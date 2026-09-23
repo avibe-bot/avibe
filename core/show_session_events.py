@@ -1219,14 +1219,20 @@ def _public_event_message(message: dict[str, Any] | None) -> dict[str, Any] | No
     echo, the ``show.event`` and ``message.new`` streams, the CLI's own result
     and the local bridge. The row itself keeps the full metadata for the
     deferred consumers that re-check it.
+
+    ``sender_label`` is dropped for the same reason: it is Chat's Organization
+    sender identity, and a Show Page audience — a shared link included — sits
+    outside the Instance, so an anchored row keeps the shape it had before that
+    field existed.
     """
 
     if not isinstance(message, dict):
         return message
-    metadata = message.get("metadata")
-    if not isinstance(metadata, dict):
-        return message
-    return {**message, "metadata": message_deliveries.public_message_metadata(metadata)}
+    public = {key: value for key, value in message.items() if key != "sender_label"}
+    metadata = public.get("metadata")
+    if isinstance(metadata, dict):
+        public["metadata"] = message_deliveries.public_message_metadata(metadata)
+    return public
 
 
 def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:

@@ -374,7 +374,17 @@ ErrorEnvelopePath = tuple[str, ...]
 # Token counts are vendor-reported, never self-measured, so one hostile or buggy
 # response must not be able to poison a persisted aggregate. The ceiling is fixed
 # in our code; it is never derived from a value the upstream declares.
-USAGE_TOKEN_CEILING: Final = 1_000_000_000
+#
+# It bounds ONE report, which is what the name has to say, because the scope is
+# the whole argument for the number. No request composes a billion input tokens,
+# so a single response past this is broken or hostile and dropping it costs
+# nothing true. An aggregate of many accepted reports is a different quantity
+# with no upper bound worth inventing — a user may spend whatever they spend —
+# and this ceiling was once reused there, where it silently truncated real usage
+# into a plausible-looking total. What an aggregate needs is
+# `usage.USAGE_COUNTER_CEILING`: a statement about what the read contract can
+# carry, not about what a count is allowed to be.
+USAGE_REPORT_TOKEN_CEILING: Final = 1_000_000_000
 
 
 @dataclass(frozen=True)
@@ -436,6 +446,8 @@ class ProtocolObservation:
     error_type_candidates: tuple[str, ...] = ()
     error_code_candidates: tuple[str, ...] = ()
     recovery_verified: bool = False
+    # Raw upstream text, for bounded redacted display only; never in reprs.
+    error_message: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -781,12 +793,12 @@ def _usage_sum(container: Mapping[str, object], paths: tuple[tuple[str, ...], ..
         for value in _path_values(container, path):
             if not isinstance(value, int) or isinstance(value, bool):
                 continue
-            if value < 0 or value > USAGE_TOKEN_CEILING:
+            if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
                 continue
             total = value if total is None else total + value
     if total is None:
         return None
-    return min(total, USAGE_TOKEN_CEILING)
+    return min(total, USAGE_REPORT_TOKEN_CEILING)
 
 
 def extract_protocol_usage(
@@ -830,10 +842,10 @@ def _usage_from_scalar_paths(
                 value = scalars.get((*container_path, *path))
                 if not isinstance(value, int) or isinstance(value, bool):
                     continue
-                if value < 0 or value > USAGE_TOKEN_CEILING:
+                if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
                     continue
                 total = value if total is None else total + value
-            return None if total is None else min(total, USAGE_TOKEN_CEILING)
+            return None if total is None else min(total, USAGE_REPORT_TOKEN_CEILING)
 
         input_tokens = usage_sum(taxonomy.input_paths)
         cached_input_tokens = usage_sum(taxonomy.cached_input_paths)
@@ -863,7 +875,9 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
             if envelope.required_error_code_path is not None:
                 paths.add(envelope.required_error_code_path)
     for error_path in _protocol_error_paths(taxonomy):
-        paths.update((error_path, (*error_path, "type"), (*error_path, "code")))
+        paths.update(
+            (error_path, (*error_path, "type"), (*error_path, "code"), (*error_path, "message"))
+        )
     if taxonomy.sequence_number_path is not None:
         paths.add(taxonomy.sequence_number_path)
     for container_path in taxonomy.usage.container_paths:
@@ -984,6 +998,7 @@ class ProtocolFactProjector:
             return ProtocolObservation(
                 outcome="failed_terminal" if matched_paths else "served",
                 error_envelope_paths=matched_paths,
+                error_message=self._error_message(matched_paths),
                 usage=usage,
                 error_type_candidates=(type_candidates if matched_paths else ()),
                 error_code_candidates=(code_candidates if matched_paths else ()),
@@ -1027,6 +1042,7 @@ class ProtocolFactProjector:
                 ),
                 sequence_number=sequence_number,
                 usage=usage,
+                error_message=self._error_message(error_paths),
                 error_type_candidates=(
                     type_candidates
                     if envelope.terminal_outcome == "failed_terminal"
@@ -1138,6 +1154,13 @@ class ProtocolFactProjector:
             if value not in candidates and len(candidates) < 8:
                 candidates.append(value)
         return tuple(candidates)
+
+    def _error_message(self, error_paths: tuple[ErrorEnvelopePath, ...]) -> str | None:
+        for error_path in error_paths:
+            value = self._scalars.get((*error_path, "message"))
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
 
     def _selector_matches(
         self,
@@ -1290,6 +1313,7 @@ class ProtocolSSEState:
     usage: ProtocolUsageReport | None = None
     error_type_candidates: tuple[str, ...] = ()
     error_code_candidates: tuple[str, ...] = ()
+    error_message: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.tokenizer = SSEObservationTokenizer(self.protocol)
@@ -1354,6 +1378,8 @@ class ProtocolSSEState:
             self.error_type_candidates = observation.error_type_candidates
         if observation.error_code_candidates:
             self.error_code_candidates = observation.error_code_candidates
+        if observation.error_message is not None:
+            self.error_message = observation.error_message
         if observation.sequence_number is not None:
             self.last_sequence_number = max(
                 self.last_sequence_number,
@@ -1379,6 +1405,7 @@ class ProtocolSSEState:
                 error_type_candidates=self.error_type_candidates,
                 error_code_candidates=self.error_code_candidates,
                 recovery_verified=self.reached_model,
+                error_message=self.error_message,
             )
         return None
 

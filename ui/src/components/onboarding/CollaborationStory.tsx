@@ -7,19 +7,22 @@ import { ASSISTANT_ORDER, WORK_LINES, collaborationFrame } from './collaboration
 import { useOnboardingMotion } from './motion';
 
 /**
- * Wire geometry in the 976x271 collaboration box: two handoffs and the rounded return
- * loop. Every coordinate is the reference's own — the cards take the top 232 rows, so a
- * handoff crosses the 39.5 gap between them at y=116, their shared midline, and the
- * return runs from the third card's centre to the first's along y=261. The box is
- * stretched to whatever the diagram currently measures, so these hold at every width.
+ * Wire geometry in the 976x350 wire box, which the stylesheet sizes at the card's
+ * height times 350/300 — the reference's own proportion (271 around 232, 306 around
+ * 262, 385 around 330 all read that way). Taking the box's height from the card and
+ * putting the handoffs at y=150 of 350 is what keeps them on the cards' shared
+ * midline at every tier rather than only at the authored one; the return loop runs
+ * from the third card's centre to the first's along y=338, inside the band the stage
+ * reserves under the cards. The x coordinates are the card tracks' own edges in 976
+ * space, so the stretched viewBox keeps every port on a card edge at every width.
  */
 const WIRES = [
-  'M299 116H339',
-  'M637 116H677',
-  'M826 232V245Q826 261 810 261H165Q149 261 149 245V232',
+  'M299 150H339',
+  'M637 150H677',
+  'M826 300V322Q826 338 810 338H165Q149 338 149 322V300',
 ];
 /** Only the four handoff ends are drawn: the return loop leaves its cards unmarked. */
-const PORTS: [number, number][] = [[299, 116], [339, 116], [637, 116], [677, 116]];
+const PORTS: [number, number][] = [[299, 150], [339, 150], [637, 150], [677, 150]];
 const ICONS = [FileText, CodeXml, ListChecks];
 // Every skeleton line as its share of the block it is measured in, so the three cards
 // draw the widths design_desktop.pen draws at any scale. The card's content box is 198
@@ -111,7 +114,7 @@ function Circuit({ handoff }: { handoff: { wire: number; progress: number } | nu
     opacity: Math.max(0, Math.min(1, handoff.progress / 0.08, (1 - handoff.progress) / 0.06)),
   };
   return (
-    <svg className="onboarding-wires" viewBox="0 0 976 271" fill="none" preserveAspectRatio="none" aria-hidden="true">
+    <svg className="onboarding-wires" viewBox="0 0 976 350" fill="none" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <filter id={glowId} x="-100%" y="-500%" width="300%" height="1100%"><feGaussianBlur stdDeviation="3" /></filter>
       </defs>
@@ -132,9 +135,9 @@ function Circuit({ handoff }: { handoff: { wire: number; progress: number } | nu
 }
 
 /** The design has no playback controls, so the loop starts with the screen and owns itself. */
-export function CollaborationStory() {
+export function CollaborationStory({ active = true }: { active?: boolean }) {
   const { t } = useTranslation();
-  const { ref, reducedMotion, running } = useOnboardingMotion();
+  const { ref, reducedMotion, running } = useOnboardingMotion(active);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (!running) return;
@@ -176,7 +179,7 @@ export function CollaborationStory() {
                     place: logo, name, and the trailing slot this step fills with the
                     assistant's role and the next one with its enable switch. */}
                 <div className="onboarding-card-identity">
-                  <BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" />
+                  <span className="onboarding-card-logo"><BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" /></span>
                   <strong className="onboarding-card-name">{t(`onboarding.story.${backend}.name`)}</strong>
                   <span className="onboarding-card-role">{t(`onboarding.story.${backend}.role`)}</span>
                 </div>

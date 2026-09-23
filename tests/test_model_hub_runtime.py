@@ -18,10 +18,12 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
+import psutil
 import yaml
 from jsonschema import Draft7Validator
 
 from core import managed_runtime
+from core.process_isolation import PROCESS_IDENTITY_ENV, fingerprint_process_marker
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     EngineHealth,
@@ -36,8 +38,13 @@ from core.handlers.model_hub.classification import (
     classify_outcome,
     terminal_outcome_category,
 )
+from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.stream_wire import (
+    ProtocolObservation,
+    ProtocolUsageReport,
+    observe_buffered_protocol_response,
+)
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
@@ -762,6 +769,9 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
         def client_if_running(self):
             return self._client
 
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
+
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
@@ -808,6 +818,9 @@ def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
 
         def client_if_running(self):
             return self._client
+
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
@@ -2606,6 +2619,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import psutil
 import yaml
 
 config_path = sys.argv[sys.argv.index('-config') + 1]
@@ -2951,6 +2965,492 @@ def test_supervisor_keeps_installing_state_unverified_until_settlement(
     assert status["verified"] is False
 
 
+def _recorded_engine_pids(record: Path) -> list[int]:
+    return [entry["pid"] for entry in json.loads(record.read_text(encoding="utf-8"))["engines"]]
+
+
+def _wait_for(condition, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+
+
+def _orphan_engine(tmp_path: Path) -> subprocess.Popen:
+    """Start an engine, then forget it the way a SIGKILLed service would."""
+
+    first, _store = _fixture_supervisor(tmp_path)
+    first.ensure_running()
+    orphan = first._process
+    assert orphan is not None
+    first._process = None
+    first._connection = None
+    # The dead service's orphan is re-parented to init, which reaps it; here it is
+    # still this test's child, so stand in for init.
+    threading.Thread(target=orphan.wait, daemon=True).start()
+    return orphan
+
+
+def test_supervisor_stop_without_a_handle_reaps_the_recorded_engine(tmp_path: Path) -> None:
+    orphan = _orphan_engine(tmp_path)
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.stop()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_refuses_to_start_beside_an_unconfirmed_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A survivor shares the watched OAuth auth dir; a second engine must not join it.
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    real_reap = supervisor_module.reap_marked_processes
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *a, **k: "unconfirmed")
+    spawned: list[object] = []
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        process_factory=lambda *a, **k: spawned.append(a) or subprocess.Popen(*a, **k),
+    )
+    record = store.root / "engine-process.json"
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason == "previous_engine_alive"
+    assert spawned == []
+    assert _recorded_engine_pids(record) == [orphan.pid]
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", real_reap)
+    supervisor.ensure_running()
+    _wait_for(lambda: orphan.poll() is not None)
+    assert _recorded_engine_pids(record) == [supervisor._process.pid]
+    supervisor.stop()
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("operation", ["disable", "invalidate_configs"])
+def test_supervisor_does_not_report_stopped_while_an_engine_is_unconfirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *a, **k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path)
+    cleared: list[bool] = []
+    monkeypatch.setattr(store, "clear_runtime_configs", lambda: cleared.append(True))
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        getattr(supervisor, operation)()
+
+    assert raised.value.reason == "previous_engine_alive"
+    # Revocation callers run only after invalidation returns.
+    assert cleared == []
+    assert _recorded_engine_pids(store.root / "engine-process.json") == [orphan.pid]
+    orphan.kill()
+
+
+def test_supervisor_shutdown_stop_keeps_an_unconfirmed_engine_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *a, **k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.stop()
+
+    assert _recorded_engine_pids(store.root / "engine-process.json") == [orphan.pid]
+    orphan.kill()
+
+
+def test_supervisor_refuses_to_start_over_an_unreadable_engine_record(tmp_path: Path) -> None:
+    spawned: list[object] = []
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        process_factory=lambda *a, **k: spawned.append(a) or subprocess.Popen(*a, **k),
+    )
+    record = store.root / "engine-process.json"
+    record.mkdir(parents=True)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason == "previous_engine_alive"
+    assert spawned == []
+    assert record.is_dir()
+
+
+def test_supervisor_refuses_an_engine_whose_identity_was_not_captured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_: None)
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    with pytest.raises(EngineUnavailableError):
+        supervisor.ensure_running()
+
+    assert supervisor._process is None
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_credential_invalidation_reaps_a_recorded_engine(tmp_path: Path) -> None:
+    orphan = _orphan_engine(tmp_path)
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.invalidate_configs()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not (store.root / "engine-process.json").exists()
+    assert supervisor._process is None
+
+
+def test_supervisor_reaps_an_engine_left_running_by_a_dead_service(tmp_path: Path) -> None:
+    # A SIGKILLed service never runs atexit; its isolated engine group survives.
+    orphan = _orphan_engine(tmp_path)
+    record = _fixture_supervisor(tmp_path)[1].root / "engine-process.json"
+    assert _recorded_engine_pids(record) == [orphan.pid]
+
+    second, _store = _fixture_supervisor(tmp_path)
+    second.ensure_running()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert second._process is not None and second._process.pid != orphan.pid
+    assert _recorded_engine_pids(record) == [second._process.pid]
+    second.stop()
+    assert not record.exists()
+
+
+def test_supervisor_never_signals_a_recycled_pid_from_its_record(tmp_path: Path) -> None:
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    try:
+        supervisor, store = _fixture_supervisor(tmp_path)
+        store.root.mkdir(parents=True, exist_ok=True)
+        (store.root / "engine-process.json").write_text(
+            json.dumps(
+                {
+                    "engines": [
+                        {
+                            "pid": stranger.pid,
+                            # A recycled pid never shares its predecessor's birth time.
+                            "create_time": psutil.Process(stranger.pid).create_time() - 1000,
+                            "worker_fingerprint": "sha256:" + "0" * 64,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        supervisor.ensure_running()
+
+        assert stranger.poll() is None
+        assert stranger.pid not in _recorded_engine_pids(store.root / "engine-process.json")
+        supervisor.stop()
+    finally:
+        stranger.kill()
+        stranger.wait(timeout=5)
+
+
+def test_supervisor_ignores_a_corrupt_engine_record(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "engine-process.json").write_text("{not json", encoding="utf-8")
+
+    supervisor.ensure_running()
+
+    assert supervisor._process is not None
+    supervisor.stop()
+
+
+def test_supervisor_ignores_an_engine_record_that_is_not_utf8(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "engine-process.json").write_bytes(b'{"engines": [\xff\xfe')
+
+    supervisor.ensure_running()
+
+    assert supervisor._process is not None
+    supervisor.stop()
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_records_the_launch_before_spawning(tmp_path: Path) -> None:
+    # A service killed between spawn and pid capture must still leave the engine findable.
+    seen: list[list[dict]] = []
+
+    def spawn(*args, **kwargs):
+        record = tmp_path / "state" / "engine-process.json"
+        seen.append(json.loads(record.read_text(encoding="utf-8"))["engines"])
+        return subprocess.Popen(*args, **kwargs)
+
+    supervisor, _store = _fixture_supervisor(tmp_path, process_factory=spawn)
+    supervisor.ensure_running()
+
+    [launch] = seen[0]
+    assert set(launch) == {"worker_fingerprint"}
+    assert launch["worker_fingerprint"] == fingerprint_process_marker(
+        psutil.Process(supervisor._process.pid).environ()[PROCESS_IDENTITY_ENV]
+    )
+    supervisor.stop()
+
+
+def test_supervisor_retires_the_launch_record_when_the_spawn_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No process exists to carry the marker, so no scan may keep the record alive.
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    def spawn(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason is None
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path) -> None:
+    orphan = _orphan_engine(tmp_path)
+    record = tmp_path / "state" / "engine-process.json"
+    # The service died after the spawn and before the pid was written.
+    [entry] = json.loads(record.read_text(encoding="utf-8"))["engines"]
+    record.write_text(
+        json.dumps({"engines": [{"worker_fingerprint": entry["worker_fingerprint"]}]}),
+        encoding="utf-8",
+    )
+
+    second, _store = _fixture_supervisor(tmp_path)
+    second.ensure_running()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert _recorded_engine_pids(record) == [second._process.pid]
+    second.stop()
+    assert not record.exists()
+
+
+def test_supervisor_refresh_and_reap_stop_an_engine_a_previous_service_left_running(tmp_path: Path) -> None:
+    record = tmp_path / "state" / "engine-process.json"
+    for operation in ("restart_if_running", "with_engine_excluded"):
+        orphan = _orphan_engine(tmp_path)
+        second, _store = _fixture_supervisor(tmp_path)
+
+        if operation == "with_engine_excluded":
+            assert second.with_engine_excluded(lambda client: client) is None
+        else:
+            second.restart_if_running()
+
+        _wait_for(lambda: orphan.poll() is not None)
+        assert second._process is None
+        assert not record.exists()
+
+
+def test_supervisor_holds_engine_starts_until_grant_removal_returns(tmp_path: Path) -> None:
+    spawned = threading.Event()
+
+    def spawn(args, **kwargs):
+        spawned.set()
+        return subprocess.Popen(args, **kwargs)
+
+    supervisor, _store = _fixture_supervisor(tmp_path, process_factory=spawn)
+
+    def remove_grant(client) -> str:
+        assert client is None
+        threading.Thread(target=supervisor.ensure_running, daemon=True).start()
+        # A start requested mid-removal must wait for it, or it could load the grant.
+        assert not spawned.wait(0.5)
+        return "removed"
+
+    assert supervisor.with_engine_excluded(remove_grant) == "removed"
+    assert spawned.wait(10)
+    _wait_for(lambda: supervisor.client_if_running() is not None)
+    supervisor.stop()
+
+
+def test_supervisor_refresh_refuses_while_a_previous_engine_is_unconfirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
+    second, _store = _fixture_supervisor(tmp_path)
+
+    for call in (second.restart_if_running, lambda: second.with_engine_excluded(pytest.fail)):
+        with pytest.raises(EngineUnavailableError) as raised:
+            call()
+        assert raised.value.reason == "previous_engine_alive"
+    monkeypatch.undo()
+    second.stop()
+    _wait_for(lambda: orphan.poll() is not None)
+
+
+def test_oauth_revoke_keeps_the_grant_while_a_previous_engine_is_unconfirmed(tmp_path: Path) -> None:
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+        def with_engine_excluded(self, operation):
+            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", auth_file.name)
+        store.sync_sources([])
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        with pytest.raises(EngineUnavailableError):
+            await adapter.revoke_credential(credential_ref)
+
+        assert auth_file.exists()
+        assert store.credential_metadata_if_present(credential_ref) is not None
+
+    asyncio.run(run())
+
+
+def test_orphaned_oauth_cleanup_keeps_the_grant_while_a_previous_engine_is_unconfirmed(tmp_path: Path) -> None:
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+        def with_engine_excluded(self, operation):
+            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", auth_file.name)
+        store.sync_sources([])
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is False
+
+        assert auth_file.exists()
+        assert store.credential_metadata_if_present(credential_ref) is not None
+
+    asyncio.run(run())
+
+
+def test_supervisor_keeps_a_marker_only_record_while_the_sweep_is_unconfirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    record = tmp_path / "state" / "engine-process.json"
+    [entry] = json.loads(record.read_text(encoding="utf-8"))["engines"]
+    marker_only = {"engines": [{"worker_fingerprint": entry["worker_fingerprint"]}]}
+    record.write_text(json.dumps(marker_only), encoding="utf-8")
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
+    second, _store = _fixture_supervisor(tmp_path)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        second.ensure_running()
+
+    assert raised.value.reason == "previous_engine_alive"
+    assert orphan.poll() is None
+    assert json.loads(record.read_text(encoding="utf-8")) == marker_only
+    monkeypatch.undo()
+    second.ensure_running()
+    _wait_for(lambda: orphan.poll() is not None)
+    second.stop()
+
+
+def test_supervisor_retires_a_record_the_marker_sweep_confirms_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An inconclusive pid/group path must not pin a record the authoritative sweep cleared.
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *_a, **_k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.stop()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_failed_tracking_reaps_a_descendant_that_ignores_sigterm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    stubborn = tmp_path / "stubborn-engine"
+    stubborn.write_text(
+        "#!/bin/sh\n"
+        f"'{sys.executable}' -c 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(60)' &\n"
+        "exec sleep 60\n",
+        encoding="utf-8",
+    )
+    stubborn.chmod(0o755)
+    markers: list[str] = []
+
+    def spawn(args, **kwargs):
+        markers.append(kwargs["env"][PROCESS_IDENTITY_ENV])
+        process = subprocess.Popen([str(stubborn)], **kwargs)
+        time.sleep(0.5)
+        return process
+
+    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_: None)
+    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason == "engine_untracked"
+    assert _processes_with_marker(markers[0]) == []
+    assert not (store.root / "engine-process.json").exists()
+
+
+def _processes_with_marker(marker: str) -> list[int]:
+    found = []
+    for process in psutil.process_iter():
+        try:
+            if process.environ().get(PROCESS_IDENTITY_ENV) == marker:
+                found.append(process.pid)
+        except (psutil.Error, OSError):
+            continue
+    return found
+
+
 def test_supervisor_starts_checks_health_and_stops_mock_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2978,6 +3478,8 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert "OPENAI_API_KEY" not in captured_env
     assert "GITHUB_TOKEN" not in captured_env
     assert "HTTP_PROXY" not in captured_env
+    marker = captured_env.pop("AVIBE_PROCESS_IDENTITY")
+    assert len(marker) == 64
     assert captured_env == engine_subprocess_environment()
     assert captured_stdio == {
         "stdout": subprocess.DEVNULL,
@@ -3486,6 +3988,9 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
 
         def client_if_running(self):
             return self._client
+
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
 
         def restart_if_running(self) -> None:
             restart_started.set()
@@ -6201,6 +6706,195 @@ def test_engine_error_fields_preserve_nested_candidates(
         assert decision.reason == "server_error"
 
 
+def _detail_source() -> SourceRecord:
+    return SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol="anthropic",
+        base_url="https://api.example.test",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+
+
+def test_engine_http_error_carries_redacted_upstream_detail_apart_from_classification() -> None:
+    message = (
+        "Claude Code 2.1.261 does not support this model;\n version 2.1.280 or newer "
+        "is required. key=sk-live_abcdefghijklmnop"
+    )
+    payload = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+                "details": {"error_code": "claude_code_version_too_old"},
+            },
+        }
+    ).encode()
+
+    outcome = client_module._reduce_protocol_observation(
+        ProtocolObservation(
+            outcome="failed_terminal",
+            error_payload=payload,
+            error_envelope_paths=(("error",),),
+            message="upstream returned HTTP 400",
+        ),
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=400,
+        stream_started=False,
+    )
+
+    assert outcome is not None
+    assert outcome.redacted_message == "upstream returned HTTP 400"
+    assert outcome.upstream_detail == (
+        "Claude Code 2.1.261 does not support this model; version 2.1.280 or newer "
+        "is required. key=[redacted]"
+    )
+    assert "sk-live" not in outcome.upstream_detail
+    assert classify_outcome(outcome).error_code == "upstream_request_invalid"
+
+
+def test_engine_streamed_error_event_carries_upstream_detail() -> None:
+    state = client_module.ProtocolSSEState("anthropic")
+    state.observe(
+        b'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error",'
+        b'"message":"Claude Code 2.1.261 is too old;  key=sk-live_abcdefghijklmnop"}}\n\n'
+    )
+
+    observation = state.terminal_observation()
+    assert observation is not None
+    assert "sk-live" not in repr(observation)
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=200,
+        stream_started=False,
+    )
+
+    assert outcome is not None
+    assert outcome.upstream_detail == "Claude Code 2.1.261 is too old; key=[redacted]"
+
+
+def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
+    body = json.dumps(
+        {"type": "error", "error": {"type": "invalid_request_error", "message": "model retired"}}
+    ).encode()
+
+    observation = observe_buffered_protocol_response("anthropic", io.BytesIO(body))
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=200,
+        stream_started=False,
+    )
+
+    assert observation.outcome == "failed_terminal"
+    assert outcome is not None
+    assert outcome.upstream_detail == "model retired"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"not json",
+        json.dumps({"error": {"type": "invalid_request_error"}}).encode(),
+        json.dumps({"error": {"message": {"nested": "x"}}}).encode(),
+        json.dumps({"error": {"message": "   "}}).encode(),
+        json.dumps({"message": "outside the trusted envelope"}).encode(),
+    ],
+)
+def test_engine_upstream_detail_is_absent_without_an_envelope_message(payload: bytes) -> None:
+    assert client_module._upstream_error_detail(payload, (("error",),)) is None
+
+
+def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
+    payload = json.dumps({"error": {"message": "模型不可用" * 200}}, ensure_ascii=False).encode()
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail is not None
+    assert len(detail) == client_module._UPSTREAM_DETAIL_CHARS
+    assert detail.startswith("模型不可用") and detail.endswith("…")
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("refresh failed: token=abc123opaque", "refresh failed: token=[redacted]"),
+        ("bad secret: xyz", "bad secret: [redacted]"),
+        ('client_secret="two words" rejected', "client_secret=[redacted]"),
+        ("session_key=s1, password='p w'", "session_key=[redacted]"),
+        ("password: `correct horse battery staple`", "password: [redacted]"),
+        ('bad token=\\"a\\" b\\" c', "bad token=[redacted]"),
+        ('rejected {"token":"opaquevalue123456789"}', 'rejected {"token":[redacted]'),
+        ("""echo {'password': 'correct horse battery staple'}""", "echo {'password': [redacted]"),
+        ('{"api_key" : "opaque"}', '{"api_key" : [redacted]'),
+        ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
+    ],
+)
+def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
+    assert client_module._bounded_upstream_detail(message) == expected
+
+
+def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> None:
+    started = time.monotonic()
+    redact_untrusted_text("a-" * 8000 + "x")
+    redact_untrusted_text("key " * 4000 + "x")
+    assert time.monotonic() - started < 0.5
+
+
+def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() -> None:
+    detail = client_module._bounded_upstream_detail(
+        "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
+    )
+
+    assert detail is not None
+    for mention in ("@everyone", "@ops_lead", "<@123>", "<@&456>", "<!here>", "<#C1>"):
+        assert mention not in detail
+    assert detail.replace("\u200b", "") == "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "[Update required](https://attacker.example/fix) to continue",
+        "[Update required](https://attacker.example/fix_(now)) to continue",
+        "[Update required] (<https://attacker.example/fix>)",
+        "see <https://attacker.example|the docs>",
+    ],
+)
+def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str) -> None:
+    detail = client_module._bounded_upstream_detail(message)
+
+    assert detail is not None
+    assert "](" not in detail.replace(" ", "")
+    assert "<h" not in detail
+    # Only zero-width breaks were inserted: the destination still reads as written.
+    assert detail.replace("\u200b", "") == message
+
+
+def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
+    assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
+        "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
+    )
+
+
+def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
+    payload = b'{"error": {"message": "bad \\ud800 byte"}}'
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail == "bad \ufffd byte"
+    detail.encode("utf-8")
+
+
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
     payload = json.dumps(
         {
@@ -7070,6 +7764,10 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
 
         def client_if_running(self):
             return None
+
+        def with_engine_excluded(self, operation):
+            # The flow started this engine, so it is the running one.
+            return operation(self._client)
 
         def invalidate_configs(self) -> None:
             self.state_store.clear_runtime_configs()

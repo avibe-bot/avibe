@@ -165,7 +165,10 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
     "turn.request_nonfallback": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
         discriminator="request_nonfallback",
-        copy_keys=(("default", "modelHub.launch.request_incompatible"),),
+        copy_keys=(
+            ("default", "modelHub.launch.request_incompatible"),
+            ("upstream_detail", "modelHub.launch.request_incompatible_detail"),
+        ),
     ),
     "turn.engine_down": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
@@ -215,6 +218,8 @@ class TurnOutcomeProjectionInput:
     stream_started: bool = False
     next_current_changed: bool = False
     source_transition_persisted: bool | None = None
+    # Redacted, bounded upstream error text for this turn's reply only.
+    upstream_detail: str | None = None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -251,6 +256,8 @@ def _turn_outcome_variant(
         return "next_current"
     if projection.stream_started and "stream_started" in copy_keys:
         return "stream_started"
+    if projection.upstream_detail and "upstream_detail" in copy_keys:
+        return "upstream_detail"
     if (
         projection.supply_facts is not None
         and projection.supply_facts.supply_state == "waiting"
@@ -274,6 +281,7 @@ def produce_turn_outcome(
     attempted_hop: tuple[str, str] | None = None,
     stream_started: bool = False,
     source_transition_persisted: bool | None = None,
+    upstream_detail: str | None = None,
 ) -> TurnOutcomeProjectionInput:
     """Produce complete terminal facts from one authoritative matrix row."""
 
@@ -340,6 +348,11 @@ def produce_turn_outcome(
         stream_started=stream_started,
         next_current_changed=next_current_changed,
         source_transition_persisted=source_transition_persisted,
+        upstream_detail=(
+            upstream_detail
+            if "upstream_detail" in variants and upstream_detail
+            else None
+        ),
     )
     if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
         raise TurnOutcomeProductionError(
@@ -480,6 +493,7 @@ def project_turn_outcome_copy(
             "source": facts.source if facts is not None else "",
             "retry_at": facts.retry_at if facts is not None else "",
             "blockers": facts.blockers if facts is not None else (),
+            "detail": projection.upstream_detail or "",
         },
     )
 
@@ -1472,8 +1486,6 @@ class TurnCorrelationRegistry:
                     and trace is not None
                     and not trace.ambiguous
                     and request_id in trace.pending_attempts
-                    and gateway_model_id
-                    in {trace.gateway_request_model_id, trace.gateway_model_id}
                 ):
                     # Admission may close after this request opened. Its
                     # ownership remains valid through the bounded drain.
@@ -1549,11 +1561,33 @@ class TurnCorrelationRegistry:
             if explicit is None:
                 return None, False
             _key, _scope, route, _route_id = explicit
-            if gateway_model_id not in {
-                route.gateway_request_model_id,
-                route.resolved_model_id,
-            }:
-                return None, False
+            # An explicit handle proves which process holds it and which turn
+            # it was minted for. It deliberately does not fix the model. A
+            # dispatched turn names another of Avibe's own models as a matter
+            # of course, and Codex always does at a model change: it
+            # re-serialises the thread under the OUTGOING model before the
+            # first turn on the new one, so that hop arrives on the new turn's
+            # handle carrying the old id. Refusing it here strands the thread
+            # for good — the re-serialisation never lands, so every later turn
+            # repeats it and fails the same way. Whether Avibe configured the
+            # named model is resolution's question, not routing's: the caller
+            # model below reaches `effective_model_route`, which serves only
+            # ids already in this agent's menu and returns an empty route for
+            # anything else. Answering it a second time here would duplicate
+            # that authority and report an unconfigured model as an
+            # incompatible request.
+            if gateway_model_id == route.gateway_request_model_id:
+                # The one id that proves a request is on its own route: what
+                # Avibe told this launch to send. The route's upstream target
+                # proves nothing, because menu ids and upstream ids are
+                # separate namespaces that may be spelled the same — reading
+                # that spelling as this route's would send the outgoing
+                # model's re-serialisation down the new route, to another
+                # source under another model. Where no distinct id was minted
+                # the two coincide, and this one comparison covers both.
+                caller_model_id = route.requested_model_id
+            else:
+                caller_model_id = gateway_model_id
             identity = self._request_identity(request_metadata)
             assert identity is not None
             _route_id, turn_id = identity
@@ -1564,11 +1598,11 @@ class TurnCorrelationRegistry:
                     route=route,
                 ):
                     return None, False
-                return route.requested_model_id, True
+                return caller_model_id, True
             # Completed turn IDs are intentionally not retained. A valid
             # process-owned route handle can route a late continuation, but it
             # cannot claim a newer active turn.
-            return route.requested_model_id, False
+            return caller_model_id, False
         route = credential.route
         if route is None:
             # No route was known when this credential was minted: the shared

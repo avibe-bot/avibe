@@ -1035,7 +1035,7 @@
           "reasoningEfforts": "推理强度",
           "customEffort": "自定义档位",
           "customEffortPlaceholder": "如 medium",
-          "effortNote": "档位按原样发送给供应商；不选则请求不带 effort 参数。",
+          "effortNote": "仅声明该模型支持的选项。在 Agent 中选择“关闭”才会禁用扩展思考；选项列表为空不等于关闭。其他档位按原样转发。",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -1157,8 +1157,19 @@
         "latestRecorded": "最近已记录回合",
         "modelNotFound": "上游返回模型不存在",
         "errorDetails": "查看错误详情",
-        "errorReason": { "invalid_parameter": "请求参数被拒绝", "protocol_error": "协议错误", "tool_incompatible": "工具不兼容", "stream_interrupted": "响应中断", "engine_down": "模型网关不可用" },
-        "origin": { "automatic": "自动", "manual": "手动", "passthrough": "透传", "unconfigured": "未配置" },
+        "errorReason": {
+          "invalid_parameter": "请求参数被拒绝",
+          "protocol_error": "协议错误",
+          "tool_incompatible": "工具不兼容",
+          "stream_interrupted": "响应中断",
+          "engine_down": "模型网关不可用"
+        },
+        "origin": {
+          "automatic": "自动",
+          "manual": "手动",
+          "passthrough": "透传",
+          "unconfigured": "未配置"
+        },
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
@@ -1174,7 +1185,11 @@
         "undoDone": "已恢复之前的手动草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "afterSave": "保存后的路由",
-        "preview": { "automatic": "恢复后：自动匹配", "passthrough": "恢复后：原名透传", "unconfigured": "恢复后：未配置" },
+        "preview": {
+          "automatic": "恢复后：自动匹配",
+          "passthrough": "恢复后：原名透传",
+          "unconfigured": "恢复后：未配置"
+        },
         "previewLoading": "正在读取继承路由…",
         "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
         "draftEmpty": "草稿中暂无路由条目。",
@@ -1278,7 +1293,9 @@
           "title": "按日",
           "chart": "每日计量 token，{{from}} 至 {{to}}",
           "table": "每日计量 token 与请求数，{{from}} 至 {{to}}",
-          "col": { "day": "日期" },
+          "col": {
+            "day": "日期"
+          },
           "column": "{{day}} · {{tokens}} tokens · {{requests}} 次请求",
           "peak": "峰值 {{tokens}}，出现在 {{day}}",
           "quiet": "这个区间没有任何一天有计量数据",
@@ -1362,7 +1379,8 @@
           "search": "搜索供应商或模型",
           "confirm": "添加",
           "noMatch": "没有匹配的供应商或模型",
-          "none": "没有可添加的供应商或模型"
+          "none": "没有可添加的供应商或模型",
+          "manual": "手动输入模型 ID"
         },
         "edit": {
           "confirm": "替换",
@@ -1385,10 +1403,20 @@
         "save": "保存",
         "saving": "正在保存路由…",
         "refreshing": "路由已保存，正在刷新模型页面…",
-        "fail": { "read": "路由暂时不可用", "save": "路由没有保存", "unconfirmed": "保存结果还没确认", "reconcileRead": "当前模型页面暂时不可用" },
+        "fail": {
+          "read": "路由暂时不可用",
+          "save": "路由没有保存",
+          "unconfirmed": "保存结果还没确认",
+          "reconcileRead": "当前模型页面暂时不可用"
+        },
         "retry": "重试",
         "empty": "此模型跟随默认路由，但目前没有符合条件的供应商。",
-        "impact": { "title": "路由已保存", "detail": "以下是这次保存实际移除或中断的项目。", "refreshFail": "路由已保存，但模型页面暂时无法刷新。", "done": "完成" },
+        "impact": {
+          "title": "路由已保存",
+          "detail": "以下是这次保存实际移除或中断的项目。",
+          "refreshFail": "路由已保存，但模型页面暂时无法刷新。",
+          "done": "完成"
+        },
         "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。"
       },
       "recent": {
@@ -1727,27 +1755,14 @@
             "displayNameCredential": "显示名称不能包含凭据",
             "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
           },
-          "impact": {
-            "title": "供应商已更新，部分路由受到影响",
-            "detail": "以下路由或模型已被移除或中断。",
-            "done": "完成"
-          },
           "settlement": {
             "title": "供应商已更新"
           }
         },
         "remove": {
-          "impact": {
-            "title": "供应商已移除，部分路由受到影响",
-            "detail": "以下是这次移除实际影响的路由和模型。",
-            "done": "完成"
-          },
           "settlement": {
             "title": "供应商已移除"
           }
-        },
-        "impact": {
-          "refreshFail": "变更已经提交，但模型页面暂时无法刷新。请再次重试对账。"
         },
         "refetch": {
           "added": "新增",
@@ -2627,6 +2642,7 @@
       "replied": "已回复",
       "loadMore": "加载更多",
       "moreUnreadBeyond": "还有未读会话在后面的分页里,点击「加载更多」查看。",
+      "moreUnreadInFull": "有未读会话不在这个预览里,打开完整收件箱查看。",
       "notifications": {
         "checking": "正在检查通知",
         "unsupported": "当前不支持通知",
@@ -4142,6 +4158,8 @@
     "loadingOlder": "正在加载更早的消息",
     "noEarlierMessages": "没有更早的消息了",
     "olderLoadFailed": "加载更早的消息失败，点击重试",
+    "organizationNotice": "这是一个组织会话，消息会显示发送者。",
+    "senderUnknown": "未知发送者",
     "forkedEmptyTitle": "复刻会话已创建",
     "forkedEmptyBody": "已从原会话上下文复刻，当前对话记录从空白开始，原会话上下文已保留，继续对话即可",
     "forkedFromPrefix": "复刻自",
@@ -4197,6 +4215,7 @@
       "searchModels": "搜索模型",
       "noModelMatch": "无匹配模型",
       "effortOptions": {
+        "none": "关闭",
         "minimal": "极简",
         "low": "低",
         "medium": "中",
@@ -4243,6 +4262,7 @@
       "attachmentFailed": "文件上传失败，请重试。",
       "retryAttachment": "重试上传",
       "removeAttachment": "移除",
+      "previewAttachment": "预览 {{name}}",
       "dropOverlay": "拖放文件以添加"
     },
     "media": {
@@ -4313,10 +4333,12 @@
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "sendingNow": "发送中…",
-      "confirmingNow": "确认中…",
+      "confirmingNow": "发送状态未确认",
+      "sendFailed": "暂时无法发送这条消息，请稍后重试。",
+      "sendStatusUnknown": "暂时无法确认发送结果，请先查看会话记录和队列，避免重复发送。",
       "sendDeferred": "暂时无法发送到当前任务，消息仍保留在队列中。",
       "attachmentsUnavailable": "部分附件已不可用，原消息仍保留在队列中。请重新上传附件后再发送。",
-      "sendReconciling": "正在确认消息是否送达，原消息已保留，请勿重复发送。",
+      "sendReconciling": "暂时无法确认这条消息是否发送成功。消息已保留，系统不会重复发送；请刷新页面查看最新状态。",
       "recall": "撤回到输入框",
       "remove": "移出队列",
       "attachments": {
@@ -5220,7 +5242,7 @@
   },
   "onboarding": {
     "welcome": {
-      "getStarted": "开始使用",
+      "getStarted": "立即开始",
       "title": "各有所长，接力完成",
       "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
       "detecting": "检测中…",
@@ -5254,7 +5276,7 @@
     },
     "access": {
       "label": "随时随地安排工作",
-      "description": "手机 APP 和常用聊天应用，随时随地安排工作",
+      "description": "6个工作入口，随时随地安排工作",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5263,20 +5285,40 @@
       "wechat": "微信"
     },
     "setup": {
-      "title": "连接 AI，开始工作",
-      "subtitle": "安装助手，连接模型，即可开始工作",
-      "claudeDescription": "Anthropic 的 AI 编程助手",
-      "codexDescription": "OpenAI 的 AI 编程助手",
-      "opencodeDescription": "开源 AI 编程助手，支持多种模型",
+      "title": "选择你的 AI 助手",
+      "subtitle": "启用助手，确认默认模型，即可开始工作",
       "install": "安装",
       "installed": "已安装",
       "notInstalled": "未安装",
       "installFailed": "安装失败",
       "enabled": "启用",
+      "enableNamed": "启用 {{name}}",
       "subscription": "订阅",
       "api_key": "API Key",
       "subscriptionConnected": "订阅已连接",
-      "api_keyConnected": "API Key 已连接"
+      "api_keyConnected": "API Key 已连接",
+      "claudeGuide": "通过 Claude 登录或填入 API Key",
+      "codexGuide": "通过 ChatGPT 登录或 OPENAI_API_KEY",
+      "opencodeGuide": "选择一种方式连接即可",
+      "installFirstNamed": "先安装 {{name}}",
+      "subscriptionConnectedHint": "订阅已保存，进入工作台即可使用",
+      "api_keyConnectedHint": "API Key 已保存，进入工作台即可使用",
+      "forNamed": "用于 {{name}}",
+      "configureRoute": "配置模型路由",
+      "defaultModel": "默认模型",
+      "defaultModelNamed": "{{name}} 的模型路由，查看并调整顺序",
+      "noteEnabled": "已启用，模型路由就绪后即可使用"
+    },
+    "route": {
+      "title": "默认模型路由",
+      "description": "为下列助手调整共享模型顺序。各助手按自己的模型列表依次尝试；其他路由保持不变。",
+      "preferred": "首选",
+      "backup": "备用 {{index}}",
+      "singleNote": "此路由只有一个模型。可添加来源，再选择备用模型。",
+      "addSource": "添加模型来源",
+      "done": "完成",
+      "moveUpNamed": "上移 {{name}}",
+      "moveDownNamed": "下移 {{name}}"
     },
     "connection": {
       "method": "连接方式",
@@ -5309,6 +5351,7 @@
       "savedSubscription": "已检测到订阅凭据",
       "savedDisabled": "凭据已保存。此助手当前未启用。",
       "readFailed": "无法读取连接状态，请重试",
+      "readFailedStatus": "无法读取连接状态（HTTP {{status}}），请重试",
       "saveFailed": "无法保存连接，请重试",
       "applyFailed": "凭据已保存，但运行时应用失败，请重试保存",
       "applyPending": "运行时尚未确认生效，请刷新连接状态",
@@ -5354,18 +5397,109 @@
       "providerConfigured": "已连接",
       "providerCredentialHint": "此凭据只用于 OpenCode 中的 {{name}} 服务商",
       "providerDescription": "服务商 · 用于 OpenCode",
-      "modelTitle": "为此连接选择模型",
-      "modelHint": "{{agent}} 当前使用 {{model}}。请选择已连接提供商的模型以完成设置。",
-      "modelSelect": "已连接提供商的模型",
-      "modelApply": "应用模型并进入",
-      "modelEmpty": "暂无兼容模型。请检查上方连接，再重试获取模型列表。",
-      "modelChanged": "连接或 Agent 已发生变化。请刷新模型列表后重试。",
       "modelUnavailable": "没有可用 Agent 的模型路由。请检查连接后重试。",
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
       "authTokenLabel": "Auth Token",
       "platformRepair": "修复已保存的消息配置",
       "platformRepairHint": "已保存的 {{platform}} 配置不完整。请修复必填凭据后进入工作区。"
+    },
+    "brand": {
+      "name": "Avibe",
+      "tagline": "Agent OS"
+    },
+    "providers": {
+      "title": "添加模型提供商",
+      "subtitle": "添加订阅或 API Key，由模型网关统一路由",
+      "stageLabel": "提供商接入模型网关，再统一路由到助手",
+      "gatewayName": "模型网关",
+      "gatewayTagline": "模型一次接入，网关统一路由",
+      "gatewayInstalling": "正在安装模型网关…",
+      "gatewayStarting": "正在启动模型网关…",
+      "gatewayNotReady": "模型网关未就绪，请重试",
+      "cardKeyDetected": "检测到 API Key {{mask}}",
+      "cardKeyAdded": "API Key {{mask}}",
+      "cardSelected": "已选中",
+      "cardUseExistingNamed": "使用 {{name}} 的已有配置",
+      "cardAddSubscriptionNamed": "添加 {{name}} 的订阅或 API Key",
+      "cardAddKeyNamed": "添加 {{name}} 的 API Key",
+      "addMoreTitle": "添加更多",
+      "addMoreSubtitle": "订阅 / API Key",
+      "addMoreAction": "添加新的订阅或 API Key",
+      "addMoreCount_one": "已添加 {{count}} 项",
+      "addMoreCount_other": "已添加 {{count}} 项",
+      "summaryNone": "未选择提供商",
+      "summarySelected_one": "已选 {{count}} 个提供商：{{names}}",
+      "summarySelected_other": "已选 {{count}} 个提供商：{{names}}",
+      "summarySelectedNote": "确认迁移后，由模型网关管理所选助手的认证。",
+      "summaryAdded_one": "已添加 {{count}} 个提供商：{{names}}",
+      "summaryAdded_other": "已添加 {{count}} 个提供商：{{names}}",
+      "summaryError": "连接未完成，请检查配置后重试。",
+      "actionImport_one": "查看 {{count}} 项并继续",
+      "actionImport_other": "查看 {{count}} 项并继续",
+      "actionRetryImport_one": "查看 {{count}} 项迁移状态",
+      "actionRetryImport_other": "查看 {{count}} 项迁移状态",
+      "actionContinue": "继续，选择 AI 助手",
+      "actionAdd": "添加订阅或 API Key",
+      "actionConnecting": "正在连接…",
+      "actionChecking": "正在检查连接…",
+      "continueHint": "也可以稍后再连接提供商。",
+      "addTitle": "添加订阅或 API Key",
+      "addTitleMore": "添加更多模型提供商",
+      "addDescription": "添加一个来源即可开始，由模型网关统一路由。",
+      "addDescriptionMore": "查看检测到的配置，确认后迁移，无需重新填写。",
+      "addMethodsLabel": "添加方式",
+      "addMethodDetected": "已检测到",
+      "addMethodSubscription": "订阅",
+      "addMethodApiKey": "API Key",
+      "addDetectedNote": "查看全部关联配置并确认后开始迁移。其他无关设置会保留。",
+      "addDetectedGroup": "其余已检测到的配置",
+      "addDetectedSelectNamed": "选择 {{name}} 的已有配置",
+      "addDetectedAdded": "已添加",
+      "addSignInNamed": "通过 {{name}} 登录",
+      "addSubscriptionNote": "前往服务商完成授权，无需在 Avibe 输入账号密码。",
+      "addKeyLabelNamed": "{{name}} API Key",
+      "addMoreProviders": "更多服务商",
+      "addFooterAddKey": "添加",
+      "addFooterAdd_one": "查看选中的 {{count}} 项",
+      "addFooterAdd_other": "查看选中的 {{count}} 项",
+      "addFooterSignInNamed": "前往 {{name}} 登录",
+      "addFooterAdding": "添加中…",
+      "addProgressSaving": "正在保存配置…",
+      "addProgressChecking": "正在检查模型连接…",
+      "addProgressWaitingAuth": "等待授权完成…",
+      "addErrorPreserved": "连接未完成，输入已保留，请重试。",
+      "addErrorDetectedPreserved": "操作未确认完成，选择已保留。请先检查当前状态，再继续恢复。",
+      "gatewayUnsupported": "此设备无法安装模型网关。请重新检查可用性，或在受支持的环境中设置 Avibe。",
+      "gatewayEnvironmentHelp": "查看安装指南"
+    },
+    "import": {
+      "title": "迁移到模型网关",
+      "description": "迁移后，CLI的认证信息将完全交由模型网关管理",
+      "review": "查看并迁移",
+      "helpBody": "模型网关统一管理认证和模型连接。迁移会清理已替代的原生认证，并将关联助手切换到模型网关；其他无关设置会保留。",
+      "action_one": "查看选中的 {{count}} 项",
+      "action_other": "查看选中的 {{count}} 项",
+      "scopeNote": "此入口仅处理完整的 API Key 组。涉及订阅登录或阻塞项的关联组不可在此接管，请前往设置检查。",
+      "outOfScope": "此凭据可以迁移，但不能在此入口迁移，请前往设置检查。",
+      "progress_one": "正在迁移 {{count}} 项配置…",
+      "progress_other": "正在迁移 {{count}} 项配置…",
+      "progressDetail": "正在迁移认证并更新关联助手的连接",
+      "done_one": "已迁移 {{count}} 项配置",
+      "done_other": "已迁移 {{count}} 项配置",
+      "doneDetail": "迁移和原生认证清理已完成。请确认助手的模型路由。",
+      "remaining_one": "还有 {{count}} 项需要查看，可随时继续",
+      "remaining_other": "还有 {{count}} 项需要查看，可随时继续",
+      "remainingAction": "继续选择",
+      "done": "完成",
+      "confirm": "开始迁移",
+      "notNow": "暂不迁移"
+    },
+    "flow": {
+      "backToIntro": "返回介绍",
+      "backToProviders": "返回模型",
+      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。",
+      "completionUnconfirmed": "无法确认设置已完成，请重试"
     }
   }
 }

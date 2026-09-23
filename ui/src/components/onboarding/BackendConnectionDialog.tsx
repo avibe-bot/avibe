@@ -324,7 +324,7 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
     <DialogContent ref={frame} className="connection-dialog" data-backend={backend} closeLabel={t('common.close')}>
       <div className="connection-heading"><div className="connection-logo"><BackendIcon backend={backend} variant="brand" brandFit="mark" size={28} aria-hidden="true" /></div>
-        <div><DialogTitle>{title}</DialogTitle><p>{t(`onboarding.setup.${backend}Description`)}</p></div>
+        <div><DialogTitle>{title}</DialogTitle><p>{t('onboarding.setup.forNamed', { name: getBackendUiMeta(backend).label })}</p></div>
       </div>
       <DialogDescription className="connection-intro connection-description">{intro}</DialogDescription>
       {picking ? (

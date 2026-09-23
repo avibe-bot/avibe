@@ -428,7 +428,7 @@
       "installing": "Installing…",
       "installed": "{{name}} is ready.",
       "installFailed": "Install failed.",
-      "memoryRuntimeDisableBeforeRepair": "Memory is running. Turn it off in Settings \u2192 Memory before repairing the runtime.",
+      "memoryRuntimeDisableBeforeRepair": "Memory is running. Turn it off in Settings → Memory before repairing the runtime.",
       "memoryPackageSourceManaged": "Source checkout; automatic package repair is unavailable.",
       "backendsTitle": "Agent backends",
       "backendsDetail": "Claude · OpenCode · Codex — managed in the Backends tab.",
@@ -1035,7 +1035,7 @@
           "reasoningEfforts": "Reasoning effort",
           "customEffort": "Custom effort",
           "customEffortPlaceholder": "e.g. medium",
-          "effortNote": "Efforts are sent to the provider verbatim; with none selected, the request omits the effort parameter.",
+          "effortNote": "List only options this model supports. Selecting Off in an Agent disables extended thinking; an empty option list does not mean Off. Other effort values are forwarded unchanged.",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -1157,8 +1157,19 @@
         "latestRecorded": "Latest recorded turn",
         "modelNotFound": "Upstream returned model not found",
         "errorDetails": "View error details",
-        "errorReason": { "invalid_parameter": "Request parameters rejected", "protocol_error": "Protocol error", "tool_incompatible": "Tool incompatible", "stream_interrupted": "Stream interrupted", "engine_down": "Gateway unavailable" },
-        "origin": { "automatic": "Automatic", "manual": "Manual", "passthrough": "Passthrough", "unconfigured": "Unconfigured" },
+        "errorReason": {
+          "invalid_parameter": "Request parameters rejected",
+          "protocol_error": "Protocol error",
+          "tool_incompatible": "Tool incompatible",
+          "stream_interrupted": "Stream interrupted",
+          "engine_down": "Gateway unavailable"
+        },
+        "origin": {
+          "automatic": "Automatic",
+          "manual": "Manual",
+          "passthrough": "Passthrough",
+          "unconfigured": "Unconfigured"
+        },
         "help": {
           "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
@@ -1174,7 +1185,11 @@
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "afterSave": "Route after saving",
-        "preview": { "automatic": "After restore: automatic matching", "passthrough": "After restore: original-name passthrough", "unconfigured": "After restore: unconfigured" },
+        "preview": {
+          "automatic": "After restore: automatic matching",
+          "passthrough": "After restore: original-name passthrough",
+          "unconfigured": "After restore: unconfigured"
+        },
         "previewLoading": "Reading inherited routing...",
         "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
         "draftEmpty": "No route entries in this draft.",
@@ -1278,7 +1293,9 @@
           "title": "By day",
           "chart": "Metered tokens per day, {{from}} to {{to}}",
           "table": "Metered tokens and requests per day, {{from}} to {{to}}",
-          "col": { "day": "Day" },
+          "col": {
+            "day": "Day"
+          },
           "column": "{{day}} · {{tokens}} tokens · {{requests}} requests",
           "peak": "Peak {{tokens}} on {{day}}",
           "quiet": "No day in this window carried a metered turn",
@@ -1362,7 +1379,8 @@
           "search": "Search sources or models",
           "confirm": "Add",
           "noMatch": "No source or model matches that",
-          "none": "No source/model pair is available to add"
+          "none": "No source/model pair is available to add",
+          "manual": "Enter a model ID manually"
         },
         "edit": {
           "confirm": "Replace",
@@ -1385,10 +1403,20 @@
         "save": "Save",
         "saving": "Saving route chain…",
         "refreshing": "Route chain saved. Refreshing the model surface…",
-        "fail": { "read": "The route chain could not be read", "save": "The route chain was not saved", "unconfirmed": "The save outcome is not confirmed", "reconcileRead": "The current model surface could not be read" },
+        "fail": {
+          "read": "The route chain could not be read",
+          "save": "The route chain was not saved",
+          "unconfirmed": "The save outcome is not confirmed",
+          "reconcileRead": "The current model surface could not be read"
+        },
         "retry": "Retry",
         "empty": "This model follows default routing, but no eligible provider can route it.",
-        "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
+        "impact": {
+          "title": "The route chain was saved",
+          "detail": "These are the items this save actually removed or interrupted.",
+          "refreshFail": "The route chain was saved, but the model surface could not be refreshed.",
+          "done": "Done"
+        },
         "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it."
       },
       "recent": {
@@ -1727,27 +1755,14 @@
             "displayNameCredential": "A display name cannot contain a credential",
             "baseUrlCredential": "Remove credentials and credential-shaped query parameters from the Base URL"
           },
-          "impact": {
-            "title": "The source was updated, and some supply was affected",
-            "detail": "These routes or models were removed or interrupted.",
-            "done": "Done"
-          },
           "settlement": {
             "title": "The source was updated"
           }
         },
         "remove": {
-          "impact": {
-            "title": "The source was removed, and some supply was affected",
-            "detail": "These are the routes and models actually affected by this removal.",
-            "done": "Done"
-          },
           "settlement": {
             "title": "The source was removed"
           }
-        },
-        "impact": {
-          "refreshFail": "The change committed, but the model surface could not be refreshed. Try the reconciliation again."
         },
         "refetch": {
           "added": "New",
@@ -2159,7 +2174,7 @@
     "memory_runtime_preparation_scrubber_timeout": "The memory runtime's diagnostic safety check timed out. Retry after checking system load.",
     "memory_runtime_preparation_scrubber_failed": "The memory runtime failed its diagnostic safety check. Retry the install.",
     "memory_runtime_preparation_sync_contract_failed": "The memory runtime does not match this Avibe version's sync contract. Reinstall the runtime.",
-    "memory_runtime_install_requires_disabled_memory": "Turn Memory off in Settings \u2192 Memory before repairing a running Memory runtime.",
+    "memory_runtime_install_requires_disabled_memory": "Turn Memory off in Settings → Memory before repairing a running Memory runtime.",
     "memory_reconcile_failed": "Avibe couldn't apply the Memory settings. Check the runtime logs for the failing step.",
     "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
     "memory_processing_interrupted": "Memory processing was interrupted before completion could be confirmed.",
@@ -2627,6 +2642,7 @@
       "replied": "Replied",
       "loadMore": "Load more",
       "moreUnreadBeyond": "More unread sessions may be further down — load more to see them.",
+      "moreUnreadInFull": "Some unread sessions aren't in this preview — open the full inbox.",
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
@@ -4142,6 +4158,8 @@
     "loadingOlder": "Loading earlier messages",
     "noEarlierMessages": "No earlier messages",
     "olderLoadFailed": "Couldn't load earlier messages — tap to retry",
+    "organizationNotice": "This is an organization session — messages show who sent them.",
+    "senderUnknown": "Unknown sender",
     "forkedEmptyTitle": "Forked session ready",
     "forkedEmptyBody": "This session has been forked from the source context. The visible transcript starts clean, and the source context is preserved so you can continue the conversation here.",
     "forkedFromPrefix": "Forked from",
@@ -4197,6 +4215,7 @@
       "searchModels": "Search models",
       "noModelMatch": "No matching models",
       "effortOptions": {
+        "none": "Off",
         "minimal": "Minimal",
         "low": "Low",
         "medium": "Medium",
@@ -4243,6 +4262,7 @@
       "attachmentFailed": "The file could not be uploaded. Try again.",
       "retryAttachment": "Retry upload",
       "removeAttachment": "Remove",
+      "previewAttachment": "Preview {{name}}",
       "dropOverlay": "Drop files to attach"
     },
     "media": {
@@ -4313,10 +4333,12 @@
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
       "sendNow": "Send now",
       "sendingNow": "Sending…",
-      "confirmingNow": "Confirming…",
+      "confirmingNow": "Send status not confirmed",
+      "sendFailed": "Couldn't send this message right now. Please try again.",
+      "sendStatusUnknown": "We couldn't confirm whether this message was sent. Check the conversation and queue to avoid sending it twice.",
       "sendDeferred": "Couldn't send into the current turn. Your message is still queued.",
       "attachmentsUnavailable": "An attachment is no longer available. Your message is still queued; upload the attachment again to resend it.",
-      "sendReconciling": "Delivery is being confirmed. Your message is retained; don't resend it.",
+      "sendReconciling": "We couldn't confirm whether this message was sent. It is kept here, and Avibe won't send it again. Refresh to check the latest status.",
       "recall": "Recall to input",
       "remove": "Remove from queue",
       "attachments": {
@@ -5221,8 +5243,8 @@
   "onboarding": {
     "welcome": {
       "getStarted": "Get started",
-      "title": "Great on their own. Better together",
-      "subtitle": "Claude Code, Codex, and OpenCode — from planning to delivery",
+      "title": "Different strengths. One team.",
+      "subtitle": "Bring Claude Code, Codex, and OpenCode together",
       "detecting": "Checking…",
       "detectionFailed": "Could not check your assistants. Try again."
     },
@@ -5254,7 +5276,7 @@
     },
     "access": {
       "label": "Work from anywhere",
-      "description": "Work on the go with the Avibe app or your favorite chat apps",
+      "description": "6 ways to work. Wherever you are.",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5263,20 +5285,40 @@
       "wechat": "WeChat"
     },
     "setup": {
-      "title": "Connect AI. Get to work",
-      "subtitle": "Install an assistant and connect a model to get started",
-      "claudeDescription": "Anthropic’s coding assistant",
-      "codexDescription": "OpenAI’s coding assistant",
-      "opencodeDescription": "An open-source coding assistant for multiple models",
+      "title": "Choose your AI assistants",
+      "subtitle": "Enable an assistant, confirm its default model, and start working",
       "install": "Install",
       "installed": "Installed",
       "notInstalled": "Not installed",
       "installFailed": "Installation failed",
       "enabled": "Enabled",
+      "enableNamed": "Enable {{name}}",
       "subscription": "Subscription",
       "api_key": "API Key",
       "subscriptionConnected": "Subscription connected",
-      "api_keyConnected": "API Key connected"
+      "api_keyConnected": "API Key connected",
+      "claudeGuide": "Sign in with Claude or enter an API key",
+      "codexGuide": "Sign in with ChatGPT or use OPENAI_API_KEY",
+      "opencodeGuide": "Choose either way to connect",
+      "installFirstNamed": "Install {{name}} first",
+      "subscriptionConnectedHint": "Subscription saved. Enter the workspace to use it.",
+      "api_keyConnectedHint": "API Key saved. Enter the workspace to use it.",
+      "forNamed": "For {{name}}",
+      "configureRoute": "Configure model route",
+      "defaultModel": "Default model",
+      "defaultModelNamed": "Model route for {{name}}, review and reorder",
+      "noteEnabled": "Enabled. Ready to work once its model route is ready."
+    },
+    "route": {
+      "title": "Default model route",
+      "description": "Set a shared model order for the assistants shown below. Each tries its own model subset in that order; other routes stay unchanged.",
+      "preferred": "Preferred",
+      "backup": "Backup {{index}}",
+      "singleNote": "This route has one model. Add a source, then select a backup model.",
+      "addSource": "Add model source",
+      "done": "Done",
+      "moveUpNamed": "Move {{name}} up",
+      "moveDownNamed": "Move {{name}} down"
     },
     "connection": {
       "method": "Connection method",
@@ -5309,6 +5351,7 @@
       "savedSubscription": "Subscription credentials detected",
       "savedDisabled": "Credentials saved. This assistant is currently disabled.",
       "readFailed": "Unable to read connection state. Try again.",
+      "readFailedStatus": "Unable to read connection state (HTTP {{status}}). Try again.",
       "saveFailed": "Unable to save the connection. Try again.",
       "applyFailed": "Credentials saved, but runtime application failed. Retry the save.",
       "applyPending": "Runtime application is not confirmed yet. Refresh the connection state.",
@@ -5354,18 +5397,109 @@
       "providerConfigured": "Connected",
       "providerCredentialHint": "This credential is only used for {{name}} in OpenCode",
       "providerDescription": "Provider · For OpenCode",
-      "modelTitle": "Choose a model for this connection",
-      "modelHint": "{{agent}} currently uses {{model}}. Select a model from a connected provider to finish setup.",
-      "modelSelect": "Model from a connected provider",
-      "modelApply": "Apply model and enter",
-      "modelEmpty": "No compatible models are available. Check the connection above, then retry the catalog.",
-      "modelChanged": "The connection or Agent changed. Refresh the catalog and try again.",
       "modelUnavailable": "No available Agent has a usable model route. Check your connections and try again.",
       "credentialType": "Credential type",
       "apiKeyLabel": "API Key",
       "authTokenLabel": "Auth Token",
       "platformRepair": "Repair saved messaging configuration",
       "platformRepairHint": "Your saved {{platform}} configuration is incomplete. Repair its required credentials before entering the workspace."
+    },
+    "brand": {
+      "name": "Avibe",
+      "tagline": "Agent OS"
+    },
+    "providers": {
+      "title": "Add model providers",
+      "subtitle": "Add a subscription or API Key. Model Hub handles routing.",
+      "stageLabel": "Providers connect to Model Hub, which routes to assistants",
+      "gatewayName": "Model Hub",
+      "gatewayTagline": "Connect models once. Model Hub handles routing.",
+      "gatewayInstalling": "Installing Model Hub…",
+      "gatewayStarting": "Starting Model Hub…",
+      "gatewayNotReady": "Model Hub is not ready. Try again.",
+      "cardKeyDetected": "API key detected {{mask}}",
+      "cardKeyAdded": "API Key {{mask}}",
+      "cardSelected": "Selected",
+      "cardUseExistingNamed": "Use existing {{name}} configuration",
+      "cardAddSubscriptionNamed": "Add a {{name}} subscription or API Key",
+      "cardAddKeyNamed": "Add a {{name}} API Key",
+      "addMoreTitle": "Add more",
+      "addMoreSubtitle": "Subscription / API Key",
+      "addMoreAction": "Add a new subscription or API Key",
+      "addMoreCount_one": "{{count}} added",
+      "addMoreCount_other": "{{count}} added",
+      "summaryNone": "No provider selected",
+      "summarySelected_one": "{{count}} provider selected: {{names}}",
+      "summarySelected_other": "{{count}} providers selected: {{names}}",
+      "summarySelectedNote": "After migration is confirmed, Model Hub manages authentication for the selected assistants.",
+      "summaryAdded_one": "{{count}} provider added: {{names}}",
+      "summaryAdded_other": "{{count}} providers added: {{names}}",
+      "summaryError": "Connection failed. Check your configuration and retry.",
+      "actionImport_one": "Review {{count}} and continue",
+      "actionImport_other": "Review {{count}} and continue",
+      "actionRetryImport_one": "Review migration status for {{count}}",
+      "actionRetryImport_other": "Review migration status for {{count}}",
+      "actionContinue": "Continue to assistants",
+      "actionAdd": "Add subscription or API Key",
+      "actionConnecting": "Connecting…",
+      "actionChecking": "Checking connection…",
+      "continueHint": "You can connect a provider later.",
+      "addTitle": "Add subscription or API Key",
+      "addTitleMore": "Add more model providers",
+      "addDescription": "Add one source to get started. Model Hub handles routing.",
+      "addDescriptionMore": "Review detected configurations and confirm migration without retyping.",
+      "addMethodsLabel": "Add method",
+      "addMethodDetected": "Detected",
+      "addMethodSubscription": "Subscription",
+      "addMethodApiKey": "API Key",
+      "addDetectedNote": "Review all linked configurations and confirm to start migration. Unrelated settings are preserved.",
+      "addDetectedGroup": "Other detected configurations",
+      "addDetectedSelectNamed": "Select existing {{name}} configuration",
+      "addDetectedAdded": "Added",
+      "addSignInNamed": "Sign in with {{name}}",
+      "addSubscriptionNote": "Authorize with the provider. You do not enter your password in Avibe.",
+      "addKeyLabelNamed": "{{name}} API Key",
+      "addMoreProviders": "More providers",
+      "addFooterAddKey": "Add",
+      "addFooterAdd_one": "Review {{count}} selected",
+      "addFooterAdd_other": "Review {{count}} selected",
+      "addFooterSignInNamed": "Sign in with {{name}}",
+      "addFooterAdding": "Adding…",
+      "addProgressSaving": "Saving configuration…",
+      "addProgressChecking": "Checking the model connection…",
+      "addProgressWaitingAuth": "Waiting for authorization…",
+      "addErrorPreserved": "Connection failed. Your entries are preserved. Please retry.",
+      "addErrorDetectedPreserved": "Completion is unconfirmed. Your selection is preserved. Check the current state before continuing recovery.",
+      "gatewayUnsupported": "Model Hub cannot be installed on this device. Recheck availability or set up Avibe in a supported environment.",
+      "gatewayEnvironmentHelp": "View installation guide"
+    },
+    "import": {
+      "title": "Migrate to Model Hub",
+      "description": "After migration, CLI authentication will be managed entirely by Model Hub.",
+      "review": "Review migration",
+      "helpBody": "Model Hub manages authentication and model connections. Migration removes replaced native authentication and switches linked assistants to Model Hub; unrelated settings are preserved.",
+      "action_one": "Review {{count}} selected",
+      "action_other": "Review {{count}} selected",
+      "scopeNote": "This entry handles complete API-key groups only. Linked groups with subscription sign-ins or blockers cannot be taken over here; review them in Settings.",
+      "outOfScope": "This credential can be migrated, but not from here. Review it in Settings.",
+      "progress_one": "Migrating {{count}} configuration item…",
+      "progress_other": "Migrating {{count}} configuration items…",
+      "progressDetail": "Migrating authentication and updating linked assistant connections",
+      "done_one": "Migrated {{count}} configuration item",
+      "done_other": "Migrated {{count}} configuration items",
+      "doneDetail": "Migration and native authentication cleanup are complete. Check the assistants’ model routes.",
+      "remaining_one": "{{count}} item needs review. Continue any time.",
+      "remaining_other": "{{count}} items need review. Continue any time.",
+      "remainingAction": "Review remaining",
+      "done": "Done",
+      "confirm": "Start migration",
+      "notNow": "Not now"
+    },
+    "flow": {
+      "backToIntro": "Back to introduction",
+      "backToProviders": "Back to models",
+      "gatewayRequired": "Setup requires Model Hub to be enabled. Your saved configuration is unchanged. Restore it through your existing configuration controls, then retry.",
+      "completionUnconfirmed": "Setup completion could not be confirmed. Try again."
     }
   }
 }

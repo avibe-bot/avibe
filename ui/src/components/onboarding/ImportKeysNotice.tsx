@@ -5,7 +5,9 @@
 // It is deliberately narrower than the settings migration: this entry is about
 // keys only, while OAuth takeover and re-authentication stay in Settings. The
 // sentence, the rows in the dialog, the batch submitted and the count left
-// afterwards all read the single `isImportableKey` predicate.
+// afterwards all read the single `isImportableKey` predicate — through the same
+// consent grouping the dialog applies it with, because a key whose group cannot be
+// taken over from here is not one this sentence may offer.
 //
 // It stays visible after an import to say what happened and what is left, so a
 // partial selection can be finished without hunting for the entry again.
@@ -16,7 +18,8 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { InfoHint } from '@/components/ui/info-hint';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
-import { importableKeys, isImportableKey, scanMigrationWhenEnabled } from '@/components/settings/models/migrationScan';
+import { takeableImportRows } from '@/components/settings/models/migrationGrouping';
+import { isImportableKey, scanMigrationWhenEnabled } from '@/components/settings/models/migrationScan';
 import type { MigrationItem } from '@/components/settings/models/types';
 import { useModelHubCapability } from '@/components/settings/models/useModelHubCapability';
 import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
@@ -25,16 +28,46 @@ import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 export const ImportKeysNotice: React.FC<{
   /** Bubble the applied count so the host step can refresh assistants/sources. */
   onApplied?: (applied: number) => void;
-}> = ({ onApplied }) => {
+  /**
+   * The rows to offer, when the host already holds them.
+   *
+   * Passing this hands over the whole data side: the capsule stops scanning, stops
+   * counting what it imported, and stops owning a dialog. The providers screen does
+   * that because it holds one scan for the stage, the CTA and this sentence at once,
+   * and a second scan taken by the capsule would make those three disagree about the
+   * same machine. What stays the capsule's is what it always was — the sentence, the
+   * help, and the dismissal signature.
+   */
+  candidates?: MigrationItem[];
+  /** Cumulative imported count, when the host owns it. */
+  imported?: number;
+  /** Replaces the capsule's own dialog. Required alongside `candidates`. */
+  onReview?: () => void;
+}> = ({ onApplied, candidates: hostedCandidates, imported: hostedImported, onReview }) => {
   const { t } = useTranslation();
   const modelHubEnabled = useModelHubCapability();
   const routeSurfaceActive = useRouteSurfaceActive();
+  const hosted = hostedCandidates !== undefined;
 
-  const [candidates, setCandidates] = React.useState<MigrationItem[]>([]);
-  const [imported, setImported] = React.useState(0);
+  const [ownCandidates, setCandidates] = React.useState<MigrationItem[]>([]);
+  const [ownImported, setImported] = React.useState(0);
   const [dialogOpen, setDialogOpen] = React.useState(false);
-  const [dismissed, setDismissed] = React.useState(false);
+  /**
+   * The imported count this capsule was last dismissed against, `null` while it has
+   * never been.
+   *
+   * A dismissal is a statement about the offer the person was looking at, and it is
+   * spent the moment an import lands: the receipt for what they just asked for is
+   * the one thing this capsule exists to report, and the remainder beside it is how
+   * a partial selection gets finished. Remembering WHICH result the decision was
+   * made against is what separates 「the same thing again」 from 「something new
+   * happened」 — and it is read during render, so a stale dismissal can never draw
+   * an empty frame first and correct itself afterwards.
+   */
+  const [dismissedAt, setDismissedAt] = React.useState<number | null>(null);
   const [scanToken, setScanToken] = React.useState(0);
+  const candidates = hostedCandidates ?? ownCandidates;
+  const imported = hostedImported ?? ownImported;
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
     aliveRef.current = true;
@@ -44,6 +77,7 @@ export const ImportKeysNotice: React.FC<{
   }, []);
 
   React.useEffect(() => {
+    if (hosted) return;
     if (modelHubEnabled !== true) {
       setCandidates([]);
       return;
@@ -55,12 +89,22 @@ export const ImportKeysNotice: React.FC<{
     scanMigrationWhenEnabled(true)
       .then((scan) => {
         if (cancelled || !aliveRef.current || scan === null) return;
-        const keys = importableKeys(scan.items);
+        // Grouped, not filtered: the dialog this sentence opens takes a backend
+        // whole and refuses a group holding a subscription sign-in or a blocker, so
+        // a count of loose importable keys would advertise keys its own review has
+        // nothing to offer for. One rule, so the number and the rows behind it agree.
+        const keys = takeableImportRows(scan.items, isImportableKey, isImportableKey);
         setCandidates(keys);
         // Only the first scan consults the persisted dismissal. A rescan follows an
         // import the person just asked for, and hiding their own result because an
         // older batch was once dismissed would lose the outcome report.
-        if (scanToken === 0) setDismissed(isMigrationDismissed(keys));
+        if (scanToken === 0) {
+          // Adopted as a decision about nothing-imported-yet, which is what it is:
+          // the only thing that moves this capsule's count is an import, and an
+          // import bumps the token above. So at token 0 the count is `0`, and the
+          // first one to land is news the dismissal cannot outrank.
+          setDismissedAt(isMigrationDismissed(keys) ? 0 : null);
+        }
       })
       .catch(() => {
         // A failed scan must not keep advertising the previous rows: the dialog it
@@ -70,10 +114,30 @@ export const ImportKeysNotice: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [modelHubEnabled, routeSurfaceActive, scanToken]);
+  }, [hosted, modelHubEnabled, routeSurfaceActive, scanToken]);
+
+  // A hosted capsule has no first scan to hang the dismissal check on, so the first
+  // batch the host delivers plays that part. Later batches are the host's own rescan
+  // after an import, and hiding someone's result because an older batch was once
+  // dismissed would lose the outcome report — the same reason the scan path only
+  // consults it at token 0. The latch is what makes this once-only, which is why
+  // `imported` can be read straight from the render scope: a re-run on a batch that
+  // landed reaches it and returns without doing anything.
+  const consultedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!hosted || consultedRef.current || (hostedCandidates?.length ?? 0) === 0) return;
+    consultedRef.current = true;
+    setDismissedAt(isMigrationDismissed(hostedCandidates ?? []) ? imported : null);
+  }, [hosted, hostedCandidates, imported]);
 
   const remaining = candidates.length;
-  if (modelHubEnabled !== true || dismissed) return null;
+  // Hidden while the result standing now is the one that was dismissed. An import
+  // that has landed since is news, and news reopens the capsule.
+  const dismissed = dismissedAt !== null && imported <= dismissedAt;
+  // The capability gate belongs to the path that would otherwise call the scan
+  // itself. A host that already scanned has better evidence than this hook, which
+  // resolves its own failures to `false` and would hide a real offer on a blip.
+  if ((!hosted && modelHubEnabled !== true) || dismissed) return null;
   // Nothing found and nothing done — there is no offer and no outcome to report.
   if (remaining === 0 && imported === 0) return null;
 
@@ -82,7 +146,7 @@ export const ImportKeysNotice: React.FC<{
     // dismissed earlier would start nagging again. With nothing left to import there
     // is nothing to remember: this is just closing a receipt.
     if (remaining > 0) writeMigrationDismissed(candidates);
-    setDismissed(true);
+    setDismissedAt(imported);
   };
 
   const message = imported === 0
@@ -101,8 +165,8 @@ export const ImportKeysNotice: React.FC<{
             // A light button, not a text link: this is the capsule's own action and
             // it has to read as one next to the primary CTA below it.
             <Button type="button" variant="secondary" size="sm" className="onboarding-import-notice-action"
-              onClick={() => setDialogOpen(true)}>
-              {t('settings.models.importNotice.review')}
+              onClick={() => (onReview ? onReview() : setDialogOpen(true))}>
+              {t('onboarding.import.review')}
             </Button>
           )}
           <InfoHint
@@ -111,7 +175,7 @@ export const ImportKeysNotice: React.FC<{
             className="onboarding-import-notice-help"
             label={t('settings.models.importNotice.help') as string}
             trigger={t('settings.models.importNotice.help')}
-            content={t('settings.models.importNotice.helpBody')}
+            content={t('onboarding.import.helpBody')}
             contentClassName="w-72"
           />
         </div>
@@ -125,10 +189,11 @@ export const ImportKeysNotice: React.FC<{
         </button>
       </div>
 
-      {dialogOpen && (
+      {dialogOpen && !hosted && (
         <MigrationDialog
           open
           eligible={isImportableKey}
+          takeable={isImportableKey}
           onClose={() => setDialogOpen(false)}
           onApplied={(applied) => {
             setDialogOpen(false);

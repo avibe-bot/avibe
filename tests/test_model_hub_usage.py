@@ -37,7 +37,7 @@ from core.handlers.model_hub.identifiers import (
 )
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
-    USAGE_TOKEN_CEILING,
+    USAGE_REPORT_TOKEN_CEILING,
     ProtocolSSEState,
     ProtocolUsageReport,
     extract_protocol_usage,
@@ -45,6 +45,10 @@ from core.handlers.model_hub.stream_wire import (
     observe_protocol_response,
 )
 from core.handlers.model_hub.usage import (
+    USAGE_COUNTER_CEILING,
+    USAGE_DEFAULT_WINDOW_DAYS,
+    USAGE_MAX_ROWS,
+    USAGE_PUBLISHED_COUNT_BOUND,
     USAGE_RETENTION_DAYS,
     BoundedUsageLedger,
     SourceIdentity,
@@ -331,7 +335,7 @@ def test_a_buffered_error_still_carries_the_tokens_it_billed() -> None:
         pytest.param(12.5, id="float"),
         pytest.param(None, id="null"),
         pytest.param([120], id="list"),
-        pytest.param(USAGE_TOKEN_CEILING + 1, id="above-ceiling"),
+        pytest.param(USAGE_REPORT_TOKEN_CEILING + 1, id="above-ceiling"),
     ],
 )
 def test_an_unusable_token_value_is_dropped_not_coerced(reported: object) -> None:
@@ -352,16 +356,16 @@ def test_a_composed_input_total_cannot_exceed_our_own_ceiling() -> None:
         "anthropic",
         {
             "usage": {
-                "input_tokens": USAGE_TOKEN_CEILING,
-                "cache_read_input_tokens": USAGE_TOKEN_CEILING,
+                "input_tokens": USAGE_REPORT_TOKEN_CEILING,
+                "cache_read_input_tokens": USAGE_REPORT_TOKEN_CEILING,
                 "total_tokens": 3,
             }
         },
     )
 
     assert report is not None
-    assert report.input_tokens == USAGE_TOKEN_CEILING
-    assert report.cached_input_tokens == USAGE_TOKEN_CEILING
+    assert report.input_tokens == USAGE_REPORT_TOKEN_CEILING
+    assert report.cached_input_tokens == USAGE_REPORT_TOKEN_CEILING
 
 
 @pytest.mark.parametrize(
@@ -614,6 +618,374 @@ def test_the_row_cap_keeps_the_newest_rows(tmp_path: Path) -> None:
     assert [row["model_id"] for row in persisted] == ["model-3", "model-4", "model-5"]
 
 
+def test_the_row_cap_holds_when_reporting_a_file_that_overflows_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review 5266689271: a file may hold more rows than the writer would emit.
+
+    `max_rows` used to be applied in `_write` only, which bounds every file this
+    ledger produces and no other one. A store that was corrupted, hand-edited, or
+    written by a different version was read back whole, so the window it published
+    was not bounded by anything the contract could name.
+
+    The bound belongs on the reportable set rather than on the parse — see
+    `test_the_row_cap_never_evicts_a_reportable_row_for_a_future_dated_one` for
+    what applying it to raw rows costs.
+
+    The stamps here are all in the past, which is what distinguishes this from
+    `test_the_row_cap_ranks_an_unmeasurable_instant_as_the_least_recent`: the
+    ordering can read every one of them, so it evicts by age.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    overflow = [
+        {
+            "day": local_usage_day(NOW).isoformat(),
+            "source_id": "src_a",
+            "model_id": f"model-{index:03d}",
+            "requests": 1,
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": (NOW - timedelta(seconds=5 - index)).isoformat(),
+        }
+        for index in range(5)
+    ]
+    path.write_text(json.dumps(overflow), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+    with caplog.at_level(logging.WARNING):
+        held = ledger.window(days=30, now=NOW)
+
+    # The survivors are the ones `_write` would have kept, in the same order.
+    assert [row["model_id"] for row in held] == ["model-002", "model-003", "model-004"]
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 3
+    assert "over its capacity of 3" in caplog.text
+
+
+def test_the_row_cap_never_evicts_a_reportable_row_for_a_future_dated_one(
+    tmp_path: Path,
+) -> None:
+    """Review 5267029898: capacity applied before the date filter evicts backwards.
+
+    `_recency` orders by day first, so a future-dated row outranks every real one.
+    `_retained` was written for exactly this — a clock that jumps forward, is
+    corrected, and leaves rows no read will ever report while they hold slots and
+    evict live ones. Applying the capacity to rows straight out of the file put
+    that defect back on the read path, ahead of the code that closes it: the
+    future rows survived, `window` then filtered them, and a window holding real
+    usage reported none of it.
+
+    Filtering to the requested window first is what makes the eviction meaningful,
+    because then every candidate is a row a reader can actually see.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    today = local_usage_day(NOW)
+    rows = [
+        {
+            "day": (today + timedelta(days=ahead)).isoformat(),
+            "source_id": "src_future",
+            "model_id": f"model-{ahead}",
+            "requests": 1,
+            "input_tokens": 5,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": (NOW + timedelta(days=ahead)).isoformat(),
+        }
+        for ahead in (1, 2, 3)
+    ] + [
+        {
+            "day": today.isoformat(),
+            "source_id": "src_real",
+            "model_id": f"model-{index}",
+            "requests": 1,
+            "input_tokens": 100,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": NOW.isoformat(),
+        }
+        for index in range(3)
+    ]
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+
+    # The real rows are the only reportable ones, so they are the ones kept.
+    assert [row["source_id"] for row in ledger.window(days=30, now=NOW)] == ["src_real"] * 3
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 300
+
+
+def test_the_row_cap_ranks_an_unmeasurable_instant_as_the_least_recent(
+    tmp_path: Path,
+) -> None:
+    """Review 5267204231: a future instant inside today survives the date filter.
+
+    The date filter closed the future-*day* case; the second half of `_recency` is
+    the instant, and a stamp later than the reading passes that filter untouched.
+    A clock corrected backwards leaves exactly this behind, and the rows it leaves
+    then outranked every real one and evicted live usage.
+
+    Bounding the instant to the reading is the obvious remedy and is not enough:
+    it makes those rows as recent as the reading, so they still outrank a row
+    metered a minute earlier. Both halves are asserted here — the survivors, and
+    the fact that a clamp would have kept the wrong ones.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    today = local_usage_day(NOW).isoformat()
+    rows = [
+        {
+            "day": today,
+            "source_id": "src_future",
+            "model_id": f"model-{ahead}",
+            "requests": 1,
+            "input_tokens": 5,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": (NOW + timedelta(hours=ahead)).isoformat(),
+        }
+        for ahead in (1, 2, 3)
+    ] + [
+        {
+            "day": today,
+            "source_id": "src_real",
+            "model_id": f"model-{index}",
+            "requests": 1,
+            "input_tokens": 100,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            # An hour old: still the most recent usage anyone metered, and still
+            # older than what a clamp to `now` would hand the future rows.
+            "last_metered_at": (NOW - timedelta(hours=1)).isoformat(),
+        }
+        for index in range(3)
+    ]
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+
+    assert [row["source_id"] for row in ledger.window(days=30, now=NOW)] == ["src_real"] * 3
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 300
+
+
+def test_an_unmeasurable_instant_costs_a_row_nothing_while_there_is_room(
+    tmp_path: Path,
+) -> None:
+    """Ranking last is an eviction order, not a verdict on the row.
+
+    Nothing about a stamp decides whether a row is reported: the day does that.
+    So a future-stamped row inside the window is published like any other until
+    the file is over capacity, and the counters it carries are its own.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-a",
+                    "requests": 1,
+                    "input_tokens": 42,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "last_metered_at": (NOW + timedelta(days=9)).isoformat(),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 42
+
+
+def test_a_merge_cannot_lift_a_published_count_over_the_declared_maximum(
+    tmp_path: Path,
+) -> None:
+    """Review 5267029898: duplicates coalesce into one row, under one cap.
+
+    `_counter` clears each stored counter against the ceiling, but their sum is
+    not thereby cleared, and merging happens after. Enough duplicate-keyed rows
+    therefore build a single row carrying more than any row may — and one row is
+    one row, so the capacity that bounds the reportable set never sees it.
+
+    How many duplicates a file holds is bounded by nothing, so this has to be
+    answered on the merged value itself.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    duplicate = {
+        "day": local_usage_day(NOW).isoformat(),
+        "source_id": "src_a",
+        "model_id": "model-x",
+        "requests": 1,
+        "input_tokens": USAGE_COUNTER_CEILING,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "last_metered_at": NOW.isoformat(),
+    }
+    path.write_text(
+        json.dumps([dict(duplicate) for _ in range(USAGE_MAX_ROWS + 1)]), encoding="utf-8"
+    )
+
+    totals = BoundedUsageLedger(path).summary(days=30, now=NOW)["totals"]
+
+    assert totals["input_tokens"] <= USAGE_PUBLISHED_COUNT_BOUND
+    # Refused rather than reduced: the bucket is garbage, and the next call
+    # recorded against it starts a row that means what it says.
+    assert totals["input_tokens"] == 0
+
+
+def test_no_file_can_make_a_published_count_exceed_the_declared_maximum(
+    tmp_path: Path,
+) -> None:
+    """The contract's maximum has to bound the reader, not just the writer.
+
+    `USAGE_PUBLISHED_COUNT_BOUND` is the product of the two capacities this file
+    has. It is a real bound on what `summary` publishes only while both of them
+    are enforced on the way *in*; each was once enforced at one door only, and
+    each time the gap let a hand-edited store publish a count its own schema
+    rejects. This drives the worst case directly — every row at the counter
+    ceiling, more rows than the file may hold — so the product stays a promise the
+    producer keeps rather than a description of its happy path.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    rows = USAGE_MAX_ROWS + 25
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": (local_usage_day(NOW) - timedelta(days=index % 30)).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": f"model-{index:04d}",
+                    "requests": USAGE_COUNTER_CEILING,
+                    "input_tokens": USAGE_COUNTER_CEILING,
+                    "cached_input_tokens": USAGE_COUNTER_CEILING,
+                    "output_tokens": USAGE_COUNTER_CEILING,
+                    "last_metered_at": (NOW + timedelta(seconds=index)).isoformat(),
+                }
+                for index in range(rows)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    totals = BoundedUsageLedger(path).summary(days=30, now=NOW)["totals"]
+
+    for key in ("requests", "input_tokens", "cached_input_tokens", "output_tokens"):
+        assert totals[key] == USAGE_PUBLISHED_COUNT_BOUND, key
+    # Tight, not merely safe: the worst admissible file reaches the bound exactly,
+    # so the contract declares no range the producer cannot occupy.
+    assert USAGE_PUBLISHED_COUNT_BOUND == USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
+
+
+def test_no_file_can_put_a_published_summary_outside_its_own_contract(
+    tmp_path: Path,
+) -> None:
+    """Every published guarantee, asserted against one deliberately hostile file.
+
+    Five rounds of review found the same shape five times: an invariant the write
+    path enforces that the report path does not mirror. Each fix closed the door it
+    was found at, and the next one was found at a door nobody had listed. Listing
+    the doors is the part that kept failing, so this asserts the guarantees instead
+    — the properties `usage-summary.schema.json` and the UI depend on — over a file
+    carrying every corruption at once, and over more reportable rows than the
+    capacity can hold, so the eviction runs rather than being skipped.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    today = local_usage_day(NOW)
+    hostile: list[object] = []
+    for index in range(USAGE_MAX_ROWS * 2):
+        # Days on both sides of both edges: three ahead of today, thirty inside the
+        # window, three behind it. Readable stamps on the first half, stamps no
+        # clock has reached on the second.
+        readable = index < USAGE_MAX_ROWS // 2
+        hostile.append(
+            {
+                "day": (today - timedelta(days=(index % 36) - 3)).isoformat(),
+                "source_id": f"src_{'past' if readable else 'ahead'}_{index % 7}",
+                "model_id": f"model_{index % 11}",
+                "requests": index,
+                "token_reports": index * 3,  # breaks its subset
+                "input_tokens": USAGE_COUNTER_CEILING - index,
+                "cached_input_tokens": USAGE_COUNTER_CEILING,  # breaks its subset
+                "output_tokens": -index,  # not a count
+                "last_metered_at": (
+                    NOW - timedelta(hours=index + 1)
+                    if readable
+                    else NOW + timedelta(hours=index)
+                ).isoformat(),
+            }
+        )
+    # Duplicate keys, so the merge builds counters no row in the file carried.
+    # Taken from the unreadable half, because a merged row past the ceiling is
+    # dropped on read and the readable family is what the eviction is asserted on.
+    hostile.extend(hostile[USAGE_MAX_ROWS : USAGE_MAX_ROWS + 60])
+    hostile.extend(["not a row", None, {"day": "2026-W34-2", "source_id": "s", "model_id": "m"}])
+    path.write_text(json.dumps(hostile), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path)
+    rows = ledger.window(days=USAGE_DEFAULT_WINDOW_DAYS, now=NOW)
+    report = ledger.summary(days=USAGE_DEFAULT_WINDOW_DAYS, now=NOW)
+
+    assert len(rows) == USAGE_MAX_ROWS  # the capacity binds, so eviction ran
+    assert all(report["from_day"] <= row["day"] <= report["to_day"] for row in rows)
+
+    # Nothing whose recency the report can read loses its slot to something it
+    # cannot read — the property the last two rounds of review both came back to.
+    # Within a day, because the day is the first half of the order and evicting the
+    # oldest one first is what retention is: a recent row outranks an older one
+    # whatever either claims about the hour.
+    survivors = {(row["day"], row["source_id"], row["model_id"]) for row in rows}
+    readable = {
+        (row["day"], row["source_id"], row["model_id"])
+        for row in hostile[: USAGE_MAX_ROWS // 2]
+        if report["from_day"] <= row["day"] <= report["to_day"]
+    }
+    assert readable
+    outbid = {day for day, _, _ in readable - survivors}
+    assert not [row for row in rows if row["day"] in outbid and "ahead" in row["source_id"]]
+
+    counters = (
+        "requests",
+        "token_reports",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+    )
+    buckets = [report["totals"], *report["days"]]
+    for source in report["sources"]:
+        buckets.append(source)
+        buckets.extend(source["models"])
+    for bucket in buckets:
+        for key in counters:
+            assert 0 <= bucket[key] <= USAGE_PUBLISHED_COUNT_BOUND
+        assert bucket["cached_input_tokens"] <= bucket["input_tokens"]
+        assert bucket["token_reports"] <= bucket["requests"]
+
+    # The three groupings are three views of one set, so they must agree.
+    for key in counters:
+        assert sum(day[key] for day in report["days"]) == report["totals"][key]
+        assert sum(source[key] for source in report["sources"]) == report["totals"][key]
+        assert (
+            sum(model[key] for source in report["sources"] for model in source["models"])
+            == report["totals"][key]
+        )
+
+
 def test_the_row_cap_evicts_the_least_recently_metered_row(tmp_path: Path) -> None:
     """Review 4959575659 finding 8: evicting by spelling starves a live model.
 
@@ -768,7 +1140,7 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
                     "requests": -4,
                     "token_reports": True,
                     "input_tokens": "many",
-                    "output_tokens": USAGE_TOKEN_CEILING * 5,
+                    "output_tokens": 1.5,
                 }
             ]
         ),
@@ -780,7 +1152,7 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
     assert row["token_reports"] == 0
     assert row["input_tokens"] == 0
     assert row["cached_input_tokens"] == 0
-    assert row["output_tokens"] == USAGE_TOKEN_CEILING
+    assert row["output_tokens"] == 0
 
 
 @pytest.mark.parametrize(
@@ -1120,14 +1492,168 @@ def test_duplicate_persisted_rows_merge_instead_of_shadowing(tmp_path: Path) -> 
     assert rows[0]["input_tokens"] == 100
 
 
-def test_accumulated_counters_stop_at_the_ceiling(tmp_path: Path) -> None:
+def test_accumulated_counters_are_exact_past_the_per_report_ceiling(tmp_path: Path) -> None:
+    """An aggregate is a sum, not a capped one.
+
+    The per-report ceiling exists so one hostile response cannot poison the
+    ledger; it says nothing about how much a user may spend across many honest
+    ones. Reusing it on the sum truncated real usage: the totals card showed a
+    figure that was the ceiling rather than the usage, and nothing on the page
+    could tell the difference. Every level the summary publishes is checked,
+    because each one accumulates separately and a clamp left on any of them
+    reappears as the same silent lie.
+    """
+
     ledger = _ledger(tmp_path)
-    saturated = ProtocolUsageReport(input_tokens=USAGE_TOKEN_CEILING)
+    maximal = ProtocolUsageReport(input_tokens=USAGE_REPORT_TOKEN_CEILING)
 
-    ledger.record(source_id="src_a", model_id="model-x", usage=saturated, at=NOW)
-    ledger.record(source_id="src_a", model_id="model-x", usage=saturated, at=NOW)
+    ledger.record(source_id="src_a", model_id="model-x", usage=maximal, at=NOW)
+    ledger.record(source_id="src_a", model_id="model-x", usage=maximal, at=NOW)
 
-    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == USAGE_TOKEN_CEILING
+    expected = 2 * USAGE_REPORT_TOKEN_CEILING
+    summary = ledger.summary(days=30, now=NOW)
+    assert summary["totals"]["input_tokens"] == expected
+    assert summary["sources"][0]["input_tokens"] == expected
+    assert summary["sources"][0]["models"][0]["input_tokens"] == expected
+    assert summary["days"][0]["input_tokens"] == expected
+
+
+def test_a_cached_input_share_survives_a_window_past_the_per_report_ceiling(
+    tmp_path: Path,
+) -> None:
+    """The share is the reason a clamped aggregate could not stay hidden.
+
+    Clamping input and its cached subset independently pinned both to the same
+    ceiling, so the ratio converged on exactly 100% — a broken number wearing the
+    appearance of perfect caching. The proportions here are a real week's:
+    billions of input tokens at a cached share in the nineties.
+    """
+
+    ledger = _ledger(tmp_path)
+    report = ProtocolUsageReport.of(
+        input_tokens=500_000_000,
+        cached_input_tokens=475_000_000,
+        output_tokens=2_000_000,
+    )
+    for day in range(7):
+        at = NOW - timedelta(days=day)
+        for _ in range(2):
+            ledger.record(source_id="src_a", model_id="model-x", usage=report, at=at)
+
+    totals = ledger.summary(days=7, now=NOW)["totals"]
+    assert totals["input_tokens"] == 14 * 500_000_000
+    assert totals["cached_input_tokens"] == 14 * 475_000_000
+    assert totals["cached_input_tokens"] < totals["input_tokens"]
+    assert totals["cached_input_tokens"] / totals["input_tokens"] == pytest.approx(0.95)
+
+
+def test_a_persisted_counter_past_the_representation_drops_its_row(
+    tmp_path: Path,
+) -> None:
+    """The one bound this module keeps, and why it drops rather than saturates.
+
+    A counter past 2**53 - 1 is not a count the file can hold, and no sum this
+    module writes can reach it, so the probe has to come from a file nothing here
+    would have produced. Saturating it would publish a number nobody spent — and
+    saturating this row's input and cached-input together would publish it as a
+    100% cached share, the exact artifact this ledger exists to not produce.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": USAGE_COUNTER_CEILING * 4,
+                    "cached_input_tokens": USAGE_COUNTER_CEILING * 4,
+                    "output_tokens": 0,
+                    "last_metered_at": NOW.isoformat(),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert ledger.window(days=30, now=NOW) == []
+    assert ledger.summary(days=30, now=NOW)["totals"] == {
+        "requests": 0,
+        "token_reports": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+
+def test_a_merge_the_file_cannot_hold_is_refused_by_every_surface(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Where an exact merge outgrows the file, and what every surface does with it.
+
+    Two duplicate-keyed rows are something only a corrupt or hand-merged file
+    holds, and `_read` folds them exactly — so their sum can exceed what a counter
+    is written and read back as, on a value that was admitted one row at a time.
+
+    This once asserted that the summary published that sum anyway, which was
+    coherent while the contract declared no maximum: an exact aggregate was the
+    honest answer and nothing downstream claimed a range. Restoring a derived
+    maximum changed what the producer owes. A merged counter is bounded by how
+    many duplicates the file holds, which is bounded by nothing, so publishing one
+    unreduced means publishing counts the contract rejects — `USAGE_MAX_ROWS`
+    rows can only bound a total while each of them is itself bounded.
+
+    So the row is refused, not reduced, and now every surface says the same thing.
+    A sum of cleared addends is not itself cleared, and the one rule every door
+    already applied — a magnitude no published document could carry is dropped,
+    never saturated — is what makes the bound hold. It is also what heals the
+    file: the bucket disappears rather than pinning at the ceiling, and the next
+    call starts a row that means what it says.
+    """
+
+    half = USAGE_COUNTER_CEILING // 2 + 1
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    duplicate = {
+        "day": local_usage_day(NOW).isoformat(),
+        "source_id": "src_a",
+        "model_id": "model-x",
+        "requests": 1,
+        "token_reports": 1,
+        "input_tokens": half,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "last_metered_at": NOW.isoformat(),
+    }
+    ledger.path.write_text(json.dumps([duplicate, dict(duplicate)]), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.usage"):
+        assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 0
+
+    assert any(
+        "merged counters outgrew what the file can carry" in record.message
+        for record in caplog.records
+    )
+    assert 2 * half > USAGE_COUNTER_CEILING
+
+    # Refusing the row on the way in is also what stops the batch that follows
+    # from being swallowed. The fold used to land on the unusable bucket and go
+    # down with it when `_write` refused the result; now the bucket is already
+    # gone, so this call is recorded rather than lost.
+    ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+
+    persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
+    assert [(row["requests"], row["input_tokens"]) for row in persisted] == [(1, 0)]
+
+    ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+    totals = ledger.summary(days=30, now=NOW)["totals"]
+    assert totals["requests"] == 2
+    assert totals["input_tokens"] == 0
 
 
 @pytest.mark.parametrize(

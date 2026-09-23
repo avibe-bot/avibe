@@ -11,7 +11,7 @@ orchestrator and land with every affected consumer on the same tested head.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
@@ -141,6 +141,10 @@ class RawCallOutcome:
     # Recognized model output or protocol success, independently of permissive
     # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
     recovery_verified: bool = False
+    # Upstream's own human-readable error text, credential-redacted and bounded
+    # by L1. Display-only: classification never reads it, it is never persisted
+    # into events or provenance, and it stays out of repr so logs cannot echo it.
+    upstream_detail: str | None = field(default=None, repr=False)
 
 
 class ObservationOutcome(str, Enum):
@@ -525,6 +529,27 @@ class EngineAdapter(Protocol):
         A safe missing/content-corrupt private document may recover from its
         ref. Readable wrong-kind/unknown/conflicting metadata, unsafe paths and
         I/O errors reject. The replacement still needs normal key validation.
+        """
+        ...
+
+    async def credential_address(self, credential_ref: str) -> str | None:
+        """Report the address outbound calls reach this credential through.
+
+        The engine addresses a credential through the model field and no other,
+        so a call spells ``<address>/<model>``. Custody mints that address and
+        is the only place it is recorded, which makes this the one answer that
+        can *prove* an id an older release stored carries one — as opposed to
+        guessing from its shape and renaming a vendor's own model.
+
+        Whichever address the engine would actually compose, however custody
+        happens to hold it: one credential records its own, another is
+        addressed by the record its Source is bound through. An implementation
+        that answers from only one of those reports no address for a Source the
+        engine addresses perfectly well.
+
+        None when nothing records an address for this credential, including
+        when it is gone. A caller that cannot prove ownership must leave the
+        id alone.
         """
         ...
 

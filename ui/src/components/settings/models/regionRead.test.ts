@@ -78,10 +78,12 @@ describe('RegionRead', () => {
     expect(called).toEqual(keys);
     expect(Object.keys(landing)).toEqual(keys);
     const settlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
-    const barrier = settlement.slice(
-      settlement.indexOf('export const readSurfaceLanding'),
-      settlement.indexOf('\n\nexport type SourceMutationLanding ='),
-    );
+    const barrierStart = settlement.indexOf('export const readSurfaceLanding');
+    // Ends on the reader's own closing brace rather than on whatever declaration
+    // follows it, so a neighbour gaining a doc comment cannot silently widen the
+    // slice into code this assertion was never about.
+    const barrier = settlement.slice(barrierStart, settlement.indexOf('\n};', barrierStart));
+    expect(barrierStart).toBeGreaterThanOrEqual(0);
     expect(barrier).not.toMatch(/listEvents|events/);
   });
 
@@ -97,10 +99,13 @@ describe('RegionRead', () => {
     expect(violations).toEqual([]);
   });
 
-  it('routes overview collections and exact chain reads through the per-backend latest authority', () => {
+  it('routes overview collections and exact chain reads through the per-chain latest authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const definitionStart = page.indexOf('const readChainRequests');
-    const definitionEnd = page.indexOf('\n\nconst settleAgentChainIndex');
+    // Ends on the last reader's own closing line rather than on whatever
+    // declaration follows it: anchored on a neighbour, a doc comment added there
+    // silently widens this slice into code it was never about.
+    const definitionEnd = page.indexOf('\n});', page.indexOf('const readExactAgentChain')) + '\n});'.length;
     const definitions = page.slice(definitionStart, definitionEnd);
     const withoutDefinition = `${page.slice(0, definitionStart)}${page.slice(definitionEnd)}`;
     const affectedRefresh = page.slice(
@@ -108,13 +113,14 @@ describe('RegionRead', () => {
       page.indexOf('\n\n  const refreshAllAgentChains'),
     );
     const settlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
-    const landing = settlement.slice(
-      settlement.indexOf('export const readSurfaceLanding'),
-      settlement.indexOf('\n\nexport type SourceMutationLanding ='),
-    );
+    const landingStart = settlement.indexOf('export const readSurfaceLanding');
+    const landingEnd = settlement.indexOf('\n};', landingStart);
+    const landing = settlement.slice(landingStart, landingEnd);
 
     expect(definitionStart).toBeGreaterThanOrEqual(0);
     expect(definitionEnd).toBeGreaterThan(definitionStart);
+    expect(landingStart).toBeGreaterThanOrEqual(0);
+    expect(landingEnd).toBeGreaterThan(landingStart);
     expect(withoutDefinition).not.toMatch(/modelsApi\.getAgentChain/);
     expect(definitions).toMatch(/modelsApi\.getAgentChains\(agent\.backend\)/);
     expect(definitions).toMatch(/modelsApi\.getAgentChain\(backend, modelId\)/);
@@ -122,6 +128,6 @@ describe('RegionRead', () => {
     expect(landing).toMatch(/readers\.chains\(affectedChains\)/);
     expect(landing).not.toMatch(/getAgentChain/);
     expect(page).not.toMatch(/\breadChains\b/);
-    expect(page).toMatch(/chainReadAuthority\.invalidateExcept\(activeBackends\)/);
+    expect(page).toMatch(/chainReadAuthority\.invalidateExcept\(\(key\) => activeBackends\.has\(chainKeyBackend\(key\)\)\)/);
   });
 });

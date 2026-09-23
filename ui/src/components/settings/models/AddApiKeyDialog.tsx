@@ -4,8 +4,6 @@ import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
   CheckCircle2,
   CircleX,
-  Eye,
-  EyeOff,
   LoaderCircle,
   Save,
   TriangleAlert,
@@ -14,15 +12,16 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
-import { Input } from '@/components/ui/input';
-import { cn } from '@/lib/utils';
-import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
-import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
-import { Field } from './dialogFields';
+import { ApiKeyField, ApiKeySourceForm } from './ApiKeySourceForm';
 import {
-  PROTOCOL_COPY_KEYS,
-} from './addApiKeyState';
+  apiKeySourceCreate,
+  apiKeyWriteSettled,
+  draftComplete,
+  EMPTY_API_KEY_DRAFT,
+  sourceClientNonce,
+  type ApiKeySourceDraft,
+} from './apiKeySourceDraft';
+import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { GuardImpact } from './GuardImpact';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
@@ -38,17 +37,10 @@ import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { mayHaveWritten, REPAIR_LINE_KEY, wasBlocked } from './repair';
 import { serverText } from './serverCopy';
 import {
-  SOURCE_DISPLAY_NAME_MAX_LENGTH,
-  SOURCE_PROTOCOLS,
-  type ApiKeySourceCreate,
   type RouteHopRef,
   type Source,
-  type SourceProtocol,
   type SupplyGap,
 } from './types';
-import { ProtocolGlyph } from './protocolGlyph';
-import { optionalTrimmedTextWithin } from './validation';
-import { VendorGlyph } from './vendorGlyph';
 
 type Phase =
   | { kind: 'form' }
@@ -57,70 +49,6 @@ type Phase =
   | { kind: 'save_unconfirmed' };
 
 const INITIAL_PHASE: Phase = { kind: 'form' };
-type ProtocolSelection = SourceProtocol;
-
-const ProtocolSegments: React.FC<{
-  id?: string;
-  disabled: boolean;
-  selection: ProtocolSelection;
-  onSelect: (value: ProtocolSelection) => void;
-}> = ({ id, disabled, selection, onSelect }) => {
-  const { t } = useTranslation();
-  return (
-    <div
-      id={id}
-      role="group"
-      aria-label={t('settings.models.addKey.field.protocol')}
-      className="model-hub-add-key-segments flex max-w-full flex-wrap"
-    >
-      {SOURCE_PROTOCOLS.map((item) => (
-        <button
-          key={item}
-          type="button"
-          disabled={disabled}
-          aria-pressed={selection === item}
-          className={cn(
-            'model-hub-add-key-segment',
-            selection === item && 'is-selected',
-          )}
-          onClick={() => onSelect(item)}
-        >
-          <ProtocolGlyph protocol={item} />
-          {t(PROTOCOL_COPY_KEYS[item])}
-        </button>
-      ))}
-    </div>
-  );
-};
-
-/**
- * The 服务商 field's rows: the shipped catalog in the order the file ships, then
- * the one entry that is not a vendor at all, each carrying its mark.
- *
- * File order because that order is a curated ranking, not an accident of how the
- * rows were appended: the vendors most users are here to add sit at the top, and
- * a name is only what you scan for once the list is long enough to have lost you.
- * Re-sorting here would put the ranking in a second place and make the catalog's
- * own order unobservable — so this reads the file verbatim, and moving a vendor
- * up the list is an edit to `vibe/data/api_key_vendors.json` and to nothing else.
- * 自定义 ranks nowhere: it is the absence of a vendor, so it sits after all of
- * them rather than inside them, while staying the value the field opens on.
- *
- * The mark is why the field is no longer a `<select>`. A vendor is recognised by
- * its logo long before its name is read, and an `<option>` holds text only — so
- * the closed control could only ever show what an option could hold, dropping
- * the mark exactly where the choice has already been made. What replaces it is
- * this app's one picker, `Combobox`, given a mark per row; a second local
- * implementation of the same trigger, panel, and keyboard would only be a place
- * for the two to diverge.
- */
-const useVendorOptions = (): ComboboxOption[] => {
-  const { t } = useTranslation();
-  return React.useMemo(() => ([
-    ...API_KEY_VENDOR_PRESETS.map((preset) => ({ value: preset.id, label: preset.label })),
-    { value: CUSTOM_VENDOR, label: t('settings.models.addKey.field.vendor.custom') },
-  ].map((option) => ({ ...option, icon: <VendorGlyph vendor={option.value} /> }))), [t]);
-};
 
 type ReplaceOutcome =
   | { kind: 'repaired' }
@@ -157,13 +85,6 @@ type AddApiKeyDialogProps = {
     }
 );
 
-const sourceClientNonce = (): string => {
-  const uuid = globalThis.crypto.randomUUID?.();
-  if (uuid) return `scn_${uuid.replaceAll('-', '').toLowerCase()}`;
-  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
-  return `scn_${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`;
-};
-
 const failureMessageKey = (failure: ReturnType<typeof apiFailure>): string | null =>
   failure?.detail ?? failure?.code ?? null;
 
@@ -173,54 +94,6 @@ const REPLACE_FAILURE_KEY: Record<ModelHubFailureClass, TranslationKey> = {
   'retryable-provider': 'settings.models.repair.replaceFailed',
 };
 
-const ApiKeyField: React.FC<{
-  value: string;
-  revealed: boolean;
-  disabled: boolean;
-  label: React.ReactNode;
-  autoFocus?: boolean;
-  onChange: (value: string) => void;
-  onToggleReveal: () => void;
-  onEnter?: () => void;
-}> = ({ value, revealed, disabled, label, autoFocus, onChange, onToggleReveal, onEnter }) => {
-  const { t } = useTranslation();
-  return (
-    <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={label}>
-      {(id) => (
-        <span className="model-hub-add-key-secret relative flex items-center">
-          <Input
-            id={id}
-            value={value}
-            type={revealed ? 'text' : 'password'}
-            disabled={disabled}
-            autoFocus={autoFocus}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(event) => onChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter' || disabled || !onEnter) return;
-              event.preventDefault();
-              onEnter();
-            }}
-            className="model-hub-add-key-input w-full pr-10 font-mono"
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="model-hub-ink-59 absolute right-1 size-7"
-            aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)}
-            disabled={disabled}
-            onClick={onToggleReveal}
-          >
-            {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-          </Button>
-        </span>
-      )}
-    </Field>
-  );
-};
-
 export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const { open, onClose } = props;
   const replaceMode = props.mode === 'replace';
@@ -228,12 +101,8 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const addOnAdded = replaceMode ? null : props.onAdded;
   const replaceSourceId = replaceMode ? props.source.id : null;
   const { t } = useTranslation();
-  const vendorOptions = useVendorOptions();
-  const [vendor, setVendor] = React.useState<string>(CUSTOM_VENDOR);
-  const [displayName, setDisplayName] = React.useState('');
-  const [baseUrl, setBaseUrl] = React.useState('');
-  const [apiKey, setApiKey] = React.useState('');
-  const [protocolSelection, setProtocolSelection] = React.useState<ProtocolSelection>('openai_chat');
+  const [draft, setDraft] = React.useState<ApiKeySourceDraft>(EMPTY_API_KEY_DRAFT);
+  const apiKey = draft.apiKey;
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
   const [replacePhase, setReplacePhase] = React.useState<ReplacePhase>({ kind: 'edit' });
@@ -253,11 +122,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     }
     if (open) {
       clientNonce.current = sourceClientNonce();
-      setVendor(CUSTOM_VENDOR);
-      setDisplayName('');
-      setBaseUrl('');
-      setApiKey('');
-      setProtocolSelection('openai_chat');
+      setDraft(EMPTY_API_KEY_DRAFT);
       setRevealed(false);
       setPhase(INITIAL_PHASE);
       setReplacePhase({ kind: 'edit' });
@@ -297,25 +162,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     if (settle) void settle().catch(() => undefined);
   }, [continuation]);
 
-  const draft = React.useCallback((): ApiKeySourceCreate => ({
-    kind: 'api_key', vendor,
-    ...(displayName.trim() ? { display_name: displayName.trim() } : {}),
-    base_url: baseUrl.trim(), key: apiKey.trim(),
-    protocol: apiKeyVendorPreset(vendor)?.protocol ?? protocolSelection,
-    client_nonce: clientNonce.current, save_unverified: true,
-  }), [apiKey, baseUrl, displayName, protocolSelection, vendor]);
-
   const persist = React.useCallback(async (seq: ContinuationTicket) => {
     if (continuation.settle(seq, () => setPhase({ kind: 'working' })) === 'stale') return;
     try {
-      const created = await modelsApi.createApiKeySource(draft());
+      const created = await modelsApi.createApiKeySource(apiKeySourceCreate(draft, clientNonce.current));
       createdDelivery.settle(continuation, seq, created);
     } catch (error) {
-      const failure = apiFailure(error);
-      const definitive = failure?.serverNamed && failure.responseStatus !== undefined
-        && failure.responseStatus >= 400 && failure.responseStatus < 500 && failure.responseStatus !== 409;
-      continuation.settle(seq, () => setPhase(definitive
-        ? { kind: 'persist_failure', messageKey: failureMessageKey(failure) }
+      continuation.settle(seq, () => setPhase(apiKeyWriteSettled(error)
+        ? { kind: 'persist_failure', messageKey: failureMessageKey(apiFailure(error)) }
         : { kind: 'save_unconfirmed' }));
     }
   }, [continuation, createdDelivery, draft]);
@@ -413,8 +267,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     createdDelivery.close();
   }, [continuation, createdDelivery, onClose, phase, replaceMode, replacePhase.kind]);
 
-  const vendorPreset = apiKeyVendorPreset(vendor);
-  const constrainedProtocol = vendorPreset?.protocol ?? protocolSelection;
   const retry = async () => {
     if (phase.kind === 'save_unconfirmed') {
       if (!addSourceReads) return;
@@ -443,38 +295,24 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     setPhase((current) => current.kind === 'persist_failure' ? INITIAL_PHASE : current);
   };
 
-  const editEndpoint = (value: string) => {
-    setBaseUrl(value);
-    clearSaveFailure();
-  };
   const editKey = (value: string) => {
-    setApiKey(value);
+    setDraft((current) => ({ ...current, apiKey: value }));
     if (replaceMode && replacePhase.kind === 'failure') setReplacePhase({ kind: 'edit' });
     clearSaveFailure();
   };
-  const editDisplayName = (value: string) => {
-    setDisplayName(value);
-    if (phase.kind === 'persist_failure') setPhase(INITIAL_PHASE);
-  };
-  const editProtocol = (value: ProtocolSelection) => {
-    setProtocolSelection(value);
-    clearSaveFailure();
-  };
-  // Re-selecting the current vendor must preserve a hand-edited endpoint and
-  // protocol. A different vendor starts from that vendor's defaults.
-  const editVendor = (value: string) => {
-    if (value === vendor) return;
-    setVendor(value);
-    setBaseUrl(apiKeyVendorPreset(value)?.official_base_url ?? '');
-    setProtocolSelection('openai_chat');
-    setPhase(INITIAL_PHASE);
+  // A vendor change resets the phase outright rather than only clearing a save
+  // failure: it restates what is being connected to, so an unsettled outcome
+  // from the previous one no longer describes what the form holds.
+  const editDraft = (next: ApiKeySourceDraft, field: keyof ApiKeySourceDraft) => {
+    setDraft(next);
+    if (field === 'vendor') setPhase(INITIAL_PHASE);
+    else clearSaveFailure();
   };
 
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
   const canCancel = replaceMode ? replacePhase.kind !== 'submitting' : !isWorking;
-  const displayNameValid = optionalTrimmedTextWithin(displayName, SOURCE_DISPLAY_NAME_MAX_LENGTH);
-  const canSubmit = Boolean(baseUrl.trim() && apiKey.trim()) && displayNameValid && !formLocked;
+  const canSubmit = draftComplete(draft) && !formLocked;
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
   const replaceFieldLocked = replacePhase.kind === 'submitting'
@@ -577,65 +415,13 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
 
         {!replaceMode && (
           <div className="model-hub-add-key-body flex flex-col">
-            {/* First, because it is the field the rest are conditioned on: it
-                decides what the Base URL starts as and whether the interface is
-                still a question. */}
-            <Field
-              className="model-hub-add-key-field"
-              labelClassName="model-hub-add-key-label"
-              hintClassName="model-hub-add-key-hint"
-              label={t('settings.models.addKey.field.vendor')}
-              hint={t('settings.models.addKey.field.vendor.hint')}
-            >
-              {(id) => (
-                <Combobox
-                  id={id}
-                  // The label points here, but a `for` association contributes
-                  // nothing to a button's accessible name, so the field has to
-                  // name itself. The primitive appends the selection to what is
-                  // passed here: the label alone would replace the trigger's
-                  // contents, and those contents are the chosen vendor — the one
-                  // thing a picker exists to report.
-                  ariaLabel={t('settings.models.addKey.field.vendor')}
-                  className="model-hub-add-key-input"
-                  options={vendorOptions}
-                  value={vendor}
-                  onValueChange={editVendor}
-                  // A vendor is a catalog row, and the request sends its id: there
-                  // is no typed value this field could accept.
-                  allowCustomValue={false}
-                  disabled={formLocked}
-                  searchPlaceholder={t('settings.models.addKey.field.vendor.search')}
-                  emptyText={t('settings.models.addKey.field.vendor.empty')}
-                />
-              )}
-            </Field>
-            <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
-              {(id) => <Input id={id} value={displayName} disabled={formLocked} aria-invalid={!displayNameValid} onChange={(event) => editDisplayName(event.target.value)} className="model-hub-add-key-input" />}
-            </Field>
-            <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
-              {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
-            </Field>
-            <ApiKeyField
-              value={apiKey}
-              revealed={revealed}
+            <ApiKeySourceForm
+              draft={draft}
               disabled={formLocked}
-              label={t('settings.models.addKey.field.apiKey')}
-              onChange={editKey}
+              revealed={revealed}
+              onChange={editDraft}
               onToggleReveal={() => setRevealed((value) => !value)}
             />
-
-            <div className="model-hub-add-key-protocol-area">
-              <span className="model-hub-add-key-label">{t('settings.models.addKey.field.protocol')}</span>
-              {vendorPreset ? (
-                <div className="model-hub-add-key-protocol-idle-row">
-                  <span className="model-hub-add-key-protocol-active">
-                    <ProtocolGlyph protocol={constrainedProtocol} />{t(PROTOCOL_COPY_KEYS[constrainedProtocol])}
-                  </span>
-                </div>
-              ) : <ProtocolSegments disabled={formLocked} selection={protocolSelection} onSelect={editProtocol} />}
-              <p className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.saveFirstHint')}</p>
-            </div>
             {isWorking && <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
               <LoaderCircle className="model-hub-ink-mint size-3.5 animate-spin" />
               <span className="model-hub-add-key-strip-title">{t('settings.models.addKey.saving')}</span>

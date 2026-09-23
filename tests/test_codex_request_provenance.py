@@ -35,6 +35,7 @@ def _launch(
     requested_model_id: str,
     resolved_model_id: str = "shared-upstream",
     source_id: str = "source",
+    gateway_request_model_id: str | None = None,
 ) -> tuple[str, str, dict[str, str]]:
     token = registry.credentials(
         "codex",
@@ -49,6 +50,7 @@ def _launch(
         requested_model_id=requested_model_id,
         resolved_model_id=resolved_model_id,
         source_id=source_id,
+        gateway_request_model_id=gateway_request_model_id,
         via_mapping=True,
     )
     metadata = registry.gateway_request_metadata(
@@ -271,6 +273,18 @@ def test_late_request_on_same_route_never_claims_newer_turn(tmp_path):
         assert late.turn_id is None
         late.mark_downstream_canceled()
 
+    # Off its own route it routes by the model the request names, and claims a
+    # turn no more and no less than on it: what a settled turn cannot do is own
+    # a request, which has nothing to do with the model the request names.
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata_old,
+    ) as stale_switch:
+        assert stale_switch.resolution_model("other-alias") == "other-alias"
+        assert stale_switch.turn_id is None
+        stale_switch.mark_downstream_canceled()
+
     with registry.gateway_terminalizer(
         backend="codex",
         token=token,
@@ -300,7 +314,6 @@ def test_invalid_identity_and_live_route_mismatch_fail_closed_without_poisoning(
         {"avibe_route_id": route_a},
         {"avibe_route_id": "foreign-route", "avibe_turn_id": "turn-a"},
         {"avibe_route_id": "路由-非ASCII", "avibe_turn_id": "turn-a"},
-        {"avibe_route_id": route_a, "avibe_turn_id": "turn-a"},
     ]
     for request_metadata in cases:
         with registry.gateway_terminalizer(
@@ -327,6 +340,151 @@ def test_invalid_identity_and_live_route_mismatch_fail_closed_without_poisoning(
 
     assert not registry._traces["turn-a"].ambiguous
     assert not registry._traces["turn-b"].ambiguous
+
+
+def test_live_handle_routes_another_model_and_keeps_its_turn(tmp_path):
+    """A verified handle authenticates a process and a turn, never a model.
+
+    Codex re-serialises a thread under the OUTGOING model before the first turn
+    on a new one, so that hop arrives on the new turn's handle naming the old
+    model. Refusing it here stranded the thread for good. Whether Avibe
+    configured the named model is resolution's question; routing only has to
+    hand the request on and keep it attributed to the turn that made it.
+    """
+
+    registry = _registry(tmp_path)
+    token, _route, metadata = _launch(
+        registry,
+        turn_id="turn-new",
+        requested_model_id="alias-new",
+        gateway_request_model_id="alias-new",
+    )
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as compaction:
+        assert compaction.resolution_model("alias-old") == "alias-old"
+        assert compaction.turn_id == "turn-new"
+        compaction.begin_attempt(
+            source_id="source",
+            resolved_model_id="shared-upstream",
+            channel="hub",
+            via_mapping=True,
+        )
+        compaction.finish_attempt(
+            outcome=_success(),
+            decision=classify_outcome(_success()),
+        )
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as turn:
+        assert turn.resolution_model("alias-new") == "alias-new"
+        assert turn.turn_id == "turn-new"
+        turn.begin_attempt(
+            source_id="source",
+            resolved_model_id="shared-upstream",
+            channel="hub",
+            via_mapping=True,
+        )
+        turn.finish_attempt(
+            outcome=_success(),
+            decision=classify_outcome(_success()),
+        )
+
+    trace = registry._traces["turn-new"]
+    assert not trace.ambiguous
+    assert "turn-new" not in registry._scopes[("codex", "codex-process")].ambiguous_turns
+
+
+def test_handle_routes_every_model_its_process_names_in_any_order(tmp_path):
+    """A handle authorizes no model, so no order of them can starve one.
+
+    Bounding what a live turn may name brings back the bug the bound was meant
+    to contain. Counted, the first other model a process names spends the
+    allowance and the outgoing model's re-serialisation is refused behind it;
+    ordered, a turn that names its own model first refuses the hop that had to
+    precede it. Both stranded the thread again from the other side. Whether a
+    named model is configured at all is resolution's question, and it answers
+    it from this agent's menu.
+    """
+
+    registry = _registry(tmp_path)
+    token, _route, metadata = _launch(
+        registry,
+        turn_id="turn-many",
+        requested_model_id="alias",
+        gateway_request_model_id="alias",
+    )
+
+    def route(gateway_model_id: str) -> tuple[str | None, str | None]:
+        with registry.gateway_terminalizer(
+            backend="codex",
+            token=token,
+            request_metadata=metadata,
+        ) as terminalizer:
+            model = terminalizer.resolution_model(gateway_model_id)
+            terminalizer.mark_downstream_canceled()
+            return model, terminalizer.turn_id
+
+    # Some other configured model first, then the outgoing one the thread is
+    # re-serialised under, then the turn's own route.
+    assert route("alias-other") == ("alias-other", "turn-many")
+    assert route("alias-old") == ("alias-old", "turn-many")
+    assert route("alias") == ("alias", "turn-many")
+    # The route's upstream target is a name in another namespace, so it routes
+    # as itself like any other id the handle did not mint.
+    assert route("shared-upstream") == ("shared-upstream", "turn-many")
+    # A turn's own request closes the handle to nothing: a retry of the
+    # migration hop behind it is the same request on the same handle.
+    assert route("alias-old") == ("alias-old", "turn-many")
+    trace = registry._traces["turn-many"]
+    assert not trace.ambiguous
+    assert "turn-many" not in registry._scopes[("codex", "codex-process")].ambiguous_turns
+
+
+def test_outgoing_model_survives_an_upstream_name_collision(tmp_path):
+    """Menu ids and upstream target ids are separate namespaces that collide.
+
+    A route proves one spelling of itself: the id Avibe told the launch to
+    send. An outgoing menu model spelled like the new route's upstream target
+    is not that, and reading it as this route's would send the outgoing
+    model's re-serialisation down the new route — another source, another
+    model — which is the aliasing a per-route handle exists to prevent.
+    """
+
+    registry = _registry(tmp_path)
+    token, _route, metadata = _launch(
+        registry,
+        turn_id="turn-new",
+        requested_model_id="alias-new",
+        # The new route relays through a source whose upstream model happens to
+        # be spelled like the menu model the thread is migrating away from.
+        resolved_model_id="gpt-5.5",
+        gateway_request_model_id="alias-new",
+    )
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as migration:
+        assert migration.resolution_model("gpt-5.5") == "gpt-5.5"
+        assert migration.turn_id == "turn-new"
+        migration.mark_downstream_canceled()
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as turn:
+        assert turn.resolution_model("alias-new") == "alias-new"
+        assert turn.turn_id == "turn-new"
+        turn.mark_downstream_canceled()
 
 
 def test_retirement_revokes_explicit_auth_and_preserves_exact_closed_fact(tmp_path):

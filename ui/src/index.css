@@ -208,25 +208,13 @@
 
   --shadow-glow-xl-mint: 0 0 48px -12px rgba(91, 255, 160, 0.44);
 
-  /* `onboarding` is the active-card halo of the approved onboarding reference, the
-     one the owner pointed at: a centred 28px mint at #5BFFA060, with no spread and
-     brighter than the sized rungs carry. It is a role rather than a rung because
-     both of those departures are the reference's, not the scale's -- reaching it by
-     stacking `xl` and `lg` was an approximation of an explicit value.
-     `37.6%` is that hex's own alpha: 0x60 is 96/255.
-
-     It is the one role the design draws at two sizes, because the two frames drew
-     it separately: Light's active card (node waUhu) is 16/-4 at #10B98170, which is
-     the sized scale's own `sm` geometry and alpha. The hue needs nothing for that
-     -- `var(--mint)` already follows whichever mint the theme declares, the way
-     `wire` does -- but blur, spread and alpha are numbers, and a number cannot
-     follow a palette. They are named here and re-anchored beside the rest of the
-     light palette, which is the shape `--brand-glow-blur` already uses and the only
-     one that renders: this block is `@theme inline`, so Tailwind substitutes the
-     value below into the utilities at build time and a later override of THIS name
-     would compile to nothing while looking correct in the file. */
+  /* The onboarding active/hover card halo: the design draws an OFFSET drop shadow,
+     not a centred one, so this role is excused from the scale's centring rule and
+     `glowScale.test.mjs` pins its own geometry per theme. The parts that differ per
+     theme are named numbers re-anchored beside each palette, like `--brand-glow-blur`;
+     the hue follows the declared mint through the mix. */
   --shadow-glow-onboarding-mint:
-    0 0 var(--onboarding-glow-blur) var(--onboarding-glow-spread)
+    0 2px var(--onboarding-glow-blur) var(--onboarding-glow-spread)
     color-mix(in srgb, var(--mint) var(--onboarding-glow-alpha), transparent);
 
   --shadow-glow-cta-mint: 0 0 var(--brand-glow-blur) -4px rgba(91, 255, 160, 0.6);
@@ -349,17 +337,25 @@
      because it is the one part of that glow that differs per theme. */
   --brand-glow-blur: 16px;
 
-  /* Geometry and alpha of the onboarding active-card halo, for the same reason the
-     CTA blur is here: they are the parts of that glow that differ per theme, and
-     the token itself is inlined into its utilities and so cannot be re-declared. */
-  --onboarding-glow-blur: 28px;
+  /* Per-theme geometry and alpha of the onboarding card halo; see the token above. */
+  --onboarding-glow-blur: 12px;
   --onboarding-glow-spread: 0px;
-  --onboarding-glow-alpha: 37.6%;
-
+  --onboarding-glow-alpha: 22%;
   /* Colour of the card wash shadows (`--shadow-mint-card*`). design.pen writes it
      as the frame's own brand mint at 0.078, which is why it is the one part of
      those shadows that moves between themes. */
   --card-wash: rgba(91, 255, 160, 0.078);
+
+  /* The onboarding enable switch, drawn per theme by the reference: a lit border
+     on the on-state in dark, none in light; a dark thumb on the lit track in dark,
+     a white thumb in light. Named here so both palettes re-anchor them and the
+     component stylesheet holds no literals. */
+  --switch-onboarding-track-off: #1a1a26;
+  --switch-onboarding-border-off: #ffffff24;
+  --switch-onboarding-track-on: #5bffa0;
+  --switch-onboarding-border-on: #5bffa057;
+  --switch-onboarding-thumb-off: #9ba3b8;
+  --switch-onboarding-thumb-on: #080812;
 
   /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
   --gradient-console:
@@ -518,20 +514,24 @@
     --bg-page: var(--gradient-console);
 
     /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
+
        swaps only the hue to the light brand mint. */
     --card-wash: rgba(16, 185, 129, 0.078);
+    --switch-onboarding-track-off: #d7dce5;
+    --switch-onboarding-border-off: #00000000;
+    --switch-onboarding-track-on: #10b981;
+    --switch-onboarding-border-on: #00000000;
+    --switch-onboarding-thumb-off: #ffffff;
+    --switch-onboarding-thumb-on: #ffffff;
 
     /* Wider CTA glow than dark: the same neon spreads far less over a white card,
        so 16px read as almost nothing here (owner decision 2026-08-14). */
     --brand-glow-blur: 20px;
 
-    /* The Light frame's own active card (waUhu) draws 16px at -4px spread and
-       #10B98170 -- the sized scale's `sm` geometry and its 0.44 alpha, not dark's
-       spreadless 28. Only these numbers are re-anchored; the hue stays `var(--mint)`,
-       which this block has already swapped to the light brand. */
+    /* Light's own onboarding halo: tighter, inset, and fainter over white. */
     --onboarding-glow-blur: 16px;
     --onboarding-glow-spread: -4px;
-    --onboarding-glow-alpha: 44%;
+    --onboarding-glow-alpha: 14.1%;
   }
 }
 
@@ -647,11 +647,17 @@
      so 16px read as almost nothing here (owner decision 2026-08-14). */
   --brand-glow-blur: 20px;
 
-  /* Light's own active-card geometry - see the prefers-color-scheme block above.
+  /* Light's own onboarding halo - see the prefers-color-scheme block above.
      Both light blocks must stay value-identical. */
   --onboarding-glow-blur: 16px;
   --onboarding-glow-spread: -4px;
-  --onboarding-glow-alpha: 44%;
+  --onboarding-glow-alpha: 14.1%;
+  --switch-onboarding-track-off: #d7dce5;
+  --switch-onboarding-border-off: #00000000;
+  --switch-onboarding-track-on: #10b981;
+  --switch-onboarding-border-on: #00000000;
+  --switch-onboarding-thumb-off: #ffffff;
+  --switch-onboarding-thumb-on: #ffffff;
 }
 
 html,

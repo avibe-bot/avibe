@@ -4,27 +4,29 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { modelChainKey, type ModelChainIndex } from './modelRows';
+import en from '../../../i18n/en.json';
+import zh from '../../../i18n/zh.json';
+import { FIRST_PAINT_REGION_WHITELIST } from './firstPaintRegions';
+import { modelChainKey, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import type { SourceCreated } from './modelsApi';
 import {
   createContinuationSettlement,
   createSourceCreatedDelivery,
   readSurfaceLanding,
-  SOURCE_MUTATION_REPORT_PROJECTIONS,
-  sourceMutationLanding,
+  sourceMutationReadFailed,
   sourceMutationReadScope,
+  SOURCE_MUTATION_OUTCOMES,
+  SOURCE_MUTATION_TOAST,
   type SourceMutationLandingReads,
 } from './mutationSettlement';
-import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
+import { readyRegion, unreadRegion } from './regionRead';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
-// Fails exactly one projection, keyed generically so each key carries its own
-// value type into `failRegionRead`. Indexing the reads with a union key hands
-// the compiler four candidate types for one inference site and it picks one.
-const degradeProjection = <K extends keyof SourceMutationLandingReads>(
-  reads: SourceMutationLandingReads,
-  projection: K,
-): SourceMutationLandingReads => ({ ...reads, [projection]: failRegionRead(reads[projection]) });
+const translated = (bundle: unknown, key: string): unknown =>
+  key.split('.').reduce<unknown>((node, part) => {
+    if (!node || typeof node !== 'object') return undefined;
+    return (node as Record<string, unknown>)[part];
+  }, bundle);
 
 describe('mutation settlement fences', () => {
   it('atomically rejects every effect belonging to an invalidated attempt', () => {
@@ -63,19 +65,21 @@ describe('mutation settlement fences', () => {
     expect(detail).toContain('settlement.gone');
   });
 
-  it('lands only after every projection referenced by the report was read', async () => {
+  it('reads the whole first-paint surface plus exactly the chains the impact named', async () => {
     const impact = {
       hops: [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: 'src', model_id: 'model-a' }],
       gaps: [{ backend: 'codex' as const, model_id: 'gpt-5.6-sol', agents: ['release'] }],
     };
     const affectedChains = sourceMutationReadScope(impact).affectedChains;
     const calls: string[] = [];
+    let requested: readonly ModelChainRequest[] = [];
     const reads = await readSurfaceLanding({
       sources: async () => { calls.push('sources'); return [] as Source[]; },
       supply: async () => { calls.push('supply'); return [] as AgentSupply[]; },
       runtime: async () => { calls.push('runtime'); return {} as RuntimeDependency; },
       chains: async (requests) => {
         calls.push('chains');
+        requested = requests;
         return Object.fromEntries(requests.map(({ backend, modelId }) => [
           modelChainKey(backend, modelId),
           readyRegion({} as AgentChain),
@@ -83,31 +87,17 @@ describe('mutation settlement fences', () => {
       },
     }, affectedChains);
 
-    expect(new Set(calls)).toEqual(new Set(Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS)));
-    expect(new Set(Object.keys(reads))).toEqual(new Set(Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS)));
-    expect(sourceMutationLanding(reads, affectedChains, true).verdict).toBe('landed');
+    // A region that draws the surface must be read by the mutation that changes
+    // it, so the whitelist — not a second list kept here — names the coverage.
+    const expected = new Set([...Object.keys(FIRST_PAINT_REGION_WHITELIST), 'chains']);
+    expect(new Set(calls)).toEqual(expected);
+    expect(new Set(Object.keys(reads))).toEqual(expected);
 
-    for (const projection of Object.keys(
-      SOURCE_MUTATION_REPORT_PROJECTIONS,
-    ) as (keyof typeof SOURCE_MUTATION_REPORT_PROJECTIONS)[]) {
-      expect(
-        sourceMutationLanding(degradeProjection(reads, projection), affectedChains, true).verdict,
-        projection,
-      ).toBe('degraded');
-    }
-
-    for (const request of affectedChains) {
-      const key = modelChainKey(request.backend, request.modelId);
-      const missing = readyRegion<ModelChainIndex>({
-        ...Object.fromEntries(affectedChains.map(({ backend, modelId }) => [
-          modelChainKey(backend, modelId),
-          readyRegion({} as AgentChain),
-        ] as const)),
-        [key]: unreadRegion<AgentChain>(),
-      });
-      expect(sourceMutationLanding({ ...reads, chains: missing }, affectedChains, true).verdict, key)
-        .toBe('degraded');
-    }
+    // The impact evidence is the whole chain scope: no route the write did not
+    // touch is refetched, and every one it did touch is.
+    expect(requested).toEqual(affectedChains);
+    expect(affectedChains).toHaveLength(2);
+    expect(reads.chains.kind).toBe('ready');
   });
 
   it('routes every management settlement through one post-await announcement', () => {
@@ -122,10 +112,84 @@ describe('mutation settlement fences', () => {
     );
 
     expect(refresh).toMatch(/Promise<SourceMutationLanding>/);
-    expect(refresh).toContain('sourceMutationLanding(');
+    // The page-wide refresh line answers for every region this read installs,
+    // route chains included. What it must never answer for is supersession —
+    // `refreshAffectedChains` reports no keys there rather than unread ones, so
+    // a newer read winning cannot arrive here as a page that could not refresh.
+    expect(refresh).toContain('sourceMutationReadFailed(landing)');
+    expect(refresh).toContain("t('settings.models.toast.refreshFailed')");
     expect(settlement).toMatch(/Promise<SourceMutationLanding>/);
     expect(settlement).toContain('return refresh(affectedChains)');
     expect((detail.match(/dispatchManageStage\(\{ type: 'settled' \}\)/g) ?? []).length).toBe(1);
     expect(committed).toMatch(/await onMutationCommitted[\s\S]*dispatchManageStage\(\{ type: 'settled' \}\)/);
+  });
+});
+
+/**
+ * The commit envelope is the only thing the page sees of a write, so the word it
+ * carries is the word the user reads. The finding this block exists for: an edit
+ * whose Source turned out to be absent still announced 「供应商已更新」 over a panel
+ * saying the provider is no longer there.
+ */
+describe('committed mutation outcomes', () => {
+  it('answers for every outcome a commit can carry', () => {
+    expect(Object.keys(SOURCE_MUTATION_TOAST).sort()).toEqual([...SOURCE_MUTATION_OUTCOMES].sort());
+  });
+
+  it.each(Object.entries(SOURCE_MUTATION_TOAST))('has copy in both locales for %s', (_outcome, toast) => {
+    for (const bundle of [en, zh]) expect(typeof translated(bundle, toast.key)).toBe('string');
+  });
+
+  it('never celebrates an outcome that is not the one the user asked for', () => {
+    // Tone tracks the outcome, not the branch that renders it: `gone` reaches the
+    // page from the EDIT flow, and green over 「已经不在了」 is the contradiction.
+    expect(SOURCE_MUTATION_TOAST.updated.tone).toBe('success');
+    expect(SOURCE_MUTATION_TOAST.removed.tone).toBe('success');
+    expect(SOURCE_MUTATION_TOAST.gone.tone).toBe('warning');
+  });
+
+  it('says the same thing as the surface under it when a Source is gone', () => {
+    // One fact, one sentence: the toast reuses the detail surface's own copy
+    // rather than adding a second wording for the same state.
+    expect(SOURCE_MUTATION_TOAST.gone.key).toBe('settings.models.sourceDetail.gone');
+  });
+});
+
+/**
+ * The page's refresh line answers one question — is anything on screen older
+ * than the server — and the bug that opened this lane was it answering a
+ * different one, saying a save that had landed could not be confirmed.
+ */
+describe('post-mutation read failure', () => {
+  const landing = (chains: ModelChainIndex): SourceMutationLandingReads => ({
+    sources: readyRegion([] as Source[]),
+    supply: readyRegion([] as AgentSupply[]),
+    runtime: readyRegion({} as RuntimeDependency),
+    chains: readyRegion(chains),
+  });
+  const chainKey = modelChainKey('claude', 'claude-opus-4-6');
+
+  it('stays silent when every projection came back', () => {
+    expect(sourceMutationReadFailed(landing({ [chainKey]: readyRegion({} as AgentChain) }))).toBe(false);
+  });
+
+  it('counts a route request that failed inside a readable index', () => {
+    // The index itself resolves — `refreshAffectedChains` catches per request —
+    // so a check that stopped at the index would call an unreadable route a
+    // clean refresh.
+    expect(sourceMutationReadFailed(landing({ [chainKey]: unreadRegion<AgentChain>() }))).toBe(true);
+  });
+
+  it('never counts a read a newer read took over', () => {
+    // Supersession reports no keys rather than unread ones. This is the case the
+    // user hit: the save had landed, and the page said it could not refresh.
+    expect(sourceMutationReadFailed(landing({}))).toBe(false);
+  });
+
+  it('counts a first-paint region that could not be read', () => {
+    expect(sourceMutationReadFailed({
+      ...landing({}),
+      supply: unreadRegion<AgentSupply[]>(),
+    })).toBe(true);
   });
 });

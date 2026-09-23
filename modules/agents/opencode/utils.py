@@ -17,6 +17,10 @@ _REASONING_FALLBACK_OPTIONS = [
 
 _REASONING_VARIANT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
+# Explicit Off is a model-declared option, distinct from an unset effort.
+# It remains truthy through the existing routing/default inheritance chain.
+NO_REASONING_EFFORT = "none"
+
 _REASONING_VARIANT_LABELS = {
     "none": "None",
     "minimal": "Minimal",

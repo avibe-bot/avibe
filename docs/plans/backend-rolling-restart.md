@@ -38,6 +38,17 @@ Codex and Claude may later prepare a new generation during DRAINING, but only if
 their adapters can prove isolated ownership. That optimization does not change
 the Session protocol.
 
+Agent CLI install/upgrade jobs measure the CLI selected by the persisted
+`agents.<backend>.cli_path` before and after installation. Only an unchanged
+configured path, resolved target, and known reported version can skip the
+refresh. A changed configured path requires reconciliation even when it resolves
+to the same executable. Missing configuration, paths, or versions conservatively
+retain the existing refresh path. Measurements bypass the UI version cache.
+
+The install worker produces this decision and the existing controller restart
+coordinator remains the sole owner of any required cutover. This optimization
+does not relax the barrier for real upgrades or change manual/auth refreshes.
+
 ## Timeout
 
 Draining is bounded. At the deadline, the coordinator:

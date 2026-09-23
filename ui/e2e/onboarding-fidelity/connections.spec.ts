@@ -387,9 +387,28 @@ for (const viewport of [{ width: 320, height: 568, tight: false }, { width: 390,
     const denied = await serveProduct(page);
     await authFixtures(page);
     const reads = await switchableReads(page);
+    // Hold the card's own connection reads behind a gate the dialog's fixtures do
+    // not own, so the setup can be measured while a read is genuinely in flight.
+    let releaseConn = () => {};
+    const connGate = new Promise<void>((resolve) => { releaseConn = resolve; });
+    await page.route('**/api/backend/*/connection', async (route) => {
+      await connGate;
+      return route.fallback();
+    });
     await page.setViewportSize(viewport);
     await openOnboarding(page);
     await openSetup(page, 'en');
+    // An in-flight connection read must not re-lay the card out: it used to add a
+    // status line under the methods, so the card grew while the read settled and
+    // shrank when it landed, moving everything under the person's pointer. Pending
+    // now spins the method rows in place and disables them, at a fixed card height.
+    const cardHeights = () => page.locator('.onboarding-assistant')
+      .evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().height * 10) / 10));
+    const pendingHeights = await cardHeights();
+    await expect(page.locator('.onboarding-assistant-actions button').first()).toBeDisabled();
+    releaseConn();
+    await expect(page.locator('.onboarding-assistant-actions button').first()).toBeEnabled();
+    expect(await cardHeights()).toEqual(pendingHeights);
     const dialog = page.getByRole('dialog');
     // Where the frame owns the scroll, two things about the comparison change and only
     // two. The reader's own scroll position is theirs, not the layout's — reaching the
@@ -1081,7 +1100,7 @@ for (const width of [1200, 390]) {
 test('saved Slack recovery narrow uses the existing form only after explicit repair', async ({ page }, info) => {
   const denied = await serveProduct(page); await authFixtures(page);
   let manifests = 0;
-  await page.route('**/api/config', (route) => route.fulfill({ json: { platforms: { enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }], slack: { has_app_token: true, bot_token: '' }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } } } }));
+  await page.route('**/api/config', (route) => route.fulfill({ json: { version: 'v2', setup_completed: false, runtime: {}, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, platforms: { primary: 'slack', enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }], slack: { has_app_token: true, bot_token: '' }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } } } }));
   await page.route('**/api/backend/claude/connection', (route) => route.fulfill({ json: { ok: true, backend: 'claude', ready: true, entry_eligible: true, enabled: true, installed: true, application: 'applied', auth: 'api_key' } }));
   await page.route('**/api/slack/manifest', (route) => { manifests++; return route.fulfill({ json: { ok: true, manifest: '{}' } }); });
   await page.setViewportSize({ width: 390, height: 640 });

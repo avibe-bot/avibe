@@ -5,6 +5,7 @@
 // block that CLI, while a complete backend can still migrate independently.
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,6 +16,7 @@ const showToast = vi.hoisted(() => vi.fn());
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
 
 import { MigrationDialog } from './MigrationDialog';
+import type { MigrationSelection } from './migrationGrouping';
 import { isImportableKey } from './migrationScan';
 import { ApiCallError, modelsApi } from './modelsApi';
 
@@ -62,6 +64,21 @@ const REAUTH: MigrationItem = {
   vendor: 'anthropic',
   display_name: 'Anthropic',
   masked_credential: 'sk-ant-…4b7e',
+};
+
+// Importable, and on the same backend as the subscription above: the pair is what
+// setup can see but cannot take, because the server migrates a backend whole.
+const CLAUDE_KEY: MigrationItem = {
+  id: 'mig_claude_key',
+  backend: 'claude',
+  kind: 'api_key',
+  masked_detail: 'sk-ant-…1c05',
+  proposed_action: 'import',
+  selected: true,
+  notes_key: null,
+  vendor: 'anthropic',
+  display_name: 'Anthropic',
+  masked_credential: 'sk-ant-…1c05',
 };
 
 // An older server that sends none of the presentation metadata.
@@ -711,5 +728,336 @@ describe('MigrationDialog — shared persisted files', () => {
     expect(checkboxes[1].getAttribute('aria-checked')).toBe('true');
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
     await waitFor(() => expect(applied).toEqual([[LEGACY.id]]));
+  });
+});
+
+// ── the two entry points ────────────────────────────────────────────────
+//
+// Setup reuses this dialog rather than growing a second take-over, so the guard
+// that matters is that Settings did not quietly change when it did: the whole
+// rendered surface is asserted literally, because a copy table that resolved one
+// key to the wrong scope would still render *something* and still pass a
+// behaviour test.
+
+const visibleText = (root: Element): string[] => {
+  const out: string[] = [];
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+    const text = node.textContent?.trim();
+    if (text) out.push(text);
+  }
+  return out;
+};
+
+const controls = (root: Element) =>
+  [...root.querySelectorAll('button')].map((button) => ({
+    role: button.getAttribute('role'),
+    name: button.getAttribute('aria-label') ?? button.textContent?.trim() ?? '',
+    disabled: button.disabled,
+  }));
+
+describe('MigrationDialog — the Settings surface the setup scope must not disturb', () => {
+  it('renders exactly the copy and controls it shipped with', async () => {
+    serve([SUBSCRIPTION, CODEX_KEY, REAUTH]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+
+    expect(visibleText(dialog)).toEqual([
+      'Migrate to the Model Hub',
+      'Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. After migration, Model Hub will manage the selected authentication.',
+      'Claude Code',
+      'Claude Code configuration',
+      'This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually.',
+      'Anthropic',
+      'Claude 账号登录（OAuth） · Claude Code configuration',
+      'Anthropic',
+      'sk-ant-…4b7e · Claude Code configuration',
+      'Codex',
+      'OpenAI',
+      'sk-…9f21 · Codex configuration',
+      'Later',
+      'Start migration',
+      'Close',
+    ]);
+    expect(controls(dialog)).toEqual([
+      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: true },
+      { role: 'checkbox', name: 'Anthropic · sk-ant-…4b7e · Claude Code configuration', disabled: true },
+      { role: 'checkbox', name: 'OpenAI · sk-…9f21 · Codex configuration', disabled: false },
+      { role: null, name: 'Later', disabled: false },
+      { role: null, name: 'Start migration', disabled: false },
+      { role: null, name: 'Close', disabled: false },
+    ]);
+  });
+
+  it('keeps owning its own scan and selection when no controlled value is passed', async () => {
+    serve([CODEX_KEY]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+    expect(within(dialog).queryByText(/complete API-key groups only/)).toBeNull();
+  });
+
+  it('still takes a key standing beside a subscription, because its scope is everything', async () => {
+    serve([SUBSCRIPTION, CLAUDE_KEY]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText(/sk-ant-…1c05/);
+
+    // No narrower scope was passed, so neither row is out of reach and the group
+    // is not blocked: the whole backend migrates together, as it always has.
+    expect(controls(dialog)).toEqual([
+      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
+      { role: 'checkbox', name: 'Anthropic · sk-ant-…1c05 · Claude Code configuration', disabled: false },
+      { role: null, name: 'Later', disabled: false },
+      { role: null, name: 'Start migration', disabled: false },
+      { role: null, name: 'Close', disabled: false },
+    ]);
+    expect(within(dialog).queryByText(/but not from here/)).toBeNull();
+  });
+});
+
+const SetupHost: React.FC<{
+  scan: MigrationItem[];
+  /** What the caller's refreshed scan returns after each successive batch. */
+  after?: MigrationItem[][];
+  onClose?: () => void;
+  onApplied?: (applied: number) => void;
+  /** What a host that can withdraw permission mid-review passes. Settings passes
+   *  nothing at all, which is the default and what every case above relies on. */
+  writable?: boolean;
+}> = ({ scan, after = [], onClose = () => {}, onApplied, writable }) => {
+  const [selection, setSelection] = useState<MigrationSelection>({
+    scan: { items: scan },
+    selectedBackends: [],
+  });
+  const [round, setRound] = useState(0);
+  return (
+    <MigrationDialog
+      open
+      scope="setup"
+      eligible={isImportableKey}
+      takeable={isImportableKey}
+      value={selection}
+      onChange={setSelection}
+      writable={writable}
+      onApplied={(applied) => {
+        onApplied?.(applied);
+        // The receipt is a refresh trigger, not a success receipt: re-read and
+        // let the refreshed scan decide what is left.
+        setSelection({ scan: { items: after[round] ?? [] }, selectedBackends: [] });
+        setRound((prior) => prior + 1);
+      }}
+      onClose={onClose}
+    />
+  );
+};
+
+const renderSetup = (props: React.ComponentProps<typeof SetupHost>) => {
+  const view = render(
+    <I18nextProvider i18n={i18n}>
+      <SetupHost {...props} />
+    </I18nextProvider>,
+  );
+  /** The host changing its half of the contract without remounting the dialog. */
+  const show = (next: Partial<React.ComponentProps<typeof SetupHost>>) => view.rerender(
+    <I18nextProvider i18n={i18n}>
+      <SetupHost {...props} {...next} />
+    </I18nextProvider>,
+  );
+  return { ...view, show };
+};
+
+describe('MigrationDialog — the setup scope', () => {
+  it('wears setup copy and never scans for a controlled caller', async () => {
+    const scan = vi.spyOn(modelsApi, 'scanMigration');
+    renderSetup({ scan: [CODEX_KEY, LEGACY] });
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Migrate to Model Hub')).toBeTruthy();
+    expect(within(dialog).getByText('After migration, CLI authentication will be managed entirely by Model Hub.')).toBeTruthy();
+    expect(within(dialog).getByText(/complete API-key groups only/)).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeTruthy();
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('starts from the caller selection and submits one atomic batch', async () => {
+    serve();
+    renderSetup({ scan: [CODEX_KEY, LEGACY] });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    const confirm = within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement;
+    // Nothing is consented to until the caller says so, whatever the scan
+    // pre-selected on its rows.
+    expect(confirm.disabled).toBe(true);
+
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await waitFor(() => expect(applied).toEqual([[CODEX_KEY.id]]));
+  });
+
+  it('reports what landed, offers the remainder, and re-enters selection with it', async () => {
+    serve();
+    renderSetup({ scan: [CODEX_KEY, LEGACY], after: [[LEGACY], []] });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await within(dialog).findByText('Migrated 1 configuration item');
+    expect(within(dialog).getByText('1 item needs review. Continue any time.')).toBeTruthy();
+    // The dialog stays: setup has more to say than "it closed".
+    expect(within(dialog).queryByRole('button', { name: 'Start migration' })).toBeNull();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Review remaining' }));
+    await within(dialog).findByRole('button', { name: 'Start migration' });
+    expect(within(dialog).queryByRole('checkbox', { name: /sk-…9f21/ })).toBeNull();
+    expect(within(dialog).getByRole('checkbox', { name: /自建中转/ })).toBeTruthy();
+  });
+
+  it('counts every batch of one session, not only the last', async () => {
+    serve();
+    renderSetup({ scan: [CODEX_KEY, LEGACY], after: [[LEGACY], []] });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await within(dialog).findByText('Migrated 1 configuration item');
+    await user.click(within(dialog).getByRole('button', { name: 'Review remaining' }));
+
+    await user.click(within(dialog).getByRole('checkbox', { name: /自建中转/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await within(dialog).findByText('Migrated 2 configuration items');
+    expect(within(dialog).queryByText(/needs review/)).toBeNull();
+    expect(applied).toEqual([[CODEX_KEY.id], [LEGACY.id]]);
+  });
+
+  it('returns to the same selection after a failed batch', async () => {
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(
+      new ApiCallError('migration_native_busy', 'busy'),
+    );
+    renderSetup({ scan: [CODEX_KEY, LEGACY] });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalled());
+    const confirm = await within(dialog).findByRole('button', { name: 'Start migration' });
+    expect((confirm as HTMLButtonElement).disabled).toBe(false);
+    expect(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }).getAttribute('aria-checked')).toBe('true');
+    expect(within(dialog).queryByText(/Migrated/)).toBeNull();
+  });
+
+  it('cannot be dismissed while a batch is in flight', async () => {
+    let release: (value: { applied: number; sources: [] }) => void = () => {};
+    vi.spyOn(modelsApi, 'applyMigration').mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    const onClose = vi.fn();
+    renderSetup({ scan: [CODEX_KEY], onClose });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await within(dialog).findByText('Migrating 1 configuration item…');
+
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+
+    release({ applied: 1, sources: [] });
+    await within(dialog).findByText('Migrated 1 configuration item');
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('refuses a batch its host no longer admits, and keeps the review readable', async () => {
+    serve();
+    const onClose = vi.fn();
+    const { show } = renderSetup({ scan: [CODEX_KEY, LEGACY], onClose, writable: true });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    const confirm = () => within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Start migration' });
+    expect(confirm().disabled).toBe(false);
+
+    // The host stopped admitting a write — for setup, the engine these keys would be
+    // migrated INTO. Only the batch is refused: what was chosen is still chosen, still
+    // readable, and still leavable, because closing this is a different answer.
+    show({ writable: false });
+    expect(confirm().disabled).toBe(true);
+    await user.click(confirm());
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }).getAttribute('aria-checked')).toBe('true');
+    expect(within(dialog).getByText(/sk-…9f21/)).toBeTruthy();
+    expect(within(dialog).queryByText(/Migrated/)).toBeNull();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Not now' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a batch it had already sent when permission goes away mid-flight', async () => {
+    let release: (value: { applied: number; sources: [] }) => void = () => {};
+    const apply = vi.spyOn(modelsApi, 'applyMigration').mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    const onApplied = vi.fn();
+    const { show } = renderSetup({ scan: [CODEX_KEY], onApplied, writable: true });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await within(dialog).findByText('Migrating 1 configuration item…');
+
+    // Withdrawn while that batch is on the server's side of the wire. It owns its own
+    // outcome: permission governs the next write, and a report dropped here would
+    // leave keys migrated with nothing on screen saying so.
+    show({ writable: false });
+    release({ applied: 1, sources: [] });
+
+    await within(dialog).findByText('Migrated 1 configuration item');
+    expect(onApplied).toHaveBeenCalledTimes(1);
+    expect(onApplied).toHaveBeenCalledWith(1);
+    expect(apply).toHaveBeenCalledTimes(1);
+    // The report is the whole of what is offered: there is no second batch to send.
+    expect(within(dialog).queryByRole('button', { name: 'Start migration' })).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
+  });
+
+  it('shows a key it cannot take here, and says why rather than offering it', async () => {
+    renderSetup({ scan: [SUBSCRIPTION, CLAUDE_KEY] });
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText(/sk-ant-…1c05/);
+
+    // The key stays on screen — a detected credential the screen dropped would be
+    // unexplained — but its group is blocked, because taking it would take the
+    // subscription beside it, which setup has no consent for.
+    expect(controls(dialog)).toEqual([
+      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: true },
+      { role: 'checkbox', name: 'Anthropic · sk-ant-…1c05 · Claude Code configuration', disabled: true },
+      { role: null, name: 'Not now', disabled: false },
+      { role: null, name: 'Start migration', disabled: true },
+      { role: null, name: 'Close', disabled: false },
+    ]);
+    // Not the server's "cannot be imported": it can be, just not from here.
+    expect(
+      within(dialog).getByText('This credential can be migrated, but not from here. Review it in Settings.'),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText(/cannot be imported/)).toBeNull();
   });
 });

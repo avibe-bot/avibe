@@ -179,6 +179,112 @@ def test_setup_completion_uses_the_same_authorized_config_flow(monkeypatch, tmp_
         SettingsStore.reset_instance()
 
 
+def test_authorized_config_envelope_and_completion_persistence_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-122 — the authorized `/api/config` envelope, and completion
+    persistence that reads back.
+
+    This is the producer half of setup's config prerequisite. Unauthenticated remote
+    access is refused and persists nothing; an authorized read returns every field
+    `readSetupConfig()` requires — a 200 missing one of them is unread state in the shell,
+    so setup could never finish against it; the two narrow completion POSTs persist through
+    CSRF; and the next read reports the new state rather than the old projection.
+
+    What the 401 here is: remote authentication refusal. The server keeps no record that a
+    prerequisite read happened, and nothing in this test implements or observes the shell's
+    fresh-read rule — it would pass unchanged with that rule deleted from `Wizard.tsx`.
+
+    Complementary coverage, not a journey. The browser half — unread or disabled evidence
+    producing zero mutation and no completion, and recovery only through an explicit
+    successful read — is asserted against controlled responses in the `fresh prerequisite
+    boundary` cases of `ui/src/components/onboarding/WizardCompletion.test.tsx`. Neither
+    layer exercises a real browser against this real boundary; that assembled journey is
+    not covered here and stays with the integrated acceptance owner.
+    """
+    from config.v2_settings import SettingsStore
+    from vibe import internal_client
+
+    config = _save_config(tmp_path, paired=True, instance_kind="personal")
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda *_args: None)
+    monkeypatch.setattr(
+        internal_client, "reconcile_platforms",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True}}),
+    )
+    # Neither the refusal nor the completion may reach a real runtime action.
+    monkeypatch.setattr(remote_access, "reconcile", Mock(side_effect=AssertionError("pairing changed")))
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    base_url = "https://alex.avibe.bot"
+    peer = {"REMOTE_ADDR": "203.0.113.44"}
+    SettingsStore.reset_instance()
+    try:
+        anonymous = app.test_client()
+        # Authentication, not a prerequisite check: the refusal is about who is asking.
+        # The shell classifies this answer as unread, but that classification is the
+        # shell's, and this boundary is unaware of it.
+        unauthenticated = anonymous.get("/api/config", base_url=base_url, environ_base=peer, follow_redirects=False)
+        assert unauthenticated.status_code == 401
+        assert unauthenticated.get_json()["error"] == "remote_access_login_required"
+
+        refused = anonymous.post(
+            "/api/config",
+            json={"setup_completed": True, "slack": {"bot_token": "xoxb-must-not-persist"}},
+            base_url=base_url, environ_base=peer, follow_redirects=False,
+        )
+        assert refused.status_code == 401
+        blocked = V2Config.load()
+        assert blocked.setup_completed is False
+        assert blocked.slack.bot_token != "xoxb-must-not-persist"
+        assert blocked.setup_state()["needs_setup"] is True
+
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(config, "owner@example.com", "owner-1", role="owner", access_source="owner"),
+            domain="alex.avibe.bot",
+        )
+        headers = csrf_headers(client, base_url=base_url)
+        read = client.get("/api/config", base_url=base_url, environ_base=peer)
+        assert read.status_code == 200
+        envelope = read.get_json()
+        # The exact shape readSetupConfig() validates before setup may act on it.
+        assert envelope["version"] == "v2"
+        assert isinstance(envelope["setup_completed"], bool)
+        assert isinstance(envelope["platforms"]["primary"], str)
+        assert isinstance(envelope["platforms"]["enabled"], list)
+        assert all(isinstance(name, str) for name in envelope["platforms"]["enabled"])
+        assert isinstance(envelope["runtime"], dict)
+        assert isinstance(envelope["agents"], dict)
+        assert isinstance(envelope["capabilities"]["model_hub"]["enabled"], bool)
+        assert isinstance(envelope["model_hub"]["enabled"], bool)
+        assert envelope["setup_state"]["needs_setup"] is True
+
+        # The same narrow POSTs the platform step and completion actually send.
+        for payload in (
+            {"slack": {"bot_token": "xoxb-fresh-prerequisite", "app_token": "xapp-fresh-prerequisite"}},
+            {"setup_completed": True},
+        ):
+            completed = client.post(
+                "/api/config", json=payload,
+                headers=headers, base_url=base_url, environ_base=peer,
+            )
+            assert completed.status_code == 200, completed.get_json()
+        assert completed.get_json()["setup_state"]["needs_setup"] is False
+        saved = V2Config.load()
+        assert saved.setup_completed is True
+        assert saved.slack.bot_token == "xoxb-fresh-prerequisite"
+        # The envelope is produced per call, so a read taken after the write reports the
+        # new state. That is what makes an uncached re-read worth doing in the shell; this
+        # boundary neither requires nor notices one.
+        reread = client.get("/api/config", base_url=base_url, environ_base=peer)
+        assert reread.status_code == 200
+        assert reread.get_json()["setup_completed"] is True
+        assert reread.get_json()["setup_state"]["needs_setup"] is False
+    finally:
+        SettingsStore.reset_instance()
+
+
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-404"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

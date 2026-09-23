@@ -28,35 +28,55 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
   };
 };
 
-/** Gives each independent key its own latest-result generation. */
-export const createLatestAsyncAuthorityByKey = <K, T>(
-  land: (key: K, value: T) => void,
+/**
+ * Orders reads at the granularity of the keys they install. A read claims the
+ * keys it will write before it starts, and when it returns it still owns every
+ * claimed key that no newer read has claimed since.
+ *
+ * Ownership is per key rather than per read so that two reads covering
+ * different keys never supersede each other, and a read that loses part of its
+ * claim still installs — and still answers for — the rest.
+ */
+export const createLatestAsyncAuthorityByKeySet = <K, T>(
+  land: (value: T, owned: ReadonlySet<K>) => void,
 ) => {
   const latestRequest = new Map<K, number>();
-  const advance = (key: K) => {
-    latestRequest.set(key, (latestRequest.get(key) ?? 0) + 1);
+  const advance = (key: K): number => {
+    const request = (latestRequest.get(key) ?? 0) + 1;
+    latestRequest.set(key, request);
+    return request;
+  };
+  const stillOwned = (claimed: ReadonlyMap<K, number>): Set<K> => {
+    const owned = new Set<K>();
+    for (const [key, request] of claimed) {
+      if (latestRequest.get(key) === request) owned.add(key);
+    }
+    return owned;
   };
 
   return {
-    /** Advances one key before an authoritative write echo is installed. */
-    invalidate: (key: K): void => advance(key),
-    /** Advances retired keys so their pending requests cannot regain ownership. */
-    invalidateExcept: (activeKeys: ReadonlySet<K>): void => {
-      for (const key of latestRequest.keys()) {
-        if (!activeKeys.has(key)) advance(key);
+    /** Advances keys before an authoritative write echo is installed. */
+    invalidate: (keys: readonly K[]): void => {
+      for (const key of keys) advance(key);
+    },
+    /** Advances retired keys so their pending reads cannot regain ownership. */
+    invalidateExcept: (active: (key: K) => boolean): void => {
+      for (const key of [...latestRequest.keys()]) {
+        if (!active(key)) advance(key);
       }
     },
-    run: async (key: K, read: () => Promise<T>): Promise<'landed' | 'stale'> => {
-      const request = (latestRequest.get(key) ?? 0) + 1;
-      latestRequest.set(key, request);
+    run: async (keys: readonly K[], read: () => Promise<T>): Promise<ReadonlySet<K>> => {
+      const claimed = new Map<K, number>();
+      for (const key of keys) claimed.set(key, advance(key));
       try {
         const value = await read();
-        if (latestRequest.get(key) !== request) return 'stale';
-        land(key, value);
-        return 'landed';
+        const owned = stillOwned(claimed);
+        if (owned.size > 0) land(value, owned);
+        return owned;
       } catch (error) {
-        if (latestRequest.get(key) !== request) return 'stale';
-        throw error;
+        const owned = stillOwned(claimed);
+        if (owned.size > 0) throw error;
+        return owned;
       }
     },
   };

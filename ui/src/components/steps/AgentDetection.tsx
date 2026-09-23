@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUpToLine,
   ChevronDown,
   ChevronUp,
   Download,
@@ -13,33 +15,46 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { BackendIcon } from '../visual';
 import { AssistantRow } from '../onboarding/AssistantRow';
 import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
 import '../onboarding/onboarding.css';
 import type { BackendId } from '../visual';
-import { BackendLifecycleChip } from '../settings/BackendLifecycleChip';
+import { BackendLifecycleChip, type BackendLifecycleVisual } from '../settings/BackendLifecycleChip';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
 import type { BackendConnectionState } from '@/context/ApiContext';
 import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
 import { ImportKeysNotice } from '../onboarding/ImportKeysNotice';
-import { useModelHubCapability } from '../settings/models/useModelHubCapability';
+import { modelHubEnabledFromConfig } from '../settings/models/featureFlags';
+import type { SetupAction, SetupFlowState, SetupScreenHandle, SetupScreenId } from '../onboarding/setupFlow';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
 import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
+import { DefaultRouteDialog } from '../onboarding/DefaultRouteDialog';
+import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
+import type { AgentSupply } from '../settings/models/types';
+import type { SetupRouteFocus } from '../onboarding/setupRoute';
 
 interface AgentDetectionProps {
+  active?: boolean;
+  ref?: React.Ref<SetupScreenHandle>;
+  onActionChange?: (action: SetupAction) => void;
   data: any;
   onNext: (data: any) => void | Promise<void>;
   onBack?: (data?: { agents: Record<string, AgentState> }) => void;
   isPage?: boolean;
   completionRecovery?: React.ReactNode;
   onSave?: (data: { agents: Record<string, AgentState> }) => Promise<void> | void;
+  flowState?: SetupFlowState;
+  setFlowState?: React.Dispatch<React.SetStateAction<SetupFlowState>>;
+  onNavigate?: (screen: SetupScreenId) => void;
+  agentReads?: CollectionReadAuthority<AgentSupply[]>;
 }
 
 type AgentState = {
@@ -47,6 +62,29 @@ type AgentState = {
   cli_path: string;
   status?: 'unknown' | 'ok' | 'missing';
 };
+
+/**
+ * The verdict of the latest settled enable write, and the intent that earned it.
+ *
+ * A write can finish with nobody reading the screen, and two reads can start at once
+ * when the screen comes back. The intent is what makes the verdict answerable: only a
+ * read asking the same question may report it, so a stale read can neither spend it
+ * nor throw it away.
+ */
+type EnableReceipt = { intent: number; message: string };
+
+/**
+ * Whether this read answers for the outstanding verdict, or only reports it.
+ *
+ * Only an operation that succeeded at the same thing the verdict is about may spend
+ * it: the card's own Retry, a provider connection that went through, an install that
+ * worked. A dialog mounting, closing or being cancelled, a write-state notification
+ * saying nothing is pending, an install or a read that failed — those are the
+ * lifecycle talking, not an answer, and an apply failure the person has not dealt
+ * with yet must still be there afterwards. An ordinary activation, detect or chip
+ * refresh reports the verdict rather than replacing it with silence.
+ */
+type ConnectionRefresh = { acknowledge?: boolean };
 
 const DEFAULT_AGENTS = DEFAULT_AGENT_STATE as Record<string, AgentState>;
 
@@ -77,14 +115,20 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 // description, status pill, enable switch) and an action row (configure
 // provider / set up Allow / install). Detection runs automatically on mount —
 // the user enables what they have and installs anything missing.
-export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery }) => {
+export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery, active = true, ref, onActionChange, flowState, setFlowState, onNavigate, agentReads }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const routeSurfaceActive = useRouteSurfaceActive();
-  const modelHubEnabled = useModelHubCapability();
+  const modelHubEnabled = modelHubEnabledFromConfig(data);
+  const [visited, setVisited] = useState(active);
+  const activation = useRef(0);
+  const activeRef = useRef(active);
+  useLayoutEffect(() => { activeRef.current = active; activation.current += 1; }, [active]);
+  useEffect(() => { if (active) setVisited(true); }, [active]);
   const [agents, setAgents] = useState<Record<string, AgentState>>(normalizeAgents(data));
-  const permission = useOpencodePermission({ autoFetchStatus: true });
+  const permission = useOpencodePermission({ autoFetchStatus: active });
   const [installingAgents, setInstallingAgents] = useState<Record<string, boolean>>({});
   const [installResults, setInstallResults] = useState<
     Record<string, { ok: boolean; message: string; output?: string | null }>
@@ -92,6 +136,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({});
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
+  const [routeOpen, setRouteOpen] = useState(false);
+  const [routeFocus, setRouteFocus] = useState<SetupRouteFocus | null>(null);
+  const canEditSetupRoute = Boolean(flowState && setFlowState && onNavigate && agentReads);
+  const openSetupRoute = (backend: RuntimeBackendId) => {
+    setRouteFocus({ backend, agentName: backend });
+    setRouteOpen(true);
+  };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
   const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
@@ -103,66 +154,120 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const enableQueue = useRef(Promise.resolve());
   const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
   const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  // What the latest settled write still owes this screen, held until someone who can
+  // answer for it reports it — see EnableReceipt.
+  const enableReceipt = useRef<Partial<Record<RuntimeBackendId, EnableReceipt>>>({});
   // One provider modal/reconciliation at a time; Configure and navigation stay
   // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
   const [detectingAgents, setDetectingAgents] = useState<Record<string, boolean>>({});
   const [detectionErrors, setDetectionErrors] = useState<Record<string, string>>({});
+  // The lifecycle the each card's chip derives, reported up so the card can draw
+  // the action the pill offers — update or upgrade-in-flight — on its state row.
+  const [visuals, setVisuals] = useState<Partial<Record<string, BackendLifecycleVisual>>>({});
+  const [refreshingAgents, setRefreshingAgents] = useState<Record<string, boolean>>({});
+  const [chipRefresh, setChipRefresh] = useState<Record<string, number>>({});
+  // A successful upgrade leaves the chip's own runtime probe in flight while this
+  // handler has already finished, so the pill still reads `update` for a moment and
+  // would re-arm the card's upgrade button against a backend that was just upgraded.
+  // The lock holds the button disabled until the chip's reported visual leaves
+  // `update`, which is the probe confirming what the upgrade did.
+  const [upgradeLocks, setUpgradeLocks] = useState<Record<string, boolean>>({});
   const pendingInstalls = useRef(new Set<string>());
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
 
-  const refreshConnection = useCallback(async (name: RuntimeBackendId, receiptError = '') => {
-    if (pendingEnable.current[name] !== undefined) return;
+  const refreshConnection = useCallback(async (name: RuntimeBackendId, { acknowledge = false }: ConnectionRefresh = {}) => {
+    if (!activeRef.current || pendingEnable.current[name] !== undefined) return;
+    const epoch = activation.current;
     const intent = enableIntent.current[name];
     const token = (connectionTokens.current[name] || 0) + 1;
     connectionTokens.current[name] = token;
+    // Read the verdict, don't take it. Starting is not accepting: this read may turn
+    // out to be stale, and it may be answering a different intent entirely — either
+    // way the verdict has to still be there for the read that can report it.
+    const receipt = enableReceipt.current[name];
+    const owed = receipt && receipt.intent === intent ? receipt : undefined;
+    const owns = () => epoch === activation.current && connectionTokens.current[name] === token && enableIntent.current[name] === intent;
     setConnectionPending((current) => ({ ...current, [name]: true }));
-    setConnectionErrors((current) => ({ ...current, [name]: receiptError }));
+    // Nothing owed means nothing to say about the write, which is not the same as
+    // saying it went fine: an ordinary refresh leaves a reported failure standing.
+    if (owed) setConnectionErrors((current) => ({ ...current, [name]: owed.message }));
     try {
       const result = await api.getBackendConnection(name);
-      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (!owns()) return;
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
       setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+      // Spending the verdict takes all three: this read still owns the screen, the
+      // caller is an operation that actually answers for it, and the verdict in hand
+      // is the one that was there when the read began. A newer write that landed
+      // meanwhile is still owed to whoever reads next.
+      const retire = acknowledge && owed && enableReceipt.current[name] === owed;
+      if (retire) delete enableReceipt.current[name];
+      setConnectionErrors((current) => ({ ...current, [name]: retire ? '' : owed?.message || '' }));
     } catch (error) {
-      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (!owns()) return;
       setConnections((current) => ({ ...current, [name]: undefined }));
-      setConnectionErrors((current) => ({ ...current, [name]: String(error) }));
+      // A read that also failed does not get to bury what the write reported, and it
+      // answers for nothing: the apply failure is the original evidence, it is the one
+      // the person can act on, and it stays owed until something actually settles it.
+      setConnectionErrors((current) => ({ ...current, [name]: owed?.message || String(error) }));
     } finally {
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
+  const onRoutesSaved = async (saved: SetupRouteFocus) => {
+    await agentReads?.refresh();
+    await refreshConnection(saved.backend);
+  };
+  // Being read again is one event with one owner, however it arrives: the shell
+  // activates this screen, or the route surface it sits on comes back. In the shell both
+  // happen in the same commit, so two effects would mean two refreshes — and neither of
+  // them consumes the write verdict, so whichever one wins still reports it.
   useEffect(() => {
-    if (!isPage) for (const name of ASSISTANT_ORDER) void refreshConnection(name);
+    const leftSurface = previousRouteSurfaceActive.current && !routeSurfaceActive;
+    previousRouteSurfaceActive.current = routeSurfaceActive;
+    // Returning also collects what a write settled while there was nobody to tell.
+    if (!isPage && active && !leftSurface) for (const name of ASSISTANT_ORDER) {
+      void refreshConnection(name);
+    }
+    // Leaving drops in-flight READS only. A queued enable intent is a write the person
+    // already asked for; invalidating it here would strand `pendingEnable` behind a
+    // completion whose intent check can never pass again.
     return () => { for (const name of ASSISTANT_ORDER) {
       connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1;
-      enableIntent.current[name] = (enableIntent.current[name] || 0) + 1;
     } };
-  }, [refreshConnection, isPage]);
-  useEffect(() => {
-    const returnedToSurface = routeSurfaceActive && !previousRouteSurfaceActive.current;
-    previousRouteSurfaceActive.current = routeSurfaceActive;
-    if (!isPage && returnedToSurface) {
-      for (const name of ASSISTANT_ORDER) void refreshConnection(name);
-    }
-  }, [isPage, refreshConnection, routeSurfaceActive]);
+  }, [refreshConnection, isPage, active, routeSurfaceActive]);
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
 
   useEffect(() => {
-    if (isPage || !data.__onboardingDetected) void detectAll();
+    if (!active || (!onActionChange && !isPage && data.__onboardingDetected)) return;
+    // The first showing adopts the parent snapshot, because Welcome may have finished
+    // detection after this retained screen mounted. After that the screen owns its own
+    // paths: the snapshot predates every install, provider write and probe made here, so
+    // copying it back on re-entry would probe a binary nobody chose and report a backend
+    // missing while the right path is the one persisted. `visited` is still false in the
+    // render that activates the screen, which is exactly that first showing.
+    const source = visited ? agents : normalizeAgents(data);
+    if (!visited) {
+      setAgents((previous) => Object.fromEntries(Object.entries(previous).map(([name, agent]) => [name, { ...agent, cli_path: source[name].cli_path }])));
+    }
+    void Promise.all(Object.entries(source).map(([name, agent]) => detect(name, agent.cli_path)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [active]);
 
   const detect = async (name: string, binary?: string) => {
+    if (!activeRef.current) return;
+    const epoch = activation.current;
     const token = (detectionTokens.current[name] || 0) + 1;
     detectionTokens.current[name] = token;
     setDetectingAgents((prev) => ({ ...prev, [name]: true }));
     setDetectionErrors((prev) => ({ ...prev, [name]: '' }));
     try {
       const result = await api.detectCli(binary || name);
-      if (detectionTokens.current[name] !== token) return;
+      if (epoch !== activation.current || detectionTokens.current[name] !== token) return;
       if (result.found) {
         setInstallResults((prev) => {
           if (!prev[name] || prev[name].ok) return prev;
@@ -181,7 +286,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         },
       }));
     } catch (error) {
-      if (detectionTokens.current[name] !== token) return;
+      if (epoch !== activation.current || detectionTokens.current[name] !== token) return;
       setDetectionErrors((prev) => ({ ...prev, [name]: String(error) }));
       setAgents((prev) => ({ ...prev, [name]: { ...prev[name], status: 'unknown' } }));
     } finally {
@@ -255,10 +360,82 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       } catch (error) { receiptError = String(error); }
       if (enableIntent.current[backend] !== intent) return;
       delete pendingEnable.current[backend];
+      // Record the verdict before anyone is asked to read it, whether or not there is
+      // anybody to tell. Two reads can start at once when the screen comes back, and
+      // the one that loses the race used to take the message with it.
+      enableReceipt.current[backend] = { intent, message: receiptError };
+      // A screen the person has left may neither read nor publish; the verdict waits.
+      if (!activeRef.current) return;
       // This uncached projection reads persisted enabled even after a rejected
       // write. Apply failure cannot roll back config that was already committed.
-      await refreshConnection(backend, receiptError);
+      await refreshConnection(backend);
+      // The presence read is a follow-up to the write, not the write itself. It is also
+      // the only thing in here that can reject, and this job is a link in the serial
+      // queue: a rejection settles the queue rejected, so every toggle after it chains
+      // onto a continuation that never runs and the person's next enable silently does
+      // nothing. Its failure is reported where this screen already reports a read that
+      // failed, and it does not bury what the write had to say.
+      try {
+        await agentReads?.refresh();
+      } catch (error) {
+        if (enableIntent.current[backend] !== intent) return;
+        setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));
+      }
     });
+  };
+
+  // The setup card draws the update action on the state row, beside the pill the
+  // chip renders, while the chip still owns the probe and the write. Bumping
+  // `chipRefresh` is what lets the chip re-probe a runtime the card's own button
+  // changed, without the card duplicating the chip's lifecycle knowledge.
+  useEffect(() => {
+    setUpgradeLocks((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [name, locked] of Object.entries(current)) {
+        if (locked && visuals[name] !== 'update' && visuals[name] !== 'updating') {
+          next[name] = false;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [visuals]);
+
+  const releaseUpgradeLock = (name: string) =>
+    setUpgradeLocks((current) => (current[name] ? { ...current, [name]: false } : current));
+
+  const upgradeAgent = async (name: string) => {
+    setRefreshingAgents((current) => ({ ...current, [name]: true }));
+    setUpgradeLocks((current) => ({ ...current, [name]: true }));
+    // The chip's own upgrade handler owns the toast contract for lifecycle
+    // operations; the card's affordance is the same operation drawn on the state
+    // row, so it settles failures the same way rather than swallowing them, and
+    // `refreshingAgents` is handed to the chip as externally busy so its popover
+    // cannot launch a second install against the same backend.
+    try {
+      const result = await api.installAgent(name);
+      if (result.ok) {
+        showToast(t('backendLifecycle.upgradeSuccess'), 'success');
+        const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
+        if (installedPath) {
+          setAgents((prev) => ({ ...prev, [name]: { ...prev[name], cli_path: installedPath } }));
+        }
+        setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
+        await detect(name, installedPath || agents[name]?.cli_path || name);
+      } else {
+        // A failed upgrade leaves the pill on `update` with no probe in flight, so
+        // the visuals-driven release never fires; settle the lock here instead of
+        // stranding the button disabled until a remount.
+        releaseUpgradeLock(name);
+        showToast(result.message || t('backendLifecycle.upgradeFailed'), 'error');
+      }
+    } catch (cause) {
+      releaseUpgradeLock(name);
+      showToast(String(cause), 'error');
+    } finally {
+      setRefreshingAgents((current) => ({ ...current, [name]: false }));
+    }
   };
 
   const installAgent = async (name: string) => {
@@ -269,8 +446,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setInstallResults((prev) => ({ ...prev, [name]: { ok: false, message: '', output: null } }));
     setExpandedOutputs((prev) => ({ ...prev, [name]: false }));
 
+    let installed = false;
     try {
       const result = await api.installAgent(name);
+      installed = result.ok;
       const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
       setInstallResults((prev) => ({
         ...prev,
@@ -284,6 +463,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           }));
         }
         await detect(name, installedPath || agents[name]?.cli_path || name);
+        await agentReads?.refresh();
       }
     } catch (e) {
       setInstallResults((prev) => ({
@@ -293,7 +473,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       pendingInstalls.current.delete(name);
       setInstallingAgents((prev) => ({ ...prev, [name]: false }));
-      if (!isPage) void refreshConnection(name as RuntimeBackendId);
+      // An install that failed reports its own failure and answers for nothing else;
+      // only one that worked replaces what the enable write had to say.
+      if (!isPage) void refreshConnection(name as RuntimeBackendId, { acknowledge: installed });
     }
   };
 
@@ -304,20 +486,89 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const opencodeAgent = agents['opencode'];
   const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
-    && !pendingWrites[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
+    && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
+  const primaryPending = useRef(false);
   const handlePrimaryAction = async () => {
-    if (entering) return;
-    if (isPage && onSave) { await onSave({ agents }); return; }
+    if (!active || entering || primaryPending.current) return;
+    primaryPending.current = true;
+    if (isPage && onSave) { try { await onSave({ agents }); } finally { primaryPending.current = false; } return; }
     setEntering(true); setEntryError('');
     try {
       await enableQueue.current;
       await onNext({ agents, readyBackends });
     } catch (error) { setEntryError(String(error)); }
-    finally { setEntering(false); }
+    finally { primaryPending.current = false; setEntering(false); }
   };
 
 
+  const actionBusy = syncing || entering || isAnyInstalling || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
+  // The recovery node is fresh JSX on every shell render, so the publication depends on
+  // whether one exists, never on its identity — an identity dependency would republish
+  // against itself forever.
+  const recoveryOpen = Boolean(completionRecovery);
+  useImperativeHandle(ref, () => ({ activate: () => { if (canContinue && !actionBusy && !recoveryOpen) void handlePrimaryAction(); } }));
+  // A layout effect, so the shell's action label lands in the same commit as the state
+  // it describes: a passive publish would leave one render where the screen already
+  // shows a settled state while the shared button still carries the previous label.
+  useLayoutEffect(() => {
+    if (active) onActionChange?.({ labelKey: entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter',
+      disabled: !canContinue || actionBusy || recoveryOpen, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
+  }, [active, onActionChange, entering, canContinue, actionBusy, recoveryOpen]);
+
+  // What sits under the shared pair in the shell: the readiness caption, the OpenCode
+  // permission callout and the completion recovery. All three are ancillary to the
+  // action and all three grow — a permission error carries a full diagnostic, a
+  // recovery is a form. Kept inside the screen they push the anchor the two steps
+  // share; lifted out of flow they cover the very buttons they explain. So the shell
+  // reserves a slot after the pair and the active screen portals them into it.
+  const setupRoot = useRef<HTMLDivElement>(null);
+  const [actionAside, setActionAside] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setActionAside(onActionChange
+      ? setupRoot.current?.closest('.onboarding-step')?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null
+      : null);
+  }, [onActionChange]);
+  const hintInner = (<>
+        <p className="text-center text-xs text-muted">
+          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
+          {/* The whole-screen rescan, kept as part of the sentence that explains why a
+              card might not say what was expected rather than a control competing with
+              the action above it. */}
+          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
+            onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
+            <RefreshCw size={12} />{t('agentDetection.rescan')}
+          </Button>
+        </p>
+        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
+  </>);
+  // Hosted in one place so the order under the pair is the same every time, and so the
+  // standalone host keeps the arrangement it already had.
+  const permissionNode = <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
+    permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
+    // Granting permission succeeds at permission. It says nothing about whether
+    // enabling the backend was persisted, so it reads the connection without
+    // spending a verdict that is about something else.
+    onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />;
+  // A portal leaves the screen root, and with it the `inert` the shell puts on a screen
+  // nobody is reading, so what it carries has to answer to the same activity itself.
+  const asideNode = onActionChange
+    ? (active && routeSurfaceActive && actionAside ? createPortal(<>
+        <div className="onboarding-setup-hint">{hintInner}</div>
+        {permissionNode}
+        {completionRecovery}
+      </>, actionAside) : null)
+    : (
+      <div className="onboarding-setup-footer">
+        <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
+          disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
+          {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
+          <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
+        </Button>
+        {hintInner}
+        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+      </div>
+    );
   // Page mode keeps the existing settings shell — render the inner content only
   const Inner = isPage ? (
     <>
@@ -364,7 +615,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                   <BackendLifecycleChip
                     name={name}
                     enabled={agent.enabled}
-                    cliStatus={agent.status || 'unknown'}
+                    cliStatus={active ? agent.status || 'unknown' : 'unknown'}
                     onChanged={async (info) => {
                       // After a successful (re)install the chip hands back the
                       // path the installer landed at — adopt it before
@@ -481,14 +732,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       const name = providerModal.backend;
       setProviderModal(null);
       void syncBackendFromConfig(name);
+      // Closing is how the dialog leaves, not a result. Cancelled without writing
+      // anything, it has answered for nothing the enable failure was about.
       void refreshConnection(name);
     }}
     onWriteState={(pending) => {
       const name = providerModal.backend;
       setPendingWrites((current) => ({ ...current, [name]: pending }));
+      // "Nothing is pending" is the same notification whether a write succeeded,
+      // failed or never happened; `onConnected` is the one that means it worked.
       if (!pending) void refreshConnection(name);
     }}
-    onConnected={async () => { await refreshConnection(providerModal.backend); }} />;
+    onConnected={async () => { await refreshConnection(providerModal.backend, { acknowledge: true }); }} />;
 
   if (isPage) {
     return (
@@ -504,9 +759,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }
 
   return (
-    <div className="onboarding-setup">
+    <div className="onboarding-setup" ref={setupRoot}>
       <header className="onboarding-heading">
-        <h2>{t('onboarding.setup.title')}</h2>
+        <h1 tabIndex={-1}>{t('onboarding.setup.title')}</h1>
         <p>{t('onboarding.setup.subtitle')}</p>
       </header>
       {/* The stage both steps share, so the action below lands on the same
@@ -525,39 +780,47 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const result = installResults[name];
           const error = detectionErrors[name] ? { message: detectionErrors[name] }
             : result && !result.ok && result.message ? result : undefined;
+          const hubRoute = connections[name]?.supply_mode === 'hub'
+            || Boolean(canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => {
-              if (connections[name]?.supply_mode === 'hub') {
+              if (hubRoute) {
+                if (canEditSetupRoute) { openSetupRoute(name); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
                 return;
               }
               setProviderModal({ backend: name, method: 'oauth' });
             }}
             onAddKey={() => {
-              if (connections[name]?.supply_mode === 'hub') {
+              if (hubRoute) {
+                if (canEditSetupRoute) { openSetupRoute(name); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
                 return;
               }
               setProviderModal({ backend: name, method: 'api_key' });
             }}
-            connection={connections[name]?.supply_mode === 'hub'
+            connection={hubRoute
               ? 'hub'
               : !connectionErrors[name] && connections[name]?.ready
                 ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
                 : undefined}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
-            onRefreshConnection={() => void refreshConnection(name)}
-            configuringDisabled={syncing || pendingWrites[name] || !agent.enabled || agent.status !== 'ok'}
-            enabledControl={<label className="flex items-center gap-2 text-xs text-muted">
-              <input type="checkbox" className="size-3.5 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                checked={agent.enabled} onChange={(event) => toggle(name, event.target.checked)} />
-              {t('onboarding.setup.enabled')}
-            </label>}
-            lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
+            onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
+            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
+              || (hubRoute
+                ? agent.status !== 'ok'
+                : !agent.enabled || agent.status !== 'ok')}
+            enabledControl={<ToggleSwitch variant="onboarding" enabled={agent.enabled}
+              label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
+              onClick={() => toggle(name, !agent.enabled)} />}
+            lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={active ? agent.status || 'unknown' : 'unknown'}
               readyLabel={t('onboarding.setup.installed')}
+              refreshKey={chipRefresh[name]}
+              externallyBusy={!!refreshingAgents[name]}
+              onVisual={(visual) => setVisuals((current) => (current[name] === visual ? current : { ...current, [name]: visual }))}
               onOperationChange={(pending) => {
                 setPendingWrites((current) => ({ ...current, [name]: pending }));
                 if (!pending) void refreshConnection(name);
@@ -567,40 +830,50 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                 setAgents((previous) => ({ ...previous, [name]: { ...previous[name], cli_path: installedPath } }));
                 await detect(name, installedPath);
               }} />}
+            upgrade={agent.status === 'ok' && (visuals[name] === 'update' || visuals[name] === 'updating' || refreshingAgents[name]) ? (
+              <Button type="button" variant="secondary" className="onboarding-life-action"
+                onClick={() => void upgradeAgent(name)}
+                disabled={refreshingAgents[name] || !!upgradeLocks[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
+                {refreshingAgents[name] || visuals[name] === 'updating'
+                  ? <RefreshCw size={14} className="motion-safe:animate-spin" />
+                  : <ArrowUpToLine size={14} />}
+                {t(refreshingAgents[name] || visuals[name] === 'updating'
+                  ? 'backendLifecycle.upgrading'
+                  : 'backendLifecycle.upgradeNow')}
+              </Button>
+            ) : undefined}
           />;
         })}
         </div>
       </div>
-      <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
-        permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
-        onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />
+      {!onActionChange && permissionNode}
       {/* Wizard-only: the offer to take over API keys already on this machine.
           Settings → Backends reaches the same migration through
           BackendSupplyModeCard, with its broader scope intact. Self-hides when
-          there is nothing importable or the gateway isn't reachable. */}
-      {modelHubEnabled === true && <ImportKeysNotice />}
+          there is nothing importable or the gateway isn't reachable — which is
+          why the slot around it is rendered either way: the stage keeps the
+          capsule's height while the read is still out, when it turns out there
+          is nothing to offer, and after the offer is refused, so none of the
+          three can move the action below it. */}
+      <div className="onboarding-import-slot">
+        {visited && modelHubEnabled === true && <ImportKeysNotice />}
+      </div>
       </div>
       {providerDialog}
-      {completionRecovery}
-      <div className="onboarding-setup-footer">
-        <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
-          disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
-          {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
-          <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
-        </Button>
-        <p className="text-center text-xs text-muted">
-          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
-          {/* The whole-screen rescan, kept as part of the sentence that explains why a
-              card might not say what was expected rather than as a control competing
-              with the action above it. */}
-          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
-            onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
-            <RefreshCw size={12} />{t('agentDetection.rescan')}
-          </Button>
-        </p>
-        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
-        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
-      </div>
+      {canEditSetupRoute && flowState && setFlowState && onNavigate && agentReads && (
+        <DefaultRouteDialog
+          open={routeOpen}
+          onClose={() => { setRouteOpen(false); setRouteFocus(null); }}
+          flowState={flowState}
+          setFlowState={setFlowState}
+          onNavigate={onNavigate}
+          agentReads={agentReads}
+          focus={routeFocus}
+          onSaved={onRoutesSaved}
+        />
+      )}
+      {!onActionChange && completionRecovery}
+      {asideNode}
     </div>
   );
 };

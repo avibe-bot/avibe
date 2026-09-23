@@ -1522,6 +1522,33 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.getByRole('button', { name: 'medium', exact: true }).className).toContain('bg-mint-soft');
   });
 
+  it('preserves a declared Off while editing another Agent field, and allows selecting medium', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: {
+        'with-off': [{ value: 'none', label: 'Off' }, { value: 'medium', label: 'Medium' }],
+      },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'with-off', reasoning_effort: 'none' };
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    renderPage(makeApi(
+      vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent,
+    ), { canManageAgents: true });
+
+    const description = await screen.findByDisplayValue('description');
+    expect(screen.getByRole('button', { name: 'chat.picker.effortOptions.none' }).className).toContain('bg-mint-soft');
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    fireEvent.change(description, { target: { value: 'updated description' } });
+    fireEvent.blur(description);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { description: 'updated description' }));
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'medium', exact: true }));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { reasoning_effort: 'medium' }));
+  });
+
   it.each(['model', 'effort'] as const)('restores the authoritative value after a failed %s mutation', async (field) => {
     const initial = {
       ...brief('agent-a', 'description'),

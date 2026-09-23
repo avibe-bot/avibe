@@ -34,6 +34,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -1773,11 +1774,16 @@ class CLIProxyEngineAdapter:
 
         async with self._routing_lock:
             await self._transports_idle.wait()
-            auth_name, payload, _prefix, _already_active = await run_owned_in_thread(
-                self.state_store.activate_oauth_auth_file,
-                credential_ref,
+            def publish_grant(running: EngineClient | None):
+                return (*self.state_store.activate_oauth_auth_file(credential_ref), running)
+
+            # Published under the lifecycle exclusion: an engine a previous service
+            # left running is reaped first, so none can load or rotate the new grant
+            # outside this service's reconcile below.
+            auth_name, payload, _prefix, _already_active, client = await run_owned_in_thread(
+                self.supervisor.with_engine_excluded,
+                publish_grant,
             )
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
             if client is None:
                 # The next ordered lifecycle step starts CPA. The atomically
                 # published watched file is the source of truth; no management
@@ -1919,6 +1925,34 @@ class CLIProxyEngineAdapter:
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         return await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
 
+    async def credential_address(self, credential_ref: str) -> str | None:
+        return await asyncio.to_thread(self._credential_address, credential_ref)
+
+    def _credential_address(self, credential_ref: str) -> str | None:
+        """Settle the address the same way ``bind_source`` settles it.
+
+        Only an OAuth credential records an address of its own, and one written
+        by an older release may not have even that. Every other bound Source is
+        addressed by the prefix its record holds, which ``bind_source`` reaches
+        for next. Reading just the credential would therefore report no address
+        for a Source the engine addresses perfectly well, and the repair would
+        decline exactly the ids that need it.
+        """
+
+        metadata = self.state_store.credential_metadata_if_present(credential_ref)
+        prefix = (metadata or {}).get("prefix")
+        if isinstance(prefix, str) and prefix:
+            return prefix
+        record = next(
+            (
+                source
+                for source in self.state_store.list_sources()
+                if source.credential_ref == credential_ref
+            ),
+            None,
+        )
+        return record.prefix if record is not None and record.prefix else None
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,
@@ -2007,24 +2041,24 @@ class CLIProxyEngineAdapter:
         )
         if auth_name:
             if metadata.get("activation_state") != "staged":
-                client = await asyncio.to_thread(self.supervisor.client_if_running)
-                if client is not None:
-                    try:
-                        await asyncio.to_thread(
-                            client.management_request,
-                            "DELETE",
-                            "/auth-files",
-                            query={"name": str(auth_name)},
-                            timeout=1.0,
-                        )
-                    except EngineClientError as exc:
-                        raise EngineStateError(
-                            "unable to remove OAuth auth file"
-                        ) from exc
-                await asyncio.to_thread(
-                    self.state_store.delete_oauth_auth_file,
-                    str(auth_name),
-                )
+
+                def remove_grant(client: EngineClient | None) -> None:
+                    if client is not None:
+                        try:
+                            client.management_request(
+                                "DELETE",
+                                "/auth-files",
+                                query={"name": str(auth_name)},
+                                timeout=1.0,
+                            )
+                        except EngineClientError as exc:
+                            raise EngineStateError("unable to remove OAuth auth file") from exc
+                    self.state_store.delete_oauth_auth_file(str(auth_name))
+
+                # One supervisor operation: an engine left running by a previous
+                # service is reaped first, and none can start and load the grant
+                # before its file is gone.
+                await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
                 await asyncio.to_thread(
                     self.state_store.audit_auth_permissions,
                     enforce=True,
@@ -2070,12 +2104,7 @@ class CLIProxyEngineAdapter:
         auth_name = metadata.get("auth_name")
         if not isinstance(auth_name, str) or not auth_name:
             return False
-        client = await asyncio.to_thread(self.supervisor.client_if_running)
-        return await self._cleanup_oauth_material(
-            client,
-            auth_name,
-            credential_ref,
-        )
+        return await self._cleanup_oauth_material(auth_name, credential_ref)
 
     async def discover_models(
         self,
@@ -2099,7 +2128,11 @@ class CLIProxyEngineAdapter:
                 "/auth-files/models",
                 query={"name": str(metadata["auth_name"])},
             )
-            return _discovered_models(payload)
+            prefix = metadata.get("prefix")
+            return _discovered_models(
+                payload,
+                str(prefix) if isinstance(prefix, str) and prefix else None,
+            )
         normalized_base_url = await asyncio.to_thread(
             self.state_store.validate_api_key_target,
             credential_ref,
@@ -2722,7 +2755,6 @@ class CLIProxyEngineAdapter:
                 # may remain behind it. Both auth-file deletions must be
                 # confirmed before revocation can discard the minted ref.
                 if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
-                    client,
                     auth.name,
                     credential_ref,
                 ):
@@ -2747,37 +2779,26 @@ class CLIProxyEngineAdapter:
         flow.state = "success"
         self._release_provider(flow)
 
-    async def _cleanup_oauth_material(
-        self,
-        client: EngineClient | None,
-        auth_name: str,
-        credential_ref: str,
-    ) -> bool:
-        engine_delete_succeeded = client is None
-        if client is not None:
+    async def _cleanup_oauth_material(self, auth_name: str, credential_ref: str) -> bool:
+        def remove_grant(client: EngineClient | None) -> bool:
+            engine_delete_succeeded = True
+            if client is not None:
+                try:
+                    client.management_request("DELETE", "/auth-files", query={"name": auth_name})
+                except EngineClientError:
+                    engine_delete_succeeded = False
             try:
-                await asyncio.to_thread(
-                    client.management_request,
-                    "DELETE",
-                    "/auth-files",
-                    query={"name": auth_name},
-                )
-            except EngineClientError:
-                engine_delete_succeeded = False
-            else:
-                engine_delete_succeeded = True
+                self.state_store.delete_oauth_auth_file(auth_name)
+            except EngineStateError:
+                return False
+            return engine_delete_succeeded
 
+        # Atomic with the engine lifecycle: see ``revoke_credential``.
         try:
-            await asyncio.to_thread(
-                self.state_store.delete_oauth_auth_file,
-                auth_name,
-            )
-        except EngineStateError:
-            local_delete_succeeded = False
-        else:
-            local_delete_succeeded = True
-
-        if not (engine_delete_succeeded and local_delete_succeeded):
+            removed = await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
+        except EngineUnavailableError:
+            return False
+        if not removed:
             return False
         try:
             await asyncio.to_thread(
@@ -2903,29 +2924,60 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
     return inventory
 
 
-def _discovered_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, ...]:
+def _discovered_models(
+    payload: Mapping[str, Any],
+    prefix: str | None = None,
+) -> tuple[DiscoveredModel, ...]:
     models = payload.get("models")
     if not isinstance(models, list):
         return ()
-    result: list[DiscoveredModel] = []
-    seen: set[str] = set()
+    coalesced: dict[str, tuple[str, ...] | None] = {}
+    # Which spellings the engine used for each name, so a row it listed twice
+    # under one name stays distinguishable from two rows that became one here.
+    spellings: dict[str, set[str]] = {}
     for item in models:
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
-        if not isinstance(value, str) or not value or value in seen:
+        if not isinstance(value, str) or not value:
             continue
-        seen.add(value)
+        answered = value
+        # This is the one place an address enters the product: the engine answers
+        # with the name it addresses this credential by. It is removed here, at
+        # that boundary, rather than by every later reader of the inventory — and
+        # only the address of the credential being discovered, so a model whose
+        # own name is spelled like one is left as upstream named it.
+        value = model_id_without_credential_address(value, prefix)
+        if not value:
+            continue
         supported_parameters = None
         if isinstance(item, dict) and isinstance(item.get("supported_parameters"), list):
             parameters = item["supported_parameters"]
             if all(isinstance(parameter, str) and parameter for parameter in parameters):
                 supported_parameters = tuple(dict.fromkeys(parameters))
-        result.append(
-            DiscoveredModel(
-                id=value,
-                supported_parameters=supported_parameters,
-            )
-        )
-    return tuple(result)
+        if value not in coalesced:
+            coalesced[value] = supported_parameters
+            spellings[value] = {answered}
+            continue
+        if answered in spellings[value]:
+            # The engine listed one name twice and said different things about
+            # it. That is the engine contradicting itself and the first answer
+            # has always been the one kept.
+            continue
+        # Two names the engine kept apart, landing on one only because the
+        # address came off. The inventory holds one row per name, so the rows
+        # are coalesced rather than the later one dropped: this merge is ours,
+        # and nothing the engine said may be lost to the order it said it in.
+        spellings[value].add(answered)
+        held = coalesced[value]
+        if supported_parameters is None:
+            continue
+        if held is None:
+            coalesced[value] = supported_parameters
+            continue
+        coalesced[value] = tuple(dict.fromkeys(held + supported_parameters))
+    return tuple(
+        DiscoveredModel(id=model_id, supported_parameters=parameters)
+        for model_id, parameters in coalesced.items()
+    )
 
 
 _adapter: CLIProxyEngineAdapter | None = None

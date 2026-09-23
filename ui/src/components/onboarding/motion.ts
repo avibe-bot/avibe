@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { useReducedMotion } from 'framer-motion';
 
 /**
@@ -60,9 +61,10 @@ function useElementOnScreen() {
  * skeleton shimmer and the test ticks) are held at their current frame rather than left
  * to play on against a stopped clock.
  */
-export function useOnboardingMotion() {
+export function useOnboardingMotion(active = true) {
+  const surfaceActive = useRouteSurfaceActive();
   const reducedMotion = useReducedMotion() === true;
   const documentVisible = useDocumentVisible();
   const [ref, onScreen] = useElementOnScreen();
-  return { ref, reducedMotion, running: !reducedMotion && documentVisible && onScreen };
+  return { ref, reducedMotion, running: active && surfaceActive && !reducedMotion && documentVisible && onScreen };
 }

@@ -19,6 +19,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { isComposingKey } from '@/lib/imeComposition';
+import { NO_REASONING_EFFORT } from '@/lib/effortOptions';
 import { cn } from '@/lib/utils';
 import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
@@ -392,7 +393,9 @@ export const BackendModelEditorDialog: React.FC<{
     });
   };
 
-  const efforts = [...new Set([...effortSuggestions, ...draft.reasoning_efforts])];
+  // A suggestion is not a capability declaration: Off stays unchecked until
+  // the operator adds it to this exact model, just like any custom effort.
+  const efforts = [...new Set([NO_REASONING_EFFORT, ...effortSuggestions, ...draft.reasoning_efforts])];
   const backendName = t(`settings.models.backends.${backend}`, { defaultValue: backend });
   const protocolLabel = t('settings.models.gateway.modelEditor.nativeProtocol.label') as string;
   const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
@@ -625,7 +628,7 @@ export const BackendModelEditorDialog: React.FC<{
                 <div className="flex flex-wrap gap-2" role="group" aria-labelledby="model-hub-efforts">
                   {efforts.map((effort) => (
                     <ChipButton key={effort} on={draft.reasoning_efforts.includes(effort)} onClick={() => toggleEffort(effort)}>
-                      {effort}
+                      {effort === NO_REASONING_EFFORT ? t('chat.picker.effortOptions.none') : effort}
                     </ChipButton>
                   ))}
                   {customOpen ? (

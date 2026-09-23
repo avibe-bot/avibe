@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
 import sys
@@ -11,6 +12,13 @@ from typing import Iterable, Mapping
 
 DEFAULT_TEST_ROOT = Path("tests")
 DEFAULT_TIMINGS_PATH = Path("scripts/ci_unit_test_timings.json")
+
+#: How much slower than its own recorded duration a file may run before the
+#: per-file watchdog treats it as stalled rather than merely unlucky. A single
+#: wall-clock budget cannot tell those apart across a suite whose files span
+#: three orders of magnitude, so the budget is expressed as a multiple of what
+#: the file itself has actually cost.
+DEFAULT_WATCHDOG_MULTIPLIER = 8.0
 
 
 def discover_unit_test_files(root: Path = DEFAULT_TEST_ROOT) -> list[Path]:
@@ -64,6 +72,40 @@ def _timing_scale(files: Iterable[Path], timings: Mapping[str, float]) -> float:
     return statistics.median(ratios) if ratios else 1.0
 
 
+def expected_seconds(
+    files: Iterable[Path],
+    timings: Mapping[str, float] | None = None,
+) -> dict[str, float]:
+    """Cost per file: its measured duration, else a scaled structural estimate."""
+    file_list = sorted(files)
+    timing_map = timings or {}
+    scale = _timing_scale(file_list, timing_map)
+    return {
+        path.as_posix(): max(1.0, float(timing_map.get(path.as_posix(), structural_weight(path) * scale)))
+        for path in file_list
+    }
+
+
+def watchdog_budget_seconds(
+    path: Path,
+    timings: Mapping[str, float] | None = None,
+    *,
+    floor_seconds: int,
+    multiplier: float = DEFAULT_WATCHDOG_MULTIPLIER,
+) -> tuple[int, float | None]:
+    """Return the watchdog budget for one file and the baseline it came from.
+
+    Only a *measured* duration raises the budget. The structural estimate the
+    planner falls back on is a relative weight, not seconds, so multiplying it
+    would hand an arbitrary deadline to exactly the files nothing is known
+    about; those keep the floor, which is what the fixed budget always was.
+    """
+    baseline = (timings or {}).get(path.as_posix())
+    if baseline is None or baseline <= 0:
+        return floor_seconds, None
+    return max(floor_seconds, math.ceil(baseline * multiplier)), baseline
+
+
 def plan_shards(
     files: Iterable[Path],
     shard_total: int,
@@ -73,13 +115,8 @@ def plan_shards(
     if shard_total < 1:
         raise ValueError("shard_total must be at least 1")
     file_list = sorted(files)
-    timing_map = timings or {}
-    scale = _timing_scale(file_list, timing_map)
-    weighted_files = []
-    for path in file_list:
-        key = path.as_posix()
-        weight = timing_map.get(key, structural_weight(path) * scale)
-        weighted_files.append((max(1.0, float(weight)), path))
+    weights = expected_seconds(file_list, timings)
+    weighted_files = [(weights[path.as_posix()], path) for path in file_list]
 
     shards: list[tuple[float, list[Path]]] = [(0.0, []) for _ in range(shard_total)]
     for weight, path in sorted(weighted_files, key=lambda item: (-item[0], item[1].as_posix())):
@@ -94,12 +131,24 @@ def plan_shards(
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
+    budget_floor: int | None = None
+    for index, value in enumerate(args):
+        if value.startswith("--budget-floor="):
+            budget_floor = int(value.removeprefix("--budget-floor=") or 0)
+            del args[index]
+            break
     if len(args) != 2 or any(not value.isdigit() for value in args):
-        print("Usage: ci_unit_test_shards.py SHARD_INDEX SHARD_TOTAL", file=sys.stderr)
+        print(
+            "Usage: ci_unit_test_shards.py [--budget-floor=SECONDS] SHARD_INDEX SHARD_TOTAL",
+            file=sys.stderr,
+        )
         return 2
     shard_index, shard_total = (int(value) for value in args)
     if shard_total < 1 or shard_index >= shard_total:
         print("Shard index must be less than a positive shard total.", file=sys.stderr)
+        return 2
+    if budget_floor is not None and budget_floor < 1:
+        print("Budget floor must be a positive number of seconds.", file=sys.stderr)
         return 2
 
     files = discover_unit_test_files()
@@ -114,7 +163,13 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     for path in selected:
-        print(path.as_posix())
+        if budget_floor is None:
+            print(path.as_posix())
+            continue
+        budget, baseline = watchdog_budget_seconds(path, timings, floor_seconds=budget_floor)
+        # Tab-separated so the launcher reads the budget it must arm without
+        # paying a second interpreter start per file to recompute it.
+        print(f"{path.as_posix()}\t{budget}\t{'' if baseline is None else format(baseline, '.0f')}")
     return 0
 
 

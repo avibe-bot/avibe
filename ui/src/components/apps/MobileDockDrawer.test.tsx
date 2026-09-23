@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe('MobileDockDrawer settings entry', () => {
-  it('opens Settings on General, the same place a desktop entry lands', async () => {
+  it('opens Settings on the section list a phone has to navigate from', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
 
@@ -42,15 +42,16 @@ describe('MobileDockDrawer settings entry', () => {
     );
 
     const chip = screen.getByRole('link', { name: 'more.controlPanel' });
-    expect(chip.getAttribute('href')).toBe('/settings/general');
+    expect(chip.getAttribute('href')).toBe('/settings');
 
     await user.click(chip);
 
-    // A phone's ordinary way into Settings is a destination, not a menu: the
-    // section list stays reachable from General's back row, but it is not what
-    // tapping 设置 hands the user.
-    expect(await screen.findByText('general-page')).toBeTruthy();
-    expect(screen.queryByText('section-list')).toBeNull();
+    // A phone shows one Settings screen at a time, so landing inside a section
+    // hides every other one behind a Back the user has to find first. The menu
+    // is the screen that names them all, and it is what tapping 设置 hands over;
+    // the rail a desktop keeps beside the page is what excuses it there.
+    expect(await screen.findByText('section-list')).toBeTruthy();
+    expect(screen.queryByText('general-page')).toBeNull();
     expect(onClose).toHaveBeenCalled();
   });
 });

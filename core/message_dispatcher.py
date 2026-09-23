@@ -37,6 +37,7 @@ from core.message_output import (
     HARNESS_TRIGGER_KINDS,
     MessageOutput,
     communication_type_for_output,
+    neutralize_mentions,
     output_for_message,
 )
 from core.reply_enhancer import (
@@ -82,19 +83,6 @@ HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"
 # (``harness_display_prompt``) and stays silent when none can be resolved; the
 # Workbench transcript still renders the full prompt for the operator.
 HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS = frozenset({"watch", "webhook", "hook"})
-# Mention neutralizers for the echoed prompt. The echo repeats text an operator wrote
-# for an agent, into a channel: quoting it does not stop a renderer from resolving a
-# broadcast, a username, or an id mention, and the Discord adapter sends without
-# ``allowed_mentions``, so an echoed ``@everyone`` would really ping the channel
-# (Codex P2). A zero-width space after the sigil keeps the text readable while
-# leaving nothing for any renderer to resolve. Deliberately platform-agnostic: every
-# adapter renders the same body, so ``@`` before a word character covers the
-# Slack/Discord broadcasts AND a bare Telegram ``@username`` (which
-# ``TelegramFormatter.render`` HTML-escapes without defusing), and a new adapter
-# inherits the guard instead of needing its own.
-_HARNESS_ECHO_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
-_HARNESS_ECHO_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
-_HARNESS_ECHO_MENTION_BREAK = "\u200b"
 # Cap for the definition name in the echo label. The prompt has its own cap, but the
 # label is appended after it and task/watch names are never length-validated at
 # creation, so an unbounded name could push the body past Discord's 2,000-char or
@@ -108,22 +96,6 @@ _HARNESS_PROMPT_ECHO_I18N_KEYS = {
     "hook": "harness.promptEcho.hook",
     "agent_run": "harness.promptEcho.agentRun",
 }
-
-
-def _neutralize_mentions(text: str) -> str:
-    """Make every mention in *text* inert without changing how it reads.
-
-    Used for the Harness prompt echo, which republishes text an operator wrote for an
-    agent into a shared channel. Covers every ``@`` sigil — the broadcast words
-    (``@everyone`` / ``@here`` / ``@channel``) and a bare ``@username``, which Telegram
-    resolves into a real notification — plus the bracketed id forms both Slack
-    (``<@U…>``, ``<!here>``, ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
-    """
-
-    neutralized = _HARNESS_ECHO_MENTION_SIGIL_PATTERN.sub(
-        "@" + _HARNESS_ECHO_MENTION_BREAK, text or ""
-    )
-    return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
 
 
 def _written_buttons(
@@ -2271,7 +2243,7 @@ class ConsolidatedMessageDispatcher:
         quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
         # Both halves are neutralized: the label carries the definition NAME, which a
         # user typed too and can hold a mention just as easily as the prompt.
-        return _neutralize_mentions(f"{label}\n{quoted}")
+        return neutralize_mentions(f"{label}\n{quoted}")
 
     def _refresh_runtime_config(self) -> None:
         """Best-effort, mtime-guarded reload of ``controller.config`` from disk.

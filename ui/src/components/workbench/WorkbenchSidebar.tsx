@@ -27,6 +27,7 @@ import {
 import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
+import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
 
@@ -105,6 +106,10 @@ const SidebarNavRow: React.FC<{
   </NavLink>
 );
 
+// How many session rows the peek holds. Named because two things depend on it:
+// which rows are picked, and whether the peek had room it could not fill.
+const PEEK_ROWS = 5;
+
 // 360px floating popover that opens when the user hovers the Inbox entry.
 // Mirrors design.pen KmQ1L — header + a few session cards + footer "open full
 // inbox" link. Pure presentational; data comes from <WorkbenchInboxProvider>.
@@ -131,10 +136,43 @@ const InboxHoverPopover: React.FC<{
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const shown = sessions.slice(0, 5);
   // The unread map is authoritative; a session absent from it has 0 unread
   // (don't fall back to the card's stale unread_count — see InboxPage).
   const unreadOf = (s: InboxSession) => unreadBySession[s.session_id] ?? 0;
+  // Unread first, then the rest. `sort` is stable, so within each group the feed
+  // keeps the backend's activity order untouched.
+  //
+  // This decides *which* five appear, not only how they are stacked — and that is
+  // the point. The popover is a five-row peek at a feed that is usually longer, so
+  // a strictly chronological slice hides the unread session the user opened it to
+  // act on behind ones they have already read. The full Inbox page keeps the
+  // chronological order on purpose: it has unread/all tabs and keyset pagination,
+  // which a client-side reorder would fight.
+  const shown = useMemo(
+    () =>
+      [...sessions]
+        .sort(
+          (a, b) =>
+            Number((unreadBySession[b.session_id] ?? 0) > 0) -
+            Number((unreadBySession[a.session_id] ?? 0) > 0),
+        )
+        .slice(0, PEEK_ROWS),
+    [sessions, unreadBySession],
+  );
+  // `unreadSessions` counts the whole feed; `sessions` holds only the pages the
+  // provider has loaded, so an unread session older than the loaded window is in
+  // the count but not in the rows, and no ordering of those rows can surface it.
+  // Say so rather than letting a header that reads "3 unread" sit above five read
+  // rows. The condition is deliberately "the peek had room and could not fill it":
+  // a peek already full of unread is hiding nothing the header does not state.
+  const unreadShown = shown.filter((s) => unreadOf(s) > 0).length;
+  const unreadBeyondPeek = unreadShown < PEEK_ROWS && unreadSessions > unreadShown;
+  const openFullInbox = (filter?: 'unread') => {
+    // The Inbox page resolves its tab from this store on entry, so writing it
+    // first is how a caller asks for a tab without a new route or prop.
+    if (filter) writeInboxFilter(filter, 0);
+    navigate('/inbox');
+  };
   return (
     // Portaled (PopoverContent) so it escapes the sidebar's stacking context and
     // floats above the chat panel — a plain `absolute z-50` div was painted under
@@ -224,9 +262,19 @@ const InboxHoverPopover: React.FC<{
         </div>
       )}
 
+      {unreadBeyondPeek && (
+        <button
+          type="button"
+          onClick={() => openFullInbox('unread')}
+          className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+        >
+          {t('workbench.inbox.moreUnreadInFull')}
+        </button>
+      )}
+
       <button
         type="button"
-        onClick={() => navigate('/inbox')}
+        onClick={() => openFullInbox()}
         className="flex items-center justify-center gap-1.5 rounded-md pt-1 text-[11px] font-medium text-cyan-ink hover:underline"
       >
         {t('workbench.inbox.viewAll')}

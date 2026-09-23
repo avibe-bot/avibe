@@ -929,7 +929,10 @@ def test_managed_watch_service_forever_timeout_disables_and_enqueues_failure(tmp
     assert saved.last_exit_code == 124
 
 
-def test_managed_watch_service_forever_timeout_retries_when_explicitly_allowed(tmp_path: Path) -> None:
+def test_managed_watch_service_forever_timeout_retries_when_explicitly_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -955,15 +958,52 @@ def test_managed_watch_service_forever_timeout_retries_when_explicitly_allowed(t
         runtime_store=runtime_store,
     )
 
+    cycles = 0
+    watch_runs = 0
+    run_cycle = service._run_cycle
+    run_watch = service._run_watch
+
+    async def counting_run_cycle(*args, **kwargs):
+        nonlocal cycles
+        cycles += 1
+        return await run_cycle(*args, **kwargs)
+
+    async def counting_run_watch(*args, **kwargs):
+        nonlocal watch_runs
+        watch_runs += 1
+        return await run_watch(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_run_cycle", counting_run_cycle)
+    monkeypatch.setattr(service, "_run_watch", counting_run_watch)
+
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.2)
-        await service.stop()
+        # A fixed sleep bets that a real interpreter spawn, its 50ms deadline and
+        # the write-back all land inside one window; on a contended runner they do
+        # not, and the assertion samples ``last_exit_code`` while it is still None.
+        #
+        # Wait for the retry this test is named for instead, and name it as the
+        # invariant that separates one from a restart: a *second waiter inside the
+        # same watch run*. A watch that recorded the retryable timeout and then
+        # returned would be started again by reconciliation and reach two waiters
+        # too, so the second waiter alone does not distinguish the two.
+        try:
+            for _ in range(500):
+                if cycles >= 2 and watch_runs == 1:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError(
+                    f"waiter never retried inside one watch run (cycles={cycles}, runs={watch_runs})"
+                )
+        finally:
+            await service.stop()
 
     asyncio.run(_run())
 
     saved = store.get_watch(watch.id)
     assert saved is not None
+    assert watch_runs == 1
     assert saved.enabled is True
     assert saved.last_exit_code == 124
     assert request_store.list_pending() == []
@@ -2551,7 +2591,7 @@ def test_managed_watch_service_start_reaps_stale_worker_for_deleted_watch(
     )
     terminated: list[int] = []
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 1234)
-    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr(
         "core.watches.terminate_process_tree_by_pid",
         lambda pid, *_args, **_kwargs: terminated.append(pid) or True,
@@ -2645,7 +2685,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
-        lambda pid: _live_identity(pid=pid, create_time=456.0),
+        lambda pid: _live_identity(pid=pid, create_time=456.0, worker_fingerprint=None),
     )
     monkeypatch.setattr(
         "core.watches.terminate_process_tree_by_pid",
@@ -2667,6 +2707,42 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
 
     assert reconciles >= 1
     assert watch.id not in service._recovery_blocked_watch_ids
+
+
+@pytest.mark.parametrize(
+    ("live_fingerprint", "unblocked"),
+    [(TEST_FINGERPRINT, ()), (None, ("watch-a",))],
+)
+def test_blocked_watch_recheck_decides_by_marker_not_a_shifted_birth_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_fingerprint: str | None,
+    unblocked: tuple[str, ...],
+) -> None:
+    """macOS may report a shifted create_time for the same live worker."""
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    identity = _persisted_identity()
+    entry = {
+        "pid": 4321,
+        "process_identity": {
+            "pid": identity.pid,
+            "create_time": identity.create_time,
+            "worker_fingerprint": identity.worker_fingerprint,
+        },
+    }
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        "core.watches.inspect_process_identity",
+        lambda pid: _live_identity(pid=pid, create_time=456.0, worker_fingerprint=live_fingerprint),
+    )
+
+    assert service._inspect_recovery_blocked_watches({"watch-a": entry}) == unblocked
 
 
 def test_managed_watch_service_start_blocks_respawn_when_worker_marker_changed(
@@ -3668,7 +3744,7 @@ def test_managed_watch_service_start_preserves_worker_state_when_reap_fails(
         runtime_store=runtime_store,
     )
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
-    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
 
     async def _run() -> None:
@@ -3704,7 +3780,7 @@ def test_managed_watch_service_periodically_unblocks_after_stale_worker_exits(
     monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: worker["alive"])
     monkeypatch.setattr("core.watches.process_group_exists", lambda *_args: False)
-    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
 
     async def fake_run_watch(_watch_id: str) -> None:

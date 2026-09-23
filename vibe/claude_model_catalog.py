@@ -10,6 +10,7 @@ DEFAULT_CLAUDE_MODEL_ALIASES: tuple[str, ...] = ("opus", "sonnet", "haiku")
 FALLBACK_CLAUDE_MODELS: tuple[str, ...] = (
     "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
@@ -19,9 +20,6 @@ FALLBACK_CLAUDE_MODELS: tuple[str, ...] = (
     "claude-haiku-4-5",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
-    "claude-opus-4",
-    "claude-sonnet-4",
-    "claude-haiku-4",
 )
 
 # Fable is Anthropic's Mythos-class tier, positioned above Opus, so it sorts first.
@@ -127,7 +125,25 @@ def _dedupe_str_values(values: Iterable[str]) -> list[str]:
     return normalized
 
 
+# Anthropic retired these on 2026-06-15, or never shipped them under this id.
+# Claude bundles still mention them in compatibility tables, so the generator
+# must drop them rather than rely on hand-editing its output.
+RETIRED_CLAUDE_MODELS = frozenset(
+    {
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-20250514",
+        "claude-sonnet-3-7",
+        "claude-haiku-3-5",
+    }
+)
+
+
 def _is_public_catalog_model(model: str) -> bool:
+    if model in RETIRED_CLAUDE_MODELS:
+        return False
     parts = model.split("-")
     if len(parts) >= 4 and parts[-1].isdigit() and len(parts[-1]) == 8:
         major = _int_or_none(parts[2])

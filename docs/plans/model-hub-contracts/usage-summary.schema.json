@@ -52,9 +52,10 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
     },
     "Count": {
+      "description": "One metered count: the exact sum of the per-call reports inside the window, each already bounded where it entered the wire. Never clamped to keep it small — a truncated total is indistinguishable from a real one, and clamping a subset and its superset together forces a ratio such as a cached-input share to exactly 100%. The maximum is derived from the producer rather than imposed on the user, and caps nobody's spending: a count is a sum over at most 400 rows (USAGE_MAX_ROWS), each carrying counters of at most 2^53 - 1 (USAGE_COUNTER_CEILING). Both limits are applied when the store is read as well as when it is written, so the bound holds for a corrupt or hand-edited store too and not only for one this producer wrote. A consumer reading this document into IEEE-754 doubles holds every value up to 2^53 - 1 exactly and every larger one as a finite double, rounded in its last places; a window spans at most 62 days of real calls, so only a corrupt or hand-edited store can publish a count in that rounding range.",
       "type": "integer",
       "minimum": 0,
-      "maximum": 1000000000
+      "maximum": 3602879701896396400
     },
     "Counters": {
       "type": "object",

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -67,6 +67,10 @@ from storage.models import (
     session_turns,
     show_session_events,
 )
+from vibe.memory_contract import (
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
+)
 
 
 @pytest.fixture
@@ -79,6 +83,8 @@ class _Controller:
         self.command_handler = SimpleNamespace(handle_stop=AsyncMock(return_value=True))
         self.agent_service = SimpleNamespace(agents={}, _turn_gates={})
         self.config = SimpleNamespace(language="en")
+        self.memory_runtime = SimpleNamespace()
+        self._memory_implementation_error = None
         self.statuses: list[tuple[str, str]] = []
 
     @staticmethod
@@ -1283,6 +1289,83 @@ async def test_steering_preparation_failure_preserves_a_definitively_unwritten_b
     assert all(_row(engine, row["id"])["state"] == "accepted" for row in queued)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("priority", ["p0", "p1", "p3"])
+async def test_delivery_path_reaches_native_write_without_memory_admission(managers, priority):
+    """Memory is not consulted by any delivery priority."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    if priority == "p1":
+        await _activate(manager, text="active")
+    manager.controller._memory_admission = Mock(
+        side_effect=AssertionError("Memory admission must not be called")
+    )
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority=priority,
+            content="steer" if priority != "p0" else "replacement",
+        ),
+        context=_context(),
+    )
+
+    assert result.state == ("accepted" if priority == "p1" else "claimed")
+    if priority == "p1":
+        manager._steer.assert_awaited_once()
+    else:
+        manager._steer.assert_not_awaited()
+    manager.controller._memory_admission.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("priority", ["p0", "p1", "p3"])
+@pytest.mark.parametrize(
+    "memory_state",
+    ["disabled", "missing", "incompatible", "runtime_raising", "conflicting", "matching"],
+)
+async def test_delivery_state_is_memory_independent(managers, priority, memory_state):
+    """Every Memory state preserves the delivery result of the disabled path."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    await _activate(manager, text="active") if priority == "p1" else None
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    manager.controller._memory_admission = Mock()
+    admission = Mock()
+    if memory_state == "disabled":
+        manager.controller.config.memory = SimpleNamespace(enabled=False)
+    else:
+        manager.controller.config.memory = SimpleNamespace(enabled=True)
+        manager.controller.memory_runtime = SimpleNamespace()
+        manager.controller._memory_implementation_error = None
+        if memory_state == "missing":
+            manager.controller.memory_runtime = None
+            manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
+        elif memory_state == "incompatible":
+            manager.controller.memory_runtime = None
+            manager.controller._memory_implementation_error = MemoryImplementationIncompatibleError("incompatible")
+        elif memory_state == "runtime_raising":
+            manager.controller._memory_admission = Mock(side_effect=RuntimeError("runtime unavailable"))
+        else:
+            admission.admits.return_value = True
+            manager.controller._memory_admission = Mock(return_value=admission)
+    if memory_state == "disabled":
+        manager.controller._memory_admission = Mock(side_effect=AssertionError("disabled Memory must not run"))
+
+    request = DeliveryRequest(
+        session_id="ses_fsm",
+        priority=priority,
+        content="memory-independent delivery" if priority != "p0" else "replacement",
+    )
+    result = await manager.deliver(request, context=_context())
+
+    assert result.state == ("accepted" if priority == "p1" else "claimed")
+    if priority == "p1":
+        manager._steer.assert_awaited_once()
+    manager.controller._memory_admission.assert_not_called()
+
+
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     captured: dict[str, object] = {}
@@ -2452,11 +2535,14 @@ def test_legacy_workbench_strict_author_keeps_memory_admission(managers) -> None
 def test_durable_workbench_turn_restores_memory_admission_facts(
     managers,
     launch_path: str,
+    monkeypatch,
 ) -> None:
     from core.controller import Controller
     from core.memory_cli_access import configure_memory_cli_access
 
     manager, _other, engine, _engine_b, _starts = managers
+    # The Memory boundary reads the cached store; bind it to this fixture's engine.
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
     manager.controller.config.memory = SimpleNamespace(enabled=True)
     classifications: list[bool | None] = []
     routing_users: list[str | None] = []

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from typing import Container
 
 # Usage rows shipped with a 200-character readable head. Keep that threshold
 # stable even when a later API admits longer model identifiers, or one upgrade
@@ -15,6 +17,73 @@ USAGE_LEDGER_VERBATIM_MAX_LENGTH = 200
 USAGE_LEDGER_KEY_MAX_LENGTH = (
     USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1 + 2 * hashlib.sha256().digest_size
 )
+
+# The shape a Source prefix is minted in: ``avibe-`` plus twelve random bytes.
+# Only ever used to recognise an address in a record that does not say which one
+# it carries; wherever the owning prefix is known, it is compared literally.
+_CREDENTIAL_ADDRESS_SHAPE = re.compile(r"avibe-[0-9a-f]{24}")
+
+
+def model_id_without_credential_address(value: str, prefix: str | None = None) -> str:
+    """Return the identity ``value`` names, with no credential address around it.
+
+    The engine addresses a credential through the model name and no other field,
+    so an outbound call spells one as ``<source prefix>/<model>``. That prefix is
+    the address of a credential, never part of a model's identity.
+
+    ``prefix`` is the address of the credential this identity belongs to. Given
+    one, only that exact address is removed, so nothing is claimed about any
+    other name: reserving the whole ``avibe-<hex>/`` namespace would rewrite an
+    upstream identity that happened to be spelled that way, and an identity is
+    not ours to rename. Callers that hold the owning Source or credential always
+    pass it.
+
+    Without one, the address is recognised by its minted shape. That is for the
+    one caller holding a credential whose metadata records no prefix, and it is
+    a fallback: it fails visibly, at the same place this bug did, rather than
+    renaming a vendor's model quietly.
+
+    Unwrapping repeatedly rather than once makes the result total: whatever this
+    returns carries no address, so a caller never has to ask how many one
+    identity accumulated across releases.
+    """
+
+    if prefix is not None:
+        return model_id_without_credential_addresses(value, (prefix,))
+    identity = value
+    while True:
+        address, separator, remainder = identity.partition("/")
+        if not separator or not remainder:
+            return identity
+        if not _CREDENTIAL_ADDRESS_SHAPE.fullmatch(address):
+            return identity
+        identity = remainder
+
+
+def model_id_without_credential_addresses(
+    value: str,
+    addresses: Container[str],
+) -> str:
+    """Return the identity ``value`` names, with no *known* address around it.
+
+    The same removal as above, for a caller holding more than one credential.
+    ``addresses`` are proven addresses — each one minted for a credential this
+    installation holds — so membership is the proof of ownership, and a leading
+    segment that is not one of them belongs to whoever named the model.
+
+    This is what lets an identity be repaired outside the Source that owns it.
+    A backend menu row, a route key, or a hidden-model entry records no Source,
+    but an address names exactly one credential and a credential binds to
+    exactly one Source, so an id carrying a proven address came from there.
+    """
+
+    identity = value
+    while True:
+        address, separator, remainder = identity.partition("/")
+        if not separator or not remainder or address not in addresses:
+            return identity
+        identity = remainder
+
 
 OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL = {
     "openai_responses": "avibe-openai",

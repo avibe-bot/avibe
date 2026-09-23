@@ -70,6 +70,10 @@ from .adapter import (
     make_source_observation,
     validate_source_observation,
 )
+from .address_repair import (
+    payload_carries_credential_address,
+    repair_credential_addresses,
+)
 from .async_owner import await_owned_task
 from .catalog_admission import (
     admissible_backend_model,
@@ -239,6 +243,10 @@ def project_opencode_public_model(
         if model.supports_reasoning is not False
         else {}
     )
+    # Translate an explicitly declared Off variant, without inventing one or
+    # changing the existing payloads of ordinary/custom effort values.
+    if model.native_protocol == "anthropic" and "none" in variants:
+        variants["none"] = {"thinking": {"type": "disabled"}}
     if variants:
         projected["variants"] = variants
     return projected
@@ -871,6 +879,9 @@ class ModelHubService:
         backend_catalog_changed: Optional[
             Callable[[BackendName], Awaitable[None]]
         ] = None,
+        repair_model_selections: Optional[
+            Callable[[frozenset[str]], Awaitable[int]]
+        ] = None,
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
     ):
@@ -912,6 +923,7 @@ class ModelHubService:
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
+        self.repair_model_selections = repair_model_selections
         self.now = now
         self.recovery = recovery or RecoveryPolicy(now=lambda: self.now())
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
@@ -1199,6 +1211,110 @@ class ModelHubService:
             raise ModelHubError("source_create_in_progress", status=409)
         self._source_create_nonces.add(client_nonce)
 
+    async def _repair_credential_addresses(self) -> None:
+        """Take a credential's address out of ids an older release stored.
+
+        Discovery no longer writes one, but a file written before it stopped
+        can still hold an addressed id, and composition then addresses it a
+        second time — the model the user picked resolves to nothing. Every
+        demand for the engine passes here, so an installation upgrading into
+        this release is repaired the first time it needs a model.
+
+        This is the seam because it is the only one where both halves are in
+        hand. The engine state store can prove which address belongs to which
+        Source, so nothing is renamed on the strength of how it is spelled; and
+        the whole config is loaded, so every collection keyed by a model id
+        moves in one write instead of half the joins being left naming
+        something gone. Persisting goes through the same projection owner as
+        any other mutation, so the engine is reconciled with what was written.
+
+        A stored id reaches past this config, too. A Vibe Agent's model, a
+        channel's routing override, and a session's pin are each a copy of an
+        id the menu once offered, and each is read back to decide what a turn
+        asks for — repairing only the catalog would leave them naming a model
+        that no longer exists under that name. The owner of those rows repairs
+        them through ``repair_model_selections``, against this same proof.
+
+        Best effort by design: an id left alone is exactly the state the
+        previous release was already in, which is not worth failing a demand
+        over. The next demand tries again.
+        """
+
+        async with self._mutation_lock:
+            config = self.store.load()
+            payload = config.to_payload()
+            if not payload_carries_credential_address(payload):
+                return
+            addresses: dict[str, str] = {}
+            for source in config.sources:
+                if not source.credential_ref:
+                    continue
+                try:
+                    address = await self.adapter.credential_address(
+                        source.credential_ref
+                    )
+                except Exception:
+                    # An address that cannot be read proves nothing about this
+                    # Source's ids, and a guess is what this design avoids.
+                    logger.debug(
+                        "model hub: no provable address for source %s", source.id
+                    )
+                    continue
+                if address:
+                    addresses[source.id] = address
+            try:
+                repair = repair_credential_addresses(payload, addresses)
+                if not repair.changed:
+                    return
+                # Selections move before the config is committed, because the
+                # config is the witness that anything needs repairing at all.
+                # Committing it first would clear that witness while a copy of
+                # one of its ids is still stored as somebody's selection; this
+                # order retries the whole pass instead, and both halves are
+                # idempotent.
+                selections = await self._repair_selections(
+                    frozenset(addresses.values())
+                )
+                await self._commit_synced(
+                    config,
+                    ModelHubConfig.from_payload(repair.payload),
+                )
+            except Exception:
+                logger.warning(
+                    "model hub: could not repair stored credential addresses",
+                    exc_info=True,
+                )
+                return
+        logger.info(
+            "model hub: removed credential addresses from stored ids "
+            "(%d source models, %d route hops, %d routes, %d agent menu "
+            "entries, %d model selections)",
+            repair.models,
+            repair.hops,
+            repair.routes,
+            repair.menu_entries,
+            selections,
+        )
+        # A running backend answers from the catalog it was started with, so
+        # reconciling the engine leaves it offering the ids that were just
+        # renamed. Same follow-up any other catalog mutation makes.
+        for backend in repair.backends:
+            try:
+                await self._refresh_backend_catalog(cast(BackendName, backend))
+            except Exception:
+                logger.warning(
+                    "model hub: could not refresh %s after an address repair",
+                    backend,
+                    exc_info=True,
+                )
+
+    async def _repair_selections(self, addresses: frozenset[str]) -> int:
+        """Hand the proven addresses to the owner of persisted selections."""
+
+        if self.repair_model_selections is None or not addresses:
+            return 0
+        return await self.repair_model_selections(addresses)
+
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
         has_hub_sources = any(
@@ -1321,6 +1437,7 @@ class ModelHubService:
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
             await self._ensure_runtime_dependency()
+            await self._repair_credential_addresses()
             if already_synced:
                 self._engine_preparation_failed = False
                 return
@@ -4040,12 +4157,52 @@ class ModelHubService:
             "routeable": True,
         }
 
-    @classmethod
     def _catalog_models_payload(
-        cls,
+        self,
         agent: ModelHubAgentSupplyConfig,
     ) -> list[dict]:
-        return [cls._catalog_model_payload(model) for model in agent.models]
+        hidden = self._hidden_retired_model_ids(agent)
+        return [self._catalog_model_payload(model) for model in agent.models if model.id not in hidden]
+
+    def _withdrawn_builtin_model_ids(self, backend: BackendName) -> set[str]:
+        # Either catalog may withdraw a model; the remote one does so without a
+        # release. A stale remote cache schedules the controller-owned refresh,
+        # whose completion reconciles the snapshot, so a new tombstone reaches
+        # the picker without waiting for a restart. A retired id the current
+        # snapshot revives is not withdrawn.
+        from vibe.backend_model_catalog import (
+            load_bundled_catalog,
+            load_cached_remote_catalog,
+            retired_backend_model_ids,
+            unlisted_retired_backend_model_ids,
+        )
+
+        retired = (
+            retired_backend_model_ids(backend, load_bundled_catalog())
+            | retired_backend_model_ids(backend, load_cached_remote_catalog())
+            | unlisted_retired_backend_model_ids(backend)
+        )
+        if not retired:
+            return set()
+        return retired - {item["id"] for item in self._current_builtin_models(backend)}
+
+    def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
+        # A retired built-in stays persisted and routeable, so any session,
+        # channel, or Agent pin keeps working; it only leaves picker
+        # projections. A row a manual route pins or the backend currently
+        # requests stays visible.
+        withdrawn = self._withdrawn_builtin_model_ids(cast(BackendName, agent.backend))
+        if not withdrawn:
+            return set()
+        requested = self._requested_model(agent)
+        return {
+            model.id
+            for model in agent.models
+            if model.origin == "builtin"
+            and model.id in withdrawn
+            and model.id != requested
+            and normalized_model_hub_override(agent.routes.get(model.id)) is None
+        }
 
     def backend_catalog_models(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -4058,8 +4215,9 @@ class ModelHubService:
         *, live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
     ) -> dict:
         backend = cast(BackendName, agent.backend)
+        hidden = self._hidden_retired_model_ids(agent)
         builtin_models = (
-            [model.id for model in agent.models]
+            [model.id for model in agent.models if model.id not in hidden]
             if agent.menu_kind == "fixed"
             else None
         )
@@ -4076,7 +4234,7 @@ class ModelHubService:
             unavailable_source_ids=unavailable_source_ids,
             live_recovery=live_recovery,
         )
-        menu_model_ids = [model.id for model in agent.models]
+        menu_model_ids = [model.id for model in agent.models if model.id not in hidden]
         model_supply = [
             {
                 "model_id": model_id,
@@ -4278,6 +4436,10 @@ class ModelHubService:
             )
 
         provider_ids: list[str] = []
+        # A source inventory (a native subscription lists the full fixed menu)
+        # never re-offers a withdrawn built-in, whether or not a row persists;
+        # a still-visible pinned row is already in the menu.
+        withdrawn = self._withdrawn_builtin_model_ids(agent_backend)
         source_by_id = {source.id: source for source in config.sources}
         for source_id in agent.sources.order:
             source = source_by_id.get(source_id)
@@ -4288,7 +4450,8 @@ class ModelHubService:
                     continue
                 candidate_id = model.id
                 if (
-                    candidate_id in menu_ids
+                    candidate_id in withdrawn
+                    or candidate_id in menu_ids
                     or candidate_id in builtin_ids
                     or candidate_id in provider_ids
                 ):
@@ -5345,6 +5508,7 @@ class ModelHubService:
             cast(BackendName, backend),
         )
         live_recovery = self.recovery.annotations(config)
+        hidden = self._hidden_retired_model_ids(agent) - {requested_model}
         return [
             self._agent_chain(
                 config,
@@ -5354,7 +5518,9 @@ class ModelHubService:
                 unavailable_source_ids=unavailable_source_ids,
                 live_recovery=live_recovery,
             )
+            # The overview is a picker surface; routing keeps every persisted row.
             for model_id in self._agent_model_ids(agent, requested_model)
+            if model_id not in hidden
         ]
 
     def opencode_public_models(self) -> dict[str, dict[str, Any]]:
@@ -6374,6 +6540,7 @@ class ModelHubService:
                 previous = self.store.load()
                 updated = self._clone_config(previous)
                 updated.enabled = True
+                updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
             await self._prepare_engine_for_demand()
             status = await self._engine_call(self.adapter.start())
@@ -6403,6 +6570,7 @@ class ModelHubService:
                     raise ModelHubError("runtime_busy", status=409)
                 updated = self._clone_config(previous)
                 updated.enabled = False
+                updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
                 return _runtime_payload(status, enabled=False)
 
@@ -6708,7 +6876,10 @@ class ModelHubService:
         if category == "served":
             return produce_turn_outcome("turn.served")
         if category == "request_nonfallback":
-            return produce_turn_outcome("turn.request_nonfallback")
+            return produce_turn_outcome(
+                "turn.request_nonfallback",
+                upstream_detail=outcome.upstream_detail,
+            )
         if category == "upstream_protocol":
             # The Gateway's existing protocol-error copy is the positive row;
             # a request-incompatible projection would misclassify the failure.
@@ -7742,6 +7913,9 @@ def create_default_service(
     backend_catalog_changed: Optional[
         Callable[[BackendName], Awaitable[None]]
     ] = None,
+    repair_model_selections: Optional[
+        Callable[[frozenset[str]], Awaitable[int]]
+    ] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -7795,4 +7969,5 @@ def create_default_service(
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
+        repair_model_selections=repair_model_selections,
     )

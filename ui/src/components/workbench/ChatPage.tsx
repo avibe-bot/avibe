@@ -63,6 +63,7 @@ import { AnnotationMessage } from './AnnotationMessage';
 import { FailureRetry } from './FailureRetry';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
+import { SenderHead } from './SenderHead';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import {
@@ -1282,16 +1283,19 @@ export const ChatPage: React.FC = () => {
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
-    if (!sessionId) return;
+    if (!sessionId) return null;
     const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
-      if (isCurrentRequest && !isCurrentRequest()) return;
-      if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
-      if (!claimQueueSnapshot()) return;
-      setQueue(res.queued ?? []);
+      if (isCurrentRequest && !isCurrentRequest()) return null;
+      if (sessionId !== sessionIdRef.current) return null; // switched chats mid-fetch
+      if (!claimQueueSnapshot()) return null;
+      const queued = res.queued ?? [];
+      setQueue(queued);
+      return queued;
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
+      return null;
     }
   }, [api, beginQueueSnapshotRead, sessionId]);
 
@@ -1592,6 +1596,8 @@ export const ChatPage: React.FC = () => {
   // and the merge in ``refresh`` only ever unions same-session rows.
   useEffect(() => {
     bootstrapRequestGenerationRef.current += 1;
+    // Returning to the same session must not revive an earlier send's ownership.
+    queueSendGenerationRef.current += 1;
     turnEpochRef.current += 1;
     // The gate is session-scoped. A PATCH for the previous chat may still be
     // pending after navigation, but it must never hold the new chat's bootstrap
@@ -2338,21 +2344,36 @@ export const ChatPage: React.FC = () => {
     // failed or ambiguous request never hides work the user may need to retry.
     setSendingQueueNow(true);
     setError(null);
-    // A turn is about to run (the flushed queue) — reflect it immediately so
-    // Stop stays available even if the controller's turn.start is missed/delayed
-    // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
+    const messageId = queue[0].id;
+    // Reflect admission immediately, but only undo this optimistic working
+    // state if no newer authoritative Turn event has arrived in the meantime.
     markWorking();
+    const turnEpochAtSend = turnEpochRef.current;
+    const reconcileFailure = async (keepWorking = false) => {
+      const refreshedQueue = await refreshQueue(isCurrentRequest);
+      if (!isCurrentRequest()) return;
+      if (!keepWorking && turnEpochAtSend === turnEpochRef.current) setWorking(false);
+      // HTTP refusals and transport failures have the same evidence boundary:
+      // retry advice is safe only for this exact, still-unfenced Delivery.
+      // A gone/fenced row or an unreadable/superseded snapshot is ambiguous.
+      const retryable = refreshedQueue?.some(
+        (item) => item.id === messageId && !isQueueDeliveryFenced(item),
+      ) ?? false;
+      setError(t(retryable ? 'chat.queue.sendFailed' : 'chat.queue.sendStatusUnknown'));
+    };
     try {
-      const res = await api.sendQueuedNow(sid, queue[0].id);
+      const res = await api.sendQueuedNow(sid, messageId);
       // Drop every effect from a request that lost ownership while it was in
       // flight, including responses that arrive after a newer send starts.
       if (!isCurrentRequest()) return;
       if (res && res.ok === false) {
         // stop_failed: the controller left the ORIGINAL turn running and the
-        // queue intact — keep Stop visible so the user can still interrupt it
-        // (Codex P2). Other failures mean no turn is running → clear working.
-        if (res.code !== 'stop_failed') setWorking(false);
-        setError(res.detail ? String(res.detail) : t('chat.stopFailed'));
+        // queue intact — preserve the existing Stop visibility behavior.
+        // Response detail is a transport/controller diagnostic, not
+        // user-facing copy. Reconcile even HTTP failures such as stale_head:
+        // another tab may already have sent the clicked Delivery.
+        await reconcileFailure(res.code === 'stop_failed');
+        return;
       } else if (res?.status === 'queued') {
         setError(t(res.reason === 'attachments_unavailable'
           ? 'chat.queue.attachmentsUnavailable'
@@ -2360,19 +2381,18 @@ export const ChatPage: React.FC = () => {
       } else if (res?.status === 'empty') {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
-        setWorking(false);
+        if (turnEpochAtSend === turnEpochRef.current) setWorking(false);
       } else {
         // A successful admission may only claim the compatible prefix.
         // Re-read the authoritative queue instead of assuming the whole visible
         // batch was flushed.
       }
       await refreshQueue(isCurrentRequest);
-    } catch (err) {
+    } catch {
       // The same ownership guard applies to failures: an older request must not
       // clear the new chat's working state or surface a stale error.
       if (isCurrentRequest()) {
-        setWorking(false);
-        setError(errorMessage(err) ?? String(err));
+        await reconcileFailure();
       }
     } finally {
       if (isCurrentRequest()) {
@@ -3430,7 +3450,9 @@ export const QueueStrip: React.FC<{
   if (queue.length === 0) return null;
   const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
   const headFenced = isQueueDeliveryFenced(queue[0]);
+  const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
+  const buttonBusy = sendingNow || (headFenced && !reconciling);
   return (
     <div className="shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
@@ -3445,20 +3467,24 @@ export const QueueStrip: React.FC<{
             size="sm"
             onClick={onSendNow}
             disabled={busy}
-            aria-busy={busy}
+            aria-busy={buttonBusy}
             className="h-6 min-w-[60px] justify-center px-2 text-[11px] text-cyan-ink"
           >
             {busy ? (
               <>
-                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                {t(queue[0].state === 'reconciling_steer' ? 'chat.queue.confirmingNow' : 'chat.queue.sendingNow')}
+                {reconciling ? (
+                  <Info className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                )}
+                {t(reconciling ? 'chat.queue.confirmingNow' : 'chat.queue.sendingNow')}
               </>
             ) : (
               t('chat.queue.sendNow')
             )}
           </Button>
         </div>
-        {headFenced && (
+        {reconciling && (
           <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
         )}
         {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
@@ -3950,6 +3976,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   footer,
 }) => {
   const { t } = useTranslation();
+  const { instanceKind } = useInstanceAuthorization();
   const recovery = useModelHubRecovery(modelRecovery, working);
   const navigate = useNavigate();
   const { openApp } = useWindowManager();
@@ -4006,6 +4033,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const forkSourceBanner =
     isForkedSession && forkSourceSessionId ? (
       <ForkSourceBanner sourceSessionId={forkSourceSessionId} sourceTitle={forkSourceSessionTitle} />
+    ) : null;
+  // One line at the head of a shared transcript saying why the bubbles below
+  // now carry names (design.pen nlrCu). Organization instances only — on a
+  // personal one there is nothing to explain.
+  const organizationNotice =
+    instanceKind === 'organization' ? (
+      <div className="flex h-10 shrink-0 items-center gap-2 rounded-lg border border-mint/20 bg-mint-soft px-3.5 text-[12px] font-medium text-mint-ink">
+        <Info className="size-4 shrink-0" />
+        <span className="truncate">{t('chat.organizationNotice')}</span>
+      </div>
     ) : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -4420,6 +4457,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8"
       >
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
+          {organizationNotice}
           {forkSourceBanner}
           {/* One slot at the head of the history for every way paging can end, so
               each outcome resolves in place instead of the top twitching: still
@@ -4637,6 +4675,10 @@ export const MessageRow = memo(function MessageRow({
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // Read here rather than threaded down as a prop: context reaches through the
+  // row's memo, so a personal↔organization change repaints the transcript
+  // without the page having to re-create every row's props.
+  const { instanceKind } = useInstanceAuthorization();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
   const [expanded, setExpanded] = useState(false);
 
@@ -4844,14 +4886,27 @@ export const MessageRow = memo(function MessageRow({
 
   // ----- User: right-aligned neutral bubble (kept distinct from agent mint) ---
   if (isUser) {
+    // On an Organization instance the bubble gets a head naming who wrote it
+    // (design.pen nlrCu) — which also carries the time, so the hover stamp
+    // underneath would just repeat it. A personal instance keeps the row
+    // exactly as it was: one owner, nothing to attribute.
+    const senderHead =
+      instanceKind === 'organization' ? (
+        <SenderHead
+          authorId={message.author_id}
+          label={message.sender_label}
+          createdAt={message.created_at}
+        />
+      ) : null;
     return (
       <div data-message-id={message.id} className={rowClass('justify-end')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-end gap-1">
+          {senderHead}
           <div className={USER_BUBBLE} style={messageFontStyle}>
             {bodyNode}
             {attachmentsNode}
           </div>
-          {time}
+          {senderHead ? null : time}
         </div>
       </div>
     );

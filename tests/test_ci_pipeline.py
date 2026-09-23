@@ -124,13 +124,23 @@ def test_ci_tool_install_command_propagates_failure(tmp_path, exit_code):
                 assert "--only-binary=:all:" in result.stdout
 
 
-def _run_isolated_unit_files(tmp_path: Path, sources: dict[str, str], *, timeout: str = "15"):
+def _run_isolated_unit_files(
+    tmp_path: Path,
+    sources: dict[str, str],
+    *,
+    timeout: str = "15",
+    timings: dict[str, float] | None = None,
+):
     (tmp_path / "tests").mkdir()
     (tmp_path / "scripts").mkdir()
     for name, source in sources.items():
         (tmp_path / "tests" / name).write_text(source, encoding="utf-8")
     shutil.copyfile(ROOT / "scripts/ci_unit_test_shards.py", tmp_path / "scripts/ci_unit_test_shards.py")
     shutil.copyfile(ROOT / "scripts/ci_pytest_metrics.py", tmp_path / "scripts/ci_pytest_metrics.py")
+    if timings is not None:
+        (tmp_path / "scripts" / "ci_unit_test_timings.json").write_text(
+            json.dumps({"durations_seconds": timings}), encoding="utf-8",
+        )
     return subprocess.run(
         ["bash", str(ROOT / "scripts/ci_unit_tests.sh")], cwd=tmp_path,
         env={**os.environ, "PYTHON": sys.executable, "CI_TEST_FILE_TIMEOUT_SECONDS": timeout,
@@ -170,6 +180,13 @@ def test_unit_file_watchdog_dumps_stacks_and_continues_fail_closed(tmp_path: Pat
     assert "test_after_stuck_file PASSED" in result.stdout
     assert "FAILED files:\n  tests/test_a_stuck.py" in result.stdout
     assert "All unit test files passed." not in result.stdout
+    # The dump names whichever frame the main thread held at the deadline, which
+    # in a file whose cost is spread across many tests is an ordinary cheap one.
+    # Saying so is the difference between reading the trace as evidence and
+    # reading it as a verdict on the test it happens to name.
+    assert "^ tests/test_a_stuck.py hit its 3s watchdog." in result.stdout
+    assert "No recorded duration for this file, so it ran on the 3s floor" in result.stdout
+    assert "not necessarily where it stalled" in result.stdout
     records = _metrics(result)
     assert records[-1]["file"] == "tests/test_b_pass.py"
     if phase == "shutdown":
@@ -177,6 +194,35 @@ def test_unit_file_watchdog_dumps_stacks_and_continues_fail_closed(tmp_path: Pat
         assert records[0]["boundary"] == "pytest_returned_before_interpreter_shutdown"
     else:
         assert len(records) == 1
+
+
+def test_unit_file_watchdog_budget_follows_the_file_own_recorded_cost(tmp_path: Path) -> None:
+    """A file the snapshot knows is slow gets headroom measured against itself.
+
+    The fixed budget this replaces could not tell "hung" from "slow": it was
+    generous for a 1s file and thin for the suite's slowest, so a uniformly
+    slow runner killed the slowest file first and named it as the culprit.
+    """
+    result = _run_isolated_unit_files(
+        tmp_path,
+        {
+            "test_a_stuck.py": "import time\ndef test_stuck():\n    time.sleep(3600)\n",
+            "test_b_pass.py": "def test_after_stuck_file():\n    pass\n",
+        },
+        timeout="4",
+        timings={"tests/test_a_stuck.py": 1.0},
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    # 8x its own second, not the 4s floor the same run gives an unknown file.
+    assert "Starting tests/test_a_stuck.py (timeout 8s, budgeted from its recorded 1s)." in result.stdout
+    assert "Timeout (0:00:08)!" in result.stderr
+    assert "^ tests/test_a_stuck.py hit its 8s watchdog." in result.stdout
+    assert "That budget is a multiple of this file's own recorded 1s" in result.stdout
+    # An unknown file keeps the floor, and the line it prints is unchanged.
+    assert "Starting tests/test_b_pass.py (timeout 4s)." in result.stdout
+    assert "test_after_stuck_file PASSED" in result.stdout
+    assert "FAILED files:\n  tests/test_a_stuck.py" in result.stdout
 
 
 @pytest.mark.parametrize("failed", [False, True])

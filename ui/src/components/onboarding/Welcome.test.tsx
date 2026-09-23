@@ -4,6 +4,14 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Welcome } from '../steps/Welcome';
+import { SetupFlowShell } from '../Wizard';
+import { loadingRegion } from '../settings/models/regionRead';
+import { useRef, useState, type ComponentProps } from 'react';
+import { useTranslation } from 'react-i18next';
+import { SETUP_SCREENS, type SetupAction, type SetupScreenHandle } from './setupFlow';
+import { SETUP_REGISTERED_SCREENS } from './setupScreenRegistry';
+import { ASSISTANT_ORDER } from './collaborationTimeline';
+import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 import { CollaborationStory } from './CollaborationStory';
 import { AccessTiles } from './AccessTiles';
 import en from '../../i18n/en.json';
@@ -15,6 +23,16 @@ vi.mock('../../context/ApiContext', () => ({ useApi: () => mocks.api }));
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
 const wrap = (element: React.ReactNode) => <I18nextProvider i18n={i18n}>{element}</I18nextProvider>;
+
+function Intro(props: Omit<ComponentProps<typeof Welcome>, 'active' | 'onActionChange'> & { active?: boolean }) {
+  const { t } = useTranslation();
+  const ref = useRef<SetupScreenHandle>(null);
+  const [action, setAction] = useState<SetupAction | null>(null);
+  return <><Welcome {...props} active={props.active ?? true} ref={ref} onActionChange={setAction} />
+    {action && <button disabled={action.disabled} onClick={() => ref.current?.activate()}>{t(action.labelKey)}</button>}
+    {/* The setup shell collapses the entry block on every screen; the wrapper mirrors it. */}
+    <AccessTiles active={false} /></>;
+}
 
 /** The tab going to the background, which jsdom exposes no other way. */
 const setHidden = (hidden: boolean) => act(() => {
@@ -58,7 +76,7 @@ describe('Welcome', () => {
   it('checks saved paths before advancing without persisting configuration', async () => {
     mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', path: `/test/${binary}` }));
     const next = vi.fn();
-    render(wrap(<Welcome data={{ agents: { claude: { cli_path: '/custom/claude' } } }} onNext={next} />));
+    render(wrap(<Intro data={{ agents: { claude: { cli_path: '/custom/claude' } } }} onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     await waitFor(() => expect(next).toHaveBeenCalledOnce());
     expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary)).toEqual(['/custom/claude', 'codex', 'opencode']);
@@ -67,7 +85,7 @@ describe('Welcome', () => {
   it('retains a failed detection on Welcome and permits retry', async () => {
     mocks.api.detectCli.mockRejectedValueOnce(new Error('Probe unavailable')).mockResolvedValue({ found: false });
     const next = vi.fn();
-    render(wrap(<Welcome onNext={next} />));
+    render(wrap(<Intro onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     await screen.findByRole('alert');
     expect(next).not.toHaveBeenCalled();
@@ -75,11 +93,76 @@ describe('Welcome', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(next).toHaveBeenCalledOnce());
   });
-  it('renders the approved Chinese copy', async () => {
+  // XpVZ/B: in the shell the failure must land in the slot AFTER the shared pair. Left
+  // in the screen it sits before the footer, and a long diagnostic there moves the
+  // anchor Welcome and the setup screen are supposed to share.
+  it('hands a failed detection to the slot below the shared pair instead of the screen', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    mocks.api.detectCli.mockRejectedValue(new Error('Probe unavailable'));
+    const { container } = render(wrap(<SetupFlowShell sequence={SETUP_SCREENS} capability="enabled" gatewayEnabled
+      onRetrySetup={vi.fn()} runtimeRead={loadingRegion()}
+      renderScreen={(id, { active, onActionChange }, ref) => (id === 'intro'
+        ? <Welcome active={active} onActionChange={onActionChange} ref={ref} onNext={vi.fn()} />
+        : <h1 tabIndex={-1}>{id}</h1>)} />));
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    const alert = await screen.findByRole('alert');
+    const aside = container.querySelector('[data-setup-action-aside]') as HTMLElement;
+    const footer = container.querySelector('.onboarding-setup-footer') as HTMLElement;
+    expect(aside.contains(alert)).toBe(true);
+    expect(container.querySelector('[data-setup-screen-root="intro"]')!.contains(alert)).toBe(false);
+    // Order, not just ownership: only content after the footer is content the anchor
+    // cannot feel.
+    expect(footer.compareDocumentPosition(aside) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' }).closest('.onboarding-primary-action')).toBeTruthy();
+  });
+  // e-Dq: detection awaits three CLI probes and only then asks to move. That
+  // continuation captured its answer before the await, so it cannot know the setup
+  // route stopped being the surface being read — and teaching this screen to re-check
+  // would only move the obligation onto the next screen that forgets. Movement has one
+  // owner, the shell, which is where a journey sitting behind another retained surface
+  // is held still and where it is handed back when the route returns.
+  it('refuses a detection that settles after the route went quiet, then moves when it returns', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const probes: ((result: { found: boolean; path: string }) => void)[] = [];
+    mocks.api.detectCli.mockImplementation(() => new Promise((resolve) => { probes.push(resolve); }));
+    const onward = SETUP_REGISTERED_SCREENS[1];
+    const shell = (routeActive: boolean) => wrap(
+      <RouteSurfaceActiveContext.Provider value={routeActive}>
+        <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability="enabled" gatewayEnabled
+          onRetrySetup={vi.fn()} runtimeRead={loadingRegion()}
+          renderScreen={(id, { active, onActionChange, onNavigate }, ref) => (id === 'intro'
+            ? <Welcome active={active} onActionChange={onActionChange} ref={ref} onNext={() => { onNavigate(onward); }} />
+            : <h1 tabIndex={-1}>{id}</h1>)} />
+      </RouteSurfaceActiveContext.Provider>);
+    const { container, rerender } = render(shell(true));
+    const current = () => container.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
+    const answer = async () => act(async () => { for (const resolve of probes.splice(0)) resolve({ found: true, path: '/test/bin' }); });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(probes).toHaveLength(ASSISTANT_ORDER.length));
+    rerender(shell(false));
+    await answer();
+    expect(current()).toBe('intro');
+    expect(document.activeElement?.textContent).not.toBe(onward);
+    // Refused, not broken: nothing failed, so there is nothing to report to anybody.
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    rerender(shell(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(probes).toHaveLength(ASSISTANT_ORDER.length));
+    await answer();
+    await waitFor(() => expect(current()).toBe(onward));
+  });
+  it('renders the approved Chinese copy and keeps the entry block mounted, hidden and inert', async () => {
     await i18n.changeLanguage('zh');
-    render(wrap(<Welcome onNext={vi.fn()} />));
+    const { container } = render(wrap(<Intro onNext={vi.fn()} />));
     expect(screen.getByRole('heading', { name: '各有所长，接力完成' })).toBeTruthy();
-    expect(screen.getAllByRole('listitem')).toHaveLength(6);
+    const block = container.querySelector('.onboarding-access') as HTMLElement;
+    expect(block.querySelectorAll('.onboarding-access-tile')).toHaveLength(6);
+    expect(block.hasAttribute('hidden')).toBe(true);
+    expect(block.hasAttribute('inert')).toBe(true);
   });
 });
 
@@ -153,7 +236,7 @@ describe('collaboration lifecycle and access interaction', () => {
   });
   it('shows completed work and stops all timers for reduced motion', () => {
     vi.useFakeTimers(); mocks.reduced = true;
-    const { container } = render(wrap(<Welcome onNext={vi.fn()} />));
+    const { container } = render(wrap(<Intro onNext={vi.fn()} />));
     expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(3);
     expect(screen.queryByTestId('handoff-pulse')).toBeNull();
     // Get started is the only button on the screen.
@@ -163,6 +246,8 @@ describe('collaboration lifecycle and access interaction', () => {
   it('pauses idle emphasis throughout pointer and keyboard interaction', () => {
     vi.useFakeTimers();
     const { container } = render(wrap(<AccessTiles />));
+    // An active consumer still draws the block: hiding it in setup is shell policy.
+    expect((container.querySelector('.onboarding-access') as HTMLElement).hasAttribute('hidden')).toBe(false);
     act(() => vi.advanceTimersByTime(2000));
     expect(container.querySelectorAll('[data-emphasis="true"]')).toHaveLength(1);
     fireEvent.pointerEnter(screen.getByRole('list'));

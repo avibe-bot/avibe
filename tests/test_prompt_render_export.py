@@ -32,6 +32,11 @@ _EVIDENCE_LED_PRINCIPLE = (
     "Ground judgments in facts and take responsibility for their reliability and practical value. "
     "Turn uncertainty into motivation for exploration and action, rather than an excuse to stop prematurely."
 )
+_CODEX_SKILL_REUSE_GUIDANCE = (
+    "Choose skills by task relevance, but load a skill only if it has not already been read "
+    "in this conversation; reuse already-loaded instructions across turns, callbacks, "
+    "and resumed work instead of reloading them for each turn."
+)
 
 
 def _inputs(backend="codex", memory=True, history="managed", skill_mode="pages"):
@@ -79,6 +84,7 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     request = _inputs(backend, memory, history, skill_mode)
     result = render_prompt_context(request)
     options = dict(request["options"])
+    options["backend"] = backend
     options["context"] = MessageContext(**options["context"])
     common = build_system_prompt_injection(**options)
     production = build_system_prompt_injection(agent_instructions=request["agent_instructions"], **options)
@@ -159,6 +165,7 @@ def test_evidence_led_principle_is_shared_by_production_export_and_studio(monkey
     request = _inputs(backend)
     rendered = render_prompt_context(request)
     options = dict(request["options"])
+    options["backend"] = backend
     options["context"] = MessageContext(**options["context"])
     production = build_system_prompt_injection(agent_instructions=request["agent_instructions"], **options)
     if backend == "codex":
@@ -180,6 +187,18 @@ def test_runtime_snapshot_has_only_tags_and_verbatim_content():
     assert CodexAgent._render_developer_prompt_snapshot(prompt) == (
         "<avibe_runtime_instructions>\n\n" + prompt + "\n</avibe_runtime_instructions>"
     )
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("skill_mode", ["empty", "manual", "single", "pages"])
+def test_skill_reuse_clarification_is_codex_only(monkeypatch, backend, skill_mode):
+    _environment(monkeypatch, skill_mode=skill_mode)
+    rendered = render_prompt_context(_inputs(backend, skill_mode=skill_mode))
+    assert rendered["text"].count(_CODEX_SKILL_REUSE_GUIDANCE) == (backend == "codex")
+    if backend == "codex":
+        guidance = next(block for block in rendered["blocks"] if block["id"] == "codex-skill-reuse")
+        assert guidance["source_path"] == "core/prompts/codex-skill-reuse.md"
+        assert guidance["text"].count(_CODEX_SKILL_REUSE_GUIDANCE) == 1
 
 
 @pytest.mark.parametrize("backend,memory,history,skill_mode", itertools.product(
@@ -233,9 +252,13 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
     blocks = rendered["blocks"]
     if backend == "codex":
         blocks = blocks[1:-1]
-    assert [block["id"] for block in blocks] == [
-        "base-capabilities-intro", "agent-working-principles", "base-capabilities-body", "show-pages-prompt",
+    expected = [
+        "base-capabilities-intro", "agent-working-principles", "base-capabilities-body",
     ]
+    if backend == "codex":
+        expected.append("codex-skill-reuse")
+    assert [block["id"] for block in blocks] == [*expected, "show-pages-prompt"]
+    assert rendered["text"].count(_CODEX_SKILL_REUSE_GUIDANCE) == (backend == "codex")
     assert blocks[1]["text"] == prompt_text("agent-working-principles")
     assert rendered == render_prompt_context(request)
 
@@ -355,7 +378,10 @@ def test_real_cli_discovers_updated_skill_and_exports_its_rendered_row(monkeypat
     assert second["revision"] != first["revision"]
 
 
-@pytest.mark.parametrize("payload", [[], None, {"backend": "unknown"}, {"backend": "codex", "options": {"unknown": True}}])
+@pytest.mark.parametrize("payload", [
+    [], None, {"backend": "unknown"}, {"backend": "codex", "options": {"unknown": True}},
+    {"backend": "claude", "options": {"backend": "codex"}},
+])
 def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys, payload):
     context_file = tmp_path / "context.json"
     context_file.write_text(json.dumps(payload), encoding="utf-8")
@@ -474,7 +500,7 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
 
 def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
-    changed = {"skills-prompt", "skills-manual-prompt"}
+    changed = {"skills-prompt", "skills-manual-prompt", "codex-skill-reuse"}
     for backend, memory, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
@@ -485,6 +511,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
-    # omitting only the two approved Skill-loading guidance blocks and restoring
-    # the previous verification principle. Every other byte/order stays pinned.
+    # omitting only the approved Skill-loading guidance blocks (including the
+    # Codex-only reuse sentence) and restoring the previous verification principle.
+    # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "fd82657d51e3193f54f939a3f159e7c7034a40d0b44388399e34a4aa17b14ea6"
