@@ -37,7 +37,7 @@ capability:
     # narrows, plus the one predicate that separates them.
     - ui/src/components/settings/models/MigrationDialog.test.tsx
     - ui/src/components/settings/models/migrationScan.test.ts
-    - ui/src/components/onboarding/ImportKeysNotice.test.tsx
+    - ui/src/components/onboarding/providers/providerStage.test.ts
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
