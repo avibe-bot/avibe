@@ -303,19 +303,26 @@ def disable_device_subscription(
     endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
     if not device_id and not endpoint:
         return False
+    device_ids = {device_id} if device_id else set()
+    if endpoint:
+        endpoint_row = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+        if endpoint_row and endpoint_row.get("device_id"):
+            # A previous endpoint keeps the rotation's device identity even if
+            # another tab submitted a different ID during logout.
+            device_ids.add(endpoint_row["device_id"])
     stmt = (
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
     )
-    if endpoint and device_id:
+    if endpoint and device_ids:
         stmt = stmt.where(
             (web_push_subscriptions.c.endpoint == endpoint)
-            | (web_push_subscriptions.c.device_id == device_id)
+            | (web_push_subscriptions.c.device_id.in_(device_ids))
         )
     elif endpoint:
         stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
     else:
-        stmt = stmt.where(web_push_subscriptions.c.device_id == device_id)
+        stmt = stmt.where(web_push_subscriptions.c.device_id.in_(device_ids))
     result = conn.execute(
         stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=_utc_now_iso())
     )

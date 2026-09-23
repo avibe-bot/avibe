@@ -139,7 +139,10 @@ def test_late_send_success_preserves_provider_invalidation(tmp_path):
         assert after_success["last_failure_at"] == invalidated["last_failure_at"]
 
 
-def test_logout_disables_rotated_endpoint_when_old_endpoint_was_submitted(tmp_path):
+@pytest.mark.parametrize("submitted_device_id", ["device-1", "stale-device"])
+def test_logout_disables_rotated_endpoint_when_old_endpoint_was_submitted(
+    tmp_path, submitted_device_id
+):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -165,7 +168,8 @@ def test_logout_disables_rotated_endpoint_when_old_endpoint_was_submitted(tmp_pa
         )
 
         assert web_push_service.disable_device_subscription(
-            conn, user_key="remote:user-a", endpoint=previous["endpoint"], device_id="device-1",
+            conn, user_key="remote:user-a", endpoint=previous["endpoint"],
+            device_id=submitted_device_id,
         )
         assert web_push_service.get_enabled_by_endpoint(
             conn, endpoint=rotated["endpoint"], user_key="remote:user-a",

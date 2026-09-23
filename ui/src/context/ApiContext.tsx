@@ -536,6 +536,7 @@ export type ApiContextType = {
     deviceLabel?: string,
     deviceId?: string,
     previousEndpoints?: string[],
+    backgroundRotation?: boolean,
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string, deviceId?: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
@@ -2621,6 +2622,7 @@ export type WebPushStatusPayload = {
 
 export type WebPushSubscriptionResult = {
   ok: boolean;
+  accepted: boolean;
   subscription: {
     id: string;
     user_key: string;
@@ -2629,7 +2631,7 @@ export type WebPushSubscriptionResult = {
     device_id?: string | null;
     user_agent?: string | null;
     device_label?: string | null;
-  };
+  } | null;
 };
 
 export type WebPushTestResult = {
@@ -3755,12 +3757,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
-    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints) =>
+    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation) =>
       postJson('/api/web-push/subscriptions', {
         subscription,
         device_label: deviceLabel,
         device_id: deviceId,
         previous_endpoints: previousEndpoints,
+        background_rotation: backgroundRotation,
       }),
     unsubscribeWebPush: (endpoint, deviceId) =>
       deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),

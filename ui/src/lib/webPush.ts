@@ -58,7 +58,7 @@ async function writeCachedPushValue(path: string, key: 'endpoint' | 'device_id',
 let deviceIdPromise: Promise<string> | undefined;
 
 export function getWebPushDeviceId(): Promise<string> {
-  deviceIdPromise ??= (async () => {
+  const resolveDeviceId = async () => {
     let deviceId: string | null = null;
     try {
       deviceId = window.localStorage.getItem(WEB_PUSH_DEVICE_ID_KEY);
@@ -75,7 +75,12 @@ export function getWebPushDeviceId(): Promise<string> {
     }
     await writeCachedPushValue(WEB_PUSH_DEVICE_ENTRY_PATH, 'device_id', deviceId);
     return deviceId;
-  })();
+  };
+  deviceIdPromise ??= (async () => (
+    navigator.locks?.request
+      ? navigator.locks.request(WEB_PUSH_DEVICE_ID_KEY, resolveDeviceId)
+      : resolveDeviceId()
+  ))();
   return deviceIdPromise;
 }
 
@@ -124,8 +129,23 @@ export async function getExistingWebPushSubscription(): Promise<PushSubscription
   return registration?.pushManager.getSubscription() ?? null;
 }
 
+export function webPushSubscriptionUsesVapidKey(
+  subscription: PushSubscription,
+  publicKey: string,
+): boolean {
+  try {
+    return arrayBuffersEqual(
+      subscription.options.applicationServerKey,
+      urlBase64ToArrayBuffer(publicKey),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type EnableWebPushOptions = {
   forceResubscribe?: boolean;
+  recoverOnly?: boolean;
 };
 
 export async function enableWebPush(
@@ -169,7 +189,17 @@ export async function enableWebPush(
     ...(existing?.endpoint ? [existing.endpoint] : []),
     ...await getRememberedWebPushEndpoints(),
   ];
-  await api.subscribeWebPush(json, undefined, await getWebPushDeviceId(), previousEndpoints);
+  const result = await api.subscribeWebPush(
+    json,
+    undefined,
+    await getWebPushDeviceId(),
+    previousEndpoints,
+    options.recoverOnly,
+  );
+  if (options.recoverOnly && !result.accepted) {
+    await subscription.unsubscribe();
+    throw new Error('recovery_not_authorized');
+  }
   await rememberWebPushEndpoint(endpoint);
   return json;
 }
@@ -177,12 +207,11 @@ export async function enableWebPush(
 export async function disableWebPush(api: ApiContextType): Promise<boolean> {
   const subscription = await getExistingWebPushSubscription();
   const endpoint = subscription?.endpoint;
+  if (endpoint) {
+    await api.unsubscribeWebPush(endpoint, await getWebPushDeviceId());
+  }
   if (subscription) {
     await subscription.unsubscribe();
   }
-  if (endpoint) {
-    await api.unsubscribeWebPush(endpoint, await getWebPushDeviceId());
-    return true;
-  }
-  return false;
+  return Boolean(endpoint);
 }
