@@ -91,6 +91,8 @@ describe('startup dependency refresh', () => {
     expect(dependencyNeedsStartupRepair({ id: 'avault', installed: true, status: 'upgrade_required' })).toBe(true);
     expect(dependencyNeedsStartupRepair({ id: 'tmux', installed: true, status: 'error' })).toBe(true);
     expect(dependencyNeedsStartupRepair(dependency('avault', true))).toBe(false);
+    expect(dependencyNeedsStartupRepair({ id: 'show-runtime', installed: null, status: 'unknown' })).toBe(false);
+    expect(dependencyIsStartupRepairing({ id: 'show-runtime', installed: null, status: 'unknown' }, new Set(['show-runtime']))).toBe(true);
     expect(dependencyNeedsStartupRepair(dependency('node', false))).toBe(false);
   });
 

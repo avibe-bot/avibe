@@ -1369,8 +1369,9 @@ orchestrator took the inventory and made the scope ruling below.
     dependency is startup-managed and missing, `upgrade_required` or `error`.
     While `reconciling` is true, every such dependency's install, update or
     repair button is disabled, whether or not it is the active step.
-    `dependencyIsStartupRepairing` keeps its active-ID filter and now drives only
-    the badge, the spinner and the label. Ready dependencies stay actionable.
+    The button also stays disabled for the active step if its status is outside
+    that pending set. `dependencyIsStartupRepairing` keeps its active-ID filter
+    for the badge, spinner and label. Ready dependencies stay actionable.
   - **Deliberate over-block.** A dependency the reconciler skips this pass, such
     as Show Runtime without Node or tmux under `VIBE_INSTALL_SKIP_TMUX`, is also
     withheld until the pass ends. The page keeps polling while `reconciling` is
@@ -1383,7 +1384,11 @@ orchestrator took the inventory and made the scope ruling below.
     - avault's Reinstall stays enabled;
     - once the pass ends, both install buttons are enabled.
 
-    A pure test covers the new predicate.
+    A second page test covers an active step with `unknown` status: it shows
+    installing but cannot start a manual install. Pure tests cover the pending
+    states and the active-ID status boundary. The focused Settings suite passed
+    1,627 tests in 100 files; `npm run build` (including TypeScript checks) and
+    `npm run lint` passed with no baseline drift.
   - **Mutations.** Each fails at least one test: disabling only the active step;
     drawing the spinner or the label from the pending set; dropping `error` from
     the repair states; withholding regardless of `reconciling`.

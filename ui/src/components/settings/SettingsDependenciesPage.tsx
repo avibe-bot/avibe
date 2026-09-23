@@ -244,7 +244,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                       <Button
                         variant={d.installed ? 'secondary' : 'brand'}
                         size="xs"
-                        disabled={dependencyOperationBusy || repairBlockedBySidecar || startupRepairPending}
+                        disabled={dependencyOperationBusy || repairBlockedBySidecar || startupInstalling || startupRepairPending}
                         onClick={() => void install(d, id)}
                       >
                         {installing || startupInstalling ? (

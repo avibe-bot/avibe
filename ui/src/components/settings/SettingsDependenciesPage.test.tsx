@@ -141,6 +141,22 @@ describe('SettingsDependenciesPage Model Hub engine', () => {
 });
 
 describe('SettingsDependenciesPage startup reconciliation', () => {
+  it('blocks the active step even when its status is outside the queued repair set', async () => {
+    stubDependencies({
+      ok: true,
+      reconciling: true,
+      reconciling_dependencies: ['askill'],
+      deps: [dependency({ id: 'askill', installed: null, status: 'unknown', action_class: 'repairable' })],
+    });
+    renderPage();
+
+    const active = await screen.findByRole('button', { name: 'settings.dependencies.installing' });
+    expect((active as HTMLButtonElement).disabled).toBe(true);
+    expect(active.querySelector('.animate-spin')).not.toBeNull();
+    await userEvent.click(active);
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
   it('withholds a later step while another step installs, and releases it when the pass ends', async () => {
     const deps = [
       dependency({ id: 'askill', installed: false, status: 'missing', action_class: 'repairable', version: null }),
