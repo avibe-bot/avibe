@@ -1372,6 +1372,104 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     assert ("error", "service process exited before startup completed", 1234, 5678) in statuses
 
 
+def _ui_refuses_to_start(monkeypatch, *, reused: bool):
+    """Wire cmd_start for the one case where ``start_ui`` hands back no pid.
+
+    ``runtime.start_ui`` returns ``None`` when the recorded UI process is alive,
+    is a UI server, is incompatible with the requested host and port, and will
+    not stop. It deliberately starts no replacement -- one would only die on
+    bind while the stale process kept serving -- and it keeps the pid record
+    naming the process that has to be stopped.
+    """
+
+    calls: list[str] = []
+    statuses: list[tuple] = []
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+
+    def start_service(**kwargs):
+        calls.append("start_service")
+        return _fake_start_result(1234, kwargs, reused=reused)
+
+    def refuse_ui(host, port, **kwargs):
+        calls.append("start_ui")
+        return None
+
+    def stop_service():
+        calls.append("stop_service")
+        return True
+
+    def wait_for_service_ready(pid, timeout):
+        calls.append("wait_for_service_ready")
+        return pid
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234 if reused else None)
+    monkeypatch.setattr(cli.runtime, "start_service", start_service)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(cli.runtime, "start_ui", refuse_ui)
+    monkeypatch.setattr(cli.runtime, "stop_service", stop_service)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", wait_for_service_ready)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+    return SimpleNamespace(calls=calls, statuses=statuses)
+
+
+def test_cmd_start_does_not_leave_its_own_service_running_when_the_ui_refuses(monkeypatch, capsys):
+    """A start that cannot finish must not leave a service nobody can stop.
+
+    No UI pid ends the start: the status writes carry that pid and
+    ``validate_start_receipt`` rejects a receipt without one. Carrying on
+    regardless left the service this command had just started alive with no
+    receipt ever printed -- and an unreceipted service is adopted as ``reused``
+    on the next attempt, so the desktop shell never owns the stop again.
+
+    Deliberately fix-agnostic: rolling the service back and refusing to start it
+    at all both satisfy the invariant below.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=False)
+
+    failure = None
+    try:
+        cli.cmd_start()
+    except Exception as error:  # noqa: BLE001 - the shape of the failure is asserted below
+        failure = error
+
+    assert failure is not None, "cmd_start reported success after the UI refused to start"
+    assert "@avibe-start-receipt:" not in capsys.readouterr().out
+    assert "start_service" not in started.calls or "stop_service" in started.calls, (
+        f"cmd_start left the service it started running with no start receipt: {started.calls}"
+    )
+    assert "running" not in [entry[0] for entry in started.statuses], (
+        f"cmd_start announced a running pair for a start that could not finish: {started.statuses}"
+    )
+
+
+def test_cmd_start_never_stops_a_service_it_did_not_start_when_the_ui_refuses(monkeypatch, capsys):
+    """The rollback is scoped to this command's own start, and nothing else.
+
+    A reused service belongs to whoever started it. The UI refusing still fails
+    the command, because there is no pid to receipt, but it must not touch the
+    service and must not restate the pair's status -- the stale UI is still
+    running with its pid record preserved, so a write naming no UI pid would
+    contradict it.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=True)
+
+    with pytest.raises(RuntimeError):
+        cli.cmd_start()
+
+    assert "stop_service" not in started.calls, "cmd_start stopped a service it did not start"
+    assert started.statuses == [], f"cmd_start restated the status of a reused pair: {started.statuses}"
+    assert "@avibe-start-receipt:" not in capsys.readouterr().out
+
+
 def _memory_start_config(*, memory_enabled: bool = True, language: str = "en") -> SimpleNamespace:
     return SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
