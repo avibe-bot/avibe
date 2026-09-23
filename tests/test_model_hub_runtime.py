@@ -6333,6 +6333,9 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
         ("session_key=s1, password='p w'", "session_key=[redacted]"),
         ("password: `correct horse battery staple`", "password: [redacted]"),
         ('bad token=\\"a\\" b\\" c', "bad token=[redacted]"),
+        ('rejected {"token":"opaquevalue123456789"}', 'rejected {"token":[redacted]'),
+        ("""echo {'password': 'correct horse battery staple'}""", "echo {'password': [redacted]"),
+        ('{"api_key" : "opaque"}', '{"api_key" : [redacted]'),
         ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
     ],
 )

@@ -114,7 +114,8 @@ def redact_credential_material(value: str) -> str:
 
 
 # Everything after a secret-like label (``token=…``, ``client_secret: "…"``,
-# ``password: `a b c` ``) in free text Avibe republishes. The value's extent is
+# ``password: `a b c` ``, serialized ``{"api_key": "…"}``) in free text Avibe
+# republishes. The value's extent is
 # deliberately not parsed: quoting, backticks, and escapes vary per upstream, and a
 # parser that misjudges the end leaks the rest of the value, so the remainder of the
 # message is dropped instead. The label needs no word boundary (``client_secret``
@@ -123,7 +124,7 @@ def redact_credential_material(value: str) -> str:
 # patterns so benign labels such as ``max token: 4096`` in a model name are not
 # rejected.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)\s*[:=]\s*"
+    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
 )
 
 
