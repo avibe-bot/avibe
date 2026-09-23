@@ -151,6 +151,9 @@ class EngineSupervisor:
         """
         with self._lock:
             if not self._is_running_locked() or self._connection is None:
+                # A previous service may have left an engine serving the old
+                # projection: a save must not succeed beside it.
+                self._require_no_untracked_engine_locked()
                 return
             self._reload_locked(previous_sources)
 

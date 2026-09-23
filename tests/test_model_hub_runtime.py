@@ -3467,14 +3467,14 @@ def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path)
 
 def test_supervisor_refresh_and_reap_stop_an_engine_a_previous_service_left_running(tmp_path: Path) -> None:
     record = tmp_path / "state" / "engine-process.json"
-    for operation in ("restart_if_running", "with_engine_excluded"):
+    for operation in ("restart_if_running", "reload_config_if_running", "with_engine_excluded"):
         orphan = _orphan_engine(tmp_path)
         second, _store = _fixture_supervisor(tmp_path)
 
         if operation == "with_engine_excluded":
             assert second.with_engine_excluded(lambda client: client) is None
         else:
-            second.restart_if_running()
+            getattr(second, operation)()
 
         _wait_for(lambda: orphan.poll() is not None)
         assert second._process is None
@@ -3513,7 +3513,11 @@ def test_supervisor_refresh_refuses_while_a_previous_engine_is_unconfirmed(
     monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
     second, _store = _fixture_supervisor(tmp_path)
 
-    for call in (second.restart_if_running, lambda: second.with_engine_excluded(pytest.fail)):
+    for call in (
+        second.restart_if_running,
+        second.reload_config_if_running,
+        lambda: second.with_engine_excluded(pytest.fail),
+    ):
         with pytest.raises(EngineUnavailableError) as raised:
             call()
         assert raised.value.reason == "previous_engine_alive"
