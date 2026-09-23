@@ -530,6 +530,26 @@ def _serialize_ipv6(address: list[int]) -> str:
     return "".join(out)
 
 
+_ACE_PREFIX = "xn--"
+
+
+def _ace_label(label: str) -> str:
+    """*label*, an ``xn--`` spelling, when it round-trips; ``""`` otherwise."""
+    try:
+        decoded = label[len(_ACE_PREFIX) :].encode("ascii").decode("punycode")
+    except (UnicodeError, ValueError):
+        return ""
+    if not decoded or decoded.isascii():
+        return ""
+    try:
+        encoded = idna.encode(
+            decoded, uts46=True, transitional=False, std3_rules=False
+        ).decode("ascii")
+    except (UnicodeError, ValueError):
+        return ""
+    return encoded if encoded == label else ""
+
+
 def _canonical_domain(host: str) -> str:
     """A non-IP host as a browser serializes it, or ``""`` when it names none.
 
@@ -549,12 +569,23 @@ def _canonical_domain(host: str) -> str:
         return ""
     labels: list[str] = []
     for label in decoded.split("."):
-        if label.isascii():
+        if label.isascii() and not label.lower().startswith(_ACE_PREFIX):
             # A browser passes an ASCII label through untouched apart from case,
             # even one UTS #46 refuses: ``my_site.example.com`` holds an
             # underscore and ``ab--cd.example`` trips the hyphen rule, and both
             # resolve. Running them through IDNA would lose the citation.
             labels.append(label.lower())
+            continue
+        if label.isascii():
+            # An ``xn--`` label is the one ASCII spelling a browser does not
+            # pass through: it decodes the punycode and refuses the whole URL
+            # when that fails (``https://xn--/x`` does not open). Accept one
+            # only when it is the exact encoding of a label the path below
+            # accepts, so a citation never names a host its link cannot reach.
+            ace = _ace_label(label.lower())
+            if not ace:
+                return ""
+            labels.append(ace)
             continue
         try:
             # A browser labels an internationalized host by the punycode it

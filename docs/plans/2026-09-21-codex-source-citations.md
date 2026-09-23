@@ -419,8 +419,11 @@ blob with no way to reach the page the answer is based on.
   non-transitional UTS #46 per label (`例え.jp` → `xn--r8jz45g.jp`,
   `faß.de` → `xn--fa-hia.de`, where the standard library's IDNA 2003 codec would
   have said `fass.de` — a different domain than the link opens), with ASCII
-  labels passed through as a browser passes them and a host that cannot be
-  canonicalized rejected rather than guessed at. A host whose last label is a
+  labels passed through as a browser passes them — except an `xn--` label,
+  which a browser decodes and refuses the whole URL over when that fails
+  (`https://xn--/x`), so one is kept only when it is the exact encoding of an
+  accepted label — and a host that cannot be canonicalized rejected rather
+  than guessed at. A host whose last label is a
   number goes through WHATWG's IPv4 parser for the same reason, so
   `2130706433`, `0x7f.1`, `127.1` and `017700000001` are all attributed to
   `127.0.0.1` instead of hiding a loopback destination behind the digits that

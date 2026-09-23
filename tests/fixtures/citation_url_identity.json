@@ -330,6 +330,12 @@
     {"why": "userinfo is case-folded nowhere - it may be a password - and neither is the host beside it; the label is where the browser's answer shows", "raw": "https://user:PW@Example.COM/x", "url": "https://user:PW@Example.COM/x", "label": "example.com"},
     {"why": "the label names the host and never the userinfo, so a username cannot dress a link up as a domain", "raw": "https://USER@example.com/x", "url": "https://USER@example.com/x", "label": "example.com"},
     {"why": "userinfo hides an IPv6 host no better", "raw": "https://attacker.example@[::1]/x", "url": "https://attacker.example@[::1]/x", "label": "[::1]"},
+    {"why": "a well-formed ACE label is the host a browser opens, so it keeps its citation", "raw": "https://xn--fa-hia.de/x", "url": "https://xn--fa-hia.de/x", "label": "xn--fa-hia.de"},
+    {"why": "an ACE prefix in any case is still that label, and the label names it lowercased", "raw": "https://XN--80AK6AA92E.com/x", "url": "https://XN--80AK6AA92E.com/x", "label": "xn--80ak6aa92e.com"},
+    {"why": "an ACE label with no punycode after the prefix makes a browser refuse the URL", "raw": "https://xn--/x", "url": null, "label": null},
+    {"why": "an ACE label whose punycode decodes to a control character is not a host", "raw": "https://xn--abc/x", "url": null, "label": null},
+    {"why": "an ACE label must round-trip to a non-ASCII label: xn--ascii- decodes to plain ascii, and refusing what a browser might still open is the safe direction", "raw": "https://xn--ascii-/x", "url": null, "label": null},
+    {"why": "an ACE label that does not round-trip is refused even beside a valid one", "raw": "https://xn--a.xn--fa-hia/x", "url": null, "label": null},
     {"why": "an authority is read only where one is written: a browser repairs the missing slashes, but the rule that keeps a hostless URL out keeps this out too, and a search result always writes them", "raw": "https:example.com/x", "url": null, "label": null}
   ]
 }
