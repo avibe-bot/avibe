@@ -4361,6 +4361,7 @@
         "served": "{{model}} was eventually served.",
         "exhausted": "Every source for {{model}} failed upstream.",
         "failed_terminal": "The upstream API rejected the request for {{model}}.",
+        "failed_local": "The request for {{model}} failed; see the reason below.",
         "no_candidate": "No source could serve {{model}} when the request was made.",
         "canceled": "The request for {{model}} was canceled."
       },
@@ -4372,6 +4373,7 @@
       "copyRecord": "Copy record",
       "reason": {
         "quota_exhausted": "Quota exhausted",
+        "cooldown": "Cooling down",
         "rate_limited": "Rate limited",
         "server_error": "Upstream server error",
         "network": "Network error",

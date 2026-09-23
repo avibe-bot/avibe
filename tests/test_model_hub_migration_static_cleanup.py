@@ -263,3 +263,16 @@ def test_codex_retained_bearer_provider_keeps_its_selectors(home, tmp_path):
     content = path.read_text()
     assert content.count('model_provider = "relay"') == 2
     assert "fixture-unselected-bearer" in content and "relay.example" in content
+
+
+def test_opencode_shell_key_leaves_a_same_vendor_oauth_entry_native(home, tmp_path):
+    auth = home / ".local/share/opencode/auth.json"
+    oauth = {"type": "oauth", "access": "fixture-access", "refresh": "fixture-refresh", "expires": 1}
+    _write(auth, json.dumps({"openrouter": oauth}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\n")
+    service, _, adapter = _service(tmp_path, migration_home=home)
+    rows = [row for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    assert len(rows) == 1
+    assert asyncio.run(service.migration_apply([rows[0]["id"]]))["applied"] == 1
+    assert adapter.provisioned
+    assert json.loads(auth.read_text())["openrouter"] == oauth

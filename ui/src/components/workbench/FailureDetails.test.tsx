@@ -90,4 +90,19 @@ describe('failed-turn upstream details', () => {
     expect(read).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
   });
+
+  it('names Avibe-side terminal failures and localizes every blocker reason', async () => {
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
+      ...record,
+      failed_attempts: [],
+      terminal_error: { ...record.terminal_error, reason: 'engine_down', http_status: null, upstream_error_code: null },
+      blockers: [{ source_id: 'src_a', model_id: 'grok-4.6', reason: 'cooldown' }],
+    } as unknown as TurnProvenance);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
+    expect(screen.getByText('grok-4.6 的请求失败了，原因见下方。')).toBeTruthy();
+    expect(screen.queryByText(/上游 API 拒绝/)).toBeNull();
+    expect(screen.queryByText(/由上游供应商的 API 返回/)).toBeNull();
+    expect(screen.getByText(/冷却中/)).toBeTruthy();
+  });
 });

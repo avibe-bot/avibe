@@ -4361,6 +4361,7 @@
         "served": "{{model}} 最终已成功响应。",
         "exhausted": "{{model}} 的所有供应商在上游都失败了。",
         "failed_terminal": "上游 API 拒绝了 {{model}} 的请求。",
+        "failed_local": "{{model}} 的请求失败了，原因见下方。",
         "no_candidate": "请求时没有可以提供 {{model}} 的供应商。",
         "canceled": "{{model}} 的请求已取消。"
       },
@@ -4372,6 +4373,7 @@
       "copyRecord": "复制记录",
       "reason": {
         "quota_exhausted": "额度用尽",
+        "cooldown": "冷却中",
         "rate_limited": "触发限流",
         "server_error": "上游服务器错误",
         "network": "网络错误",

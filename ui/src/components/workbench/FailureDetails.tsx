@@ -16,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import { modelsApi } from '../settings/models/modelsApi';
-import type { ChainUnavailableReason, Source, TurnProvenance } from '../settings/models/types';
+import type { Source, TurnProvenance } from '../settings/models/types';
 import { CopyButton } from '../ui/copy-button';
 
 type Row = {
@@ -64,11 +64,12 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
 
   if (!eligible || !turnId || !detail) return null;
 
-  const blockerLabel = (reason: ChainUnavailableReason): string => {
+  // Blockers carry the event-reason vocabulary (`cooldown`, `credential_expired`,
+  // …); only a source detail arrives as a full i18n key.
+  const blockerLabel = (reason: string): string => {
     if (reason === 'native_cli_unavailable') return t('models.probe.native_cli_unavailable');
-    if (reason === 'source_missing') return t('chat.failureDetails.reason.source_missing');
-    if (reason === 'model_unsupported') return t('chat.failureDetails.reason.model_unsupported');
-    return t(reason);
+    if (reason.includes('.')) return t(reason, { defaultValue: reason });
+    return t(`chat.failureDetails.reason.${reason}`, { defaultValue: reason });
   };
 
   const rows = (record: TurnProvenance, names: Record<string, string>): Row[] => {
@@ -98,10 +99,16 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   const body = (() => {
     const { record, names } = detail;
     const attempts = rows(record, names);
+    // A terminal failure is an upstream refusal only when the upstream refused
+    // the parameters; an engine, protocol or tool failure is Avibe's side.
+    const outcome = record.outcome === 'failed_terminal' && record.terminal_error?.reason !== 'invalid_parameter'
+      ? 'failed_local'
+      : record.outcome;
+    const upstreamFacts = attempts.some((row) => row.status !== null || row.code !== null);
     return (
       <div className="flex flex-col gap-2">
         <p className="text-gold-ink">
-          {t(`chat.failureDetails.outcome.${record.outcome}`, { model: record.requested_model_id })}
+          {t(`chat.failureDetails.outcome.${outcome}`, { model: record.requested_model_id })}
         </p>
         {attempts.length > 0 && (
           <ol className="flex flex-col gap-1.5">
@@ -130,7 +137,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
             </ul>
           </div>
         )}
-        <p className="text-gold-ink/70">{t('chat.failureDetails.upstreamNote')}</p>
+        {upstreamFacts && <p className="text-gold-ink/70">{t('chat.failureDetails.upstreamNote')}</p>}
         <span className="flex items-center gap-2 text-gold-ink/70">
           <span className="font-mono">{record.turn_id}</span>
           <CopyButton value={JSON.stringify(record, null, 2)} label={t('chat.failureDetails.copyRecord') as string} />

@@ -404,6 +404,13 @@ def plan_native_cleanup(
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
+                entry = payload.get(vendor)
+                # An entry the Hub could not carry (OAuth, or a key outside the
+                # selection) stays native, like every other unselected credential.
+                if isinstance(entry, dict) and not (
+                    "type" in entry and entry["type"] == "api" and selected_api_key(entry.get("key"))
+                ):
+                    continue
                 payload.pop(vendor, None)
 
         edit_json(opencode_auth_path(home), clear_provider_auth, guard_unchanged=True)
