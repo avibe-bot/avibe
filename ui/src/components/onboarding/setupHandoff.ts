@@ -128,7 +128,8 @@ export function playSetupHandoff(
     card.append(surface);
     animate(card, [{ transform: 'translate(0,0)' }, { transform: `translate(${bounds.x - source.bounds.x}px,${bounds.y - source.bounds.y}px)` }]);
     animate(surface, [
-      { transform: growing ? scaled : 'scale(1,1)', background: source.surface, borderColor: source.border, borderRadius: source.radius, boxShadow: source.shadow },
+      { transform: growing ? scaled : 'scale(1,1)', background: source.surface, borderColor: source.border, borderRadius: source.radius,
+        boxShadow: source.shadow === 'none' ? 'none' : 'var(--ob-active-shadow)' },
       { transform: growing ? 'scale(1,1)' : scaled,
         background: style.backgroundColor, borderColor: style.borderColor, borderRadius: style.borderRadius, boxShadow: 'none' },
     ]);

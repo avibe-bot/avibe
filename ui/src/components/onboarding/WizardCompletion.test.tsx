@@ -1011,6 +1011,29 @@ describe('setup route editor on the registered journey', () => {
     expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
   });
 
+  it('does not claim an enabled assistant uses another assistant\'s route before its own is saved', async () => {
+    serveAgents('claude-agent', [
+      { ...CLAUDE_AGENT, model: 'opus-5' },
+      { name: 'codex', backend: 'codex', model: 'gpt-5' },
+    ]);
+    mock.models.listAgents.mockResolvedValue([
+      hubSupply('claude', [route('claude-agent', { effective_model_id: 'opus-5' })]),
+      hubSupply('codex', [route('codex', { effective_model_id: 'gpt-5' })]),
+    ]);
+    mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({
+      ok: true, backend, enabled: true, installed: true, auth: 'none', application: 'applied',
+      ready: backend === 'claude', entry_eligible: backend === 'claude', supply_mode: 'hub',
+    }));
+    mock.models.getAgentChain.mockImplementation(async (backend: AgentBackend, model: string) => ({
+      ...chainOf(backend === 'claude' ? hops : []), backend, model_id: model,
+    }));
+
+    await setup();
+    expect(assistantCard('Claude Code').getByText('gpt-5')).toBeTruthy();
+    expect(assistantCard('Codex').getByText(en.onboarding.setup.noteNoModels)).toBeTruthy();
+    expect(assistantCard('Codex').getByRole('button', { name: en.onboarding.setup.configureRoute })).toBeTruthy();
+  });
+
   it('saves a Codex card reorder to every enabled assistant and shows the named preferred model', async () => {
     const saved: Record<string, typeof hops> = { claude: [...hops], codex: [...hops] };
     serveAgents('claude-agent', [

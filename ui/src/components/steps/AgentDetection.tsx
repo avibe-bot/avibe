@@ -233,10 +233,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     // alone says nothing about why it differs from the shared draft.
     const own = routeRead.targets.find((target) => target.backend === backend);
     const ownHops = own ? chainMembership(own.chain) : [];
-    // Its own chain when it has one, the shared order when it does not: the card
-    // describes what this assistant will call, and an assistant that has not joined the
-    // shared route yet joins it the moment it is switched on or the route is saved.
-    const hops = ownHops.length ? ownHops : sharedRoute;
+    // An enabled card describes its persisted route, even when that route is empty.
+    // An off card previews the shared order it will adopt when switched on.
+    const hops = agents[backend]?.enabled ? ownHops : sharedRoute;
     const mine = hops[0] ?? null;
     return {
       loading,
