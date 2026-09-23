@@ -1,7 +1,9 @@
 """Inspect shipped bytes, then import the installed wheel away from the source."""
 
 from email.parser import BytesParser
+import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +12,8 @@ import tarfile
 import zipfile
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -112,3 +116,52 @@ print("installed startup imports and removed HTTP contract passed")
     cli = subprocess.run([str(python), "-I", "-m", "vibe", "memory", "status"], cwd=tmp_path,
                          capture_output=True, text=True, timeout=30)
     assert cli.returncode == 2 and "invalid choice: 'memory'" in cli.stderr
+
+
+def _assert_builtin_skills_mirror(distribution: Path, *, environment: Path, tmp_path: Path) -> None:
+    subprocess.run([sys.executable, "-m", "venv", str(environment)], check=True, capture_output=True)
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    installed = subprocess.run(
+        [str(python), "-m", "pip", "install", "--disable-pip-version-check", str(distribution)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    avibe_home = tmp_path / f"{environment.name}-home"
+    probe = '''
+import hashlib, json, os
+from pathlib import Path
+from core.managed_skills import builtin_skills_source, load_skill, prepare_builtin_skills
+source = builtin_skills_source()
+assert source.name == "builtin_skills_source"
+snapshot = prepare_builtin_skills()
+skill = load_skill("use-avibe")
+assert skill is not None and skill.body and skill.directory.name == "use-avibe"
+root = Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / snapshot
+files = {}
+for path in root.rglob("*"):
+    if path.is_file():
+        files[path.relative_to(root).as_posix()] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "mode": path.stat().st_mode & 0o777}
+print(json.dumps({"snapshot": snapshot, "files": files}, sort_keys=True))
+'''
+    result = subprocess.run([str(python), "-c", probe], cwd=tmp_path,
+                            env={**os.environ, "AVIBE_HOME": str(avibe_home)},
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = json.loads(result.stdout.strip())
+    expected = {}
+    for path in (ROOT / "skills").rglob("*"):
+        if path.is_file() and "__pycache__" not in path.parts:
+            expected[path.relative_to(ROOT / "skills").as_posix()] = {
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "mode": path.stat().st_mode & 0o777,
+            }
+    assert observed["files"] == expected
+    assert len(observed["snapshot"]) == 64
+
+
+def test_installed_wheel_mirrors_complete_builtin_skills_snapshot(tmp_path):
+    _assert_builtin_skills_mirror(_artifact("AVIBE_CORE_WHEEL"), environment=tmp_path / "builtin-skills-wheel", tmp_path=tmp_path)
+
+
+def test_installed_sdist_mirrors_complete_builtin_skills_snapshot(tmp_path):
+    _assert_builtin_skills_mirror(_artifact("AVIBE_CORE_SDIST"), environment=tmp_path / "builtin-skills-sdist", tmp_path=tmp_path)
