@@ -143,17 +143,21 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [routeRead, setRouteRead] = useState<{
     done: boolean;
     failed: boolean;
+    confirmed: { epoch: number; token: number } | null;
     chains: Partial<Record<RuntimeBackendId, AgentChain | null>>;
     models: Partial<Record<RuntimeBackendId, string | null>>;
     sources: Source[];
     supplies: AgentSupply[];
-  }>({ done: false, failed: false, chains: {}, models: {}, sources: [], supplies: [] });
+  }>({ done: false, failed: false, confirmed: null, chains: {}, models: {}, sources: [], supplies: [] });
   const routeReadToken = useRef(0);
+  const routeTargetReady = () => active && activeRef.current && routeRead.done && !routeRead.failed
+    && routeRead.confirmed?.epoch === activation.current
+    && routeRead.confirmed?.token === routeReadToken.current;
   const readCardRoutes = useCallback(async () => {
     if (!agentReads) return false;
     const token = ++routeReadToken.current;
     const epoch = activation.current;
-    setRouteRead((current) => ({ ...current, done: false, failed: false }));
+    setRouteRead((current) => ({ ...current, done: false, failed: false, confirmed: null }));
     try {
       const [supplyRead, listed, vibeAgents] = await Promise.all([
         agentReads.read(),
@@ -179,11 +183,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         }
       }));
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead({ done: true, failed: false, chains, models, sources: listed, supplies });
+      setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, chains, models, sources: listed, supplies });
       return true;
     } catch {
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead((current) => ({ ...current, done: true, failed: true }));
+      setRouteRead((current) => ({ ...current, done: true, failed: true, confirmed: null }));
       return false;
     }
   }, [agentReads, api]);
@@ -199,14 +203,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     return model?.display_name?.trim() || catalog?.display_name?.trim() || hop.model_id;
   };
   const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
-    const loading = Boolean(canEditSetupRoute && modelHubEnabled && !routeRead.done);
+    const loading = Boolean(canEditSetupRoute && modelHubEnabled && !routeRead.failed && !routeTargetReady());
     const chain = routeRead.chains[backend];
     const mine = chain?.chain[0] ?? null;
     return {
       loading,
       model: mine ? modelLabel(mine) : null,
       backups: Math.max(0, (chain?.chain.length ?? 0) - 1),
-      noModel: routeRead.done && !routeRead.failed && !routeRead.models[backend],
+      noModel: routeTargetReady() && !routeRead.models[backend],
     };
   };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
@@ -865,6 +869,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const hubRoute = supplyMode === 'hub'
             || Boolean(!supplyMode && canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
           const openRoute = () => {
+            if (!routeTargetReady()) return;
             const supply = routeRead.supplies.find((row) => row.backend === name);
             const modelId = routeRead.models[name];
             if (supply?.mode === 'hub' && modelId) {
@@ -905,7 +910,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             routeError={hubRoute && routeRead.failed ? t('settings.models.routeDialog.fail.reconcileRead') : undefined}
             onRetryRoute={() => void readCardRoutes()}
             configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
-              || (hubRoute && routeRead.failed)
+              || (hubRoute && canEditSetupRoute && !routeTargetReady())
               || (hubRoute
                 ? agent.status !== 'ok'
                 : !agent.enabled || agent.status !== 'ok')}

@@ -29,6 +29,7 @@ import {
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
 import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import type {
+  AgentBackend,
   AgentSupply,
   MigrationItem,
   RuntimeDependency,

@@ -541,21 +541,39 @@ describe('Hub route refresh', () => {
     expect(row('Claude Code').queryByText(en.onboarding.setup.defaultModel)).toBeNull();
   });
 
-  it('reads the current route again when the retained assistants screen reopens', async () => {
+  it('cannot open a stale route while re-reading a changed Agent model on reentry', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.status = 'ok';
-    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
-    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
-    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    let designatedModel = 'model-A';
+    const listed = { ...hubAgent(), model: designatedModel };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [listed], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async () => ({ ok: true, agent: { ...listed, model: designatedModel } }));
+    mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('hop-A'), model_id: 'model-A' }]);
     const flowState = { ...INITIAL_SETUP_FLOW_STATE };
     const setFlowState = vi.fn();
     const props = { data: saved, onNext: vi.fn(), flowState, setFlowState, onNavigate: vi.fn(), agentReads: hubReads };
     const view = render(wrap(<AgentDetection {...props} active />));
-    await waitFor(() => expect(row('Claude Code').getByText('model-a')).toBeTruthy());
+    const routeAction = () => row('Claude Code').getByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(row('Claude Code').getByText('hop-A')).toBeTruthy());
+    expect(routeAction().disabled).toBe(false);
     view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
-    mock.models.getAgentChains.mockResolvedValue([hubChain('model-b')]);
+    designatedModel = 'model-B';
+    const delayed = pending<ReturnType<typeof hubChain>[]>();
+    mock.models.getAgentChains.mockReturnValue(delayed.promise);
     view.rerender(wrap(<AgentDetection {...props} active />));
-    await waitFor(() => expect(row('Claude Code').getByText('model-b')).toBeTruthy());
+    await waitFor(() => expect(mock.models.getAgentChains).toHaveBeenCalledTimes(2));
+    expect(routeAction().disabled).toBe(true);
+    routeAction().removeAttribute('disabled');
+    fireEvent.click(routeAction());
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await act(async () => delayed.resolve([{ ...hubChain('hop-B'), model_id: 'model-B' }]));
+    await waitFor(() => expect(row('Claude Code').getByText('hop-B')).toBeTruthy());
+    expect(routeAction().disabled).toBe(false);
+    fireEvent.click(routeAction());
+    expect(within(await screen.findByRole('dialog')).getByText('model-B · Route chain')).toBeTruthy();
   });
 
 });
