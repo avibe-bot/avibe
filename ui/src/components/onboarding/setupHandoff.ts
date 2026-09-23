@@ -112,18 +112,24 @@ export function playSetupHandoff(
     const style = getComputedStyle(target);
     const card = document.createElement('div');
     card.className = 'onboarding-handoff-card';
-    // The box is the SOURCE's, scaled down to the target: a shell sized to the
-    // target and scaled up would magnify its own 1px border and its radius on the
-    // opening frame, which is a thick edge where the reference has a hairline.
     Object.assign(card.style, { left: `${source.bounds.x - origin.x}px`, top: `${source.bounds.y - origin.y}px`,
       width: `${source.bounds.width}px`, height: `${source.bounds.height}px` });
     const surface = document.createElement('div');
     surface.className = 'onboarding-handoff-surface';
+    // Scale only ever shrinks, as the reference does: the shell is built at whichever
+    // box is bigger and the other end is the scaled one. A shell scaled past its own
+    // size would magnify its 1px border and its radius with it, which is the bulging
+    // corner the reference never shows.
+    const growing = bounds.width * bounds.height > source.bounds.width * source.bounds.height;
+    if (growing) Object.assign(surface.style, { right: 'auto', bottom: 'auto', width: `${bounds.width}px`, height: `${bounds.height}px` });
+    const scaled = growing
+      ? `scale(${source.bounds.width / bounds.width},${source.bounds.height / bounds.height})`
+      : `scale(${bounds.width / source.bounds.width},${bounds.height / source.bounds.height})`;
     card.append(surface);
     animate(card, [{ transform: 'translate(0,0)' }, { transform: `translate(${bounds.x - source.bounds.x}px,${bounds.y - source.bounds.y}px)` }]);
     animate(surface, [
-      { transform: 'scale(1,1)', background: source.surface, borderColor: source.border, borderRadius: source.radius, boxShadow: source.shadow },
-      { transform: `scale(${bounds.width / source.bounds.width},${bounds.height / source.bounds.height})`,
+      { transform: growing ? scaled : 'scale(1,1)', background: source.surface, borderColor: source.border, borderRadius: source.radius, boxShadow: source.shadow },
+      { transform: growing ? 'scale(1,1)' : scaled,
         background: style.backgroundColor, borderColor: style.borderColor, borderRadius: style.borderRadius, boxShadow: 'none' },
     ]);
     for (const [piece, selector] of [[source.icon, hooks(to).icon], [source.name, hooks(to).name]] as const) {
