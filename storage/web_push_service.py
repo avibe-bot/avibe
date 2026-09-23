@@ -74,12 +74,12 @@ def _disable_previous_endpoints(
     endpoints = _normalize_previous_endpoints(previous_endpoints, endpoint)
     if not endpoints:
         return
+    # A replaced endpoint can no longer authorize another automatic repair.
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
         .where(web_push_subscriptions.c.endpoint.in_(endpoints))
-        .where(web_push_subscriptions.c.enabled == 1)
-        .values(enabled=0, updated_at=now)
+        .values(enabled=0, provider_invalidated_at=None, updated_at=now)
     )
 
 
@@ -111,8 +111,7 @@ def upsert_subscription(
             .where(web_push_subscriptions.c.user_key == user_key)
             .where(web_push_subscriptions.c.device_id == device_id)
             .where(web_push_subscriptions.c.endpoint != endpoint)
-            .where(web_push_subscriptions.c.enabled == 1)
-            .values(enabled=0, updated_at=now)
+            .values(enabled=0, provider_invalidated_at=None, updated_at=now)
         )
     stmt = sqlite_insert(web_push_subscriptions).values(
         id=_new_id(),
@@ -228,13 +227,6 @@ def attach_device_to_enabled_subscription(
                 continue
             recoverable_previous = previous_row
             break
-    _disable_previous_endpoints(
-        conn,
-        user_key=user_key,
-        endpoint=endpoint,
-        previous_endpoints=previous_endpoints,
-        now=now,
-    )
     existing = get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
     if existing is None:
         if (
@@ -251,13 +243,19 @@ def attach_device_to_enabled_subscription(
                 previous_endpoints=previous_endpoints,
             )
         return None
+    _disable_previous_endpoints(
+        conn,
+        user_key=user_key,
+        endpoint=endpoint,
+        previous_endpoints=previous_endpoints,
+        now=now,
+    )
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
         .where(web_push_subscriptions.c.device_id == device_id)
         .where(web_push_subscriptions.c.endpoint != endpoint)
-        .where(web_push_subscriptions.c.enabled == 1)
-        .values(enabled=0, updated_at=now)
+        .values(enabled=0, provider_invalidated_at=None, updated_at=now)
     )
     values = {
         "p256dh": p256dh,
@@ -299,7 +297,7 @@ def disable_device_subscription(
     device_id: str | None = None,
     endpoint: str | None = None,
 ) -> bool:
-    """Disable only the logging-out browser's selected Push subscription."""
+    """Disable the submitted endpoint and any rotated row for this browser."""
 
     device_id = device_id.strip() if isinstance(device_id, str) else ""
     endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
@@ -309,7 +307,12 @@ def disable_device_subscription(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
     )
-    if endpoint:
+    if endpoint and device_id:
+        stmt = stmt.where(
+            (web_push_subscriptions.c.endpoint == endpoint)
+            | (web_push_subscriptions.c.device_id == device_id)
+        )
+    elif endpoint:
         stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
     else:
         stmt = stmt.where(web_push_subscriptions.c.device_id == device_id)

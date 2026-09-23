@@ -139,6 +139,45 @@ def test_late_send_success_preserves_provider_invalidation(tmp_path):
         assert after_success["last_failure_at"] == invalidated["last_failure_at"]
 
 
+def test_logout_disables_rotated_endpoint_when_old_endpoint_was_submitted(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/old"),
+            device_id="device-1",
+        )
+        rotated = web_push_service.upsert_background_rotated_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/new"),
+            previous_endpoints=[previous["endpoint"]],
+        )
+        assert rotated is not None
+        assert rotated["device_id"] == "device-1"
+        other_device = web_push_service.upsert_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/other"),
+            device_id="device-2",
+        )
+        other_user = web_push_service.upsert_subscription(
+            conn, user_key="remote:user-b", payload=_payload("https://push.example.test/sub/user-b"),
+            device_id="device-1",
+        )
+
+        assert web_push_service.disable_device_subscription(
+            conn, user_key="remote:user-a", endpoint=previous["endpoint"], device_id="device-1",
+        )
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=rotated["endpoint"], user_key="remote:user-a",
+        ) is None
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=other_device["endpoint"], user_key="remote:user-a",
+        ) is not None
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=other_user["endpoint"], user_key="remote:user-b",
+        ) is not None
+
+
 def test_subscription_upsert_disables_previous_endpoint_for_same_device(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
@@ -274,6 +313,11 @@ def test_background_rotation_accepts_provider_failed_previous(tmp_path):
         assert accepted is not None
         assert accepted["endpoint"] == "https://push.example.test/sub/current"
         assert accepted["device_id"] == "device-1"
+        consumed = web_push_service.get_by_endpoint(
+            conn, endpoint=previous["endpoint"], user_key="remote:user-a",
+        )
+        assert consumed is not None
+        assert consumed["provider_invalidated_at"] is None
 
 
 def test_attach_device_to_enabled_subscription_preserves_same_origin_legacy_rows(tmp_path):
@@ -451,6 +495,48 @@ def test_attach_device_to_enabled_subscription_recovers_after_provider_disabled_
         assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 1
 
 
+@pytest.mark.parametrize("repair_mode", ["foreground", "background"])
+def test_repair_consumes_previous_invalidation_before_later_logout(tmp_path, repair_mode):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/a"),
+            device_id="device-1",
+        )
+        web_push_service.mark_send_failure(conn, endpoint=previous["endpoint"], disable=True)
+        replacement = _payload("https://push.example.test/sub/b")
+        if repair_mode == "foreground":
+            repaired = web_push_service.attach_device_to_enabled_subscription(
+                conn, user_key="remote:user-a", payload=replacement, device_id="device-1",
+                previous_endpoints=[previous["endpoint"]],
+            )
+        else:
+            repaired = web_push_service.upsert_background_rotated_subscription(
+                conn, user_key="remote:user-a", payload=replacement,
+                previous_endpoints=[previous["endpoint"]],
+            )
+        assert repaired is not None
+        consumed = web_push_service.get_by_endpoint(
+            conn, endpoint=previous["endpoint"], user_key="remote:user-a",
+        )
+        assert consumed is not None
+        assert consumed["provider_invalidated_at"] is None
+        assert web_push_service.disable_device_subscription(
+            conn, user_key="remote:user-a", device_id="device-1",
+        )
+        assert web_push_service.attach_device_to_enabled_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/c"),
+            device_id="device-1", previous_endpoints=[repaired["endpoint"], previous["endpoint"]],
+        ) is None
+        assert web_push_service.upsert_background_rotated_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/c"),
+            previous_endpoints=[repaired["endpoint"], previous["endpoint"]],
+        ) is None
+
+
 def test_attach_device_to_enabled_subscription_does_not_cross_devices(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
@@ -477,8 +563,31 @@ def test_attach_device_to_enabled_subscription_does_not_cross_devices(tmp_path):
             conn,
             endpoint=previous["endpoint"],
             user_key="remote:user-a",
+        ) is not None
+        assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 1
+
+
+def test_failed_foreground_reconciliation_preserves_invalidation(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/previous"),
+            device_id="device-1",
+        )
+        web_push_service.mark_send_failure(conn, endpoint=previous["endpoint"], disable=True)
+
+        assert web_push_service.attach_device_to_enabled_subscription(
+            conn, user_key="remote:user-a", payload=_payload("https://push.example.test/sub/current"),
+            device_id="device-2", previous_endpoints=[previous["endpoint"]],
         ) is None
-        assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 0
+        remaining = web_push_service.get_by_endpoint(
+            conn, endpoint=previous["endpoint"], user_key="remote:user-a",
+        )
+        assert remaining is not None
+        assert remaining["provider_invalidated_at"] is not None
 
 
 def test_attach_device_to_enabled_subscription_preserves_existing_label_when_missing(tmp_path):
