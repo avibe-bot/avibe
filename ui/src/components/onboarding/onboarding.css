@@ -394,6 +394,8 @@
   color: var(--popover-foreground);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.13);
 }
+/* The row's frame is the onboarding header's; its hover and selected fills come from
+   the switcher itself, so both variants of the menu answer for them in one place. */
 .onboarding-language-menu button {
   display: flex;
   align-items: center;
@@ -403,12 +405,9 @@
   padding: 10px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
-  color: inherit;
   font-size: 14px;
   text-align: left;
 }
-.onboarding-language-menu button:hover { background: var(--surface-2); }
 
 /* `1 0 auto`: this box is never shorter than what it holds, so a composition taller
    than the window pushes the shell into its own scroll rather than being clipped above
@@ -621,6 +620,9 @@
   color: var(--muted);
   white-space: nowrap;
 }
+/* The reference sets the role in bold (`.flow-role`, 700): at 11px on a muted grey it
+   is the one label on the card that has to read as a tag rather than as running text. */
+.onboarding-card-role { font-weight: 700; }
 .onboarding-assistant-enable { display: flex; align-items: center; }
 /* The enable switch: a real `role="switch"` in the reference's own geometry — a 42x24
    track, a 2px border and a 16px thumb that travels 18px. The invisible ring around it
