@@ -529,7 +529,8 @@ def test_remote_workbench_caller_without_matching_snapshot_fails_closed() -> Non
     assert caller_resource_user_context(context) == {}
 
 
-def test_scheduled_remote_editor_uses_persisted_snapshot_without_owner_fallback() -> None:
+@pytest.mark.parametrize("trigger", ["scheduled", "watch"])
+def test_harness_remote_editor_uses_persisted_snapshot_without_owner_fallback(trigger) -> None:
     from modules.im import MessageContext
 
     snapshot = {
@@ -541,7 +542,7 @@ def test_scheduled_remote_editor_uses_persisted_snapshot_without_owner_fallback(
     context = caller_context_from_platform_payload(
         _agent_turn_payload(
             {
-                "task_trigger_kind": "scheduled",
+                "task_trigger_kind": trigger,
                 "message_metadata": {"resource_user_context": snapshot},
             }
         ),
@@ -573,11 +574,14 @@ def test_scheduled_missing_or_malformed_snapshot_never_becomes_local_owner(snaps
     assert caller_resource_user_context(context) == {}
 
 
-def test_local_scheduled_turn_without_persisted_remote_context_stays_local() -> None:
+@pytest.mark.parametrize("trigger", ["scheduled", "watch"])
+def test_local_harness_turn_with_producer_metadata_stays_local(trigger) -> None:
     from modules.im import MessageContext
 
     context = caller_context_from_platform_payload(
-        _agent_turn_payload({"task_trigger_kind": "scheduled"}),
+        _agent_turn_payload(
+            {"task_trigger_kind": trigger, "message_metadata": {}}
+        ),
         message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
         fallback_platform="avibe",
     )

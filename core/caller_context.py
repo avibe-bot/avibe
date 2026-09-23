@@ -323,7 +323,7 @@ def _scope_id_from_session_key(session_key: str) -> Optional[str]:
 
 
 def _harness_resource_context(
-    source: str, message_metadata: object,
+    source: str, platform: str, message_metadata: object,
 ) -> Optional[dict[str, Any]]:
     """Recover durable remote authority for synthetic Harness turns.
 
@@ -334,7 +334,13 @@ def _harness_resource_context(
     the existing ACL checks rather than falling back to local Owner authority.
     """
 
-    if source not in {"scheduled", "watch"} or not isinstance(message_metadata, Mapping):
+    if (
+        source not in {"scheduled", "watch"}
+        or platform != "avibe"
+        or not isinstance(message_metadata, Mapping)
+    ):
+        return None
+    if _RESOURCE_USER_CONTEXT_METADATA_KEY not in message_metadata:
         return None
     snapshot = message_metadata.get(_RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
@@ -523,7 +529,7 @@ def caller_context_from_platform_payload(
             if subject and authorization_user_id == f"remote:{subject}":
                 resource_user_context = dict(raw_resource_context)
 
-    harness_resource_context = _harness_resource_context(source, message_metadata)
+    harness_resource_context = _harness_resource_context(source, platform, message_metadata)
     if harness_resource_context is not None:
         # Keep ``is_remote`` true even for an invalid snapshot.  An empty remote
         # context fails closed in resource ACLs; treating it as local would grant
