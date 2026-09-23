@@ -10,10 +10,9 @@
  *
  * Validation is deliberately narrow and shared: absent or malformed fields are UNREAD
  * state, not an opt-out, and that distinction is the whole reason a caller can tell
- * "the gateway is off" from "nobody could tell me". The same shape is already written
- * and published in L2's `providers/gatewayBootstrap.ts`; this is that parser, extracted
- * so both callers hold one policy. L2 deletes its copy and imports this in the
- * integration commit after #2087 lands.
+ * "the gateway is off" from "nobody could tell me". `providers/gatewayBootstrap.ts`
+ * reads the same `/api/config` at its own steps and imports this parser, so the two
+ * callers cannot drift into two policies about what a valid config is.
  *
  * Stateless on purpose: no React, no cache, no owner. It returns one classified read.
  */
@@ -51,8 +50,9 @@ export type SetupConfigFetch = (input: string, init?: RequestInit) => Promise<Re
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** The server's error shape is a string on some handlers and an object on others. */
-function errorDetail(body: unknown): string | undefined {
+/** The server's error shape is a string on some handlers and an object on others.
+ *  Exported because the bootstrap sequence quotes the same producers at its own steps. */
+export function errorDetail(body: unknown): string | undefined {
   if (!isRecord(body)) return undefined;
   const error = body.error;
   if (typeof error === 'string') return error;
@@ -61,10 +61,11 @@ function errorDetail(body: unknown): string | undefined {
   return undefined;
 }
 
-const hasError = (body: unknown): boolean =>
+export const hasError = (body: unknown): boolean =>
   isRecord(body) && (body.ok === false || body.error !== undefined);
 
-async function parseJson(response: Response): Promise<unknown> {
+/** A body that is not JSON is a body that said nothing, at every step that reads one. */
+export async function parseJson(response: Response): Promise<unknown> {
   try {
     return await response.json();
   } catch {

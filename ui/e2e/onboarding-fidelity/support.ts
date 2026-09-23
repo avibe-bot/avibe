@@ -234,6 +234,13 @@ export async function openSetup(page: Page, lang: string) {
   await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
   // The handoff timer uses the same browser clock as the story in deterministic runs.
   await page.clock.runFor(950);
+  // Providers is the first step now. This fixture answers「no sources」and leaves the
+  // Hub unready, so the connection action is disabled and the way on the screen states
+  // is the only control that leaves it — which is how a person gets to the assistants
+  // here, and so how the capture does. Addressed by the hint's own class rather than
+  // its sentence, because these captures run in both languages.
+  await page.locator('.onboarding-setup-hint button').click();
+  await page.clock.runFor(950);
   await page.locator('[data-setup-screen="assistants"]').waitFor();
   await page.locator('.onboarding-assistants').waitFor();
 }

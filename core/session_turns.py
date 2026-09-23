@@ -487,6 +487,11 @@ def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     return not (sink_token is not None and ctx_token != sink_token)
 
 
+# A Run cancel joining another Stop waits this long for that Stop's receipt.
+# Together with one retried Stop it must fit the CLI's 30s cancel timeout.
+_RUN_CANCEL_JOIN_WAIT_SECONDS = 10.0
+_RUN_CANCEL_JOIN_POLL_SECONDS = 0.05
+
 @dataclass
 class Turn:
     """The one active turn for an avibe session — the EXECUTION half of the FSM
@@ -541,9 +546,10 @@ class DeliveryRequest:
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
     expected_turn_id: str | None = None
-    # Run-level cancellation may interrupt a backend only when this exact Run is
-    # still the Turn's sole initial input.  Checked under the P0 writer lock.
-    expected_exclusive_agent_run_id: str | None = None
+    # Run-level cancellation stops the live Turn whenever this Run's input may
+    # have reached it; an input still outside the Turn is canceled alone.
+    # Checked under the P0 writer lock.
+    cancel_agent_run_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -3489,8 +3495,8 @@ class SessionTurnManager:
                 )
             ).scalar_one_or_none()
             current = delivery_store.active_turn(conn, request.session_id)
-            expected_exclusive_run_id = str(
-                request.expected_exclusive_agent_run_id or ""
+            cancel_run_id = str(
+                request.cancel_agent_run_id or ""
             ).strip()
             if request.content is not None and session_status != "active":
                 existing = (
@@ -3510,10 +3516,10 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
-                    if expected_exclusive_run_id:
+                    if cancel_run_id:
                         cancellation = apply_live_agent_run_cancellation_in_connection(
                             conn,
-                            expected_exclusive_run_id,
+                            cancel_run_id,
                             session_id=request.session_id,
                             detach=True,
                         )
@@ -3555,7 +3561,7 @@ class SessionTurnManager:
                     request.content is None
                     and expected_turn_id
                     and current_id != expected_turn_id
-                    and not expected_exclusive_run_id
+                    and not cancel_run_id
                 ):
                     return DeliveryResult(
                         None,
@@ -3564,33 +3570,48 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
-                if request.content is None and expected_exclusive_run_id:
-                    exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
+                if request.content is None and cancel_run_id:
+                    stops_turn, reason = delivery_store.agent_run_input_reached_turn(
                         conn,
-                        run_id=expected_exclusive_run_id,
+                        run_id=cancel_run_id,
                         turn_id=str(current_id or ""),
                     )
                     replacement_terminalized = False
-                    if not exclusive:
+                    if stops_turn and current.get("control_state") in {
+                        "pending",
+                        "interrupting",
+                        "reconciling",
+                    }:
+                        # A Stop without a receipt may still be refused. Record
+                        # nothing so a refused Stop cannot leave this Run
+                        # marked canceled while its backend keeps running.
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "reconciling",
+                            current_id,
+                            "joined_unconfirmed_interrupt",
+                        )
+                    if not stops_turn:
                         replacement_terminalized = (
                             self._terminalize_detached_run_replacement(
                                 conn,
-                                run_id=expected_exclusive_run_id,
+                                run_id=cancel_run_id,
                                 session_id=request.session_id,
                                 current=current,
                             )
                         )
                     cancellation = apply_live_agent_run_cancellation_in_connection(
                         conn,
-                        expected_exclusive_run_id,
+                        cancel_run_id,
                         session_id=request.session_id,
-                        detach=not exclusive,
+                        detach=not stops_turn,
                     )
                     if replacement_terminalized and cancellation != "run_detached":
                         raise RuntimeError(
                             "replacement Run terminalized without cancellation ownership"
                         )
-                    if not exclusive:
+                    if not stops_turn:
                         return DeliveryResult(
                             None,
                             None,
@@ -8146,7 +8167,11 @@ class SessionTurnManager:
         *,
         agent_run_id: str | None = None,
     ) -> dict:
-        """Cancel a Session Turn or detach one exact Run from a shared Turn."""
+        """Cancel a Session Turn, or one exact Run.
+
+        A Run whose input may have reached the live Turn stops that whole Turn,
+        exactly like Session Stop; a Run still outside it is canceled alone.
+        """
         normalized_agent_run_id = (
             str(agent_run_id).strip() if agent_run_id is not None else None
         )
@@ -8250,18 +8275,25 @@ class SessionTurnManager:
                         "status": "stale_released",
                         "reason": "runtime_gone",
                     }
-        result = await self.deliver(
-            DeliveryRequest(
-                session_id=session_id,
-                priority="p0",
-                content=None,
-                expected_turn_id=(str(owner["id"]) if owner is not None else None),
-                expected_exclusive_agent_run_id=(
-                    normalized_agent_run_id
-                ),
-            ),
-            context=turn.context if turn is not None else None,
+        request = DeliveryRequest(
+            session_id=session_id,
+            priority="p0",
+            content=None,
+            expected_turn_id=(str(owner["id"]) if owner is not None else None),
+            cancel_agent_run_id=normalized_agent_run_id,
         )
+        context = turn.context if turn is not None else None
+        result = await self.deliver(request, context=context)
+        # A Run cancel that meets another Stop awaiting its receipt waits for
+        # that receipt: accepted confirms this cancel, refused lets it retry.
+        deadline = asyncio.get_running_loop().time() + _RUN_CANCEL_JOIN_WAIT_SECONDS
+        while (
+            normalized_agent_run_id
+            and result.reason == "joined_unconfirmed_interrupt"
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(_RUN_CANCEL_JOIN_POLL_SECONDS)
+            result = await self.deliver(request, context=context)
         if result.state == "run_detached":
             return {
                 "ok": True,
@@ -8271,7 +8303,15 @@ class SessionTurnManager:
             }
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
-        if result.state == "settled":
+        # ``claimed``: a pre-write stop settled the Turn and started its successor.
+        if result.state in {"settled", "claimed"}:
+            if normalized_agent_run_id and result.reason == "prewrite_canceled":
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "cancel_requested",
+                    "reason": result.reason,
+                }
             if normalized_agent_run_id:
                 return {
                     "ok": True,

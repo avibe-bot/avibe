@@ -5,7 +5,12 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { modelsApi } from './modelsApi';
-import type { SourceMutationLanding, SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import type {
+  SourceMutationLanding,
+  SourceMutationLandingReads,
+  SourceMutationSettlement,
+  TrackSourceMutation,
+} from './mutationSettlement';
 import { readyRegion, unreadRegion } from './regionRead';
 import { SourceTestDialog } from './SourceTestDialog';
 import { CONTRACT_VERSION, type Source, type SourceProbeResult } from './types';
@@ -23,19 +28,17 @@ const answer = (patch: Partial<SourceProbeResult> = {}): SourceProbeResult => ({
   source_id: source.id, model_id: 'gpt-5.6-luna', protocol: source.protocol,
   reachable: true, latency_ms: 123, error: null, ...patch,
 });
-const landing = (sources: Source[] = [source]): SourceMutationLanding => ({
-  verdict: 'landed', affectedChains: [], reads: {
-    sources: readyRegion(sources), supply: readyRegion([]), chains: readyRegion({}),
-    runtime: readyRegion({
-      contract_version: CONTRACT_VERSION,
-      manifest: { name: 'cliproxyapi', resolution: 'unresolved', assets: [] },
-      status: { verified: false, health: 'not_started' },
-    }),
-  },
+const landing = (sources: Source[] = [source]): SourceMutationLandingReads => ({
+  sources: readyRegion(sources), supply: readyRegion([]), chains: readyRegion({}),
+  runtime: readyRegion({
+    contract_version: CONTRACT_VERSION,
+    manifest: { name: 'cliproxyapi', resolution: 'unresolved', assets: [] },
+    status: { verified: false, health: 'not_started' },
+  }),
 });
 const settlement = {
   unread: vi.fn(),
-  gone: vi.fn().mockResolvedValue({ verdict: 'degraded', reads: null, affectedChains: [] }),
+  gone: vi.fn().mockResolvedValue(null),
 } as unknown as SourceMutationSettlement;
 const track: TrackSourceMutation = (work) => work(source, settlement);
 const view = (current = source) => <I18nextProvider i18n={i18n}>
@@ -95,7 +98,7 @@ describe('SourceTestDialog', () => {
     expect(settlement.unread).toHaveBeenCalledTimes(1);
   });
 
-  it.each([true, false])('publishes no verdict before reconciliation completes: reachable=%s', async (reachable) => {
+  it.each([true, false])('publishes no result before reconciliation completes: reachable=%s', async (reachable) => {
     vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
     let resolve!: (value: SourceMutationLanding) => void;
     vi.mocked(settlement.unread).mockReturnValue(new Promise((done) => { resolve = done; }));
@@ -109,7 +112,7 @@ describe('SourceTestDialog', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it.each([true, false])('does not retry or publish a verdict after rejected reconciliation: reachable=%s', async (reachable) => {
+  it.each([true, false])('does not retry or publish a result after rejected reconciliation: reachable=%s', async (reachable) => {
     const probe = vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
     vi.mocked(settlement.unread).mockRejectedValue(new Error('Source list unavailable'));
     render(view());
@@ -120,7 +123,7 @@ describe('SourceTestDialog', () => {
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['unread', 'stale', 'deleted', 'credential', 'marker', 'base_url', 'protocol', 'model'])('requires a current matching Source after reconciliation: %s', async (change) => {
+  it.each(['unread', 'superseded', 'deleted', 'credential', 'marker', 'base_url', 'protocol', 'model'])('requires a current matching Source after reconciliation: %s', async (change) => {
     vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
     const current = { ...source };
     if (change === 'credential') current.credential_ref = 'cred_replacement';
@@ -128,9 +131,12 @@ describe('SourceTestDialog', () => {
     if (change === 'base_url') current.base_url = 'https://other.example/v1';
     if (change === 'protocol') current.protocol = 'anthropic';
     if (change === 'model') current.models = [];
-    const result = landing(change === 'deleted' ? [] : [current]);
-    if (change === 'unread') result.reads!.sources = unreadRegion();
-    if (change === 'stale') result.verdict = 'degraded';
+    const reads = landing(change === 'deleted' ? [] : [current]);
+    if (change === 'unread') reads.sources = unreadRegion();
+    // `superseded`: a newer read took the surface over, so this mutation's own
+    // read never published one — indistinguishable here from a read it could
+    // not complete, and equally unable to confirm the probe.
+    const result: SourceMutationLanding = change === 'superseded' ? null : reads;
     vi.mocked(settlement.unread).mockResolvedValue(result);
     render(view());
     await userEvent.click(screen.getByRole('button', { name: 'Run test' }));

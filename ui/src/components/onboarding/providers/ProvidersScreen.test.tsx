@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import {
   beginRegionRead,
+  loadingRegion,
   readyRegion,
   unreadRegion,
   type RegionRead,
@@ -250,6 +251,9 @@ const Harness: React.FC<ScreenOptions & { handle: React.RefObject<SetupScreenHan
   const [flowState, setFlowState] = React.useState<SetupFlowState>({ ...INITIAL_SETUP_FLOW_STATE, ...flow });
   return (
     <I18nextProvider i18n={i18n}>
+      {/* The shell's half of the anchor, not decoration: what is ancillary to the
+          pair is portaled into this slot, so a host without it sees none of it. */}
+      <div className="onboarding-step">
       <ProvidersScreen
         ref={handle}
         active={active}
@@ -263,6 +267,8 @@ const Harness: React.FC<ScreenOptions & { handle: React.RefObject<SetupScreenHan
         onActionChange={(action) => { actions.push(action); }}
         onNavigate={(screen) => { navigated.push(screen); }}
       />
+      <div className="onboarding-action-aside" data-setup-action-aside="" />
+      </div>
     </I18nextProvider>
   );
 };
@@ -521,6 +527,35 @@ describe('ProvidersScreen — the stage', () => {
     // install or a start from here, would be a mutation nobody asked for.
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
     expect(retrySetup).not.toHaveBeenCalled();
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
+  });
+
+  it('re-reads supply for a new observation, and not for the same one re-reported', async () => {
+    // The shell owns the runtime region and hands one down on every render it makes.
+    // What this screen takes its inventory against is the machine that answers it, not
+    // the object that described the machine — a refresh that confirmed nothing changed,
+    // or a parent that rebuilt its props, is the same observation said twice. Reading
+    // again for one of those does not merely waste a request: every answer publishes
+    // selection state, which is another render, which is another carrier.
+    serve();
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    await settled();
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+
+    // A genuinely different machine is the other half, and the half that matters: the
+    // engine that could not answer the first read is why it failed, and the sequence
+    // that fixes one publishes into the shell's region rather than into this screen.
+    await show({
+      runtimeRead: readyRegion(runtimeOf('ok', {
+        status: { verified: true, health: 'ok', installed_version: '2.0.0' },
+      })),
+    });
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    // A read is all it is. Nothing here authorizes a mutation of the engine.
     expect(modelsApi.installRuntime).not.toHaveBeenCalled();
     expect(modelsApi.startRuntime).not.toHaveBeenCalled();
   });
@@ -839,6 +874,104 @@ describe('ProvidersScreen — the action the shell renders', () => {
     // Opening the takeover is not continuing: the report of what landed would be
     // lost behind a navigation.
     expect(navigated).toEqual([]);
+  });
+
+  // The invariant rather than the symptom: the shell draws the action this screen
+  // published, and a press is made against the one drawn. So an action that became
+  // pressable may only stop being pressable because something new arrived — someone
+  // asking for a read again, a write going out, an engine going down. A retraction
+  // nobody caused is a press that reaches nothing: `activate` sees the state the
+  // screen is really in and drops it, and the person is given no reason to press a
+  // second time.
+  //
+  // Judged over the published SEQUENCE, not over a rendered frame, because the frame
+  // a retraction leaves behind is identical to the settled one — the action comes
+  // back to exactly what it was a commit later. Only the order the shell was told
+  // about tells the two apart.
+  it('never takes a pressable action back on its own once a new observation lands', async () => {
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    // Arriving before the runtime read has landed is the ordinary way in: the supply
+    // read answers first, so the action already names the way on while the engine is
+    // still unknown — stated, and not yet pressable.
+    const { show } = renderScreen({ runtimeRead: loadingRegion<RuntimeDependency>() });
+    await settled();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(lastAction().disabled).toBe(true);
+
+    // The only new input in this case, and the last one: the engine is observed
+    // serving. It admits the press AND is a new observation for the supply read, which
+    // is exactly why the retraction it used to cause was invisible — the same input
+    // produced both halves.
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    await waitFor(() => expect(lastAction().disabled).toBe(false));
+    // The refresh that observation starts has to have been made and settled before the
+    // sequence means anything; otherwise this passes on a read that never happened.
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(cards()[0].dataset.state).toBe('connected'));
+
+    const pressable = actions.findIndex((action) => !action.disabled && !action.busy);
+    expect(pressable).toBeGreaterThanOrEqual(0);
+    expect(actions.slice(pressable).every((action) => !action.disabled && !action.busy)).toBe(true);
+  });
+});
+
+describe('ProvidersScreen — the way on when nothing is connected', () => {
+  it('states a way on beside the take-over it found, and only navigates', async () => {
+    serve({ scan: [CLAUDE_KEY] });
+    renderScreen();
+    await settled();
+
+    // The take-over keeps the footer: whoever came here to connect something is
+    // still offered the thing they came for. The way on is beside it, not instead.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    const onward = screen.getByRole('button', { name: 'Continue to assistants' });
+    expect((onward as HTMLButtonElement).disabled).toBe(false);
+
+    await userEvent.setup().click(onward);
+
+    // Navigating is the whole action. Nothing was added, taken over or installed
+    // on the way out, and the review that was on offer is still only on offer.
+    expect(navigated).toEqual(['assistants']);
+    expect(server.sources).toEqual([]);
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('leaves the single action alone once a source is really there', async () => {
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+  });
+
+  it('takes the way on back when the shell hides the screen, and returns it on re-entry', async () => {
+    serve();
+    const { show } = renderScreen();
+    await settled();
+    expect(screen.getByRole('button', { name: 'Continue to assistants' })).toBeTruthy();
+
+    // It leaves the screen root to reach the shell's slot, so nothing else would
+    // take it out of reach of a reader on the step after this one.
+    await show({ active: false });
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+
+    await show({ active: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue to assistants' })).toBeTruthy());
+    expect(navigated).toEqual([]);
+  });
+
+  it('says nothing about a way on while the inventory is unread, which is not an empty one', async () => {
+    serve();
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('common.retry'));
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
   });
 });
 

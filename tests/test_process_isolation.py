@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,8 +28,11 @@ from core.process_isolation import (
     process_group_exists,
     process_group_identity_status,
     process_identity_matches,
+    process_identity_recycled,
     process_identity_subprocess_env,
     probe_process_liveness,
+    _processes_carrying_marker,
+    reap_marked_processes,
     reap_orphaned_process_tree,
     signal_process_tree,
     terminate_process_group_by_pgid,
@@ -434,7 +438,8 @@ def test_terminate_process_tree_by_pid_does_not_signal_reused_pid(monkeypatch: p
         pytest.skip("process group signalling assertion is POSIX-specific")
 
     expected_identity = _persisted_identity()
-    reused_identity = _live_identity(create_time=456.0)
+    # A stranger holding a recycled pid: another birth time and none of our marker.
+    reused_identity = _live_identity(create_time=456.0, worker_fingerprint=None)
     monkeypatch.setattr(
         "core.process_isolation._open_process_identity",
         lambda _pid: (SimpleNamespace(pid=12345), reused_identity),
@@ -454,6 +459,118 @@ def test_terminate_process_tree_by_pid_does_not_signal_reused_pid(monkeypatch: p
             expected_identity=expected_identity,
         )
         is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("live_create_time", "live_fingerprint", "matches", "recycled"),
+    [
+        (123.0, TEST_FINGERPRINT, True, False),
+        # macOS: the displayed birth time shifts while the same execution runs on.
+        (123.7, TEST_FINGERPRINT, True, False),
+        (456.0, None, False, True),
+        (456.0, fingerprint_process_marker("other-tree"), False, True),
+        # Same birth, no readable marker: neither ours nor provably someone else's.
+        (123.0, None, False, False),
+    ],
+)
+def test_process_identity_is_decided_by_marker_not_a_shifted_birth_time(
+    live_create_time: float,
+    live_fingerprint: str | None,
+    matches: bool,
+    recycled: bool,
+) -> None:
+    expected = _persisted_identity()
+    live = _live_identity(create_time=live_create_time, worker_fingerprint=live_fingerprint)
+
+    assert process_identity_matches(expected, live) is matches
+    assert process_identity_recycled(expected, live) is recycled
+
+
+def test_unreadable_marker_with_a_shifted_birth_time_is_not_recycled() -> None:
+    expected = PersistedProcessIdentity(pid=4321, create_time=123.0, worker_fingerprint=fingerprint_process_marker("m"))
+    unreadable = ProcessIdentity(pid=4321, create_time=456.0, worker_fingerprint=None, marker_readable=False)
+    stranger = ProcessIdentity(pid=4321, create_time=456.0, worker_fingerprint=None)
+
+    assert process_identity_recycled(expected, unreadable) is False
+    assert process_identity_recycled(expected, stranger) is True
+
+
+def test_open_process_identity_reports_an_unreadable_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    def deny(_process):
+        raise psutil.AccessDenied(os.getpid())
+
+    monkeypatch.setattr(psutil.Process, "environ", deny)
+
+    identity = inspect_process_identity(os.getpid())
+
+    assert identity is not None
+    assert identity.worker_fingerprint is None and identity.marker_readable is False
+
+
+def test_reap_marked_processes_finds_a_tree_by_marker_alone() -> None:
+    marker = new_process_identity_marker()
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env={**os.environ, PROCESS_IDENTITY_ENV: marker},
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while (identity := inspect_process_identity(child.pid)) is None or identity.worker_fingerprint is None:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        outcome = reap_marked_processes(
+            logging.getLogger(__name__),
+            "test process",
+            worker_fingerprint=fingerprint_process_marker(marker),
+        )
+        assert outcome == "reaped"
+        assert child.wait(timeout=5) is not None
+        assert (
+            reap_marked_processes(
+                logging.getLogger(__name__),
+                "test process",
+                worker_fingerprint=fingerprint_process_marker(marker),
+            )
+            == "gone"
+        )
+    finally:
+        with suppress(ProcessLookupError):
+            child.kill()
+        child.wait(timeout=5)
+
+
+def test_marker_scan_skips_processes_it_cannot_inspect(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A tree this service spawned is always inspectable; an unreadable or foreign
+    # process is not ours and must not block recovery forever (non-dumpable daemons).
+    own_uid = os.getuid()
+    marker = new_process_identity_marker()
+    ours = SimpleNamespace(
+        pid=4141,
+        info={"uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid), "username": "me"},
+        environ=lambda: {PROCESS_IDENTITY_ENV: marker},
+    )
+    unreadable = SimpleNamespace(
+        pid=4242,
+        info={"uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid), "username": "me"},
+        environ=lambda: (_ for _ in ()).throw(psutil.AccessDenied(4242)),
+    )
+    setuid = SimpleNamespace(
+        pid=4343,
+        info={"uids": SimpleNamespace(real=own_uid, effective=0, saved=0), "username": "me"},
+        environ=lambda: pytest.fail("a setuid process cannot carry our marker"),
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable, ours]))
+
+    assert _processes_carrying_marker(fingerprint_process_marker(marker)) == [ours]
+    assert (
+        reap_marked_processes(
+            logging.getLogger(__name__),
+            "test process",
+            worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
+        )
+        == "gone"
     )
 
 

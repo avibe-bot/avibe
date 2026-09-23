@@ -58,6 +58,7 @@ _DEFAULT_REASONING_EFFORTS = {
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
 }
 REASONING_EFFORT_VOCABULARY: Final[tuple[str, ...]] = (
+    "none",
     "minimal",
     "low",
     "medium",
@@ -75,16 +76,22 @@ _CODEX_BUILT_IN_MODELS = [
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
-    "gpt-5.4-nano",
-    "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
-    "gpt-5.2-codex",
-    "gpt-5.2",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-    "gpt-5.1",
-    "gpt-5",
 ]
+# Retired Codex ids that only ever came from the legacy list or a Codex CLI
+# cache, never the bundled menu. They are blocked here rather than tombstoned in
+# the bundled catalog, which would add them to the persisted fixed menu.
+_RETIRED_CODEX_MODELS = frozenset(
+    {
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.4-nano",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini",
+        "gpt-5.1",
+        "gpt-5",
+    }
+)
 _REASONING_LABELS = {
     "none": "None",
     "minimal": "Minimal",
@@ -739,6 +746,33 @@ def backend_model_entries(backend: str, catalog: dict[str, Any] | None) -> list[
     return [entry for entry in entries if entry]
 
 
+def visible_backend_model_entries(
+    backend: str, catalog: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Backend rows a picker may offer, with tombstoned rows dropped.
+
+    Callers that merge catalogs keep the raw entries instead, because
+    ``merge_model_sources`` needs to see a tombstone to suppress the same id in
+    the lower-priority sources behind it.
+    """
+
+    return [entry for entry in backend_model_entries(backend, catalog) if not _model_hidden(entry)]
+
+
+def unlisted_retired_backend_model_ids(backend: str) -> frozenset[str]:
+    """Retired ids no bundled catalog row carries, so no tombstone can name them."""
+
+    return _RETIRED_CODEX_MODELS if (backend or "").strip().lower() == "codex" else frozenset()
+
+
+def retired_backend_model_ids(backend: str, catalog: dict[str, Any] | None) -> frozenset[str]:
+    """Ids this catalog tombstones, i.e. models the backend no longer serves."""
+
+    return frozenset(
+        entry["id"] for entry in backend_model_entries(backend, catalog) if _model_hidden(entry)
+    )
+
+
 def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> dict[str, Any]:
     backend_key = (backend or "").strip().lower()
     if backend_key not in _SUPPORTED_BACKENDS:
@@ -754,12 +788,12 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
 
     if backend_key == "claude":
         sources = _claude_sources(remote_catalog, bundled_catalog)
-        blocked: set[str] = set()
+        blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     else:
         local_catalog = _read_codex_models_cache()
         remote_entries = backend_model_entries("codex", remote_catalog)
         blocked = _codex_blocked_model_ids(
-            remote_entries,
+            remote_catalog,
             local_catalog,
             bundled_catalog,
         )
@@ -859,13 +893,13 @@ def backend_builtin_snapshot(
             bundled_catalog,
             local_models=local_models,
         )
-        blocked: set[str] = set()
+        blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     else:
         local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
         local_complete = not cli_installed or local_catalog_read
         remote_entries = backend_model_entries("codex", remote_catalog)
         blocked = _codex_blocked_model_ids(
-            remote_entries,
+            remote_catalog,
             local_catalog,
             bundled_catalog,
         )
@@ -1079,18 +1113,51 @@ def _model_explicitly_visible(entry: dict[str, Any]) -> bool:
     return isinstance(visibility, str) and visibility.strip().lower() in _VISIBLE_VISIBILITIES
 
 
+def _bundled_retired_model_ids(
+    backend: str,
+    remote_catalog: dict[str, Any],
+    bundled_catalog: dict[str, Any],
+) -> set[str]:
+    """Bundled retirements outrank a remote catalog cached before they shipped.
+
+    Only a remote row that is explicitly visible may bring a retired id back;
+    an old cached row that merely lists the id does not.
+    """
+
+    remote_entries = backend_model_entries(backend, remote_catalog)
+    explicit_remote_models = {
+        entry["id"] for entry in remote_entries if _model_explicitly_visible(entry)
+    }
+    return {
+        model
+        for model in retired_backend_model_ids(backend, bundled_catalog)
+        if model not in explicit_remote_models
+    }
+
+
+def _claude_blocked_model_ids(
+    remote_catalog: dict[str, Any],
+    bundled_catalog: dict[str, Any],
+) -> set[str]:
+    return _bundled_retired_model_ids("claude", remote_catalog, bundled_catalog)
+
+
 def _codex_blocked_model_ids(
-    remote_entries: Sequence[dict[str, Any]],
+    remote_catalog: dict[str, Any],
     local_catalog: Sequence[dict[str, Any]],
     bundled_catalog: dict[str, Any],
 ) -> set[str]:
+    remote_entries = backend_model_entries("codex", remote_catalog)
     bundled_entries = backend_model_entries("codex", bundled_catalog)
     explicit_catalog_models = {
         entry["id"]
         for entry in [*remote_entries, *bundled_entries]
         if _model_explicitly_visible(entry)
     }
-    return {
+    retired = _bundled_retired_model_ids("codex", remote_catalog, bundled_catalog) | {
+        model for model in _RETIRED_CODEX_MODELS if model not in explicit_catalog_models
+    }
+    return retired | {
         entry["id"] for entry in remote_entries if _model_hidden(entry)
     } | {
         entry["id"]

@@ -29,13 +29,17 @@ import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
 import { ImportKeysNotice } from '../onboarding/ImportKeysNotice';
 import { modelHubEnabledFromConfig } from '../settings/models/featureFlags';
-import type { SetupAction, SetupScreenHandle } from '../onboarding/setupFlow';
+import type { SetupAction, SetupFlowState, SetupScreenHandle, SetupScreenId } from '../onboarding/setupFlow';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
 import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
+import { DefaultRouteDialog } from '../onboarding/DefaultRouteDialog';
+import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
+import type { AgentSupply } from '../settings/models/types';
+import type { SetupRouteFocus } from '../onboarding/setupRoute';
 
 interface AgentDetectionProps {
   active?: boolean;
@@ -47,6 +51,10 @@ interface AgentDetectionProps {
   isPage?: boolean;
   completionRecovery?: React.ReactNode;
   onSave?: (data: { agents: Record<string, AgentState> }) => Promise<void> | void;
+  flowState?: SetupFlowState;
+  setFlowState?: React.Dispatch<React.SetStateAction<SetupFlowState>>;
+  onNavigate?: (screen: SetupScreenId) => void;
+  agentReads?: CollectionReadAuthority<AgentSupply[]>;
 }
 
 type AgentState = {
@@ -107,7 +115,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 // description, status pill, enable switch) and an action row (configure
 // provider / set up Allow / install). Detection runs automatically on mount —
 // the user enables what they have and installs anything missing.
-export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery, active = true, ref, onActionChange }) => {
+export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery, active = true, ref, onActionChange, flowState, setFlowState, onNavigate, agentReads }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -128,6 +136,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({});
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
+  const [routeOpen, setRouteOpen] = useState(false);
+  const [routeFocus, setRouteFocus] = useState<SetupRouteFocus | null>(null);
+  const canEditSetupRoute = Boolean(flowState && setFlowState && onNavigate && agentReads);
+  const openSetupRoute = (backend: RuntimeBackendId) => {
+    setRouteFocus({ backend, agentName: backend });
+    setRouteOpen(true);
+  };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
   const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
@@ -202,6 +217,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
+  const onRoutesSaved = async (saved: SetupRouteFocus) => {
+    await agentReads?.refresh();
+    await refreshConnection(saved.backend);
+  };
   // Being read again is one event with one owner, however it arrives: the shell
   // activates this screen, or the route surface it sits on comes back. In the shell both
   // happen in the same commit, so two effects would mean two refreshes — and neither of
@@ -350,6 +369,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       // This uncached projection reads persisted enabled even after a rejected
       // write. Apply failure cannot roll back config that was already committed.
       await refreshConnection(backend);
+      // The presence read is a follow-up to the write, not the write itself. It is also
+      // the only thing in here that can reject, and this job is a link in the serial
+      // queue: a rejection settles the queue rejected, so every toggle after it chains
+      // onto a continuation that never runs and the person's next enable silently does
+      // nothing. Its failure is reported where this screen already reports a read that
+      // failed, and it does not bury what the write had to say.
+      try {
+        await agentReads?.refresh();
+      } catch (error) {
+        if (enableIntent.current[backend] !== intent) return;
+        setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));
+      }
     });
   };
 
@@ -432,6 +463,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           }));
         }
         await detect(name, installedPath || agents[name]?.cli_path || name);
+        await agentReads?.refresh();
       }
     } catch (e) {
       setInstallResults((prev) => ({
@@ -748,24 +780,28 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const result = installResults[name];
           const error = detectionErrors[name] ? { message: detectionErrors[name] }
             : result && !result.ok && result.message ? result : undefined;
+          const hubRoute = connections[name]?.supply_mode === 'hub'
+            || Boolean(canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => {
-              if (connections[name]?.supply_mode === 'hub') {
+              if (hubRoute) {
+                if (canEditSetupRoute) { openSetupRoute(name); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
                 return;
               }
               setProviderModal({ backend: name, method: 'oauth' });
             }}
             onAddKey={() => {
-              if (connections[name]?.supply_mode === 'hub') {
+              if (hubRoute) {
+                if (canEditSetupRoute) { openSetupRoute(name); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
                 return;
               }
               setProviderModal({ backend: name, method: 'api_key' });
             }}
-            connection={connections[name]?.supply_mode === 'hub'
+            connection={hubRoute
               ? 'hub'
               : !connectionErrors[name] && connections[name]?.ready
                 ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
@@ -773,7 +809,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
-            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name] || !agent.enabled || agent.status !== 'ok'}
+            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
+              || (hubRoute
+                ? agent.status !== 'ok'
+                : !agent.enabled || agent.status !== 'ok')}
             enabledControl={<ToggleSwitch variant="onboarding" enabled={agent.enabled}
               label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
               onClick={() => toggle(name, !agent.enabled)} />}
@@ -821,6 +860,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       </div>
       </div>
       {providerDialog}
+      {canEditSetupRoute && flowState && setFlowState && onNavigate && agentReads && (
+        <DefaultRouteDialog
+          open={routeOpen}
+          onClose={() => { setRouteOpen(false); setRouteFocus(null); }}
+          flowState={flowState}
+          setFlowState={setFlowState}
+          onNavigate={onNavigate}
+          agentReads={agentReads}
+          focus={routeFocus}
+          onSaved={onRoutesSaved}
+        />
+      )}
       {!onActionChange && completionRecovery}
       {asideNode}
     </div>

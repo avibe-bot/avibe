@@ -187,6 +187,8 @@ def _projection_for_copy_variant(
         kwargs.update(config=config, resolution=resolution)
     elif variant == "transition_unpersisted":
         kwargs["source_transition_persisted"] = False
+    elif variant == "upstream_detail":
+        kwargs["upstream_detail"] = "claude-code version too old"
     elif variant == "next_current":
         menu_model = fixed_model("claude")
         supplied = source("src_copynext", [menu_model])

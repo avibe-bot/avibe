@@ -14,7 +14,6 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
-import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
@@ -147,6 +146,59 @@ const usageSummary: UsageSummary = {
     models: [{ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
   }],
   days: [{ day: '2026-08-18', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
+};
+
+/**
+ * One Hub agent whose only route runs through the retained Source, the chain
+ * that route reads, and the impact the server reports for a write touching it.
+ * Shared because the impact-scoped chain read is what every committed mutation
+ * turns on, and each case would otherwise restate the same three shapes.
+ */
+const REFRESH_FAILED = /^Couldn't refresh, please retry$|^刷新失败，请重试$/;
+
+const routedModelId = 'claude-opus-4-6';
+
+const routedHubAgent: AgentSupply = {
+  ...takeoverAgent,
+  backend: 'claude',
+  selected_model_id: routedModelId,
+  sources: {
+    order: [retainedSource.id],
+    eligibility: [{ source_id: retainedSource.id, eligible: true }],
+  },
+  routes: { [routedModelId]: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] } },
+  model_supply: [{ route_origin: 'manual' as const, model_id: routedModelId, chain_length: 1, has_runnable_hop: true }],
+  builtin_models: [routedModelId],
+};
+
+const routedChain: AgentChain = {
+  manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
+  route_origin: 'manual' as const,
+  contract_version: 10,
+  backend: 'claude',
+  model_id: routedModelId,
+  current: { source_id: retainedSource.id, model_id: routedModelId },
+  chain: [{
+    source_id: retainedSource.id,
+    model_id: routedModelId,
+    channel: 'hub',
+    health: 'healthy',
+    runnable: true,
+    reason: null,
+    retry_at: null,
+  }],
+  supply_state: 'ok',
+};
+
+const routedImpact = {
+  removed_hops: [{
+    backend: 'claude' as const,
+    menu_model: routedModelId,
+    position: 1,
+    source_id: retainedSource.id,
+    model_id: routedModelId,
+  }],
+  interrupted: [{ backend: 'claude' as const, model_id: routedModelId, agents: ['Release bot'] }],
 };
 
 const deferred = <T,>() => {
@@ -1181,58 +1233,25 @@ describe('SettingsModelsPage surface branches', () => {
   });
 
   it.each(MANAGE_COMMIT_ACTIONS)(
-    '[MH-SRC-DELETE-001] keeps the page-owned $action impact readable until every referenced projection lands',
+    '[MH-SRC-DELETE-001] announces a committed $action once and reconciles every referenced projection with no second decision',
     async (action) => {
-      const modelId = 'claude-opus-4-6';
+      // The guard already made the user confirm this exact impact before the
+      // write, so repeating it afterwards asked them to decide something that
+      // had already happened. What the commit still owes is the announcement
+      // and the surface read: the toast lands immediately, the read runs behind
+      // it, and the page settles on its own once every referenced projection —
+      // including the impact-scoped chain — comes back.
       const updatedSource = { ...retainedSource, display_name: 'Updated source' };
-      const hubAgent: AgentSupply = {
-        ...takeoverAgent,
-        backend: 'claude',
-        selected_model_id: modelId,
-        sources: {
-          order: [retainedSource.id],
-          eligibility: [{ source_id: retainedSource.id, eligible: true }],
-        },
-        routes: { [modelId]: { hops: [{ source_id: retainedSource.id, model_id: modelId }] } },
-        model_supply: [{ route_origin: "manual" as const, model_id: modelId, chain_length: 1, has_runnable_hop: true }],
-        builtin_models: [modelId],
-      };
-      const affectedChain: AgentChain = { manual_override: {hops:[{source_id:retainedSource.id,model_id:modelId}]}, route_origin: "manual" as const,
-        contract_version: 10,
-        backend: 'claude',
-        model_id: modelId,
-        current: { source_id: retainedSource.id, model_id: modelId },
-        chain: [{
-          source_id: retainedSource.id,
-          model_id: modelId,
-          channel: 'hub',
-          health: 'healthy',
-          runnable: true,
-          reason: null,
-          retry_at: null,
-        }],
-        supply_state: 'ok',
-      };
-      const impact = {
-        removed_hops: [{
-          backend: 'claude' as const,
-          menu_model: modelId,
-          position: 1,
-          source_id: retainedSource.id,
-          model_id: modelId,
-        }],
-        interrupted: [{ backend: 'claude' as const, model_id: modelId, agents: ['Release bot'] }],
-      };
       const sourceRead = vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
-      vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
+      vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([routedHubAgent]);
       vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
       vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-      const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([affectedChain]);
-      const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(affectedChain);
+      const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([routedChain]);
+      const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(routedChain);
       if (action === 'edit') {
-        vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, ...impact });
+        vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, ...routedImpact });
       } else {
-        vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce(impact);
+        vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce(routedImpact);
       }
 
       render(
@@ -1247,6 +1266,10 @@ describe('SettingsModelsPage surface branches', () => {
       expect(within(sourceDialog).getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i })).toBeTruthy();
       await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
 
+      const chainLanding = deferred<AgentChain>();
+      chainRead.mockImplementationOnce(() => chainLanding.promise);
+      sourceRead.mockResolvedValue(action === 'edit' ? [updatedSource] : []);
+
       await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
       if (action === 'edit') {
         await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
@@ -1259,42 +1282,68 @@ describe('SettingsModelsPage surface branches', () => {
         await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
       }
 
-      const report = await screen.findByRole('dialog', {
-        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
-      });
-      expect(report.dataset.reportProjections?.split(' ')).toEqual(
-        Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS),
+      const settled = await screen.findByText(
+        action === 'edit' ? /^The source was updated$|^供应商已更新$/ : /^The source was removed$|^供应商已移除$/,
       );
-      expect(report.textContent).toContain(modelId);
-      expect(report.textContent).toContain('Release bot');
+      expect(settled.closest('[role="dialog"]')).toBeNull();
+      expect(screen.queryByRole('dialog', {
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
+      })).toBeNull();
+      // The impact evidence still decides which chains the commit must re-read;
+      // only the modal that used to gate that read is gone.
+      await waitFor(() => expect(chainRead).toHaveBeenLastCalledWith('claude', routedModelId));
 
-      const chainLanding = deferred<AgentChain>();
-      chainRead.mockImplementationOnce(() => chainLanding.promise);
-      sourceRead.mockResolvedValue(action === 'edit' ? [updatedSource] : []);
-      const done = within(report).getAllByRole('button', { name: /^Done$|^完成$/i })
-        .find((button) => button.classList.contains('model-hub-guard-action'));
-      await userEvent.click(done!);
-
+      await act(async () => {
+        chainLanding.resolve(routedChain);
+        await chainLanding.promise;
+      });
       if (action === 'edit') {
         await waitFor(() => expect(document.querySelector('.model-hub-source-title')?.textContent)
           .toBe(updatedSource.display_name));
       } else {
         await waitFor(() => expect(document.querySelector('.model-hub-source-title')).toBeNull());
       }
-      expect(screen.getByRole('dialog', {
-        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
-      })).toBeTruthy();
-      expect(chainRead).toHaveBeenLastCalledWith('claude', modelId);
-
-      await act(async () => {
-        chainLanding.resolve(affectedChain);
-        await chainLanding.promise;
-      });
-      await waitFor(() => expect(screen.queryByRole('dialog', {
-        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
-      })).toBeNull());
+      // Every projection came back, so nothing may tell the user the page is
+      // behind the server. This is the line the bug that opened the lane showed
+      // after a save that had in fact landed.
+      expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
     },
   );
+
+  it('says the page could not refresh when a route the write touched cannot be read', async () => {
+    // The other half of the same decision. A route that could not be re-read
+    // after a committed write is a real gap between the page and the server, and
+    // the chain card's own Retry is not always on screen to say so — a backend
+    // with enough models renders the collapse control in its place. So the page
+    // keeps this line, alongside the announcement: the write did commit, and the
+    // two statements are about different things.
+    const updatedSource = { ...retainedSource, display_name: 'Updated source' };
+    renderPage([retainedSource], [routedHubAgent]);
+    const overviewRead = vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([routedChain]);
+    const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(routedChain);
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, ...routedImpact });
+
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
+    // The per-backend overview read has to settle first: it shares the chain
+    // authority's key with the impact-scoped read, so letting it land later
+    // would make this a supersession case instead of the read failure at issue.
+    await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
+
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([updatedSource]);
+    chainRead.mockRejectedValue(new ApiCallError('chain_unavailable'));
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, updatedSource.display_name);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    expect(await screen.findByText(/^The source was updated$|^供应商已更新$/)).toBeTruthy();
+    expect(await screen.findByText(REFRESH_FAILED)).toBeTruthy();
+    await waitFor(() => expect(chainRead).toHaveBeenLastCalledWith('claude', routedModelId));
+  });
 
   it('[MH-SRC-DELETE-002] returns to the list once a removal commits, whichever way the route answered', async () => {
     // The dialog renders one selected source, so a committed removal leaves it
@@ -1325,7 +1374,44 @@ describe('SettingsModelsPage surface branches', () => {
       expect(deleteWrite).toHaveBeenLastCalledWith(removed.id, undefined);
       // Not merely closed: the placeholder never became something to read past.
       expect(screen.queryByText(/no longer available|已经不在了/i)).toBeNull();
+      // The row that opened this dialog left with the removal, so the recorded
+      // return target is disconnected. Focus has to land back inside the Hub
+      // rather than on `document.body`, where the next Tab would restart at the
+      // top of the document instead of near the list being worked in. The shell
+      // rather than the overview is what both rounds share: the second removal
+      // empties the Hub, which unmounts the overview along with the last row.
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement?.closest('.model-hub-shell')).toBeTruthy();
+      if (survivors.length) {
+        expect(document.activeElement?.closest('.model-hub-overview-grid')).toBeTruthy();
+      }
     }
+  });
+
+  it('reports an edit whose Source turned out to be gone as gone, not as updated', async () => {
+    // The commit envelope carries the OUTCOME, not the flow: this is still the
+    // edit flow, but nothing was updated, and announcing 「已更新」 over a panel
+    // saying the provider is no longer there tells the user two things at once.
+    renderPage([retainedSource]);
+    const patch = vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(new ApiCallError('source_not_found'));
+
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Renamed source');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/^The source was updated$|^供应商已更新$/)).toBeNull();
+    // The Save press gets an answer OUTSIDE the dialog — the toast — saying the
+    // same thing the panel under it now says, rather than one each.
+    await waitFor(() => expect(screen.getAllByText(/no longer available|已经不在了/i)
+      .some((node) => node.closest('[role="dialog"]') === null)).toBe(true));
   });
 
   it('states in the dialog that a source disappeared with no removal of ours', async () => {

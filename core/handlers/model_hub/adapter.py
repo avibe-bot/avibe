@@ -11,7 +11,7 @@ orchestrator and land with every affected consumer on the same tested head.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
@@ -141,6 +141,10 @@ class RawCallOutcome:
     # Recognized model output or protocol success, independently of permissive
     # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
     recovery_verified: bool = False
+    # Upstream's own human-readable error text, credential-redacted and bounded
+    # by L1. Display-only: classification never reads it, it is never persisted
+    # into events or provenance, and it stays out of repr so logs cannot echo it.
+    upstream_detail: str | None = field(default=None, repr=False)
 
 
 class ObservationOutcome(str, Enum):

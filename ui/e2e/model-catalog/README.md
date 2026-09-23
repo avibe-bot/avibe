@@ -12,6 +12,12 @@ touch input. Cases verify picker additions, save/readback, child Cancel/Escape/
 outside dismissal, editor commit, custom-editor handoff and catalog cancellation.
 The host unmounts the catalog on close, matching `SettingsModelsPage`.
 
+`reasoning-off.spec.ts` extends `MH-MENU-COMPOSE-001`: Off is an unchecked
+per-model option until explicitly selected, existing/custom tiers retain their
+order, the catalog saves the exact declaration, and reread/cancel preserves it.
+All three backends run in English/Chinese on desktop/mobile. This proves the
+model editor's declaration flow, not live provider support for that declaration.
+
 This consumes the shared `MH-MENU-COMPOSE-001` addition workflow. It guards the
 React ownership of portalled child dialogs: a delayed touch click must not be
 classified as outside the catalog after the child closes. Mouse-only and JSDOM

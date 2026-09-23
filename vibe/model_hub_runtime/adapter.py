@@ -121,6 +121,7 @@ def _authorization_landing_url(raw: str) -> str | None:
         return url
     return urlunsplit(parts._replace(query=urlencode(kept)))
 
+
 # The local surface the pinned engine serves a hub-held subscription on.
 #
 # A subscription's protocol is not a fact about the vendor's public API — it is a
@@ -572,9 +573,9 @@ def _anthropic_wrapperless_error_kind(
     if _request_error_rejects_credential(status, error):
         return "rejected"
     identifiers = _error_identifiers(error)
-    if status in _REQUEST_ERROR_STATUSES and not (
-        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
-    ).isdisjoint(identifiers):
+    if status in _REQUEST_ERROR_STATUSES and not (_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS).isdisjoint(
+        identifiers
+    ):
         return "accepted"
     if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
         return "rejected"
@@ -594,9 +595,9 @@ def _openai_wrapperless_error_kind(
     identifiers = _payload_identifiers(payload)
     if not identifiers:
         return None
-    if status in _REQUEST_ERROR_STATUSES and not (
-        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
-    ).isdisjoint(identifiers):
+    if status in _REQUEST_ERROR_STATUSES and not (_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS).isdisjoint(
+        identifiers
+    ):
         return "accepted"
     if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
         return "rejected"
@@ -678,8 +679,7 @@ def _parse_protocol_authenticated_evidence(
     top_level_identifiers = _payload_identifiers(payload)
     if (
         not oauth
-        and
-        status in _AUTHENTICATION_ERROR_STATUSES
+        and status in _AUTHENTICATION_ERROR_STATUSES
         and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
     ):
         return evidence(
@@ -787,6 +787,7 @@ async def _probe_protocol_response(
             headers.pop("Authorization")
             headers["x-api-key"] = secret
     client_timeout = aiohttp.ClientTimeout(total=timeout)
+
     async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.post(
@@ -797,7 +798,11 @@ async def _probe_protocol_response(
             ) as response:
                 body = await response.content.read(64 * 1024)
                 return _parse_protocol_authenticated_evidence(
-                    protocol, response.status, body, vendor=vendor, request_root=root,
+                    protocol,
+                    response.status,
+                    body,
+                    vendor=vendor,
+                    request_root=root,
                 )
 
     try:
@@ -833,9 +838,7 @@ def _response_shape_proves_protocol(
     if protocol == "anthropic":
         error = body.get("error")
         return body.get("type") == "message" or (
-            body.get("type") == "error"
-            and isinstance(error, dict)
-            and isinstance(error.get("type"), str)
+            body.get("type") == "error" and isinstance(error, dict) and isinstance(error.get("type"), str)
         )
     error = body.get("error")
     if protocol == "openai_responses":
@@ -868,9 +871,9 @@ def _openai_family_elimination_proof(
     exclusion. Transient upstream failures do not qualify.
     """
 
-    if not {
-        protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS
-    }.issubset(ruled_out_protocols):
+    if not {protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS}.issubset(
+        ruled_out_protocols
+    ):
         return None
 
     candidate = responses.get("openai_responses")
@@ -1110,6 +1113,7 @@ def _probe_oauth_protocol_response(
             status_code=404,
         )
     headers["Authorization"] = "Bearer $TOKEN$"
+
     def request(probe_headers: dict[str, str]) -> _ProtocolEvidence:
         payload = client.management_request(
             "POST",
@@ -1282,6 +1286,9 @@ class CLIProxyEngineAdapter:
         self._active_transports = 0
         self._transports_idle = asyncio.Event()
         self._transports_idle.set()
+        self._unsent_requests = 0
+        self._requests_sent = asyncio.Event()
+        self._requests_sent.set()
         self._installation_lock = asyncio.Lock()
         self._install_task: asyncio.Task[None] | None = None
         self._install_admission: asyncio.Future[EngineStatus] | None = None
@@ -1426,9 +1433,7 @@ class CLIProxyEngineAdapter:
         loop = asyncio.get_running_loop()
         recovery_deadline: float | None = None
         recovery_delay = _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS
-        claimed_target: dict[str, str] | None = (
-            dict(expected_target) if expected_target is not None else None
-        )
+        claimed_target: dict[str, str] | None = dict(expected_target) if expected_target is not None else None
 
         def persist_claim(target: dict[str, str]) -> None:
             nonlocal claim_owned, claimed_target
@@ -1463,10 +1468,7 @@ class CLIProxyEngineAdapter:
                     )
                     break
                 except EngineUnavailableError as exc:
-                    if (
-                        expected_target is None
-                        or exc.reason != INSTALL_ALREADY_RUNNING_REASON
-                    ):
+                    if expected_target is None or exc.reason != INSTALL_ALREADY_RUNNING_REASON:
                         raise
                     if self._installation_stopping:
                         await self._abandon_install_claim(
@@ -1483,9 +1485,7 @@ class CLIProxyEngineAdapter:
                         )
                     remaining = recovery_deadline - now
                     if remaining <= 0:
-                        logger.error(
-                            "Model Hub runtime recovery gave up waiting for the shared install lock"
-                        )
+                        logger.error("Model Hub runtime recovery gave up waiting for the shared install lock")
                         raise EngineUnavailableError(
                             "models.engine.install_failed",
                             reason=INSTALL_RECOVERY_TIMEOUT_REASON,
@@ -1596,11 +1596,7 @@ class CLIProxyEngineAdapter:
         on_resolved: Callable[[dict[str, str]], None] | None = None,
     ) -> EngineEnsureResult:
         async with self._routing_lock:
-            installer = (
-                self.supervisor.installer.offline_copy()
-                if offline
-                else self.supervisor.installer
-            )
+            installer = self.supervisor.installer.offline_copy() if offline else self.supervisor.installer
             if expected_target is None and on_resolved is None:
                 if force:
                     install = await asyncio.to_thread(
@@ -1655,10 +1651,7 @@ class CLIProxyEngineAdapter:
             if status.health is EngineHealth.INSTALLING:
                 return status
             start_after_install_task = self._start_after_install_task
-            if (
-                start_after_install_task is not None
-                and not start_after_install_task.done()
-            ):
+            if start_after_install_task is not None and not start_after_install_task.done():
                 start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
             return await self.status()
@@ -1717,9 +1710,14 @@ class CLIProxyEngineAdapter:
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
         async with self._routing_lock:
-            await self._transports_idle.wait()
-            # Cancellation must retain the barrier until the finite transaction
-            # has either restarted or restored the prior projection.
+            # The routing lock orders the projection against new admissions.
+            # An admitted request keeps the projection it was admitted under
+            # until the engine has read it; established streams keep their
+            # connection, since CPA hot-reloads the config, so a save neither
+            # waits for them nor restarts. Cancellation must retain the lock
+            # until the finite transaction has applied or restored the prior
+            # projection.
+            await self._requests_sent.wait()
             await run_owned_in_thread(self._sync_sources_transaction, tuple(bindings))
 
     def _sync_sources_transaction(self, bindings: Sequence[SourceBinding]) -> None:
@@ -1727,20 +1725,35 @@ class CLIProxyEngineAdapter:
             previous = self.state_store.list_sources()
         except EngineStateError:
             previous = []
-        was_running = self.supervisor.client_if_running() is not None
         self.state_store.sync_sources(bindings)
         try:
-            self.supervisor.restart_if_running()
+            self.supervisor.reload_config_if_running(previous)
         except Exception:
+            applied = self.state_store.list_sources()
             self.state_store.replace_sources(previous)
-            if was_running:
-                try:
-                    self.supervisor.ensure_running()
-                except Exception as restore_error:
-                    raise EngineStateError(
-                        "source sync failed and the previous engine state could not be restored"
-                    ) from restore_error
+            try:
+                self.supervisor.reload_config_if_running(applied)
+            except Exception as restore_error:
+                raise EngineStateError(
+                    "source sync failed and the previous engine state could not be restored"
+                ) from restore_error
             raise
+
+    def _hold_unsent_request(self) -> Callable[[], None]:
+        self._unsent_requests += 1
+        self._requests_sent.clear()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._unsent_requests -= 1
+            if self._unsent_requests == 0:
+                self._requests_sent.set()
+
+        return release
 
     def _acquire_transport(self) -> Callable[[], None]:
         self._active_transports += 1
@@ -1809,11 +1822,17 @@ class CLIProxyEngineAdapter:
 
         async with self._routing_lock:
             await self._transports_idle.wait()
-            auth_name, payload, _prefix, _already_active = await run_owned_in_thread(
-                self.state_store.activate_oauth_auth_file,
-                credential_ref,
+
+            def publish_grant(running: EngineClient | None):
+                return (*self.state_store.activate_oauth_auth_file(credential_ref), running)
+
+            # Published under the lifecycle exclusion: an engine a previous service
+            # left running is reaped first, so none can load or rotate the new grant
+            # outside this service's reconcile below.
+            auth_name, payload, _prefix, _already_active, client = await run_owned_in_thread(
+                self.supervisor.with_engine_excluded,
+                publish_grant,
             )
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
             if client is None:
                 # The next ordered lifecycle step starts CPA. The atomically
                 # published watched file is the source of truth; no management
@@ -1824,14 +1843,8 @@ class CLIProxyEngineAdapter:
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError(
-                    "OAuth activation could not inspect the engine"
-                ) from exc
-            matching = [
-                auth
-                for auth in inventory.values()
-                if auth.name == auth_name or auth.identity == auth_name
-            ]
+                raise EngineStateError("OAuth activation could not inspect the engine") from exc
+            matching = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matching) > 1:
                 raise EngineStateError("OAuth activation auth record is ambiguous")
             if matching:
@@ -1861,14 +1874,8 @@ class CLIProxyEngineAdapter:
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError(
-                    "OAuth activation could not inspect the engine"
-                ) from exc
-            matching = [
-                auth
-                for auth in inventory.values()
-                if auth.name == auth_name or auth.identity == auth_name
-            ]
+                raise EngineStateError("OAuth activation could not inspect the engine") from exc
+            matching = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matching) > 1:
                 raise EngineStateError("OAuth activation auth record is ambiguous")
             if not matching:
@@ -1906,9 +1913,7 @@ class CLIProxyEngineAdapter:
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError(
-                    "OAuth credential validation could not inspect the engine"
-                ) from exc
+                raise EngineStateError("OAuth credential validation could not inspect the engine") from exc
             auth_name = str(metadata.get("auth_name") or "")
             matches = [
                 auth
@@ -1974,11 +1979,7 @@ class CLIProxyEngineAdapter:
         if isinstance(prefix, str) and prefix:
             return prefix
         record = next(
-            (
-                source
-                for source in self.state_store.list_sources()
-                if source.credential_ref == credential_ref
-            ),
+            (source for source in self.state_store.list_sources() if source.credential_ref == credential_ref),
             None,
         )
         return record.prefix if record is not None and record.prefix else None
@@ -2064,31 +2065,27 @@ class CLIProxyEngineAdapter:
             self.state_store.credential_metadata_if_present,
             credential_ref,
         )
-        auth_name = (
-            metadata.get("auth_name")
-            if metadata is not None and metadata.get("kind") == "oauth"
-            else None
-        )
+        auth_name = metadata.get("auth_name") if metadata is not None and metadata.get("kind") == "oauth" else None
         if auth_name:
             if metadata.get("activation_state") != "staged":
-                client = await asyncio.to_thread(self.supervisor.client_if_running)
-                if client is not None:
-                    try:
-                        await asyncio.to_thread(
-                            client.management_request,
-                            "DELETE",
-                            "/auth-files",
-                            query={"name": str(auth_name)},
-                            timeout=1.0,
-                        )
-                    except EngineClientError as exc:
-                        raise EngineStateError(
-                            "unable to remove OAuth auth file"
-                        ) from exc
-                await asyncio.to_thread(
-                    self.state_store.delete_oauth_auth_file,
-                    str(auth_name),
-                )
+
+                def remove_grant(client: EngineClient | None) -> None:
+                    if client is not None:
+                        try:
+                            client.management_request(
+                                "DELETE",
+                                "/auth-files",
+                                query={"name": str(auth_name)},
+                                timeout=1.0,
+                            )
+                        except EngineClientError as exc:
+                            raise EngineStateError("unable to remove OAuth auth file") from exc
+                    self.state_store.delete_oauth_auth_file(str(auth_name))
+
+                # One supervisor operation: an engine left running by a previous
+                # service is reaped first, and none can start and load the grant
+                # before its file is gone.
+                await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
                 await asyncio.to_thread(
                     self.state_store.audit_auth_permissions,
                     enforce=True,
@@ -2134,12 +2131,7 @@ class CLIProxyEngineAdapter:
         auth_name = metadata.get("auth_name")
         if not isinstance(auth_name, str) or not auth_name:
             return False
-        client = await asyncio.to_thread(self.supervisor.client_if_running)
-        return await self._cleanup_oauth_material(
-            client,
-            auth_name,
-            credential_ref,
-        )
+        return await self._cleanup_oauth_material(auth_name, credential_ref)
 
     async def discover_models(
         self,
@@ -2236,7 +2228,11 @@ class CLIProxyEngineAdapter:
             if auth_scheme is not None:
                 for protocol in protocol_order:
                     validate_api_key_auth_scheme(
-                        normalized_vendor, protocol, base_url, secret, auth_scheme,
+                        normalized_vendor,
+                        protocol,
+                        base_url,
+                        secret,
+                        auth_scheme,
                     )
         elif credential_kind == "oauth":
             if normalized_base_url is not None:
@@ -2662,10 +2658,12 @@ class CLIProxyEngineAdapter:
                     )
                 )
             release = self._acquire_transport()
+            request_sent = self._hold_unsent_request()
             try:
                 if on_admitted is not None:
                     on_admitted()
             except BaseException:
+                request_sent()
                 release()
                 raise
         try:
@@ -2681,10 +2679,13 @@ class CLIProxyEngineAdapter:
                 request_protocol=request_protocol,
                 request_headers=getattr(request, "headers", None),
                 on_transport_done=release,
+                on_request_sent=request_sent,
             )
         except BaseException:
             release()
             raise
+        finally:
+            request_sent()
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True
@@ -2727,7 +2728,7 @@ class CLIProxyEngineAdapter:
             # The same account is already a Source. A new file for it is this
             # flow's own material and is removed; an existing one belongs to the
             # other Source and is never touched.
-            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(client, auth.name):
+            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
                 self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
             elif auth.identity in foreign:
                 self._set_retained_material(flow, RetainedMaterialDisposition.FOREIGN_SOURCE_REF)
@@ -2820,7 +2821,6 @@ class CLIProxyEngineAdapter:
                 # may remain behind it. Both auth-file deletions must be
                 # confirmed before revocation can discard the minted ref.
                 if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
-                    client,
                     auth.name,
                     credential_ref,
                 ):
@@ -2857,45 +2857,42 @@ class CLIProxyEngineAdapter:
                 foreign.add(record.identity)
         return foreign
 
-    async def _delete_auth_files(self, client: EngineClient, auth_name: str) -> bool:
-        try:
-            await asyncio.to_thread(client.management_request, "DELETE", "/auth-files", query={"name": auth_name})
-            await asyncio.to_thread(self.state_store.delete_oauth_auth_file, auth_name)
-        except (EngineClientError, EngineStateError):
-            return False
-        return True
-
-    async def _cleanup_oauth_material(
-        self,
-        client: EngineClient | None,
-        auth_name: str,
-        credential_ref: str,
-    ) -> bool:
-        engine_delete_succeeded = client is None
-        if client is not None:
+    async def _delete_auth_files(self, auth_name: str) -> bool:
+        def remove(client: EngineClient | None) -> bool:
             try:
-                await asyncio.to_thread(
-                    client.management_request,
-                    "DELETE",
-                    "/auth-files",
-                    query={"name": auth_name},
-                )
-            except EngineClientError:
-                engine_delete_succeeded = False
-            else:
-                engine_delete_succeeded = True
+                if client is not None:
+                    client.management_request("DELETE", "/auth-files", query={"name": auth_name})
+                self.state_store.delete_oauth_auth_file(auth_name)
+            except (EngineClientError, EngineStateError):
+                return False
+            return True
 
+        # Atomic with the engine lifecycle, like ``_cleanup_oauth_material``.
         try:
-            await asyncio.to_thread(
-                self.state_store.delete_oauth_auth_file,
-                auth_name,
-            )
-        except EngineStateError:
-            local_delete_succeeded = False
-        else:
-            local_delete_succeeded = True
+            return await asyncio.to_thread(self.supervisor.with_engine_excluded, remove)
+        except EngineUnavailableError:
+            return False
 
-        if not (engine_delete_succeeded and local_delete_succeeded):
+    async def _cleanup_oauth_material(self, auth_name: str, credential_ref: str) -> bool:
+        def remove_grant(client: EngineClient | None) -> bool:
+            engine_delete_succeeded = True
+            if client is not None:
+                try:
+                    client.management_request("DELETE", "/auth-files", query={"name": auth_name})
+                except EngineClientError:
+                    engine_delete_succeeded = False
+            try:
+                self.state_store.delete_oauth_auth_file(auth_name)
+            except EngineStateError:
+                return False
+            return engine_delete_succeeded
+
+        # Atomic with the engine lifecycle: see ``revoke_credential``.
+        try:
+            removed = await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
+        except EngineUnavailableError:
+            return False
+        if not removed:
             return False
         try:
             await asyncio.to_thread(
@@ -3072,8 +3069,7 @@ def _discovered_models(
             continue
         coalesced[value] = tuple(dict.fromkeys(held + supported_parameters))
     return tuple(
-        DiscoveredModel(id=model_id, supported_parameters=parameters)
-        for model_id, parameters in coalesced.items()
+        DiscoveredModel(id=model_id, supported_parameters=parameters) for model_id, parameters in coalesced.items()
     )
 
 

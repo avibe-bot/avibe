@@ -5,13 +5,17 @@ import * as React from 'react';
 // ``useImageViewer()`` returns null where no provider is mounted (e.g. the
 // agent-config editor preview), which makes the click a documented no-op.
 
-// ``isolated`` opens the image on its own: the lightbox shows exactly that one
-// src and never pages, whatever the session gallery happens to contain. A caller
-// outside the transcript (the queue strip) needs that as a *stated* property —
-// its URL not being in ``images`` today is an accident of when the message is
-// sent, and would silently stop holding the moment the same file also appears in
-// the transcript, or the queue flushes while the viewer is open.
-export type ImageViewerOpenOptions = { isolated?: boolean };
+// A caller outside the transcript opens its own images, and what it pages
+// through has to be a *stated* property of the open call: which of its URLs the
+// session gallery happens to hold is an accident of when a message is sent, and
+// would change under an open viewer the moment the queue flushes.
+//
+// ``gallery`` names that set — the composer's staged attachments, in attachment
+// order — and the viewer pages within exactly it, never the transcript's images.
+// ``isolated`` is the one-image case of the same idea (the queue strip): shown on
+// its own, never paging, whatever the session gallery contains. Setting both is a
+// contradiction; ``isolated`` wins.
+export type ImageViewerOpenOptions = { isolated?: boolean; gallery?: string[] };
 
 type ImageViewerContextValue = { open: (src: string, options?: ImageViewerOpenOptions) => void };
 

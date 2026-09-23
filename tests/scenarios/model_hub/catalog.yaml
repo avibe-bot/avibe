@@ -356,11 +356,11 @@ scenarios:
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_008_real_gateway_cpa_exact_model_and_source
   - id: MH-ROUTING-009
-    name: Registration-changing Save waits for active output completion or client close without deadlock or truncation
+    name: Registration-changing Save hot-reloads the live engine during active output without waiting, restart, or truncation
     status: assert
     kind: concurrency
     layer: e2e
-    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_009_save_during_active_stream_hot_reloads_without_restart_or_truncation
   - id: MH-ROUTING-010
     name: Real gateway model-not-found preserves source health and records exact attributed errors superseded by success
     status: assert

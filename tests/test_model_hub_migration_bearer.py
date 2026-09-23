@@ -30,6 +30,7 @@ def _adapter(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     supervisor = SimpleNamespace(
         state_store=store, client_if_running=lambda: None, restart_if_running=lambda: None,
+        reload_config_if_running=lambda _previous=None: None,
         invalidate_configs=store.clear_runtime_configs,
     )
     return CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)

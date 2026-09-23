@@ -286,7 +286,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                       effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
                     )}
                   >
-                    {opt}
+                    {opt === 'none' ? t('chat.picker.effortOptions.none') : opt}
                   </button>
                 ))}
               </div>

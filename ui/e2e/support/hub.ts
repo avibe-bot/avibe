@@ -283,11 +283,11 @@ export class ModelHubPage {
     return this.page.locator('.model-hub-guard-dialog').filter({ hasText: title });
   }
 
-  /** The after-the-fact report of a committed source mutation. It shares the
-   *  guard's chrome — deliberately, since it restates the same facts — but it
-   *  carries the action it is reporting, which is what tells them apart. */
-  mutationReport(action: 'edit' | 'delete'): Locator {
-    return this.page.locator(attr('data-source-mutation-report', action));
+  /** The global toast layer. A committed source mutation announces itself here
+   *  and nowhere else: the guard already made the user confirm the impact before
+   *  the write, so what is left is one line, not a second decision. */
+  get toasts(): Locator {
+    return this.page.locator('div.fixed.right-4.z-50 > div');
   }
 
   get routeDialog(): Locator {

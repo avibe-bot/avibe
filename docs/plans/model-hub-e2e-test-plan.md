@@ -49,7 +49,7 @@ Out of scope (documented, not dropped silently):
 | B4 | discovery fails | save succeeds with pending verification; preserve manual inventory and allow manual addition without refetching | assert |
 | B5 | replay create with same `client_nonce` | idempotent, no duplicate source | assert |
 | B6 | replace key happy + rollback; rename; patch base URL | C22/C23 contracts | assert |
-| B7 | sole owned default source + exact one-hop manual route, verified by reads → delete source → guard 409 → echo plan → force | actual inherited supply gap; impact report lists interrupted agents; malformed echo rejected; canonical route and exact captured default order restored independently (only the owned deleted ID may be omitted) | assert |
+| B7 | sole owned default source + exact one-hop manual route, verified by reads → delete source → guard 409 → echo plan → force | actual inherited supply gap; the guard lists the interrupted agents before the forced press and the commit announces itself in one toast with no second decision; malformed echo rejected; canonical route and exact captured default order restored independently (only the owned deleted ID may be omitted) | assert |
 | B8 | force transport asymmetry (`?force=` vs body) | document current split (B6 issue); decide normalization | baseline |
 | B9 | refetch after upstream inventory change | added/removed diff; **`discovered_at` preserved for pre-existing models** (currently overwritten — fix-first, see B-list) | fix-first |
 | B10 | inspect provider inventory and add/remove a manual model | no reasoning column, provenance badge, tier editor or empty advanced toggle; manual creation needs only a model ID. Compatibility API tests retain existing metadata ownership coverage | assert |
@@ -340,7 +340,7 @@ Core flows against a live instance: capability gate redirect, runtime
 install/start/stop toggle incl. blocked-stop copy, add-API-key dialog full
 branches (auto-detect / manual protocol / pull models / empty-inventory
 add-anyway / replace key) against the mock upstream, guard refusal → confirm
-→ impact report (incl. B7 echo probe as fixme), source detail
+→ committed toast (incl. B7 echo probe as fixme), source detail
 rename/refetch/tier edit, route chain dialog add/remove/keyboard reorder,
 global priority drawer, usage & logs tabs render with real metered data,
 error-copy assertions (fixme where copy is known-missing per B1/D-3),

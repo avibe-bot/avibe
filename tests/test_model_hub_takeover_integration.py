@@ -36,10 +36,16 @@ class FixtureSupervisor:
     def client(self):
         return self.client_if_running()
 
+    def with_engine_excluded(self, operation):
+        return operation(self.client_if_running())
+
     def ensure_running(self):
         return self.connection
 
     def restart_if_running(self):
+        pass
+
+    def reload_config_if_running(self, _previous=None):
         pass
 
     def status(self):

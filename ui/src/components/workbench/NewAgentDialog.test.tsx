@@ -115,4 +115,24 @@ describe('NewAgentDialog', () => {
       reasoning_effort: 'medium',
     })));
   });
+
+  it.each([false, true])('keeps medium unless the user selects declared Off (selected=%s)', async (selectOff) => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: {
+        'with-off': [{ value: 'none', label: 'Off' }, { value: 'medium', label: 'Medium' }],
+      },
+    };
+    const { createVibeAgent } = renderDialog();
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('with-off');
+    const off = screen.getByRole('button', { name: 'chat.picker.effortOptions.none' });
+    if (selectOff) fireEvent.click(off);
+    submit();
+
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'with-off',
+      reasoning_effort: selectOff ? 'none' : 'medium',
+    })));
+  });
 });

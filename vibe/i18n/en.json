@@ -171,7 +171,13 @@
         "failed": "The run failed before producing a result."
       },
       "bindingUnresolvedRetry": "Pinned agent session {session} cannot accept a turn ({attempt}/{threshold}). This definition will be paused after {threshold} consecutive unresolvable-target failures. Re-point it with: vibe task update {id} --session-id <id>.",
-      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}."
+      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}.",
+      "cli": {
+        "help": {
+          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop"
+        },
+        "canceledBeforeLiveTurn": "Run was canceled before its input reached the live Session turn."
+      }
     },
     "notice": {
       "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
@@ -743,7 +749,8 @@
   },
   "message": {
     "ack": "{agent} received, processing...",
-    "quickReplyNote": "Reply: {text}"
+    "quickReplyNote": "Reply: {text}",
+    "citationUnresolved": "(source unavailable)"
   },
   "backend": {
     "claude": "ClaudeCode",
@@ -1036,7 +1043,8 @@
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help."
+      "request_incompatible": "This request is incompatible; switching Sources will not help.",
+      "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"
     }
   },
   "remote_access": {

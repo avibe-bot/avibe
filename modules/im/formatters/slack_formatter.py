@@ -1,4 +1,61 @@
+from core.citations import spell_destination
+
 from .base_formatter import BaseMarkdownFormatter
+
+
+def encode_slack_delimiters(text: str) -> str:
+    """Spell ``&``, ``<`` and ``>`` so Slack shows them instead of reading them.
+
+    For text whose Markdown has already been interpreted - a link label, whose
+    backslash escapes have been restored and whose character references have
+    been resolved, so every one of these three characters left in it is one
+    the reader is meant to see. Slack reads all three as markup of its own, and
+    inside ``<url|label>`` a bare ``>`` ends the link early, so each is encoded
+    here, once and unconditionally.
+
+    Encoding every one of them is what keeps the two spellings apart. A label
+    that MEANS ``&`` arrives here as ``&``; a label that SPELLS ``&amp;``
+    arrives as those five characters and has to leave as ``&amp;amp;`` to be
+    shown as five. Leaving an already-spelled reference alone would deliver one
+    string for both, which is the caller's distinction to keep, not this
+    function's to guess from the finished text.
+
+    Not the same job as ``escape_special_chars``, which encodes text that was
+    never Markdown (a path, a tool name) - the same encoding, reached without
+    any Markdown interpretation in between.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def spell_uri_escapes(url: str) -> str:
+    """Write a resolved destination the way its Markdown consumer spells it.
+
+    Not an encoder for a URL that was never one, and not a canonicaliser: this
+    is the address a Markdown reader already resolved, on its way into a place
+    that cannot hold every character. ``spell_uri`` is the rule the renderer on
+    the other side of that boundary applies to the same destination, so the two
+    write the same address rather than two spellings nobody has checked name
+    one page. A ``%3E`` that arrived spelled stays spelled once; a ``%`` that
+    starts no escape is data and is written ``%25``, because that is what the
+    consumer reads it as.
+
+    What it buys inside ``<url|label>`` falls out of the same rule. ``>`` ends
+    the link early and ``|`` starts the label early, so a destination holding
+    either arrives truncated with the rest shown as plain text; both are
+    outside the safe set and leave as ``%3E`` and ``%7C``. So do a space, a
+    backslash, a backtick and every C0 control - including the newline a
+    character reference can put in an address, which no single-line wrapper
+    survives.
+
+    A bracketed IPv6 authority is the one place an escape has to come back:
+    those two brackets are the host's own syntax rather than data, and nothing
+    opens ``%5B::1%5D``. Which is why the destination is handed over unspelled
+    and ``spell_destination`` does both halves - once spelled, a host written
+    ``[::1]`` and a provider's own ``%5B::1%5D`` are the same characters, and
+    putting brackets back into the second one would deliver a live link to an
+    address the provider never named.
+    """
+    return spell_destination(url)
 
 
 class SlackFormatter(BaseMarkdownFormatter):

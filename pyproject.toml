@@ -43,7 +43,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2.93",
+    "claude-agent-sdk>=0.2.158",
     "anyio>=4.0.0",
     "APScheduler>=3.10.4",
     "slack-sdk>=3.26.0",
@@ -51,6 +51,9 @@ dependencies = [
     "aiohttp>=3.8.0",
     "ijson>=3.5.1",
     "markdown-it-py>=4.2.0",
+    # citation labels need non-transitional UTS #46; the standard library's
+    # "idna" codec is IDNA 2003 and folds a different domain out of some hosts
+    "idna>=3.4",
     "markdown_to_mrkdwn>=0.2.0",
     "typing_extensions>=4.12.2",
     "PyYAML>=6.0",

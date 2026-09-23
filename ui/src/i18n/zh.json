@@ -1036,7 +1036,7 @@
           "reasoningEfforts": "推理强度",
           "customEffort": "自定义档位",
           "customEffortPlaceholder": "如 medium",
-          "effortNote": "档位按原样发送给供应商；不选则请求不带 effort 参数。",
+          "effortNote": "仅声明该模型支持的选项。在 Agent 中选择“关闭”才会禁用扩展思考；选项列表为空不等于关闭。其他档位按原样转发。",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -1759,27 +1759,14 @@
             "displayNameCredential": "显示名称不能包含凭据",
             "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
           },
-          "impact": {
-            "title": "供应商已更新，部分路由受到影响",
-            "detail": "以下路由或模型已被移除或中断。",
-            "done": "完成"
-          },
           "settlement": {
             "title": "供应商已更新"
           }
         },
         "remove": {
-          "impact": {
-            "title": "供应商已移除，部分路由受到影响",
-            "detail": "以下是这次移除实际影响的路由和模型。",
-            "done": "完成"
-          },
           "settlement": {
             "title": "供应商已移除"
           }
-        },
-        "impact": {
-          "refreshFail": "变更已经提交，但模型页面暂时无法刷新。请再次重试对账。"
         },
         "refetch": {
           "added": "新增",
@@ -4176,6 +4163,8 @@
     "loadingOlder": "正在加载更早的消息",
     "noEarlierMessages": "没有更早的消息了",
     "olderLoadFailed": "加载更早的消息失败，点击重试",
+    "organizationNotice": "这是一个组织会话，消息会显示发送者。",
+    "senderUnknown": "未知发送者",
     "forkedEmptyTitle": "复刻会话已创建",
     "forkedEmptyBody": "已从原会话上下文复刻，当前对话记录从空白开始，原会话上下文已保留，继续对话即可",
     "forkedFromPrefix": "复刻自",
@@ -4212,6 +4201,11 @@
       "vaultExpired": "已过期",
       "agentFallback": "智能体"
     },
+    "citation": {
+      "badge": "来源 {{index}}：{{source}}",
+      "badgeWithDomain": "来源 {{index}}：{{source}}（{{domain}}）",
+      "open": "打开来源页面"
+    },
     "annotation": {
       "titleUser": "用户批注",
       "titleAgent": "Agent 批注",
@@ -4227,6 +4221,7 @@
       "searchModels": "搜索模型",
       "noModelMatch": "无匹配模型",
       "effortOptions": {
+        "none": "关闭",
         "minimal": "极简",
         "low": "低",
         "medium": "中",
@@ -4273,6 +4268,7 @@
       "attachmentFailed": "文件上传失败，请重试。",
       "retryAttachment": "重试上传",
       "removeAttachment": "移除",
+      "previewAttachment": "预览 {{name}}",
       "dropOverlay": "拖放文件以添加"
     },
     "media": {
@@ -5338,8 +5334,8 @@
       "wechat": "微信"
     },
     "setup": {
-      "title": "连接 AI，开始工作",
-      "subtitle": "安装助手，连接模型，即可开始工作",
+      "title": "选择你的 AI 助手",
+      "subtitle": "启用助手，确认默认模型，即可开始工作",
       "install": "安装",
       "installed": "已安装",
       "notInstalled": "未安装",
@@ -5356,7 +5352,22 @@
       "installFirstNamed": "先安装 {{name}}",
       "subscriptionConnectedHint": "订阅已保存，进入工作台即可使用",
       "api_keyConnectedHint": "API Key 已保存，进入工作台即可使用",
-      "forNamed": "用于 {{name}}"
+      "forNamed": "用于 {{name}}",
+      "configureRoute": "配置模型路由",
+      "defaultModel": "默认模型",
+      "defaultModelNamed": "{{name}} 的模型路由，查看并调整顺序",
+      "noteEnabled": "已启用，模型路由就绪后即可使用"
+    },
+    "route": {
+      "title": "默认模型路由",
+      "description": "为下列助手调整共享模型顺序。各助手按自己的模型列表依次尝试；其他路由保持不变。",
+      "preferred": "首选",
+      "backup": "备用 {{index}}",
+      "singleNote": "此路由只有一个模型。可添加来源，再选择备用模型。",
+      "addSource": "添加模型来源",
+      "done": "完成",
+      "moveUpNamed": "上移 {{name}}",
+      "moveDownNamed": "下移 {{name}}"
     },
     "connection": {
       "method": "连接方式",
@@ -5435,12 +5446,6 @@
       "providerConfigured": "已连接",
       "providerCredentialHint": "此凭据只用于 OpenCode 中的 {{name}} 服务商",
       "providerDescription": "服务商 · 用于 OpenCode",
-      "modelTitle": "为此连接选择模型",
-      "modelHint": "{{agent}} 当前使用 {{model}}。请选择已连接提供商的模型以完成设置。",
-      "modelSelect": "已连接提供商的模型",
-      "modelApply": "应用模型并进入",
-      "modelEmpty": "暂无兼容模型。请检查上方连接，再重试获取模型列表。",
-      "modelChanged": "连接或 Agent 已发生变化。请刷新模型列表后重试。",
       "modelUnavailable": "没有可用 Agent 的模型路由。请检查连接后重试。",
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
@@ -5487,6 +5492,7 @@
       "actionAdd": "添加订阅或 API Key",
       "actionConnecting": "正在连接…",
       "actionChecking": "正在检查连接…",
+      "continueHint": "也可以稍后再连接提供商。",
       "addTitle": "添加订阅或 API Key",
       "addTitleMore": "添加更多模型提供商",
       "addDescription": "添加一个来源即可开始，由模型网关统一路由。",
@@ -5541,7 +5547,8 @@
     "flow": {
       "backToIntro": "返回介绍",
       "backToProviders": "返回模型",
-      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。"
+      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。",
+      "completionUnconfirmed": "无法确认设置已完成，请重试"
     }
   }
 }

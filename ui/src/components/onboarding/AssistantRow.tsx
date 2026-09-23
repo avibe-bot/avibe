@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Check, Download, ExternalLink, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { Check, Download, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
 import { Button } from '../ui/button';
@@ -104,12 +104,10 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             the connected state wearing the same row with a mint check. */}
         <div className="onboarding-assistant-actions">
           {connection === 'hub' ? (
-            /* A hub-supplied credential is managed in Model Gateway, so the row names
-               where it lives and clicking it goes there. */
             <button type="button" className="onboarding-method-connected" onClick={onConfigure}
               disabled={configuringDisabled || installing || detecting || !!connectionPending}>
-              {connectionPending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <ExternalLink size={16} />}
-              {t('settings.backends.openModelHub')}
+              {connectionPending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <SlidersHorizontal size={16} />}
+              {t('onboarding.setup.configureRoute')}
             </button>
           ) : connection ? (
             /* A button wearing the connected row: it reads as the static receipt the
