@@ -120,17 +120,17 @@ describe('UI evidence resolution', () => {
     // template and its substitutions in separate keys. Both are terms of one
     // citation, and the count is still what decides.
     const collected = [
-      { name: 'parse > accepts the declared failure memory_repair_failed with result failed', file: '/checkout/parse.test.ts' },
-      { name: 'parse > accepts the declared failure memory_repair_failed with result timed_out', file: '/checkout/parse.test.ts' },
+      { name: 'parse > accepts the declared failure request_failed with result failed', file: '/checkout/parse.test.ts' },
+      { name: 'parse > accepts the declared failure request_failed with result timed_out', file: '/checkout/parse.test.ts' },
     ];
     const cited = (inputs) => [{
-      id: 'MEMORY-REPAIR-004',
+      id: 'MH-PARAM-004',
       file: 'parse.test.ts',
       cited: 'accepts the declared failure %s with result %s',
       inputs,
     }];
 
-    expect(resolveUiEvidence(cited(['memory_repair_failed', 'timed_out']), collected)).toEqual([]);
+    expect(resolveUiEvidence(cited(['request_failed', 'timed_out']), collected)).toEqual([]);
     // The template alone reaches every row of the table, which identifies none of
     // them — the same failure as reaching no case at all.
     expect(resolveUiEvidence(cited([]), collected)).toHaveLength(1);

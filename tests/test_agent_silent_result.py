@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import CitationSource, register_citations
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
 from modules.im.formatters.slack_formatter import SlackFormatter
@@ -94,6 +95,53 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.messages, [("result", "✅ ⏱️ 5s · 🪙 1.2k tok", "markdown")])
         # Promoted to body, so no separate subtext footer is passed.
         self.assertEqual(controller.result_footers, [None])
+
+    async def test_an_uncited_result_does_not_require_the_citation_keyword(self):
+        """The controller is substitutable, so an empty sidecar stays unsent.
+
+        ``_StubController`` above deliberately keeps the pre-citation signature:
+        an ordinary uncited turn must reach any stand-in that never heard of
+        citations, on both the duration-on and duration-off paths.
+        """
+        controller = _StubController()
+        agent = _StubAgent(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        for show_duration in (True, False):
+            controller.config.show_duration = show_duration
+            message_id = await agent.emit_result_message(context, "Plain answer.")
+
+            self.assertEqual(message_id, "message-id")
+        self.assertEqual([m[0] for m in controller.messages], ["result", "result"])
+
+    async def test_a_cited_result_forwards_its_sidecar(self):
+        """The keyword is withheld only when there is nothing to carry."""
+        seen: list[object] = []
+
+        class _CitationAwareController(_StubController):
+            async def emit_agent_message(self, *args, citations=None, **kwargs):
+                seen.append(citations)
+                return await super().emit_agent_message(*args, **kwargs)
+
+        controller = _CitationAwareController()
+        agent = _StubAgent(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+        registered, bundle = register_citations(
+            "Cited answer.\ue200cite\ue202turn0view0\ue201",
+            {
+                "turn0view0": CitationSource(
+                    ref_id="turn0view0", title="Example", url="https://example.com/x"
+                )
+            },
+            unresolved_label="(source unavailable)",
+        )
+
+        await agent.emit_result_message(context, registered, citations=bundle)
+
+        # The bundle is forwarded, not a copy of it: the tokens in the text are
+        # only meaningful against the one that minted them.
+        self.assertEqual(seen, [bundle])
+        self.assertIs(seen[0], bundle)
 
 
 class AgentSessionIdContextTests(unittest.TestCase):

@@ -10,13 +10,31 @@ import logging
 import os
 import re
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
+from core.citations import (
+    CitationBundle,
+    CitationSource,
+    citation_ref_ids,
+    has_citation_markers,
+    register_citations,
+    unresolved_refs,
+)
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
+from modules.agents.codex.search_history import (
+    SAFE_THREAD_ID_RE,
+    HistoryFingerprint,
+    ThreadSearchState,
+    harvest_search_results,
+    is_web_search_item,
+    read_thread_search_sources,
+)
+from modules.agents.codex.turn_state import CodexHeldMessage, CodexTurnState
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
@@ -24,9 +42,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _GENERATED_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".webp"}
-_SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ATTACHMENT_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(attachment://[^)\s]+\)")
 _ImageSnapshot = dict[Path, tuple[int, int]]
+# Bounds for the citation source cache. Generous enough that an ordinary
+# multi-search conversation always resolves, small enough that a long-lived
+# process cannot grow it without limit.
+_MAX_CITATION_THREADS = 16
+_MAX_CITATION_SOURCES_PER_THREAD = 512
+# Refs one thread is known not to define. Bounded like the sources it mirrors;
+# forgetting one costs a re-scan of that thread's history, never a citation.
+_MAX_CITATION_ABSENT_REFS_PER_THREAD = 512
 
 
 class CodexEventHandler:
@@ -41,6 +66,14 @@ class CodexEventHandler:
         self._agent = agent
         self._image_snapshots_by_turn: dict[str, tuple[str, _ImageSnapshot]] = {}
         self._pending_image_snapshots_by_session: dict[str, tuple[str, _ImageSnapshot]] = {}
+        # Citable web-search results, keyed by Codex thread then ref_id. A ref_id
+        # is only unique inside its own native thread, and a later Avibe turn can
+        # cite a search run in an earlier one, so the scope is the thread - never
+        # the turn, and never one map shared across threads. This is a memo over
+        # Codex's recorded history rather than the record itself: a thread absent
+        # here is read back from that history on first use, so neither a restart
+        # nor an eviction loses attribution.
+        self._search_sources_by_thread: OrderedDict[str, ThreadSearchState] = OrderedDict()
 
     def snapshot_generated_images(self, thread_id: str, base_session_id: str) -> None:
         """Record generated images present before a Codex turn starts."""
@@ -147,6 +180,9 @@ class CodexEventHandler:
             if not turn_state:
                 logger.debug("Ignoring interrupted completion for unknown turn %s", turn_id)
                 return
+            # The turn is over, so nothing it narrated is waiting for a source
+            # any more; it ships with whatever attribution it has.
+            await self._drain_narration(turn_state, force=True)
             self._clear_generated_image_snapshot(params)
             cleanup_request = self._agent._turn_registry.claim_indicator_cleanup(turn_id)
             self._agent._turn_registry.pop_turn(turn_id)
@@ -170,6 +206,9 @@ class CodexEventHandler:
             if not turn_state:
                 logger.info("Ignoring failed completion for unknown turn %s", turn_id)
                 return
+            # What the turn narrated before it failed is still what happened, and
+            # it belongs ahead of the error rather than lost behind it.
+            await self._drain_narration(turn_state, force=True)
             error_msg = turn_state.terminal_error if turn_state else None
             already_notified = turn_state.terminal_error_notified if turn_state else False
             error_was_user_visible = already_notified
@@ -209,15 +248,22 @@ class CodexEventHandler:
             if not turn_state:
                 logger.debug("Ignoring completion for unknown turn %s", turn_id)
                 return
+            # A turn whose result is suppressed narrates nothing either; its held
+            # messages are discarded with it, exactly as its result candidate is.
+            turn_state.pending_narration.clear()
             self._clear_generated_image_snapshot(params)
             self._agent._turn_registry.pop_turn(turn_id)
             logger.debug("Ignoring inactive turn/completed for turn %s", turn_id)
             self._release_stream_turn(tracked_request.context)
             return
 
+        await self._drain_narration(turn_state, force=True)
         await asyncio.to_thread(self._persist_turn_generated_images, params)
         pending = turn_state.pending_assistant if turn_state else None
         pending_text = pending[0] if pending else None
+        pending_text, citations = await self._register_citations(
+            pending_text, params, tracked_request
+        )
         result_text = self._append_generated_images(pending_text, params, tracked_request)
         self._agent._turn_registry.pop_turn(turn_id)
         if pending and (pending[0] or "").strip():
@@ -229,6 +275,7 @@ class CodexEventHandler:
                 started_at=tracked_request.started_at,
                 parse_mode=pending_parse_mode or "markdown",
                 request=tracked_request,
+                citations=citations,
             )
         else:
             await self._agent.emit_result_message(
@@ -238,6 +285,7 @@ class CodexEventHandler:
                 started_at=tracked_request.started_at,
                 parse_mode="markdown",
                 request=tracked_request,
+                citations=citations,
             )
         thread_id = self._extract_thread_id(params) or self._agent._session_mgr.get_thread_id(
             tracked_request.base_session_id
@@ -255,6 +303,7 @@ class CodexEventHandler:
             return
 
         turn_state = self._agent._turn_registry.get_turn(turn_id) if turn_id else None
+        thread_id = self._extract_thread_id(params)
 
         if item_type == "agentMessage":
             text = item.get("text", "")
@@ -264,11 +313,8 @@ class CodexEventHandler:
                 prev_is_visible = bool(prev and strip_silent_blocks(prev[0]).strip())
                 if text_is_visible and prev_is_visible:
                     prev_text, prev_pm = prev
-                    await self._agent.controller.emit_agent_message(
-                        request.context,
-                        "assistant",
-                        prev_text,
-                        parse_mode=prev_pm or "markdown",
+                    await self._narrate(
+                        request, turn_state, thread_id, "assistant", prev_text, prev_pm
                     )
                 # A silent terminal response may settle the turn, but it must
                 # not displace an earlier visible result candidate.
@@ -290,12 +336,7 @@ class CodexEventHandler:
                         "output": output[:500] if output else "",
                     },
                 )
-                await self._agent.controller.emit_agent_message(
-                    request.context,
-                    "toolcall",
-                    toolcall,
-                    parse_mode="markdown",
-                )
+                await self._narrate(request, turn_state, thread_id, "toolcall", toolcall)
 
         elif item_type == "fileChange":
             changes = item.get("changes", [])
@@ -309,12 +350,7 @@ class CodexEventHandler:
                         "file_change",
                         {"file": file_path, "type": change_kind},
                     )
-                    await self._agent.controller.emit_agent_message(
-                        request.context,
-                        "toolcall",
-                        toolcall,
-                        parse_mode="markdown",
-                    )
+                    await self._narrate(request, turn_state, thread_id, "toolcall", toolcall)
 
         elif item_type == "reasoning":
             # Extract from summary array (list of strings) or content array
@@ -328,15 +364,239 @@ class CodexEventHandler:
                         parts.append(c)
             text = "\n".join(parts)
             if text:
-                await self._agent.controller.emit_agent_message(
-                    request.context,
-                    "assistant",
-                    f"_🧠 {text}_",
-                    parse_mode="markdown",
+                await self._narrate(
+                    request, turn_state, thread_id, "assistant", f"_🧠 {text}_"
                 )
+
+        # One predicate for both readings, so the live path and the recorded one
+        # cannot disagree about what a completed search looks like.
+        elif is_web_search_item(item):
+            self._record_search_sources(params, item)
+            # A message held for one of these refs can go out now.
+            await self._drain_narration(turn_state)
 
         elif item_type == "imageGeneration":
             await asyncio.to_thread(self._persist_generated_image, params, item)
+
+    def _record_search_sources(self, params: dict[str, Any], item: dict[str, Any]) -> None:
+        """Harvest a completed web search's results so later markers can cite them.
+
+        The live stream is the fast path only. Codex records the same results in
+        the thread's rollout file, and ``_sources_for_thread`` reads them back
+        when this handler never saw them, so an eviction here costs a re-read
+        rather than the attribution.
+        """
+        thread_id = self._extract_thread_id(params)
+        if not thread_id:
+            return
+        harvested = harvest_search_results(item)
+        # A search with nothing citable adds nothing; leave the thread's entry
+        # (and its hydration state) exactly as it was.
+        if not harvested:
+            return
+        self._merge_search_sources(thread_id, harvested)
+
+    def _thread_state(self, thread_id: str) -> ThreadSearchState:
+        """This thread's record, created on first use and kept most-recently-used."""
+        state = self._search_sources_by_thread.get(thread_id)
+        if state is None:
+            state = ThreadSearchState()
+            self._search_sources_by_thread[thread_id] = state
+        self._search_sources_by_thread.move_to_end(thread_id)
+        while len(self._search_sources_by_thread) > _MAX_CITATION_THREADS:
+            self._search_sources_by_thread.popitem(last=False)
+        return state
+
+    def _merge_search_sources(
+        self,
+        thread_id: str,
+        harvested: list[CitationSource],
+    ) -> ThreadSearchState:
+        """Fold sources into a thread's record, newest definition of a ref winning."""
+        state = self._thread_state(thread_id)
+        for source in harvested:
+            state.sources[source.ref_id] = source
+            state.sources.move_to_end(source.ref_id)
+            # It is defined after all, so the recorded absence is now wrong.
+            state.absent.pop(source.ref_id, None)
+            while len(state.sources) > _MAX_CITATION_SOURCES_PER_THREAD:
+                state.sources.popitem(last=False)
+        return state
+
+    @staticmethod
+    def _remember_absent(
+        state: ThreadSearchState,
+        refs: Collection[str],
+        proved_at: HistoryFingerprint | None,
+    ) -> None:
+        """Record refs a complete read of *proved_at* does not define.
+
+        The fingerprint travels with the ref, so the absence can only ever
+        suppress a re-read of the very history that proved it.
+        """
+        if proved_at is None:
+            return
+        for ref in refs:
+            state.absent[ref] = proved_at
+            state.absent.move_to_end(ref)
+        while len(state.absent) > _MAX_CITATION_ABSENT_REFS_PER_THREAD:
+            state.absent.popitem(last=False)
+
+    async def _sources_for_thread(
+        self, thread_id: str, wanted: Collection[str]
+    ) -> Mapping[str, CitationSource]:
+        """The sources that define *wanted* in this thread, history included.
+
+        A thread reaches this handler with no live searches recorded whenever the
+        process restarted, the conversation resumed (``excludeTurns``), it was
+        re-read (``includeTurns: False``), or it was forked - ``thread/fork``
+        hands back an id and nothing else. A thread that *has* live searches can
+        still be missing the very refs those cases lost, so what decides whether
+        to read the recorded history is the refs this message asks for, never
+        whether the thread has an entry.
+
+        The read is skipped only when every missing ref was already looked for in
+        exactly one history, and that history is the one on disk now - a ref whose
+        absence was never proved, or was proved against an older file, is reason
+        enough to walk it again. Its results are returned alongside the cache even
+        if the bounded cache immediately evicted one of them, so an eviction costs
+        a re-read and never the attribution.
+        """
+        if not thread_id or not wanted:
+            return {}
+        state = self._thread_state(thread_id)
+        missing = {ref for ref in wanted if ref not in state.sources}
+        if not missing:
+            return state.sources
+        proofs = {state.absent.get(ref) for ref in missing}
+        unchanged = proofs.pop() if len(proofs) == 1 else None
+        read = await asyncio.to_thread(
+            read_thread_search_sources, thread_id, wanted=missing, unchanged=unchanged
+        )
+        if not read.scanned:
+            return state.sources
+        self._merge_search_sources(thread_id, list(read.sources.values()))
+        # Only a complete read leaves an absence behind it: an unreadable,
+        # unindexed, or still-growing history proved nothing, so its refs stay
+        # re-readable rather than settling into negative truth.
+        if read.complete:
+            self._remember_absent(state, missing - read.sources.keys(), read.fingerprint)
+        return {**state.sources, **read.sources}
+
+    async def _prepare_citations(
+        self,
+        text: str | None,
+        thread_id: str,
+        request: AgentRequest,
+    ) -> tuple[str | None, CitationBundle | None, list[str]]:
+        """Register one message's markers and say which refs are still undefined.
+
+        The third value is what a delivery boundary needs: a ref no source has
+        been recorded for yet may still be on its way, so the message that cites
+        it is not finished. A ref whose source is present but unlinkable is not
+        in it - that citation has already reached its final form.
+
+        What comes back is the text with each attributable marker replaced by an
+        opaque token, plus the bundle that writes those tokens out at the end of
+        delivery. This is the last point where the markers mean what they say:
+        every stage after it rewrites the text, and two of those rewrites can
+        splice a marker into existence (see ``core.citations``).
+        """
+        if not has_citation_markers(text):
+            return text, None, []
+        refs = citation_ref_ids(text)
+        sources = await self._sources_for_thread(thread_id, refs)
+        registered, bundle = register_citations(
+            text,
+            sources,
+            unresolved_label=self._t("message.citationUnresolved", request),
+        )
+        return registered, bundle, unresolved_refs(refs, sources)
+
+    async def _register_citations(
+        self,
+        text: str | None,
+        params: dict[str, Any],
+        request: AgentRequest,
+    ) -> tuple[str | None, CitationBundle | None]:
+        """Register an outgoing message's citation markers for delivery.
+
+        Registration happens at emit time, not when the text arrives, so a search
+        result that lands between the message item and the turn completing is
+        still available to the message that cites it.
+        """
+        registered, bundle, _ = await self._prepare_citations(
+            text, self._extract_thread_id(params), request
+        )
+        return registered, bundle
+
+    async def _narrate(
+        self,
+        request: AgentRequest,
+        turn_state: CodexTurnState | None,
+        thread_id: str,
+        role: str,
+        text: str,
+        parse_mode: str | None = "markdown",
+    ) -> None:
+        """Deliver one intermediate message, or hold it until it can be attributed.
+
+        Every intermediate emit goes through here, whether or not it cites
+        anything, because holding one message may not let the messages behind it
+        change places: the reader sees the turn's own order or nothing.
+
+        Without a turn there is no boundary that could end a wait, so a message
+        outside one is delivered as it arrives - the pre-citation behaviour.
+        """
+        if turn_state is None:
+            resolved, citations, _ = await self._prepare_citations(text, thread_id, request)
+            await self._emit_narration(request, role, resolved, parse_mode, citations)
+            return
+        turn_state.pending_narration.append(
+            CodexHeldMessage(role=role, text=text, parse_mode=parse_mode, thread_id=thread_id)
+        )
+        await self._drain_narration(turn_state)
+
+    async def _emit_narration(
+        self,
+        request: AgentRequest,
+        role: str,
+        text: str | None,
+        parse_mode: str | None,
+        citations: CitationBundle | None,
+    ) -> None:
+        await self._agent.controller.emit_agent_message(
+            request.context,
+            role,
+            text,
+            parse_mode=parse_mode or "markdown",
+            # Forwarded only when there is a sidecar, so a message without
+            # citations keeps the call it always had.
+            **({"citations": citations} if citations else {}),
+        )
+
+    async def _drain_narration(
+        self, turn_state: CodexTurnState | None, *, force: bool = False
+    ) -> None:
+        """Deliver held narration in order, stopping at the first one still waiting.
+
+        *force* is the turn's terminal boundary: the wait is bounded by the turn,
+        so a ref that never arrives still ships, carrying its visible unresolved
+        label instead of holding the message forever.
+        """
+        if turn_state is None:
+            return
+        held = turn_state.pending_narration
+        request = turn_state.request
+        while held:
+            entry = held[0]
+            resolved, citations, missing = await self._prepare_citations(
+                entry.text, entry.thread_id, request
+            )
+            if missing and not force:
+                return
+            held.pop(0)
+            await self._emit_narration(request, entry.role, resolved, entry.parse_mode, citations)
 
     def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:
         turn = params.get("turn")
@@ -372,6 +632,9 @@ class CodexEventHandler:
                 logger.info("Ignoring Codex error for unknown turn %s: %s", turn_id, message)
                 return
 
+            # A terminal error ends the turn, so the wait ends with it. A
+            # ``willRetry`` error returned above: the turn is still running.
+            await self._drain_narration(turn_state, force=True)
             turn_state.terminal_error = message
             if (
                 self._agent._turn_registry.should_emit_terminal_error(turn_id)
@@ -544,7 +807,7 @@ class CodexEventHandler:
         return images
 
     def _generated_images_dir(self, thread_id: str) -> Path | None:
-        if not _SAFE_THREAD_ID_RE.fullmatch(thread_id):
+        if not SAFE_THREAD_ID_RE.fullmatch(thread_id):
             logger.warning("Ignoring unsafe Codex thread id for generated images: %s", thread_id)
             return None
         codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")

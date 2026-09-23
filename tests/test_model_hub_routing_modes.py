@@ -300,8 +300,8 @@ def test_engine_compiler_registers_inventory_union_without_invented_reasoning(tm
     payload = {}
     _append_source(payload, record, store)
     assert payload[section][0]["models"] == [
-        {"name": "listed", "alias": "listed", "thinking": {"levels": ["high", "low"]}},
-        {"name": "unlisted", "alias": "unlisted"},
+        {"name": "listed", "alias": "listed", "display-name": "listed #0", "thinking": {"levels": ["high", "low"]}},
+        {"name": "unlisted", "alias": "unlisted", "display-name": "unlisted #0"},
     ]
     store.sync_sources([replace(binding, model_ids=(), model_reasoning_efforts=())])
     assert store.list_sources()[0].model_ids == ()
@@ -882,7 +882,7 @@ def test_retained_opencode_route_registration_matches_resolver_without_inventing
         _append_source(compiled, engine_store.get_source(source.id), engine_store)
         compiled_models = compiled["codex-api-key"][0]["models"]
         assert {item["name"] for item in compiled_models} == set(binding.model_ids) | set(expected_targets)
-        assert all(set(item) == {"name", "alias"} for item in compiled_models)
+        assert all(set(item) == {"name", "alias", "display-name"} for item in compiled_models)
     if state == "unknown":
         adapter.outcomes.append(
             RawCallOutcome(

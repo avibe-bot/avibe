@@ -4,6 +4,11 @@ import { APPLICATION_ROUTE_PATHS } from './applicationRoutes';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
 
 describe('legacy Settings redirects', () => {
+  it.each(['/admin/settings/memory', '/settings/memory'])('redirects retired bookmark %s to General', (from) => {
+    expect(LEGACY_SETTINGS_REDIRECTS.filter((route) => route.from === from)).toEqual([
+      { from, to: '/settings/general' },
+    ]);
+  });
   it('translates every retired admin route exactly once', () => {
     const adminRoutes = APPLICATION_ROUTE_PATHS.filter((path) => path.startsWith('/admin'));
     const redirectedAdminRoutes = LEGACY_SETTINGS_REDIRECTS

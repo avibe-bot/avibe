@@ -11,7 +11,6 @@ from pathlib import Path
 
 from config import paths
 from config.v2_config import V2Config
-from vibe.memory_ui_access import generate_ui_read_secret
 from scripts.incus_regression import SERVICE_HOME, regression_show_runtime_env
 from vibe import runtime
 
@@ -112,16 +111,13 @@ def main() -> int:
 
     _normalize_show_runtime_source_environment()
     config = _config()
-    memory_ui_secret = generate_ui_read_secret()
     service_pid = runtime.start_service(
         wait_for_ready=False,
-        memory_ui_secret=memory_ui_secret,
     )
     bind_host = runtime.effective_ui_bind_host(config)
     ui_pid = runtime.start_ui(
         bind_host,
         config.ui.setup_port,
-        memory_ui_secret=memory_ui_secret,
     )
 
     # Asked unconditionally: the predicate that used to guard this is the lock,
@@ -163,8 +159,7 @@ def main() -> int:
                 ui_pid = runtime.start_ui(
                     runtime.effective_ui_bind_host(config),
                     config.ui.setup_port,
-                    memory_ui_secret=memory_ui_secret,
-                )
+                            )
                 runtime.write_status("running", "ui restarted in incus regression", service_pid, ui_pid)
         elif current_ui_pid != ui_pid:
             ui_pid = current_ui_pid

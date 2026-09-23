@@ -4,9 +4,8 @@
 // browsers without the API (and non-installed contexts) simply no-op, and a
 // rejected badge promise must never block the notification from showing.
 //
-// Returns a promise to await, or null when there is nothing to do. `count` is
-// the global unread total the server computed for this push; a missing/invalid
-// count leaves the existing badge untouched (we don't guess).
+// Returns a promise to await, or null when there is nothing to do. A
+// missing/invalid count leaves the existing badge untouched (we don't guess).
 function syncAppBadge(count) {
   if (!('setAppBadge' in navigator)) return null;
   if (typeof count !== 'number' || !Number.isFinite(count)) return null;
@@ -15,16 +14,248 @@ function syncAppBadge(count) {
   return op && typeof op.catch === 'function' ? op.catch(() => {}) : null;
 }
 
+let badgeWrite = Promise.resolve();
+let pageBadgeRevision = 0;
+let workerBadgeRefresh = 0;
+
+function queueAppBadge(count, refreshId = null, pageRevisionAtStart = null) {
+  badgeWrite = badgeWrite.catch(() => {}).then(() => {
+    if (refreshId !== null && refreshId !== workerBadgeRefresh) return;
+    if (pageRevisionAtStart !== null && pageRevisionAtStart !== pageBadgeRevision) return;
+    return syncAppBadge(count);
+  });
+  return badgeWrite;
+}
+
+const APP_SHELL_PATHS = ['/inbox', '/search', '/agents', '/skills', '/harness', '/vaults', '/projects', '/apps', '/settings', '/more', '/chat', '/admin'];
+
+function isAppShellClient(client) {
+  try {
+    const url = new URL(client.url);
+    if (url.origin !== self.location.origin) return false;
+    if (url.pathname === '/') return true;
+    return APP_SHELL_PATHS.some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
+  } catch {
+    return false;
+  }
+}
+
+async function appWindowClients() {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  return clients.filter(isAppShellClient);
+}
+
+function requestForegroundBadgeRefresh(clients) {
+  for (const client of clients) {
+    // A hidden page's ordinary Inbox read could renew an unattended login.
+    if (client.visibilityState !== 'visible') continue;
+    try {
+      client.postMessage({ type: 'vibe.push-badge-refresh' });
+    } catch {
+      // A closing window will refresh its Inbox on the next launch.
+    }
+  }
+}
+
+// Push delivery can lag behind a mark-read response. The count embedded when
+// the push was sent may already be obsolete by the time this worker runs.
+async function refreshAppBadge() {
+  if (!('setAppBadge' in navigator)) return;
+  const refreshId = ++workerBadgeRefresh;
+  const pageRevisionAtStart = pageBadgeRevision;
+  try {
+    let clients = await appWindowClients();
+    if (clients.some((client) => client.visibilityState === 'visible')) {
+      requestForegroundBadgeRefresh(clients);
+      return;
+    }
+    const response = await fetch('/api/inbox?platform=avibe&limit=1', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'X-Avibe-Background-Push': '1' },
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    clients = await appWindowClients();
+    if (clients.some((client) => client.visibilityState === 'visible')) {
+      requestForegroundBadgeRefresh(clients);
+      return;
+    }
+    await queueAppBadge(payload?.unread_total, refreshId, pageRevisionAtStart);
+    requestForegroundBadgeRefresh(await appWindowClients());
+  } catch {
+    // An unavailable or unauthenticated read is not evidence that the badge is zero.
+  }
+}
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'vibe.app-badge-current') return;
+  const count = event.data.count;
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) return;
+  pageBadgeRevision += 1;
+  event.waitUntil(queueAppBadge(count));
+});
+
 const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
 const WEB_PUSH_LAUNCH_ENTRY_PATH = '/__avibe/web-push-launch';
+const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
+const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
+
+function endpointCacheUrl() {
+  return new URL(WEB_PUSH_ENDPOINT_ENTRY_PATH, self.location.origin).href;
+}
+
+async function rememberedPushEndpoint() {
+  if (!self.caches) return null;
+  try {
+    const cache = await self.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    const response = await cache.match(endpointCacheUrl());
+    const payload = response ? await response.json() : null;
+    return typeof payload?.endpoint === 'string' && payload.endpoint ? payload.endpoint : null;
+  } catch {
+    return null;
+  }
+}
+
+async function rememberPushEndpoint(endpoint) {
+  if (!self.caches || !endpoint) return;
+  try {
+    const cache = await self.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    await cache.put(endpointCacheUrl(), new Response(JSON.stringify({ endpoint }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+  } catch {
+    // Foreground reconciliation remains available if Cache Storage fails.
+  }
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = self.atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+function arrayBuffersEqual(left, right) {
+  if (!left || left.byteLength !== right.byteLength) return false;
+  const leftView = new Uint8Array(left);
+  const rightView = new Uint8Array(right);
+  for (let i = 0; i < leftView.length; i += 1) {
+    if (leftView[i] !== rightView[i]) return false;
+  }
+  return true;
+}
+
+async function fetchCsrfToken() {
+  const response = await fetch('/api/csrf-token', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`CSRF token request failed (${response.status})`);
+  const payload = await response.json();
+  if (typeof payload?.csrf_token !== 'string' || !payload.csrf_token) {
+    throw new Error('CSRF token missing from response');
+  }
+  return payload.csrf_token;
+}
+
+async function isInvalidCsrfResponse(response) {
+  if (response.status !== 403 || typeof response.json !== 'function') return false;
+  try {
+    const payload = await response.json();
+    return payload?.message === 'Forbidden: invalid csrf token';
+  } catch {
+    return false;
+  }
+}
+
+async function postPushSubscription(subscription, previousEndpoints, csrfToken) {
+  return fetch('/api/web-push/subscriptions', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Vibe-CSRF-Token': csrfToken,
+    },
+    body: JSON.stringify({
+      subscription: subscription.toJSON(),
+      previous_endpoints: previousEndpoints,
+      background_rotation: true,
+    }),
+  });
+}
+
+async function syncPushSubscription(subscription, previousEndpoints) {
+  let csrfToken = await fetchCsrfToken();
+  let response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
+  if (
+    !response.ok
+    && await isInvalidCsrfResponse(response)
+  ) {
+    csrfToken = await fetchCsrfToken();
+    response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
+  }
+  if (!response.ok) throw new Error(`Push subscription sync failed (${response.status})`);
+  const payload = await response.json();
+  return payload?.accepted !== false;
+}
+
+async function fetchVapidPublicKey() {
+  const response = await fetch('/api/web-push/vapid-public-key', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`VAPID key request failed (${response.status})`);
+  const payload = await response.json();
+  if (typeof payload?.public_key !== 'string' || !payload.public_key) {
+    throw new Error('VAPID public key missing from response');
+  }
+  return urlBase64ToUint8Array(payload.public_key);
+}
+
+async function replacementSubscription(event) {
+  const applicationServerKey = await fetchVapidPublicKey();
+  const replacement = event.newSubscription;
+  if (
+    replacement
+    && arrayBuffersEqual(replacement.options?.applicationServerKey, applicationServerKey)
+  ) {
+    return replacement;
+  }
+  if (replacement) {
+    await replacement.unsubscribe();
+    const remaining = await self.registration.pushManager.getSubscription();
+    if (remaining?.endpoint === replacement.endpoint) {
+      throw new Error('Stale push subscription was not removed');
+    }
+  }
+  const current = await self.registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey,
+  });
+  if (
+    !arrayBuffersEqual(current.options?.applicationServerKey, applicationServerKey)
+    || (replacement && current.endpoint === replacement.endpoint)
+  ) {
+    throw new Error('Push subscription replacement is still stale');
+  }
+  return current;
+}
 
 // iOS may honor an installed PWA's manifest start URL instead of the path passed
 // to openWindow(). Leave a short-lived launch handoff in Cache Storage so the
 // app shell can still prefer the tapped notification over its remembered page.
 function rememberPendingNotificationLaunch(url) {
   if (!self.caches) return Promise.resolve();
-  const entryUrl = new URL(WEB_PUSH_LAUNCH_ENTRY_PATH, self.location.origin).href;
-  const response = new Response(JSON.stringify({ url, createdAt: Date.now() }), {
+  const createdAt = Date.now();
+  // Distinct cache keys let a page consume click A without deleting click B
+  // if B arrives while A's response body is being read.
+  const entryUrl = new URL(
+    `${WEB_PUSH_LAUNCH_ENTRY_PATH}/${createdAt}-${Math.random().toString(36).slice(2)}`,
+    self.location.origin,
+  ).href;
+  const response = new Response(JSON.stringify({ url, createdAt }), {
     headers: { 'content-type': 'application/json' },
   });
   return self.caches
@@ -32,6 +263,22 @@ function rememberPendingNotificationLaunch(url) {
     .then((cache) => cache.put(entryUrl, response))
     .catch(() => {});
 }
+
+let notificationClickQueue = Promise.resolve();
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      const previousEndpoint = event.oldSubscription?.endpoint ?? await rememberedPushEndpoint();
+      const subscription = await replacementSubscription(event);
+      const accepted = await syncPushSubscription(
+        subscription,
+        previousEndpoint ? [previousEndpoint] : [],
+      );
+      if (accepted) await rememberPushEndpoint(subscription.endpoint);
+    })().catch(() => undefined),
+  );
+});
 
 self.addEventListener('push', (event) => {
   let payload = {};
@@ -53,8 +300,7 @@ self.addEventListener('push', (event) => {
   };
 
   const tasks = [self.registration.showNotification(title, options)];
-  const badgeTask = syncAppBadge(payload.badge_count);
-  if (badgeTask) tasks.push(badgeTask);
+  tasks.push(refreshAppBadge());
   event.waitUntil(Promise.all(tasks));
 });
 
@@ -69,21 +315,23 @@ self.addEventListener('notificationclick', (event) => {
     type: 'vibe.notification-click',
     url: targetUrl.pathname + targetUrl.search + targetUrl.hash,
   };
-  const appShellPaths = ['/inbox', '/agents', '/skills', '/harness', '/vaults', '/projects', '/more', '/chat', '/admin'];
-  const isAppShellClient = (url) => {
-    if (url.origin !== self.location.origin) return false;
-    if (url.pathname === '/') return true;
-    return appShellPaths.some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
-  };
-
-  event.waitUntil(
+  // A slow first focus must not post its target after a later tap has posted
+  // another one. Keep the handoff, focus, and message in click order.
+  const click = notificationClickQueue.then(() =>
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
-        if ('focus' in client && isAppShellClient(new URL(client.url))) {
-          return client.focus().then((focusedClient) => {
-            (focusedClient || client).postMessage(message);
-            return focusedClient || client;
-          });
+        if ('focus' in client && isAppShellClient(client)) {
+          // A suspended page may miss postMessage even after focus resolves.
+          // Persist the target before waking it so the page's resume handler
+          // can consume the same one-shot handoff as a cold launch.
+          return rememberPendingNotificationLaunch(message.url)
+            .then(() => client.focus())
+            .then((focusedClient) => {
+              const target = focusedClient || client;
+              target.postMessage(message);
+              return target;
+            })
+            .catch(() => self.clients.openWindow?.(href));
         }
       }
       if (self.clients.openWindow) {
@@ -101,4 +349,6 @@ self.addEventListener('notificationclick', (event) => {
       return undefined;
     }),
   );
+  notificationClickQueue = click.catch(() => {});
+  event.waitUntil(click);
 });

@@ -80,3 +80,36 @@ def test_indicator_cleanup_has_exactly_one_owner():
 
     assert registry.claim_indicator_cleanup("turn-1") is request
     assert registry.claim_indicator_cleanup("turn-1") is None
+
+
+def test_hiding_a_turn_discards_everything_it_had_not_said_yet():
+    """A superseded turn speaks no further, so both held buffers go with it.
+
+    ``pending_narration`` holds intermediate messages waiting for the search
+    that attributes them. It is the same kind of undelivered candidate as
+    ``pending_assistant``, so hiding the turn has to settle both or a hidden
+    turn would still narrate once its sources arrived.
+    """
+    registry = CodexTurnRegistry()
+    request = SimpleNamespace(base_session_id="session-1")
+    state = registry.register_turn("turn-1", request)
+    state.pending_assistant = ("Final answer.", "markdown")
+    state.pending_narration.append(("Progress.", "markdown"))
+
+    hidden = registry.hide_turn("turn-1")
+
+    assert hidden is state
+    assert state.pending_assistant is None
+    assert state.pending_narration == []
+
+
+def test_each_turn_gets_its_own_narration_queue():
+    registry = CodexTurnRegistry()
+    first = SimpleNamespace(base_session_id="session-1")
+    second = SimpleNamespace(base_session_id="session-2")
+
+    one = registry.register_turn("turn-1", first)
+    two = registry.register_turn("turn-2", second)
+    one.pending_narration.append(("Only mine.", "markdown"))
+
+    assert two.pending_narration == []

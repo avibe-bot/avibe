@@ -77,7 +77,6 @@ def verify_installed_companion(distribution: Distribution, wheel: Path, url: str
             entry.filename for entry in source.infolist()
             if not entry.is_dir() and not entry.filename.endswith(".dist-info/RECORD")
         ]
-        assert any(name.startswith("avibe_memory/") for name in payload), "Missing companion payload"
         for name in payload:
             installed = Path(distribution.locate_file(name))
             assert installed.is_file(), f"Missing installed companion file: {name}"

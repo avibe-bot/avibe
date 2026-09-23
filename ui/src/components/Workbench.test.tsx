@@ -49,7 +49,7 @@ vi.mock('../lib/sessionInfo', () => ({
 // only need to see that the chip reaches it and that closing it changes nothing.
 vi.mock('./workbench/NewProjectDialog', () => ({
   NewProjectDialog: ({ onClose, initialPath }: { onClose: () => void; initialPath?: string }) => (
-    <div role="dialog" aria-label="directory-browser" data-path={initialPath}>
+    <div role="dialog" aria-label="folder-browser" data-path={initialPath}>
       <button type="button" onClick={onClose}>cancel-folder</button>
     </div>
   ),
@@ -219,10 +219,10 @@ describe('Workbench first-task home', () => {
 
     // No menu in between: the row reaches the folder picker itself.
     await user.click(screen.getByRole('button', { name: en.newSession.newProject }));
-    expect(screen.getByRole('dialog', { name: 'directory-browser' })).toBeTruthy();
+  expect(screen.getByRole('dialog', { name: 'folder-browser' })).toBeTruthy();
 
     await user.click(screen.getByText('cancel-folder'));
-    expect(screen.queryByRole('dialog', { name: 'directory-browser' })).toBeNull();
+  expect(screen.queryByRole('dialog', { name: 'folder-browser' })).toBeNull();
     expect(input().value).toBe('帮我看看这个仓库');
     expect(newSession.setSelected).not.toHaveBeenCalled();
     expect(newSession.upsertSelectProject).not.toHaveBeenCalled();
@@ -254,7 +254,7 @@ describe('Workbench first-task home', () => {
     await user.type(input(), '开始一个新项目');
     await user.click(screen.getByRole('button', { name: en.chat.compose.send }));
 
-    expect(await screen.findByRole('dialog', { name: 'directory-browser' })).toBeTruthy();
+  expect(await screen.findByRole('dialog', { name: 'folder-browser' })).toBeTruthy();
     // The prompt survives the detour — the user retries it, not retypes it.
     expect(input().value).toBe('开始一个新项目');
   });

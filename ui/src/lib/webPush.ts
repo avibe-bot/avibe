@@ -3,6 +3,9 @@ import { isIosDevice, isStandalonePwa } from './platform';
 
 const WEB_PUSH_DEVICE_ID_KEY = 'vibe.webPush.deviceId';
 const WEB_PUSH_ENDPOINTS_KEY = 'vibe.webPush.endpoints';
+const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
+const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
+const WEB_PUSH_DEVICE_ENTRY_PATH = '/__avibe/web-push-device-id';
 
 export type WebPushSupportState =
   | { supported: true; standalone: boolean; requiresStandalone: boolean }
@@ -27,46 +30,84 @@ function arrayBuffersEqual(left: ArrayBuffer | null, right: ArrayBuffer): boolea
   return true;
 }
 
-export function getWebPushDeviceId(): string {
+async function readCachedPushValue(path: string, key: 'endpoint' | 'device_id'): Promise<string | null> {
+  if (!('caches' in window)) return null;
   try {
-    const existing = window.localStorage.getItem(WEB_PUSH_DEVICE_ID_KEY);
-    if (existing) return existing;
+    const cache = await window.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    const response = await cache.match(new URL(path, window.location.origin).href);
+    const payload = response ? await response.json() : null;
+    const value = payload?.[key];
+    return typeof value === 'string' && value ? value : null;
   } catch {
-    // Storage can be blocked in hardened browsers/WebViews; keep notification
-    // controls usable even if the id cannot persist across page loads.
+    return null;
   }
-  const generated =
-    window.crypto?.randomUUID?.() ??
-    `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  try {
-    window.localStorage.setItem(WEB_PUSH_DEVICE_ID_KEY, generated);
-  } catch {
-    // Best-effort persistence only.
-  }
-  return generated;
 }
 
-export function getRememberedWebPushEndpoints(): string[] {
+async function writeCachedPushValue(path: string, key: 'endpoint' | 'device_id', value: string): Promise<void> {
+  if (!('caches' in window)) return;
+  try {
+    const cache = await window.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    await cache.put(new URL(path, window.location.origin).href, new Response(JSON.stringify({ [key]: value }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+  } catch {
+    // localStorage remains available where Cache Storage is blocked.
+  }
+}
+
+let deviceIdPromise: Promise<string> | undefined;
+
+export function getWebPushDeviceId(): Promise<string> {
+  const resolveDeviceId = async () => {
+    let deviceId: string | null = null;
+    try {
+      deviceId = window.localStorage.getItem(WEB_PUSH_DEVICE_ID_KEY);
+    } catch {
+      // Hardened browsers can block localStorage while allowing Cache Storage.
+    }
+    deviceId ||= await readCachedPushValue(WEB_PUSH_DEVICE_ENTRY_PATH, 'device_id');
+    deviceId ||= window.crypto?.randomUUID?.()
+      ?? `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    try {
+      window.localStorage.setItem(WEB_PUSH_DEVICE_ID_KEY, deviceId);
+    } catch {
+      // Cache Storage or this page's in-memory identity remains available.
+    }
+    await writeCachedPushValue(WEB_PUSH_DEVICE_ENTRY_PATH, 'device_id', deviceId);
+    return deviceId;
+  };
+  deviceIdPromise ??= (async () => (
+    navigator.locks?.request
+      ? navigator.locks.request(WEB_PUSH_DEVICE_ID_KEY, resolveDeviceId)
+      : resolveDeviceId()
+  ))();
+  return deviceIdPromise;
+}
+
+export async function getRememberedWebPushEndpoints(): Promise<string[]> {
+  let localEndpoints: string[] = [];
   try {
     const raw = window.localStorage.getItem(WEB_PUSH_ENDPOINTS_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (Array.isArray(parsed)) {
-      return parsed.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0);
+      localEndpoints = parsed.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0);
     }
   } catch {
-    // Best-effort cleanup hints only.
+    // Cache Storage remains available where localStorage is blocked.
   }
-  return [];
+  const cachedEndpoint = await readCachedPushValue(WEB_PUSH_ENDPOINT_ENTRY_PATH, 'endpoint');
+  return [...new Set([...(cachedEndpoint ? [cachedEndpoint] : []), ...localEndpoints])].slice(0, 8);
 }
 
-export function rememberWebPushEndpoint(endpoint: string | undefined): void {
+export async function rememberWebPushEndpoint(endpoint: string | undefined): Promise<void> {
   if (!endpoint) return;
-  const endpoints = [endpoint, ...getRememberedWebPushEndpoints().filter((candidate) => candidate !== endpoint)].slice(0, 8);
+  const endpoints = [endpoint, ...(await getRememberedWebPushEndpoints()).filter((candidate) => candidate !== endpoint)].slice(0, 8);
   try {
     window.localStorage.setItem(WEB_PUSH_ENDPOINTS_KEY, JSON.stringify(endpoints));
   } catch {
     // Best-effort persistence only.
   }
+  await writeCachedPushValue(WEB_PUSH_ENDPOINT_ENTRY_PATH, 'endpoint', endpoint);
 }
 
 export function getWebPushSupportState(): WebPushSupportState {
@@ -88,7 +129,29 @@ export async function getExistingWebPushSubscription(): Promise<PushSubscription
   return registration?.pushManager.getSubscription() ?? null;
 }
 
-export async function enableWebPush(api: ApiContextType): Promise<PushSubscriptionJSON> {
+export function webPushSubscriptionUsesVapidKey(
+  subscription: PushSubscription,
+  publicKey: string,
+): boolean {
+  try {
+    return arrayBuffersEqual(
+      subscription.options.applicationServerKey,
+      urlBase64ToArrayBuffer(publicKey),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export type EnableWebPushOptions = {
+  forceResubscribe?: boolean;
+  recoverOnly?: boolean;
+};
+
+export async function enableWebPush(
+  api: ApiContextType,
+  options: EnableWebPushOptions = {},
+): Promise<PushSubscriptionJSON> {
   const support = getWebPushSupportState();
   if (!support.supported) {
     throw new Error(support.reason);
@@ -101,10 +164,18 @@ export async function enableWebPush(api: ApiContextType): Promise<PushSubscripti
   const registration = await navigator.serviceWorker.register('/push-sw.js');
   const serverKey = urlBase64ToArrayBuffer((await api.getWebPushVapidPublicKey()).public_key);
   const existing = await registration.pushManager.getSubscription();
-  if (existing && !arrayBuffersEqual(existing.options.applicationServerKey, serverKey)) {
+  let current = existing;
+  if (
+    existing
+    && (options.forceResubscribe
+      || !arrayBuffersEqual(existing.options.applicationServerKey, serverKey))
+  ) {
     await existing.unsubscribe();
+    current = await registration.pushManager.getSubscription();
+    if (current?.endpoint === existing.endpoint) {
+      throw new Error('unsubscribe_failed');
+    }
   }
-  const current = await registration.pushManager.getSubscription();
   const subscription =
     current ??
     (await registration.pushManager.subscribe({
@@ -114,20 +185,33 @@ export async function enableWebPush(api: ApiContextType): Promise<PushSubscripti
 
   const json = subscription.toJSON();
   const endpoint = typeof json.endpoint === 'string' ? json.endpoint : undefined;
-  await api.subscribeWebPush(json, undefined, getWebPushDeviceId(), getRememberedWebPushEndpoints());
-  rememberWebPushEndpoint(endpoint);
+  const previousEndpoints = [
+    ...(existing?.endpoint ? [existing.endpoint] : []),
+    ...await getRememberedWebPushEndpoints(),
+  ];
+  const result = await api.subscribeWebPush(
+    json,
+    undefined,
+    await getWebPushDeviceId(),
+    previousEndpoints,
+    options.recoverOnly,
+  );
+  if (options.recoverOnly && !result.accepted) {
+    await subscription.unsubscribe();
+    throw new Error('recovery_not_authorized');
+  }
+  await rememberWebPushEndpoint(endpoint);
   return json;
 }
 
 export async function disableWebPush(api: ApiContextType): Promise<boolean> {
   const subscription = await getExistingWebPushSubscription();
   const endpoint = subscription?.endpoint;
+  if (endpoint) {
+    await api.unsubscribeWebPush(endpoint, await getWebPushDeviceId());
+  }
   if (subscription) {
     await subscription.unsubscribe();
   }
-  if (endpoint) {
-    await api.unsubscribeWebPush(endpoint);
-    return true;
-  }
-  return false;
+  return Boolean(endpoint);
 }

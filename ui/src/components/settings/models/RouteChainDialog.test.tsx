@@ -453,7 +453,7 @@ describe("RouteChainDialog", () => {
       expect(chain.manual_override?.hops).toHaveLength(2);
     });
 
-    it('clears to no-key Unconfigured, confirms the exact DELETE guard and shows actual impact then Done', async () => {
+    it('clears to no-key Unconfigured, confirms the exact DELETE guard and closes after saving', async () => {
       const user = userEvent.setup();
       const gap = { backend: 'claude' as const, model_id: 'opus-5', agents: ['writer'] };
       const hop = { backend: 'claude' as const, menu_model: 'opus-5', ...chain.manual_override!.hops[0], position: 1 };
@@ -464,16 +464,17 @@ describe("RouteChainDialog", () => {
       const put = vi.spyOn(modelsApi, 'putAgentChain');
       const committed = vi.fn();
       vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
+      const close = vi.fn();
       render(<I18nextProvider i18n={i18n}><RouteChainDialog
         selection={{ agent: { ...agent, sources: { order: [], eligibility: [] } }, modelId: 'opus-5', read: readyRegion(chain) }}
-        sources={[]} onClose={vi.fn()} onCommitted={committed} readAgents={vi.fn()} readSources={vi.fn()}
+        sources={[]} onClose={close} onCommitted={committed} readAgents={vi.fn()} readSources={vi.fn()}
       /></I18nextProvider>);
       await clear(user);
       await screen.findByText('After restore: unconfigured');
       expect(restore).not.toHaveBeenCalled();
       await user.click(screen.getByRole('button', { name: 'Save' }));
       await user.click(await screen.findByRole('button', { name: 'Save anyway' }));
-      await within(document.querySelector<HTMLElement>('.model-hub-route-foot')!).findByRole('button', { name: 'Done' });
+      await waitFor(() => expect(close).toHaveBeenCalledOnce());
       expect(restore.mock.calls).toEqual([
         ['claude', 'opus-5', undefined],
         ['claude', 'opus-5', { force: true, would_remove_hops: [hop], would_interrupt: [gap] }],
@@ -744,10 +745,11 @@ describe("RouteChainDialog", () => {
   it("saves the changed ordered hop array and consumes the response envelope", async () => {
     const user = userEvent.setup();
     const onCommitted = vi.fn();
+    const onClose = vi.fn();
     const put = vi
       .spyOn(modelsApi, "putAgentChain")
       .mockResolvedValue(mutation());
-    renderDialog(onCommitted);
+    renderDialog(onCommitted, onClose);
     await screen.findAllByRole("button", { name: "Remove hop" });
 
     await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
@@ -763,7 +765,7 @@ describe("RouteChainDialog", () => {
       removed_hops: [],
       interrupted: [],
     });
-    expect(screen.getByText("Done").closest("button")).toBeTruthy();
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("MH-ROUTE-EDIT-001 replaces one hop in place and saves the exact order", async () => {
@@ -811,8 +813,9 @@ describe("RouteChainDialog", () => {
     );
   });
 
-  it("renders the complete removed-hop impact after a successful save", async () => {
+  it("closes through the owner after a successful save with impact", async () => {
     const user = userEvent.setup();
+    const onClose = vi.fn();
     const removed = {
       backend: "claude" as const,
       menu_model: "opus-5",
@@ -823,85 +826,13 @@ describe("RouteChainDialog", () => {
     vi.spyOn(modelsApi, "putAgentChain").mockResolvedValue(
       mutation(chain, { removed_hops: [removed] }),
     );
-    renderDialog();
+    renderDialog(vi.fn(), onClose);
     await screen.findAllByRole("button", { name: "Remove hop" });
 
     await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(await screen.findByText("Claude Code · opus-5")).toBeTruthy();
-    expect(screen.getByText("claude-opus-5 · Order #1")).toBeTruthy();
-  });
-
-  it("keeps Done available while page-owned M6 is pending and failed", async () => {
-    const user = userEvent.setup();
-    const removed = {
-      backend: "claude" as const,
-      menu_model: "opus-5",
-      source_id: "src_a",
-      model_id: "claude-opus-5",
-      position: 1,
-    };
-    const put = vi
-      .spyOn(modelsApi, "putAgentChain")
-      .mockResolvedValue(mutation(chain, { removed_hops: [removed] }));
-    const onCommitted = vi.fn();
-    const retry = vi.fn();
-    vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
-    const page = render(
-      <I18nextProvider i18n={i18n}>
-        <RouteChainDialog
-          selection={{ agent, modelId: "opus-5", read: readyRegion(chain) }}
-          sources={sources}
-          onClose={vi.fn()}
-          onCommitted={onCommitted}
-          commitReconciliation={{ pending: true, failed: false, retry }}
-          readAgents={vi.fn().mockResolvedValue(observation([agent]))}
-          readSources={vi.fn().mockResolvedValue(observation(sources))}
-        />
-      </I18nextProvider>,
-    );
-    await screen.findAllByRole("button", { name: "Remove hop" });
-    await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
-    expect(
-      await screen.findByText(
-        "Route chain saved. Refreshing…",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "These are the items this save actually removed or interrupted.",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByText("Done").closest("button")).toBeTruthy();
-    page.rerender(
-      <I18nextProvider i18n={i18n}>
-        <RouteChainDialog
-          selection={{ agent, modelId: "opus-5", read: readyRegion(chain) }}
-          sources={sources}
-          onClose={vi.fn()}
-          onCommitted={onCommitted}
-          commitReconciliation={{ pending: false, failed: true, retry }}
-          readAgents={vi.fn().mockResolvedValue(observation([agent]))}
-          readSources={vi.fn().mockResolvedValue(observation(sources))}
-        />
-      </I18nextProvider>,
-    );
-    expect(
-      await screen.findByText(
-        "The route chain was saved, but the display could not be refreshed.",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "These are the items this save actually removed or interrupted.",
-      ),
-    ).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-    expect(retry).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("echoes the exact refusal plan on a forced confirmation", async () => {
@@ -981,7 +912,8 @@ describe("RouteChainDialog", () => {
     const put = vi
       .spyOn(modelsApi, "putAgentChain")
       .mockRejectedValueOnce(new TypeError("response lost"));
-    renderDialog();
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
     await screen.findAllByRole("button", { name: "Remove hop" });
 
     await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
@@ -990,7 +922,7 @@ describe("RouteChainDialog", () => {
 
     await waitFor(() => expect(read).toHaveBeenCalledWith("claude", "opus-5"));
     expect(put).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("Done").closest("button")).toBeTruthy();
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("installs a nonmatching D-36 observation without treating it as a retryable write", async () => {

@@ -20,6 +20,7 @@ const CATALOG_PY = resolve(HERE, '../../../../..', 'vibe/backend_model_catalog.p
  * never a silent skip.
  */
 const FROZEN_VOCABULARY = [
+  'none',
   'minimal',
   'low',
   'medium',
@@ -68,7 +69,7 @@ describe('reasoning-effort vocabulary UI ↔ backend mirror', () => {
     expect(namesVocabulary).toBe(namesDefaults);
   });
 
-  it('holds REASONING_EFFORTS equal to the backend export, or the frozen 7-list while that name is absent', () => {
+  it('holds REASONING_EFFORTS equal to the backend export, including model-scoped Off', () => {
     expect([...REASONING_EFFORTS]).toEqual(exportedVocabulary ?? [...FROZEN_VOCABULARY]);
   });
 

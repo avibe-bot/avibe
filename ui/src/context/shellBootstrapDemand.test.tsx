@@ -80,7 +80,7 @@ const inboxPayload = {
   unread_by_session: { [session.id]: 3 },
 };
 
-type ListInboxArgs = { platform: string; limit: number; before?: string; onlySession?: string };
+type ListInboxArgs = { platform: string; limit: number; before?: string; onlySession?: string; backgroundPush?: boolean };
 
 type FakeApi = {
   getWorkbenchProjectsBootstrap?: () => Promise<unknown>;
@@ -769,6 +769,55 @@ describe('Demand-driven shell bootstrap', () => {
   // deliver the map may fail, be invalidated, or be dropped by the gate, and the
   // badge still ends up with one.
   describe('the unread map no route gates', () => {
+    it('reapplies an unchanged authoritative badge count after a worker write', async () => {
+      const originalSetBadge = Object.getOwnPropertyDescriptor(navigator, 'setAppBadge');
+      const originalClearBadge = Object.getOwnPropertyDescriptor(navigator, 'clearAppBadge');
+      const originalWorker = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+      const setAppBadge = vi.fn(async () => {});
+      const clearAppBadge = vi.fn(async () => {});
+      const worker = new EventTarget();
+      Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: setAppBadge });
+      Object.defineProperty(navigator, 'clearAppBadge', { configurable: true, value: clearAppBadge });
+      Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: worker });
+
+      try {
+        const listInbox = vi.fn(async (_args: ListInboxArgs) => ({
+          sessions: [],
+          next_cursor: null,
+          unread_by_session: {},
+        }));
+        apiRef.current = { listInbox, connectWorkbenchEvents: vi.fn(() => vi.fn()) };
+        render(
+          <WorkbenchInboxProvider>
+            <InboxProbe feed={false} />
+          </WorkbenchInboxProvider>,
+        );
+        await settle();
+        expect(clearAppBadge).toHaveBeenCalledOnce();
+
+        // The worker finished a stale write just after the page's last 0.
+        await setAppBadge(1);
+        await act(async () => {
+          worker.dispatchEvent(new MessageEvent('message', {
+            data: { type: 'vibe.push-badge-refresh' },
+          }));
+        });
+        await settle();
+
+        expect(listInbox).toHaveBeenCalledTimes(2);
+        expect(listInbox.mock.calls[1][0]).toMatchObject({ backgroundPush: true });
+        expect(clearAppBadge).toHaveBeenCalledTimes(2);
+      } finally {
+        cleanup();
+        if (originalSetBadge) Object.defineProperty(navigator, 'setAppBadge', originalSetBadge);
+        else Reflect.deleteProperty(navigator, 'setAppBadge');
+        if (originalClearBadge) Object.defineProperty(navigator, 'clearAppBadge', originalClearBadge);
+        else Reflect.deleteProperty(navigator, 'clearAppBadge');
+        if (originalWorker) Object.defineProperty(navigator, 'serviceWorker', originalWorker);
+        else Reflect.deleteProperty(navigator, 'serviceWorker');
+      }
+    });
+
     it('reads the counts a dropped feed read was carrying', async () => {
       const feedRead = deferred<typeof inboxPayload>();
       const countsOnly = {

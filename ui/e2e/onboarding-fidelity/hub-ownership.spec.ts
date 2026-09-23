@@ -122,7 +122,6 @@ for (const width of [1200, 390]) {
         }],
       });
       // These unrelated app-shell reads are empty, not live-service fallbacks.
-      if (path === '/api/memory/status') return answer({ ok: true, enabled: false });
       if (path === '/api/projects') return answer({ ok: true, projects: [] });
       if (path === '/api/scopes') return answer({ ok: true, scopes: [] });
       if (path === '/api/inbox') return answer({

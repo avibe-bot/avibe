@@ -6,7 +6,6 @@
 vibe              # Alias for vibe start
 vibe start        # Start Avibe if needed (opens web UI)
 vibe status       # Check service status
-vibe memory status # Read local Memory status from the running controller
 vibe restart      # Restart all services (use --delay-seconds when agent-triggered)
 vibe remote       # Guided Avibe Cloud remote-access setup
 vibe screenshot   # Capture a local desktop screenshot
@@ -63,17 +62,6 @@ vibe start
 - Reuses the main service and Web UI if they are already running
 - Opens the setup wizard at `http://127.0.0.1:5123`
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
-
-**Known limitation — Memory Settings after a partial restart.** The Web UI and
-the service prove local Memory reads to each other with a secret minted once per
-launch. It reaches each child over stdin and is never written to disk, so
-`vibe start` can only align the processes it starts itself. When the service is
-already running and only the Web UI starts fresh, the pair holds no shared
-proof and the Memory Settings page reports Memory as unavailable until both are
-restarted together; the CLI prints that recovery step — run `vibe stop`, then
-`vibe`. The reverse case needs no action: a freshly started service restarts a
-surviving Web UI so the new pair shares one secret. `vibe memory ...` uses a
-separate session-scoped grant and is unaffected.
 
 ### `vibe stop`
 
@@ -228,50 +216,6 @@ space reclamation: old data may remain in SQLite WAL/free pages or backups.
 Restoring a database backup also restores its historical statistics and clear
 watermark; clear again after a restore when needed. No historical conversation
 scan or backfill is performed by this feature.
-
-### `vibe memory`
-
-Read scoped local Memory or submit context for best-effort, process-local capture — facts the user explicitly asked to remember, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. Acceptance does not guarantee provider delivery or persistence. This command does not start a service and has no clear, configuration, export, or delete subcommands.
-
-Memory Settings' Processing Record retains up to 50 recent write anomalies for
-this service process. It distinguishes an unknown submitted result from captures
-discarded before submission; consecutive discarded captures share an
-`affected_count`. Native engine recovery preserves these observations, while a
-service restart or explicit data clear removes them. The source is partial,
-not a complete failure history; sanitized service logs retain operational events.
-An unknown capture is never automatically replayed. A healthy engine does not
-prove an earlier write completed. Add and flush wait for the native six-minute
-processing budget plus a ten-second response margin.
-
-`status` works from a normal terminal. `profile`, `list`, `search`, and `remember`
-require an eligible Agent shell where Avibe has injected the current Session
-context; running them from a normal terminal returns `memory_access_denied`.
-
-```bash
-vibe memory status [--json]
-vibe memory profile [--json]
-vibe memory list [--project <slug>] [--page N] [--limit 1..100] [--json]
-vibe memory search <query> [--project <slug>] [--mode {hybrid|keyword|vector|agentic}] [--limit 1..100] [--json]
-vibe memory remember <text> [--project <slug>] [--json]
-```
-
-List returns valid processed episodes newest first. It uses EverOS's exact
-1-based page semantics, defaults to 20 episodes per page, and exposes each
-episode's opaque entry id in JSON. The Agent CLI accepts `default` or one
-catalogued named project; `--project all` is reserved for the Settings UI.
-Listing is an explicit inspection command and is not added to the injected
-Personal Memory prompt.
-
-Search defaults to `--mode hybrid` with `--limit 8`. Use `keyword` for exact
-terms, `vector` for semantic matches, and reserve `agentic` for complex,
-multi-hop recall. Agentic searches are bounded to 30 seconds and require the
-configured LLM, embedding, and rerank capabilities. They fail closed when any
-required capability is unavailable, and `--project all --mode agentic` is not
-supported.
-
-EverOS returns an empty `atomic_facts` list for agentic episode results. When
-EverOS receives unlimited `top_k`, agent case and skill results are capped at
-10; the Avibe CLI always sends its explicit bounded `--limit` value.
 
 ### `vibe doctor`
 
@@ -716,5 +660,3 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 - [Slack Setup Guide](SLACK_SETUP.md)
 - [Telegram Setup Guide](TELEGRAM_SETUP.md)
 - [Codex Setup Guide](CODEX_SETUP.md)
-
-The Memory profile switch can disable profile reads and automatic profile processing without deleting existing memory or changing ordinary search.

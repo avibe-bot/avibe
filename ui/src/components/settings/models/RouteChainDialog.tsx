@@ -493,7 +493,7 @@ export const RouteChainDialog: React.FC<{
         ? "impact"
         : "refreshing",
     );
-    focusAfterRender(doneButtonRef);
+    onClose();
   };
 
   const submit = async (confirmation?: GuardState) => {

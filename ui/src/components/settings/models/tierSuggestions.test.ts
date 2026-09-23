@@ -43,9 +43,9 @@ describe('unified reasoning-effort vocabulary', () => {
     // The UI-side pin of the frozen vocabulary. The cross-file mirror in
     // `reasoningEffortVocabulary.mirror.test.ts` holds this list equal to the
     // backend export when that name exists on the branch, and to this same
-    // frozen 7-list while it does not.
+    // frozen vocabulary while it does not.
     expect([...REASONING_EFFORTS]).toEqual([
-      'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
+      'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
     ]);
   });
 
@@ -60,6 +60,7 @@ describe('unified reasoning-effort vocabulary', () => {
       // Family defaults are rung-1 over-claim protection, not the catalog
       // superset: an unknown relay must not be handed `ultra`.
       expect(tiers, protocol).not.toContain('ultra');
+      expect(tiers, protocol).not.toContain('none');
     }
   });
 

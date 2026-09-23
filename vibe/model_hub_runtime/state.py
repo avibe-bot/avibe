@@ -919,8 +919,12 @@ class EngineStateStore:
                 if path.parent in present_directories:
                     self._remove_private_file_if_present(path)
 
-    def clear_runtime_configs(self) -> None:
-        """Remove persisted engine configs after any credential is revoked."""
+    def clear_runtime_configs(self, *, keep: Path | None = None) -> None:
+        """Remove persisted engine configs after any credential is revoked.
+
+        ``keep`` names the live instance directory whose config was just
+        re-rendered without the revoked credential.
+        """
         with self._lock:
             self._ensure_private_dir(self.root)
             instances_dir = self.root / "instances"
@@ -931,6 +935,8 @@ class EngineStateStore:
                 mode = instance_dir.lstat().st_mode
                 if not stat.S_ISDIR(mode):
                     raise EngineStateError("engine instance directory is unsafe")
+                if keep is not None and instance_dir == keep:
+                    continue
                 config_path = instance_dir / "config.yaml"
                 try:
                     config_mode = config_path.lstat().st_mode

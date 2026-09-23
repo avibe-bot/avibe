@@ -252,6 +252,17 @@ def test_readiness_asks_for_a_recorded_failure_and_not_for_a_live_thread(startup
     assert startup.events == ["published ready", "serving"]
 
 
+def test_module_initialization_runs_synchronously_on_the_bound_controller(monkeypatch):
+    controller = Controller.__new__(Controller)
+    assert not hasattr(controller._init_modules, "__wrapped__")
+    controller.config = SimpleNamespace()
+    create = Mock(side_effect=RuntimeError("reached real module initialization"))
+    monkeypatch.setattr("core.controller.IMFactory.create_clients", create)
+    with pytest.raises(RuntimeError, match="reached real module initialization"):
+        controller._init_modules()
+    create.assert_called_once_with(controller.config)
+
+
 def test_an_im_runtime_that_fails_before_the_loop_starts_still_stops_it(startup):
     """The stop has to survive being sent to a loop that has not started yet.
 
@@ -272,7 +283,8 @@ def test_an_im_runtime_that_fails_before_the_loop_starts_still_stops_it(startup)
     )
 
     # Records the failure and asks the not-yet-running loop to stop.
-    Controller._run_im_runtime(startup.controller)
+    del startup.controller._run_im_runtime
+    startup.controller._run_im_runtime()
     assert isinstance(startup.controller._im_run_exception, RuntimeError)
 
     # A daemon thread, because the assertion for a lost stop is a `run_forever()`

@@ -17,12 +17,96 @@ processes would only add scheduling noise the lock already excludes).
 from __future__ import annotations
 
 import threading
+import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from config import paths
 from config.v2_config import V2Config, update_config_fields
+
+
+def test_transaction_and_load_persistence_share_lock_order(isolated_config_home, monkeypatch):
+    from config import v2_config as module
+
+    migration_entered = threading.Event()
+    transaction_attempted = threading.Event()
+    errors = []
+    owner = threading.local()
+    lock = threading.RLock()
+
+    class OrderedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "config-transaction":
+                transaction_attempted.set()
+            lock.acquire()
+            owner.depth = getattr(owner, "depth", 0) + 1
+
+        def __exit__(self, *_args):
+            owner.depth -= 1
+            lock.release()
+
+    original_file_lock = module._config_file_lock
+
+    @contextmanager
+    def checked_file_lock(path):
+        if threading.current_thread().name == "config-transaction":
+            transaction_attempted.set()
+        # Fail deterministically before an inverted entrant can deadlock the
+        # test process. The real re-entrant OS file lock still guards writes.
+        assert getattr(owner, "depth", 0) > 0, "file lock acquired before CONFIG_LOCK"
+        with original_file_lock(path):
+            yield
+
+    monkeypatch.setattr(module, "CONFIG_LOCK", OrderedLock())
+    monkeypatch.setattr(module, "_config_file_lock", checked_file_lock)
+
+    def migration():
+        try:
+            with module.CONFIG_LOCK:
+                migration_entered.set()
+                assert transaction_attempted.wait(3)
+                V2Config.load(isolated_config_home, persist_migrations=True)
+                raw = isolated_config_home.read_text()
+                payload = json.loads(raw)
+                payload["language"] = "zh"
+                _backup, warning = module._persist_migrated_config_payload(isolated_config_home, raw, payload)
+                assert warning is None
+        except BaseException as exc:
+            errors.append(exc)
+
+    def transaction():
+        try:
+            assert migration_entered.wait(3)
+            with module.config_write_transaction(isolated_config_home) as config:
+                assert config.language == "zh"
+                config.runtime.log_level = "DEBUG"
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=migration), threading.Thread(target=transaction, name="config-transaction")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+    assert not errors
+    result = V2Config.load(isolated_config_home)
+    assert (result.language, result.runtime.log_level) == ("zh", "DEBUG")
+
+
+def test_shared_config_lock_allows_nested_load_save_transaction(isolated_config_home):
+    from config import v2_config as module
+
+    with module.CONFIG_LOCK, module.config_file_lock(isolated_config_home):
+        with module.config_write_transaction(isolated_config_home) as config:
+            config.language = "zh"
+            config.save(isolated_config_home)
+            with module.config_write_transaction(isolated_config_home) as nested:
+                assert nested.language == "zh"
+            assert V2Config.load(isolated_config_home, persist_migrations=True).language == "zh"
+    assert V2Config.load(isolated_config_home).language == "zh"
 
 
 @pytest.fixture()

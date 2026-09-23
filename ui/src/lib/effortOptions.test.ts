@@ -39,6 +39,32 @@ describe('effort options', () => {
     expect(isEffortSupported('codex', 'future-model', 'ultra', reasoningOptions)).toBe(true);
   });
 
+  it.each(['claude', 'codex', 'opencode'])('offers Off only from the selected %s model declaration', (backend) => {
+    const reasoningOptions = {
+      'with-off': [
+        { value: '__default__', label: 'Default' },
+        { value: 'high', label: 'High' },
+        { value: 'none', label: 'Off' },
+        { value: 'custom-effort', label: 'Custom' },
+      ],
+      'without-off': [{ value: 'high', label: 'High' }],
+      'empty': [],
+      'default-only': [{ value: '__default__', label: 'Default' }],
+    };
+
+    // Preserve declared order and custom values, rather than changing the first
+    // option (which existing callers may use as their suggested default).
+    expect(resolveEffortOptions(backend, 'with-off', reasoningOptions)).toEqual(['high', 'none', 'custom-effort']);
+    expect(isEffortSupported(backend, 'with-off', 'none', reasoningOptions)).toBe(true);
+    for (const model of ['without-off', 'empty', 'default-only', 'unknown']) {
+      expect(isEffortSupported(backend, model, 'none', reasoningOptions)).toBe(false);
+      expect(isEffortSupported(backend, model, null, reasoningOptions)).toBe(true);
+    }
+    expect(resolveEffortOptions(backend, 'without-off', reasoningOptions)).toEqual(['high']);
+    expect(resolveEffortOptions(backend, 'empty', reasoningOptions)).toEqual([]);
+    expect(resolveEffortOptions(backend, 'unknown', undefined)).not.toContain('none');
+  });
+
   it('treats an explicitly empty entry as "no efforts", not as a missing answer', () => {
     const reasoningOptions = {
       '': [{ value: 'low', label: 'Low' }],
@@ -101,7 +127,8 @@ describe('effort options', () => {
   });
 
   it('orders selected efforts by the unified vocabulary, unknowns last', () => {
-    expect(sortEffortsByVocabulary(['ultra', 'low', 'custom-b', 'max', 'custom-a'])).toEqual([
+    expect(sortEffortsByVocabulary(['ultra', 'low', 'custom-b', 'none', 'max', 'custom-a'])).toEqual([
+      'none',
       'low',
       'max',
       'ultra',
@@ -113,6 +140,9 @@ describe('effort options', () => {
   it('keeps the OpenCode family fallback inside the vocabulary without ultra', () => {
     // Same set the OpenCode provider form offers and the save path accepts
     // (`vibe/opencode_config.py:_VALID_REASONING_VARIANTS` minus `none`).
-    expect(EFFORT_BY_BACKEND.opencode).toEqual([...REASONING_EFFORTS].filter((effort) => effort !== 'ultra'));
+    expect(EFFORT_BY_BACKEND.opencode).toEqual(
+      [...REASONING_EFFORTS].filter((effort) => effort !== 'ultra' && effort !== 'none'),
+    );
+    for (const efforts of Object.values(EFFORT_BY_BACKEND)) expect(efforts).not.toContain('none');
   });
 });

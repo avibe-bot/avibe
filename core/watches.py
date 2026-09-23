@@ -27,6 +27,7 @@ from core.process_isolation import (
     process_group_identity_status,
     process_identity_from_payload,
     process_identity_matches,
+    process_identity_recycled,
     serialize_process_identity,
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
@@ -671,11 +672,7 @@ class ManagedWatchStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-        metadata = metadata_with_delegated_memory_owner(
-            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
-        )
+        metadata = metadata_with_resource_user_context(metadata, user_context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
             name=name,
@@ -830,11 +827,6 @@ class ManagedWatchStore:
             if waiter_lifecycle_changed:
                 watch.metadata = dict(watch.metadata)
                 watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
-            from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-            watch.metadata = metadata_with_delegated_memory_owner(
-                watch.metadata, session_id=session_id
-            )
             watch.updated_at = _utc_now_iso()
             if not self._write_watch(
                 watch,
@@ -1434,7 +1426,7 @@ class ManagedWatchService:
                 )
                 block(watch_id, entry)
                 continue
-            if live_identity.create_time != expected_identity.create_time:
+            if process_identity_recycled(expected_identity, live_identity):
                 logger.info(
                     "Recorded stale watch worker pid=%s watch_id=%s no longer exists; "
                     "the pid belongs to a newer process",
@@ -1529,10 +1521,7 @@ class ManagedWatchService:
                             live_identity.create_time,
                         )
                     else:
-                        worker_is_gone = (
-                            live_identity.create_time
-                            != expected_identity.create_time
-                        )
+                        worker_is_gone = process_identity_recycled(expected_identity, live_identity)
             except Exception:
                 logger.debug(
                     "Failed to recheck blocked stale watch pid=%s watch_id=%s",

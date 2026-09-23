@@ -13,6 +13,7 @@ import { Workbench } from '../../src/components/Workbench';
 import { settingsOverlayNavigationState } from '../../src/lib/settingsOverlay';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
 import i18n from '../../src/i18n';
+import type { FsEntry } from '../../src/lib/filesApi';
 import '../../src/index.css';
 
 const params = new URLSearchParams(location.search);
@@ -30,6 +31,12 @@ type Write = { path: string; body: Record<string, unknown> };
 const writes: Write[] = [];
 const sessions: Array<Record<string, unknown>> = [];
 const uploads = new Map<string, { sessionId: string; token: string }>();
+const createdFolders = new Map<string, FsEntry[]>();
+const directoryEntries = (path: string): FsEntry[] => [
+  { name: '另一个项目', kind: 'dir', size: null, mtime: null, ext: '' },
+  { name: '.hidden', kind: 'dir', size: null, mtime: null, ext: '' },
+  ...(createdFolders.get(path) ?? []),
+];
 const control = {
   writes,
   unexpectedRequests: [] as string[],
@@ -52,6 +59,7 @@ const control = {
   heldBrowsePaths: [] as string[],
   pendingBrowses: [] as Array<{ path: string; release: () => void }>,
   browseCompletions: [] as string[],
+  listRequests: [] as Array<{ path: string; showHidden: boolean }>,
 };
 declare global { interface Window { homeMedia: typeof control } }
 window.homeMedia = control;
@@ -80,13 +88,46 @@ window.fetch = async (input, init) => {
   }
   if (path === '/api/projects' || path === '/api/workbench/projects-bootstrap') return reply({ projects, sessions: {} });
   if (path === '/api/browse') {
-    if (control.heldBrowsePaths.includes(body.path)) {
-      await new Promise<void>((resolve) => { control.pendingBrowses.push({ path: body.path, release: resolve }); });
-    }
-    control.browseCompletions.push(body.path);
+    // Compatibility resolution is separate from the Files listing. Held
+    // navigation requests below intentionally block the listing phase only.
     return reply({ ok: true, path: body.path === '~' ? '/fixture' : body.path || '/fixture', parent: '/fixture', dirs: [{ name: '另一个项目', path: '/fixture/另一个项目' }] });
   }
   if (path === '/api/browse/favorites') return reply({ ok: true, favorites: [{ key: 'home', path: '/fixture' }] });
+  if (path === '/api/files/list') {
+    const directory = url.searchParams.get('path')!;
+    const showHidden = url.searchParams.get('show_hidden') === '1';
+    control.listRequests.push({ path: directory, showHidden });
+    if (control.heldBrowsePaths.includes(directory)) {
+      await new Promise<void>((resolve) => { control.pendingBrowses.push({ path: directory, release: resolve }); });
+    }
+    control.browseCompletions.push(directory);
+    return reply({
+      ok: true, path: directory, parent: directory.slice(0, directory.lastIndexOf('/')) || '/',
+      entries: directoryEntries(directory).filter((entry) => showHidden || !entry.name.startsWith('.')),
+      truncated: false, limit: 2000,
+    });
+  }
+  if (path === '/api/files/search_names') {
+    const root = url.searchParams.get('root')!;
+    const query = url.searchParams.get('query')!;
+    const showHidden = url.searchParams.get('show_hidden') === '1';
+    return reply({
+      ok: true, root, query, truncated: false, limit: 1000,
+      results: directoryEntries(root)
+        .filter((entry) => (showHidden || !entry.name.startsWith('.')) && entry.name.includes(query))
+        .map((entry) => ({ ...entry, path: `${root}/${entry.name}`, rel: entry.name })),
+    });
+  }
+  if (path === '/api/files/mkdir' && init?.method === 'POST') {
+    const target = String(body.path);
+    const parent = target.slice(0, target.lastIndexOf('/'));
+    const name = target.slice(target.lastIndexOf('/') + 1);
+    if (directoryEntries(parent).some((entry) => entry.name === name)) {
+      return reply({ ok: false, error: { code: 'exists', message: 'Entry already exists' } }, 409);
+    }
+    createdFolders.set(parent, [...(createdFolders.get(parent) ?? []), { name, kind: 'dir', size: null, mtime: null, ext: '' }]);
+    return reply({ ok: true });
+  }
   if (path === '/api/sessions' && init?.method === 'POST') {
     if (control.holdCreate) await new Promise<void>((resolve) => { control.releaseCreate = resolve; });
     const session = { ...body, id: `ses-${sessions.length + 1}`, status: 'active', agent_status: 'idle', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', metadata: {} };

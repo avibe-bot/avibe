@@ -157,7 +157,7 @@ def test_session_archive_delegates_terminal_mutation_to_controller(
     async def _noop(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(internal_client, "memory_archive_session", _archive_via_controller)
+    monkeypatch.setattr(internal_client, "archive_session", _archive_via_controller)
     monkeypatch.setattr(sessions_service, "archive_session", _archive)
     monkeypatch.setattr(ui_server, "_archive_cancel_turn", _noop)
 
@@ -199,7 +199,7 @@ def test_session_archive_fails_closed_when_controller_is_unavailable(
     async def _unavailable(_session_id: str):
         raise internal_client.InternalServerUnavailable("controller unavailable")
 
-    monkeypatch.setattr(internal_client, "memory_archive_session", _unavailable)
+    monkeypatch.setattr(internal_client, "archive_session", _unavailable)
     client = app.test_client()
     response = client.delete(
         f"/api/sessions/{session_id}",
@@ -210,6 +210,84 @@ def test_session_archive_fails_closed_when_controller_is_unavailable(
     assert response.json()["code"] == "session_archive_unavailable"
     with engine.connect() as conn:
         assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_archive_http_rpc_waits_for_accepted_durable_outcome(monkeypatch, tmp_path, failure):
+    import httpx
+    from types import MethodType
+    from core import internal_server
+    from core.controller import Controller
+    from storage.db import create_sqlite_engine
+    from storage import workbench_sessions_service as sessions
+    from tests.test_internal_server import _build_controller_double
+    from vibe import internal_client
+
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session_id = sessions.create_session(conn, scope_id=None, agent_backend="claude", title="归档")['id']
+    accepted = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    outcomes = []
+    controller = _build_controller_double()
+    controller.archive_session = MethodType(Controller.archive_session, controller)
+    internal_app = internal_server.create_app(controller)
+
+    async def delayed_lifecycle(actual_id, operation, **kwargs):
+        assert actual_id == session_id
+        accepted.set()
+        assert await asyncio.to_thread(release.wait, 5)
+        if failure:
+            raise LookupError(session_id)
+        return await operation()
+
+    monkeypatch.setattr(controller.session_turns, "run_session_lifecycle", delayed_lifecycle)
+
+    class ArchiveTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            assert request.url.path == "/internal/sessions/archive"
+            assert request.extensions["timeout"] == {
+                "connect": 5.0, "read": None, "write": None, "pool": None,
+            }
+            return await httpx.ASGITransport(app=internal_app).handle_async_request(request)
+
+    async def verified(_path):
+        return tmp_path / "test-only.sock"
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(internal_client, "_verified_socket_path_async", verified)
+    monkeypatch.setattr(internal_client.httpx, "AsyncHTTPTransport", lambda **kwargs: ArchiveTransport())
+    monkeypatch.setattr(ui_server, "_archive_cancel_turn", noop)
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def request_archive():
+        try:
+            outcomes.append(client.delete(f"/api/sessions/{session_id}", headers=headers))
+        except BaseException as exc:
+            outcomes.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=request_archive)
+    worker.start()
+    try:
+        assert accepted.wait(5), outcomes
+        assert not finished.is_set()
+        with engine.connect() as conn:
+            assert sessions.get_session(conn, session_id)["status"] == "active"
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert len(outcomes) == 1 and not isinstance(outcomes[0], BaseException), outcomes
+    assert outcomes[0].status_code == (404 if failure else 200)
+    with engine.connect() as conn:
+        assert sessions.get_session(conn, session_id)["status"] == ("active" if failure else "archived")
 
 
 @pytest.mark.parametrize("session_kind", ["missing", "reserved", "archived"])
@@ -245,7 +323,7 @@ def test_session_archive_preflight_skips_controller_lifecycle_for_ineligible_row
             archive_session(conn, session_id)
 
     archive_session = AsyncMock()
-    monkeypatch.setattr(internal_client, "memory_archive_session", archive_session)
+    monkeypatch.setattr(internal_client, "archive_session", archive_session)
     client = app.test_client()
 
     response = client.delete(
@@ -3333,6 +3411,7 @@ def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
     assert status_body["public_key"]
     assert status_body["subscription_count"] == 1
     assert status_body["current_subscription_enabled"] is True
+    assert status_body["current_subscription_repairable"] is False
 
     removed = client.delete(
         "/api/web-push/subscriptions",
@@ -3345,6 +3424,60 @@ def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
     status_after = client.post("/api/web-push/status", json={"endpoint": subscription["endpoint"]}, headers=headers)
     assert status_after.get_json()["subscription_count"] == 0
     assert status_after.get_json()["current_subscription_enabled"] is False
+    assert status_after.get_json()["current_subscription_repairable"] is False
+
+
+def test_web_push_disable_retires_a_racing_rotation_for_same_device(monkeypatch, tmp_path):
+    from storage import web_push_service
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    client = app.test_client()
+    headers = csrf_headers(client)
+    old = {
+        "endpoint": "https://push.example.test/sub/old",
+        "keys": {"p256dh": "old-key", "auth": "old-auth"},
+    }
+    rotated = {
+        "endpoint": "https://push.example.test/sub/rotated",
+        "keys": {"p256dh": "new-key", "auth": "new-auth"},
+    }
+    other = {
+        "endpoint": "https://push.example.test/sub/other",
+        "keys": {"p256dh": "other-key", "auth": "other-auth"},
+    }
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": old, "device_id": "device-1"},
+        headers=headers,
+    ).status_code == 200
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": rotated, "background_rotation": True, "previous_endpoints": [old["endpoint"]]},
+        headers=headers,
+    ).get_json()["accepted"] is True
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": other, "device_id": "device-2"},
+        headers=headers,
+    ).status_code == 200
+
+    disabled = client.delete(
+        "/api/web-push/subscriptions",
+        json={"endpoint": old["endpoint"], "device_id": "device-1"},
+        headers=headers,
+    )
+    assert disabled.status_code == 200
+    assert disabled.get_json()["disabled"] is True
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=rotated["endpoint"], user_key="local",
+        ) is None
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=other["endpoint"], user_key="local",
+        ) is not None
 
 
 def test_web_push_status_sync_disables_previous_endpoint_for_same_device(monkeypatch, tmp_path):
@@ -3468,9 +3601,13 @@ def test_web_push_status_sync_disables_client_known_previous_endpoint(monkeypatc
         ) is not None
 
 
-def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider_invalidated", [True, False])
+def test_web_push_status_sync_does_not_reenable_disabled_endpoint(
+    monkeypatch, tmp_path, provider_invalidated
+):
     from storage import web_push_service
     from storage.db import create_sqlite_engine
+    from storage.models import web_push_subscriptions
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
@@ -3491,6 +3628,12 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         web_push_service.mark_send_failure(conn, endpoint=subscription["endpoint"], disable=True)
+        if not provider_invalidated:
+            conn.execute(
+                web_push_subscriptions.update()
+                .where(web_push_subscriptions.c.endpoint == subscription["endpoint"])
+                .values(provider_invalidated_at=None)
+            )
 
     status = client.post(
         "/api/web-push/status",
@@ -3505,12 +3648,64 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     assert status.status_code == 200
     assert status.get_json()["subscription_count"] == 0
     assert status.get_json()["current_subscription_enabled"] is False
+    assert status.get_json()["current_subscription_repairable"] is provider_invalidated
     with engine.connect() as conn:
         assert web_push_service.get_enabled_by_endpoint(
             conn,
             endpoint=subscription["endpoint"],
             user_key="local",
         ) is None
+
+
+def test_web_push_background_rotation_preserves_logout_opt_out(monkeypatch, tmp_path):
+    from storage import web_push_service
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    previous = {
+        "endpoint": "https://push.example.test/sub/previous",
+        "keys": {"p256dh": "previous-key", "auth": "previous-auth"},
+    }
+    current = {
+        "endpoint": "https://push.example.test/sub/current",
+        "keys": {"p256dh": "current-key", "auth": "current-auth"},
+    }
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": previous, "device_id": "device-1"},
+        headers=headers,
+    ).status_code == 200
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        assert web_push_service.disable_subscription(
+            conn,
+            endpoint=previous["endpoint"],
+            user_key="local",
+        ) is True
+
+    rotated = client.post(
+        "/api/web-push/subscriptions",
+        json={
+            "subscription": current,
+            "previous_endpoints": [previous["endpoint"]],
+            "background_rotation": True,
+        },
+        headers=headers,
+    )
+
+    assert rotated.status_code == 200
+    assert rotated.get_json() == {
+        "accepted": False,
+        "ok": True,
+        "subscription": None,
+    }
+    with engine.connect() as conn:
+        assert web_push_service.count_enabled(conn, user_key="local") == 0
 
 
 def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):

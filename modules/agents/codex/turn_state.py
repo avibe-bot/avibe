@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
+
+
+@dataclass
+class CodexHeldMessage:
+    """One intermediate message a turn narrated but has not delivered yet.
+
+    Held because a ref it cites has no source recorded for it so far, or because
+    a message ahead of it is. ``thread_id`` travels with it because a ref_id only
+    names a source inside its own Codex thread.
+    """
+
+    role: str
+    text: str
+    parse_mode: Optional[str]
+    thread_id: str
 
 
 @dataclass
@@ -14,6 +29,11 @@ class CodexTurnState:
     turn_id: str
     request: AgentRequest
     pending_assistant: Optional[Tuple[str, Optional[str]]] = None
+    # Narration this turn has produced but not yet delivered, oldest first,
+    # because the source that will attribute part of it has not arrived. Held as
+    # one queue per turn so the order the turn narrated in is the order the user
+    # reads, and so a boundary that ends the turn can settle all of it at once.
+    pending_narration: List[CodexHeldMessage] = field(default_factory=list)
     terminal_error: Optional[str] = None
     terminal_error_notified: bool = False
     visible_to_user: bool = True
@@ -153,6 +173,9 @@ class CodexTurnRegistry:
 
         state.visible_to_user = False
         state.pending_assistant = None
+        # A hidden turn says nothing further, so everything it was still holding
+        # back goes with it rather than surfacing under its successor.
+        state.pending_narration.clear()
         state.terminal_error = None
         state.terminal_error_notified = False
         if self._active_turns.get(state.request.base_session_id) == turn_id:

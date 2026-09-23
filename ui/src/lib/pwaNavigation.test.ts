@@ -183,10 +183,6 @@ describe('internalPwaLinkTarget', () => {
       path: '/admin/settings/models?source=custom',
       navigation: 'spa',
     });
-    expect(internalPwaLinkTarget('/admin/settings/memory#profile', current)).toEqual({
-      path: '/admin/settings/memory#profile',
-      navigation: 'spa',
-    });
   });
 
   it('keeps every other same-origin destination in the current document', () => {

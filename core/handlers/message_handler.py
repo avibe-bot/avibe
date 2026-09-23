@@ -1,21 +1,17 @@
 """Message routing and Agent communication handlers"""
 
-import asyncio
 import logging
 import inspect
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
-    AUDIO_SIGNATURE_SAMPLE_BYTES,
     AudioTranscript,
     append_audio_transcripts_to_message,
-    detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import emit_backend_failure
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
-from core.memory_adapter import TurnAccepted, snapshot_memory_files
 from core.message_context import (
     resolve_context_thread_id,
 )
@@ -33,39 +29,6 @@ from .base import BaseHandler
 logger = logging.getLogger(__name__)
 
 SUBAGENT_REACTION_EMOJI = "🤖"
-
-
-def memory_turn_event(
-    context: MessageContext,
-    text: str,
-    session_id: str,
-    lifecycle_snapshot: object,
-    attachment_lease: object = None,
-    sender_name: str | None = None,
-) -> TurnAccepted:
-    """Close one live message context into immutable host-owned facts."""
-
-    payload = (
-        context.platform_specific
-        if isinstance(context.platform_specific, dict)
-        else {}
-    )
-    platform = context.platform or payload.get("platform")
-    user_id = payload.get("author_id") if platform == "avibe" else context.user_id
-    return TurnAccepted(
-        platform=platform,
-        user_id=user_id,
-        message_id=context.message_id,
-        session_id=session_id,
-        text=text,
-        files=snapshot_memory_files(context.files),
-        is_dm=payload.get("is_dm") is True,
-        is_ordinary_text=context.is_original_human_text,
-        is_ordinary_attachment=context.is_original_human_attachment,
-        lifecycle_snapshot=lifecycle_snapshot,
-        attachment_lease=attachment_lease,
-        sender_name=sender_name,
-    )
 
 
 def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Optional[str] = None) -> Optional[str]:
@@ -303,24 +266,6 @@ class MessageHandler(BaseHandler):
                     mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
-            capture_session_id = base_session_id
-            capture_lifecycle_snapshot: object | None = None
-            capture_sender_name = None
-            if is_human:
-                sender_name_for_context = getattr(self.controller, "memory_sender_name_for_context", None)
-                if callable(sender_name_for_context):
-                    capture_sender_name = await sender_name_for_context(context)
-                capture_lifecycle_snapshot = lifecycle_snapshot
-                if capture_lifecycle_snapshot is None:
-                    snapshot = getattr(
-                        getattr(self.controller, "session_turns", None),
-                        "snapshot_session_lifecycle",
-                        None,
-                    )
-                    capture_lifecycle_snapshot = (
-                        snapshot(capture_session_id) if callable(snapshot) else 0
-                    )
-            lifecycle_snapshot = None
             payload = dict(context.platform_specific or {})
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
@@ -328,21 +273,6 @@ class MessageHandler(BaseHandler):
                 context, source=source
             )
             context.platform_specific = payload
-
-            # Text-only turns keep the original early capture path. Attachment
-            # turns defer only until the shared materializer has produced a
-            # descriptor-backed lease.
-            if is_human and not context.files:
-                self.controller.memory_adapter.offer(
-                    memory_turn_event(
-                        context,
-                        control_message,
-                        capture_session_id,
-                        capture_lifecycle_snapshot,
-                        sender_name=capture_sender_name,
-                    )
-                )
-                capture_lifecycle_snapshot = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -723,16 +653,6 @@ class MessageHandler(BaseHandler):
                         working_path,
                     )
                 except Exception:
-                    if is_human:
-                        self.controller.memory_adapter.offer(
-                            memory_turn_event(
-                                context,
-                                control_message,
-                                capture_session_id,
-                                capture_lifecycle_snapshot,
-                                sender_name=capture_sender_name,
-                            )
-                        )
                     raise
                 attachment_lease = attachment_batch.lease
                 processed_files = list(attachment_batch.attachments) or None
@@ -749,19 +669,6 @@ class MessageHandler(BaseHandler):
                         "Processed %s file attachments for message",
                         len(processed_files),
                     )
-
-            if is_human and context.files:
-                self.controller.memory_adapter.offer(
-                    memory_turn_event(
-                        context,
-                        control_message,
-                        capture_session_id,
-                        capture_lifecycle_snapshot,
-                        attachment_lease,
-                        sender_name=capture_sender_name,
-                    )
-                )
-                capture_lifecycle_snapshot = None
 
             if durable_ingress_enabled and not durable_delivery_owned:
                 admitted = await self._admit_human_delivery(
