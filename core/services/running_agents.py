@@ -716,20 +716,41 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
         return {"ok": False, "error": "opencode_unavailable"}
     active_requests = getattr(agent, "_active_requests", {}) or {}
     task = active_requests.get(base_session_id)
-    # Best-effort remote abort (so the OpenCode server stops the run too), then
-    # cancel the local polling task.
     session_mgr = getattr(agent, "_session_manager", None)
-    try:
-        get_req = getattr(session_mgr, "get_request_session", None)
-        req_info = get_req(base_session_id) if callable(get_req) else None
-        if req_info:
-            server = await agent._get_server()
-            await server.abort_session(req_info[0], req_info[1])
-    except Exception:  # noqa: BLE001
-        logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
+    get_req = getattr(session_mgr, "get_request_session", None)
+    req_info = get_req(base_session_id) if callable(get_req) else None
     if task is not None and not task.done():
+        # Active End has already gone through the canonical stop path. Finish
+        # interrupting its native poll, but do not retire a shared server here.
+        try:
+            if req_info:
+                server = await agent._get_server()
+                await server.abort_session(req_info[0], req_info[1])
+        except Exception:  # noqa: BLE001
+            logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
         task.cancel()
-    return {"ok": True, "action": "ended", "backend": "opencode"}
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+
+    pop_req = getattr(session_mgr, "pop_request_session", None)
+    if callable(pop_req):
+        pop_req(base_session_id)
+    list_all = getattr(session_mgr, "list_all", None)
+    if not callable(list_all) or list_all():
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+    if any(not request.done() for request in active_requests.values()):
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+
+    # The serve process is shared across Sessions. Its existing strict idle
+    # retirement checks native requests, durable ownership, and process proof.
+    server = getattr(getattr(agent, "_client_manager", None), "_server_manager", None)
+    if server is None:
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+    try:
+        await server.retire_for_native_migration()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
+        return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
+    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": True}
 
 
 async def _settle_workbench_turn(
@@ -1228,7 +1249,8 @@ async def end_running_agent(
     - claude → interrupt the turn + disconnect the SDK client + reap the subprocess.
     - codex  → interrupt the turn + clear the session mappings (+ stop the shared
       app-server when this was its last session).
-    - opencode → abort the remote run + cancel the local polling task.
+    - opencode → abort an active run; retire the shared serve process when idle
+      and no other session owns it.
 
     For an ACTIVE turn, the stop goes through the canonical per-backend stop path
     (Workbench turns via ``SessionTurnManager.cancel``; IM / agent-run turns via

@@ -880,6 +880,41 @@ def test_end_opencode_cancels_active_task():
     assert task.cancelled
 
 
+@pytest.mark.parametrize("has_other_session", [False, True])
+def test_end_idle_opencode_retires_only_last_shared_server(has_other_session):
+    sessions = {
+        "b1": ("oc-1", "/work", "channel-1"),
+    }
+    if has_other_session:
+        sessions["b2"] = ("oc-2", "/work", "channel-2")
+    retired = _AsyncFlag()
+    server = types.SimpleNamespace(retire_for_native_migration=retired)
+    manager = types.SimpleNamespace(
+        get_request_session=lambda base: sessions.get(base),
+        pop_request_session=lambda base: sessions.pop(base, None),
+        list_all=lambda: dict(sessions),
+    )
+    agent = types.SimpleNamespace(
+        _active_requests={},
+        _session_manager=manager,
+        _client_manager=types.SimpleNamespace(_server_manager=server),
+    )
+
+    result = asyncio.run(
+        running_agents.end_running_agent(
+            _make_controller(opencode=agent),
+            backend="opencode",
+            base_session_id="b1",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["process_killed"] is not has_other_session
+    assert retired.called is not has_other_session
+    assert "b1" not in sessions
+    assert ("b2" in sessions) is has_other_session
+
+
 def test_end_opencode_settles_durable_owner_after_poll_is_gone(monkeypatch):
     """A durable Workbench owner with no live poll is still an active turn.
 

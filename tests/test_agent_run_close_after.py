@@ -161,6 +161,54 @@ def test_close_after_holds_runtime_gate_until_teardown_finishes() -> None:
     asyncio.run(exercise())
 
 
+def test_close_after_waits_for_backend_cleanup_after_terminal_delivery() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "opencode",
+                "close_after": True,
+                "agent_session_target": {
+                    "agent_backend": "opencode",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "turn-1",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "opencode"
+        backend_finished = asyncio.Event()
+        backend_task = asyncio.create_task(backend_finished.wait())
+        gate.task = backend_task
+        end_running_agent = AsyncMock(return_value={"ok": True})
+
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._release_runtime_turn(context)
+            await asyncio.sleep(0.01)
+            assert gate.lock.locked()
+            end_running_agent.assert_not_awaited()
+            backend_finished.set()
+            await backend_task
+            await asyncio.sleep(0.01)
+            end_running_agent.assert_awaited_once()
+            assert not gate.lock.locked()
+
+    asyncio.run(exercise())
+
+
 def test_close_after_does_not_close_when_successor_is_already_queued() -> None:
     async def exercise() -> None:
         controller = SimpleNamespace()

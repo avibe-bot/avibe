@@ -1016,7 +1016,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         )
         if failure.kind == "pids":
             return (
-                f" {i18n_t('error.agentPidsLimit', language, **pids_failure_labels(failure))}"
+                f" {i18n_t('error.agentPidsLimit', language, **pids_failure_labels(failure, language))}"
             )
         if failure.kind == "memory":
             return f" {i18n_t('error.agentMemoryLimit', language)}"

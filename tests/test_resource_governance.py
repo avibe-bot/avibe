@@ -7,12 +7,14 @@ from config import paths
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
 from core.resource_governance import (
     MIB,
+    AgentResourceFailure,
     AgentResourceGovernor,
     _is_known_avibe_runtime_member,
     config_from_controller,
     derive_agent_limits,
     is_controller_resource_governor,
     governor_from_controller,
+    pids_failure_labels,
     tenant_memory_limit_bytes,
 )
 
@@ -66,6 +68,44 @@ def test_governor_diagnoses_pid_limit_from_counter_delta(
     assert zero_failure is not None
     assert zero_failure.pids_current == 0
     assert "current=0" in zero_failure.message
+
+
+def test_pid_limit_fallback_labels_are_localized() -> None:
+    failure = AgentResourceFailure(kind="pids", message="pressure")
+
+    assert pids_failure_labels(failure, "zh") == {
+        "current": "未知",
+        "limit": "未知或不限",
+    }
+    assert pids_failure_labels(failure, "en") == {
+        "current": "unknown",
+        "limit": "unknown or unlimited",
+    }
+
+
+def test_unchanged_governance_config_keeps_pressure_baseline_across_reload(
+    tmp_path: Path,
+) -> None:
+    group = tmp_path / "avibe-agents"
+    group.mkdir()
+    for name, value in (
+        ("pids.current", "1"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 0\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+    governor = AgentResourceGovernor({"mode": "enabled"})
+    governor._group = group
+    baseline = governor.snapshot()
+    governor._event_baseline = baseline
+
+    governor.update_config({"mode": "enabled"})
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    assert governor.group_path == group
+    assert governor._event_baseline is baseline
+    assert governor.observe_resource_pressure().event_delta == 1
 
 
 def test_governor_diagnoses_memory_limit_from_counter_delta(

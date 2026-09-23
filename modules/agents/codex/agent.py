@@ -291,7 +291,7 @@ class CodexAgent(BaseAgent):
                 visible = i18n_t(
                     "error.agentPidsLimit",
                     language,
-                    **pids_failure_labels(failure),
+                    **pids_failure_labels(failure, language),
                 )
             elif failure.kind == "memory":
                 visible = i18n_t("error.agentMemoryLimit", language)
@@ -1436,7 +1436,7 @@ class CodexAgent(BaseAgent):
             if getattr(resource_failure, "kind", None) == "pids":
                 message = (
                     f"{message} "
-                    f"{i18n_t('error.agentPidsLimit', language, **pids_failure_labels(resource_failure))}"
+                    f"{i18n_t('error.agentPidsLimit', language, **pids_failure_labels(resource_failure, language))}"
                 )
             elif getattr(resource_failure, "kind", None) == "memory":
                 message = f"{message} {i18n_t('error.agentMemoryLimit', language)}"

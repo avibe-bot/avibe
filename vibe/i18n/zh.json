@@ -411,6 +411,8 @@
     "claudeProcessExitCode": "退出码 {code}",
     "claudeProcessTerminated": "Claude Code 进程已终止（{reason}）；会话已重置，请重试。",
     "agentPidsLimit": "共享 Agent cgroup 记录到进程/线程上限事件（{current}/{limit}）；并发 Agent 进程可能受到影响。",
+    "agentPidsCurrentUnavailable": "未知",
+    "agentPidsLimitUnavailable": "未知或不限",
     "agentMemoryLimit": "共享 Agent cgroup 记录到内存上限事件；并发 Agent 进程可能受到影响。",
     "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请在原工作目录恢复原会话，再手动重试待发送的输入；也可以在当前目录开始一个新会话。",

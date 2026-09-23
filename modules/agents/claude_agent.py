@@ -184,9 +184,13 @@ class ClaudeAgent(BaseAgent):
             resource_failure = getattr(client, "_vibe_resource_failure", None)
             if resource_failure is not None:
                 if getattr(resource_failure, "kind", None) == "pids":
+                    language = str(
+                        getattr(getattr(self.controller, "config", None), "language", "en")
+                        or "en"
+                    )
                     message = (
                         f"{message} "
-                        f"{self._translate_error('error.agentPidsLimit', **pids_failure_labels(resource_failure))}"
+                        f"{self._translate_error('error.agentPidsLimit', **pids_failure_labels(resource_failure, language))}"
                     )
                 elif getattr(resource_failure, "kind", None) == "memory":
                     message = f"{message} {self._translate_error('error.agentMemoryLimit')}"

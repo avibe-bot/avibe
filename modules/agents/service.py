@@ -984,7 +984,9 @@ class AgentService:
         finally:
             self.release_runtime_turn_key(runtime_key, runtime_token)
 
-    def reserve_close_after_teardown(self, context: Any) -> tuple[str, str] | bool | None:
+    def reserve_close_after_teardown(
+        self, context: Any
+    ) -> tuple[str, str, asyncio.Task | None] | bool | None:
         """Hold the completed turn's gate while its disposable runtime is closed.
 
         An already queued successor takes priority and retains the runtime.
@@ -1008,8 +1010,9 @@ class AgentService:
         except Exception:
             logger.exception("native terminal ownership reconciliation failed before close-after")
         reservation = f"close-after:{uuid.uuid4().hex}"
+        turn_task = gate.task
         self.release_runtime_turn_key(runtime_key, runtime_token, reserve_token=reservation)
-        return runtime_key, reservation
+        return runtime_key, reservation, turn_task
 
     def release_runtime_turn_key(
         self,

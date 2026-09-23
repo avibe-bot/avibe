@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from config import paths as config_paths
+from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
@@ -56,19 +57,22 @@ class AgentResourceFailure:
     event_delta: int | None = None
 
 
-def pids_failure_labels(failure: AgentResourceFailure) -> dict[str, str]:
+def pids_failure_labels(
+    failure: AgentResourceFailure,
+    language: str,
+) -> dict[str, str]:
     """Preserve zero and distinguish unavailable cgroup counts in user copy."""
 
     return {
         "current": (
             str(failure.pids_current)
             if failure.pids_current is not None
-            else "unknown"
+            else i18n_t("error.agentPidsCurrentUnavailable", language)
         ),
         "limit": (
             str(failure.pids_max)
             if failure.pids_max is not None
-            else "max"
+            else i18n_t("error.agentPidsLimitUnavailable", language)
         ),
     }
 
@@ -439,7 +443,7 @@ class AgentResourceGovernor:
         root: Path | None = None,
         base_cgroup: Path | None = None,
     ) -> None:
-        self.config = config or {}
+        self.config = dict(config or {})
         self.root = root
         self.base_cgroup = base_cgroup
         self._base: Path | None = None
@@ -462,7 +466,12 @@ class AgentResourceGovernor:
         return self._limits
 
     def update_config(self, config: dict[str, Any] | None) -> None:
-        self.config = config or {}
+        updated = dict(config or {})
+        if updated == self.config:
+            # Ordinary settings hot-reloads must not lose the group and event
+            # baseline still observing existing backend processes.
+            return
+        self.config = updated
         self._base = None
         self._group = None
         self._limits = None

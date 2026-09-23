@@ -1637,7 +1637,7 @@ class ConsolidatedMessageDispatcher:
         self,
         context: MessageContext,
         *,
-        lease: tuple[str, str] | None = None,
+        lease: tuple[str, str, asyncio.Task | None] | None = None,
     ) -> None:
         """Release a runtime explicitly marked disposable after its Run settles."""
 
@@ -1669,7 +1669,7 @@ class ConsolidatedMessageDispatcher:
                     None,
                 )
                 if callable(release_lease):
-                    release_lease(*lease)
+                    release_lease(lease[0], lease[1])
             logger.warning(
                 "close-after requested without a disposable runtime target: session_id=%s base_session_id=%s backend=%s",
                 session_id,
@@ -1685,15 +1685,17 @@ class ConsolidatedMessageDispatcher:
                     None,
                 )
                 if callable(release_lease):
-                    release_lease(*lease)
+                    release_lease(lease[0], lease[1])
             return
         self._close_after_session_ids.add(session_id)
 
         async def _close() -> None:
-            # Let the terminal result finish releasing the active turn before
-            # asking the canonical runtime teardown path to close the backend.
+            # A backend may finish its own post-result cleanup after the shared
+            # terminal boundary. Keep its gate reserved until that task exits.
             try:
                 await asyncio.sleep(0)
+                if lease is not None and lease[2] is not None:
+                    await asyncio.wait({lease[2]})
                 runtime_key = str(
                     payload.get("agent_runtime_turn_key") or ""
                 ).strip()
@@ -1738,7 +1740,7 @@ class ConsolidatedMessageDispatcher:
                         None,
                     )
                     if callable(release_lease):
-                        release_lease(*lease)
+                        release_lease(lease[0], lease[1])
                 self._close_after_session_ids.discard(session_id)
 
         task = asyncio.create_task(
