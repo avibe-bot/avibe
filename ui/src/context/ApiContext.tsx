@@ -798,7 +798,7 @@ export type ApiContextType = {
     draft: { text: string; updated_at: string | null },
   ) => Promise<void>;
   recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
-  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
+  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean; backgroundPush?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: {
     backend?: string;
@@ -4249,6 +4249,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.onlySession) search.set('session', params.onlySession);
       const qs = search.toString();
       const path = qs ? `/api/inbox?${qs}` : '/api/inbox';
+      if (params?.backgroundPush) {
+        // A Push-triggered page read is non-interactive just like the worker's
+        // own read. Bypass the shared cache and never adopt an error as an empty map.
+        return apiFetch(path, { headers: { 'X-Avibe-Background-Push': '1' } }).then(async (response) => {
+          if (!response.ok) throw new Error(`Background Inbox refresh failed (${response.status})`);
+          return response.json();
+        });
+      }
       const options = { handleError: params?.handleError };
       return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
     },

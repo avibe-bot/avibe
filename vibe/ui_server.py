@@ -3083,6 +3083,11 @@ def renew_remote_access_cookie(response: Response) -> Response:
     # Logout handler explicitly clears the session cookie; never re-issue it.
     if getattr(g, "remote_session_logout", False):
         return response
+    # A credentialed Push worker read is not an interactive visit. It may
+    # arrive regularly while the app is closed and must not keep a remote
+    # browser session alive merely by refreshing its icon badge.
+    if request.path == "/api/inbox" and request.headers.get("X-Avibe-Background-Push") == "1":
+        return response
     if _is_current_immutable_static_asset_request():
         return response
     renew = getattr(g, "remote_session_renew", None)
