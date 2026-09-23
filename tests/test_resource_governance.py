@@ -176,6 +176,36 @@ def test_governor_diagnoses_memory_limit_from_counter_delta(
     assert governor.observe_resource_pressure() is None
 
 
+def test_simultaneous_pid_and_memory_events_remain_separately_observable(
+    tmp_path: Path,
+) -> None:
+    group = tmp_path / "avibe-agents"
+    group.mkdir()
+    for name, value in (
+        ("pids.current", "100"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 1\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+    governor = AgentResourceGovernor({"mode": "enabled"})
+    governor._group = group
+    governor._event_baseline = governor.snapshot()
+
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+    (group / "memory.events").write_text(
+        "max 2\noom 1\noom_kill 1\n", encoding="utf-8"
+    )
+
+    pid_failure = governor.observe_resource_pressure()
+    memory_failure = governor.observe_resource_pressure()
+
+    assert pid_failure is not None and pid_failure.kind == "pids"
+    assert memory_failure is not None and memory_failure.kind == "memory"
+    assert "event=oom_kill" in memory_failure.message
+    assert governor.observe_resource_pressure() is None
+
+
 def test_derive_agent_limits_honors_explicit_bytes() -> None:
     limits = derive_agent_limits(
         8 * 1024 * MIB,

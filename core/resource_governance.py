@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -535,7 +535,8 @@ class AgentResourceGovernor:
 
         pids_max_delta = current.pids_events.get("max", 0) - baseline.pids_events.get("max", 0)
         if pids_max_delta > 0:
-            self._event_baseline = current
+            # Leave simultaneous memory events pending for the next observer.
+            self._event_baseline = replace(current, memory_events=baseline.memory_events)
             current_label = (
                 str(current.pids_current)
                 if current.pids_current is not None
@@ -561,7 +562,7 @@ class AgentResourceGovernor:
         for event_name in ("oom_kill", "oom", "max"):
             delta = current.memory_events.get(event_name, 0) - baseline.memory_events.get(event_name, 0)
             if delta > 0:
-                self._event_baseline = current
+                self._event_baseline = replace(current, pids_events=baseline.pids_events)
                 return AgentResourceFailure(
                     kind="memory",
                     message=(
