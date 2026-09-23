@@ -276,3 +276,41 @@ def test_opencode_shell_key_leaves_a_same_vendor_oauth_entry_native(home, tmp_pa
     assert asyncio.run(service.migration_apply([rows[0]["id"]]))["applied"] == 1
     assert adapter.provisioned
     assert json.loads(auth.read_text())["openrouter"] == oauth
+
+
+@pytest.mark.parametrize("field", ["http_headers", "env_http_headers"])
+def test_codex_retained_header_provider_keeps_its_configuration(home, tmp_path, field):
+    path = home / ".codex/config.toml"
+    header = '{ Authorization = "Bearer fixture-header" }' if field == "http_headers" else '{ Authorization = "RELAY_TOKEN" }'
+    _write(path, 'model_provider = "relay"\n'
+           '[model_providers.relay]\nbase_url = "https://relay.example/v1"\n'
+           f'{field} = {header}\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    [item] = _items(service, ())
+    assert item.proposed_action != "import"
+    other = replace(item, kind="oauth_native", proposed_action="import", native_provider_id="relay")
+    for edit in plan_native_cleanup([other], home=home):
+        edit.apply()
+    content = path.read_text()
+    assert 'model_provider = "relay"' in content
+    assert "relay.example" in content and "Authorization" in content
+
+
+def test_opencode_shell_key_keeps_the_endpoint_a_retained_oauth_entry_uses(home, tmp_path):
+    config = home / ".config/opencode/opencode.json"
+    auth = home / ".local/share/opencode/auth.json"
+    # The OAuth entry's endpoint; the shell key is the only importable row.
+    _write(config, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1"}}}}))
+    oauth = {"type": "oauth", "access": "fixture-access", "refresh": "fixture-refresh", "expires": 1}
+    _write(auth, json.dumps({"openrouter": oauth}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    items = _items(service, ())
+    importable = [item for item in items if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    assert json.loads(auth.read_text())["openrouter"] == oauth
+    options = json.loads(config.read_text())["provider"]["openrouter"]["options"]
+    assert options.get("baseURL") == "https://relay.example/api/v1"

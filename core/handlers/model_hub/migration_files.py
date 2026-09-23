@@ -325,7 +325,8 @@ def plan_native_cleanup(
             except (ValueError, UnicodeError):
                 raise TakeoverStateError("native configuration cannot be parsed") from None
             before = json.dumps(config, sort_keys=True, default=str)
-            removable = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
+            managed_ids = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
+            removable = set(managed_ids)
             removable.update(item.native_provider_id for item in items if item.backend == "codex" and item.native_provider_id)
             providers = config.get("model_providers")
             if isinstance(providers, dict):
@@ -333,9 +334,16 @@ def plan_native_cleanup(
                     provider = providers.get(provider_id)
                     if not isinstance(provider, dict):
                         continue
-                    if provider.get("experimental_bearer_token") and not selected_api_key(provider["experimental_bearer_token"]):
-                        # A retained provider keeps its selectors too, or
-                        # direct mode would stop using what was kept.
+                    uncarried_headers = provider_id not in managed_ids and any(
+                        provider.get(field) for field in ("http_headers", "env_http_headers")
+                    )
+                    if uncarried_headers or (
+                        provider.get("experimental_bearer_token")
+                        and not selected_api_key(provider["experimental_bearer_token"])
+                    ):
+                        # Authentication migration did not carry stays native as
+                        # a whole provider, selectors included, or direct mode
+                        # would stop using what was kept.
                         removable.discard(provider_id)
                         continue
                     # Retain user labels, capabilities, and timeout preferences.
@@ -368,6 +376,16 @@ def plan_native_cleanup(
         vendors = {item.vendor for item in items if item.backend == "opencode"}
         shell_values = dict(pair for item in items for pair in item.shell_values)
 
+        def auth_entry_retained(entry: object) -> bool:
+            # An entry the Hub could not carry (OAuth, or a key outside the
+            # selection) stays native, like every other unselected credential.
+            return isinstance(entry, dict) and not (
+                "type" in entry and entry["type"] == "api" and selected_api_key(entry.get("key"))
+            )
+
+        native_auth = read_native_config(opencode_auth_path(home)) or {}
+        retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor))}
+
         def clear_providers(payload: dict) -> None:
             providers = payload.get("provider")
             if providers is None:
@@ -395,7 +413,9 @@ def plan_native_cleanup(
                         if not reference:
                             continue
                     options.pop("apiKey", None)
-                    options.pop("baseURL", None)
+                    if vendor not in retained_auth:
+                        # A retained same-vendor credential keeps its endpoint.
+                        options.pop("baseURL", None)
                     if not options:
                         provider.pop("options", None)
 
@@ -404,12 +424,7 @@ def plan_native_cleanup(
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
-                entry = payload.get(vendor)
-                # An entry the Hub could not carry (OAuth, or a key outside the
-                # selection) stays native, like every other unselected credential.
-                if isinstance(entry, dict) and not (
-                    "type" in entry and entry["type"] == "api" and selected_api_key(entry.get("key"))
-                ):
+                if auth_entry_retained(payload.get(vendor)):
                     continue
                 payload.pop(vendor, None)
 
