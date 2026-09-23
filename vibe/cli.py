@@ -14011,10 +14011,10 @@ def cmd_start(*, open_browser: bool | None = None):
         #
         # Both undos find their process through its pid record rather than the
         # captured pid, and that is sound by construction, not by luck: the
-        # spawn primitives write the record before they hand a child back and
-        # kill the child if they cannot, and `start_service` captures a created
-        # service only after its reservation is written. So a created process
-        # this sees always has a record naming it.
+        # spawn primitives write the record and then capture the child, both
+        # inside the region that kills the child if either step fails. So every
+        # live process this sees as created has a record naming it, and no
+        # child that missed the capture is still alive.
         if ui_start.pid is not None and not ui_start.reused:
             # `stop_remote_access=False`, the same distinction the stale-UI
             # restart above makes, and for the same reason: `vibe start` never

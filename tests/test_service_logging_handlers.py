@@ -72,12 +72,15 @@ def test_start_service_disables_stdout_logging_for_background_process(monkeypatc
     # the full slow-start timeout and then raise.
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout=None: pid)
 
-    def fake_spawn_service_background_process(args, stdout_name, stderr_name, env=None):
+    def fake_spawn_service_background_process(args, stdout_name, stderr_name, env=None, *, hand_over, **kwargs):
         captured["args"] = args
         captured["stdout_name"] = stdout_name
         captured["stderr_name"] = stderr_name
         captured["env"] = env
-        return type("Process", (), {"pid": 12345, "poll": lambda self: None})()
+        process = type("Process", (), {"pid": 12345, "poll": lambda self: None})()
+        # The real primitive hands the child over before it returns.
+        hand_over(process)
+        return process
 
     monkeypatch.setattr(runtime, "spawn_service_background_process", fake_spawn_service_background_process)
 

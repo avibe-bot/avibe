@@ -1163,15 +1163,14 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         return {"ok": True, "service": "vibe-remote-internal", "version": 1}
 
     monkeypatch.setattr("vibe.internal_client.health_identity", health_identity)
-    monkeypatch.setattr(
-        cli.runtime,
-        "spawn_background",
-        lambda args, pid_path, *logs, **kwargs: (
-            spawned.append((args, logs, kwargs)),
-            pid_path.write_text("5678", encoding="utf-8"),
-            5678,
-        )[-1],
-    )
+    def spawn_ui(args, pid_path, *logs, **kwargs):
+        # The spawn primitive records and captures the child before returning it.
+        spawned.append((args, logs, kwargs))
+        pid_path.write_text("5678", encoding="utf-8")
+        kwargs["start_info"].capture(5678, reused=False)
+        return 5678
+
+    monkeypatch.setattr(cli.runtime, "spawn_background", spawn_ui)
 
     def wait_for_ui(host, port):
         response = app.test_client().get("/ready", base_url=f"http://{host}:{port}")

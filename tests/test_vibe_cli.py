@@ -965,6 +965,8 @@ def _no_live_runtime_processes(monkeypatch):
 #: Captured at import, before any test replaces it, for the tests that drive
 #: the real UI start underneath an otherwise stubbed `cmd_start`.
 _REAL_START_UI = runtime.start_ui
+_REAL_STOP_UI = runtime.stop_ui
+_REAL_START_SERVICE = runtime.start_service
 
 
 def _fake_start_result(pid, kwargs, *, reused=False):
@@ -991,13 +993,19 @@ def receipt_runtime(monkeypatch):
         captured.append(pid)
         return SimpleNamespace(create_time=lambda: process_times[pid])
 
-    def spawn_service(*args, **kwargs):
+    # Both stand in for the spawn primitives, so both honour their contract:
+    # the child is recorded and captured before it is returned.
+    def spawn_service(*args, hand_over, **kwargs):
         spawned.append("service")
-        return SimpleNamespace(pid=1234, poll=lambda: None)
+        process = SimpleNamespace(pid=1234, poll=lambda: None)
+        hand_over(process)
+        return process
 
-    def spawn_ui(args, pid_path, *logs, **kwargs):
+    def spawn_ui(args, pid_path, *logs, start_info=None, **kwargs):
         spawned.append("ui")
         pid_path.write_text("5678", encoding="utf-8")
+        if start_info is not None:
+            start_info.capture(5678, reused=False)
         return 5678
 
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
@@ -1697,26 +1705,7 @@ def test_cmd_start_leaves_no_ui_running_when_the_ui_pid_record_cannot_be_written
     """
 
     started = _ui_refuses_to_start(monkeypatch, reused=False)
-    fake_python = tmp_path / "avibe-ui-probe-python"
-    fake_python.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
-    fake_python.chmod(0o755)
-    monkeypatch.setattr(cli.runtime, "start_ui", _REAL_START_UI)
-    monkeypatch.setattr(
-        runtime,
-        "current_service_launcher",
-        lambda: runtime.ServiceLauncher(python=str(fake_python), main="unused"),
-    )
-    monkeypatch.setattr(runtime.paths, "get_runtime_ui_pid_path", lambda: tmp_path / "missing" / "vibe-ui.pid")
-    children = []
-    real_popen = runtime.subprocess.Popen
-
-    class SpyPopen(real_popen):
-        def __init__(self, args, *rest, **kwargs):
-            super().__init__(args, *rest, **kwargs)
-            if args and args[0] == str(fake_python):
-                children.append(self)
-
-    monkeypatch.setattr(runtime.subprocess, "Popen", SpyPopen)
+    children = _real_ui_children(monkeypatch, tmp_path, tmp_path / "missing" / "vibe-ui.pid")
 
     try:
         with pytest.raises(FileNotFoundError):
@@ -1728,10 +1717,179 @@ def test_cmd_start_leaves_no_ui_running_when_the_ui_pid_record_cannot_be_written
         # The service this start created is still undone.
         assert started.calls.count("stop_service") == 1, started.calls
     finally:
-        for child in children:
-            if child.poll() is None:
-                child.kill()
-                child.wait(timeout=5)
+        _kill_children(children)
+
+
+def _real_ui_children(monkeypatch, tmp_path, ui_pid_path):
+    """Let cmd_start's real `start_ui` spawn a real UI child that only sleeps.
+
+    Everything else stays as `_ui_refuses_to_start` wired it. The returned list
+    fills with every UI child spawned, so a test can check the process itself.
+    """
+
+    fake_python = tmp_path / "avibe-ui-probe-python"
+    fake_python.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(cli.runtime, "start_ui", _REAL_START_UI)
+    monkeypatch.setattr(
+        runtime,
+        "current_service_launcher",
+        lambda: runtime.ServiceLauncher(python=str(fake_python), main="unused"),
+    )
+    monkeypatch.setattr(runtime.paths, "get_runtime_ui_pid_path", lambda: ui_pid_path)
+    children = []
+    real_popen = runtime.subprocess.Popen
+
+    class SpyPopen(real_popen):
+        def __init__(self, args, *rest, **kwargs):
+            super().__init__(args, *rest, **kwargs)
+            if args and args[0] == str(fake_python):
+                children.append(self)
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", SpyPopen)
+    return children
+
+
+def _kill_children(children) -> None:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_cmd_start_leaves_no_ui_running_when_interrupted_between_the_ui_record_and_its_capture(
+    monkeypatch, capsys, tmp_path
+):
+    """The last gap in the UI handover, end to end, with a real UI child.
+
+    `start_ui` used to capture the child only after `spawn_background` had
+    returned it with its pid record written. A Ctrl-C in between left a live UI
+    that `start_info` did not name, so the rollback -- which undoes only what it
+    was told it created -- never stopped it. The capture now runs inside the
+    spawn's guarded region; here a signal lands after the record and before the
+    capture.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=False)
+    ui_pid_path = tmp_path / "vibe-ui.pid"
+    children = _real_ui_children(monkeypatch, tmp_path, ui_pid_path)
+    records_at_intrusion = []
+
+    def interrupted_capture(self, pid, *, reused):
+        records_at_intrusion.append(ui_pid_path.read_text(encoding="utf-8"))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runtime.ProcessStartInfo, "capture", interrupted_capture)
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cli.cmd_start()
+
+        assert len(children) == 1, children
+        # The signal landed where it was aimed: the record already named the child.
+        assert records_at_intrusion == [str(children[0].pid)]
+        assert children[0].returncode is not None, "the UI this start spawned was left running"
+        assert not runtime.pid_alive(children[0].pid)
+        assert not ui_pid_path.exists(), "the record of a discarded UI was left behind"
+        # The service this start created is still undone, and nothing claims success.
+        assert started.calls.count("stop_service") == 1, started.calls
+        assert "running" not in [entry[0] for entry in started.statuses], started.statuses
+        assert "@avibe-start-receipt:" not in capsys.readouterr().out
+    finally:
+        _kill_children(children)
+
+
+def test_cmd_start_leaves_no_service_running_when_interrupted_between_its_reservation_and_its_capture(
+    monkeypatch, capsys, tmp_path
+):
+    """The service side of the same boundary, through the real `start_service`.
+
+    The reservation is what `stop_service()` finds, and the capture is what tells
+    the rollback it created the service. A signal between the two used to leave
+    a reserved service no rollback was asked about.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=False)
+    script = tmp_path / "avibe-service-probe.py"
+    script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    monkeypatch.setattr(cli.runtime, "start_service", _REAL_START_SERVICE)
+    monkeypatch.setattr(
+        runtime,
+        "current_service_launcher",
+        lambda: runtime.ServiceLauncher(python=sys.executable, main=str(script)),
+    )
+    # The real service a developer has running must not be seen as the holder.
+    monkeypatch.setattr(runtime, "extra_service_process_pids", lambda **kwargs: [])
+    monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: [])
+    reservation = paths.get_runtime_pid_path()
+    children = []
+    real_popen = runtime.subprocess.Popen
+
+    class SpyPopen(real_popen):
+        def __init__(self, args, *rest, **kwargs):
+            super().__init__(args, *rest, **kwargs)
+            if str(script) in args:
+                children.append(self)
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", SpyPopen)
+    reservations_at_intrusion = []
+
+    def interrupted_capture(self, pid, *, reused):
+        reservations_at_intrusion.append(reservation.read_text(encoding="utf-8"))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runtime.ProcessStartInfo, "capture", interrupted_capture)
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cli.cmd_start()
+
+        assert len(children) == 1, children
+        assert reservations_at_intrusion == [str(children[0].pid)]
+        assert children[0].returncode is not None, "the service this start spawned was left running"
+        assert not runtime.pid_alive(children[0].pid)
+        assert not reservation.exists(), "the reservation of a discarded service was left behind"
+        # Nothing was captured, so nothing is left for the rollback, and the UI
+        # was never reached.
+        assert started.calls == [], started.calls
+        assert "@avibe-start-receipt:" not in capsys.readouterr().out
+    finally:
+        _kill_children(children)
+
+
+def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypatch, capsys, tmp_path):
+    """Once captured, the UI is the rollback's to stop, and the rollback finds it.
+
+    The other side of the handover boundary: a Ctrl-C after `start_ui` returned
+    is `cmd_start`'s to undo, through the pid record the spawn wrote. The real
+    `stop_ui` runs against the real child; it is only guarded so that a rollback
+    asking for remote access to stop fails here instead of reaching it.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=False, on_wait=KeyboardInterrupt())
+    ui_pid_path = tmp_path / "vibe-ui.pid"
+    children = _real_ui_children(monkeypatch, tmp_path, ui_pid_path)
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: True)
+
+    def stop_ui(**kwargs):
+        started.calls.append("stop_ui")
+        assert kwargs == {"stop_remote_access": False}, kwargs
+        return _REAL_STOP_UI(**kwargs)
+
+    monkeypatch.setattr(cli.runtime, "stop_ui", stop_ui)
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cli.cmd_start()
+
+        assert len(children) == 1, children
+        # Stopped by the rollback's managed SIGTERM, not by this test's cleanup.
+        assert children[0].wait(timeout=5) == -signal.SIGTERM
+        assert not ui_pid_path.exists()
+        assert started.calls.index("stop_ui") < started.calls.index("stop_service"), started.calls
+        assert "@avibe-start-receipt:" not in capsys.readouterr().out
+    finally:
+        _kill_children(children)
 
 
 def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypatch, capsys):

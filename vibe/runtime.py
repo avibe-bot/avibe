@@ -1171,19 +1171,28 @@ def _spawn_owned_process(
     env: dict[str, str] | None,
     *,
     memory_ui_secret: str | None,
-    record: Callable[[int], None] | None = None,
+    hand_over: Callable[[subprocess.Popen], None] | None = None,
+    withdraw: Callable[[int], None] | None = None,
 ) -> subprocess.Popen:
     """Start a process the caller owns, or leave no process at all.
 
-    A caller can only undo what it knows about, and it knows about a child only
-    once this returns. Every step between ``Popen`` and that return -- the
-    secret written to the child's stdin, the pid record that lets any other
-    process find it -- used to be able to raise with the child already running,
-    and then no caller could see it: `cmd_start`'s rollback looked for a UI it
-    had created and found none, and the orphan kept the listener every later
-    start then failed to bind. So a failure anywhere in that span kills and
-    reaps the child before it propagates, and every caller inherits the rule
-    instead of each rolling back a window it cannot observe.
+    A caller can only undo what it knows about. Every step between ``Popen``
+    and the moment the caller knows -- the secret written to the child's stdin,
+    the pid record that lets any other process find it, the caller's own note
+    that it created the child -- used to be able to raise with the child
+    already running, and then no caller could see it: `cmd_start`'s rollback
+    looked for a UI it had created and found none, and the orphan kept the
+    listener every later start then failed to bind. So a failure anywhere in
+    that span kills and reaps the child before it propagates, and every caller
+    inherits the rule instead of each rolling back a window it cannot observe.
+
+    ``hand_over`` is the caller's side of that span: it records the child and
+    captures it as created, and it runs inside the guarded region so that
+    nothing is handed back half-owned. Once it returns, the caller's own
+    rollback can find the child. If the child is discarded instead,
+    ``withdraw`` removes whatever part of that record already exists -- but
+    only once the child is known to be gone, so a child that could not be
+    reaped stays findable.
     """
 
     stdout_path = _log_path(stdout_name)
@@ -1191,6 +1200,11 @@ def _spawn_owned_process(
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
     stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
+    # The child holds its own copies of these once it starts; the parent's must
+    # still close, or a log sink never sees end-of-file.
+    parent_handles = [
+        handle for handle in (stdin, stdout_sink.stdin, stderr_sink.stdin) if handle is not subprocess.PIPE
+    ]
     process: subprocess.Popen | None = None
     try:
         process = subprocess.Popen(
@@ -1204,18 +1218,48 @@ def _spawn_owned_process(
             **isolated_subprocess_kwargs(),
         )
         _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
-        if record is not None:
-            record(process.pid)
+        # Closing can fail too, so it happens inside this region and before the
+        # handover: once the caller owns the child, nothing here can raise.
+        _close_parent_handles(parent_handles)
+        if hand_over is not None:
+            hand_over(process)
     except BaseException:
         if process is not None:
             discard_spawned_child(process)
+            if withdraw is not None and process.returncode is not None:
+                _withdraw_quietly(withdraw, process.pid)
+        _close_parent_handles(parent_handles, quietly=True)
         raise
-    finally:
-        if stdin is not subprocess.PIPE:
-            stdin.close()
-        stdout_sink.stdin.close()
-        stderr_sink.stdin.close()
     return process
+
+
+def _withdraw_quietly(withdraw: Callable[[int], None], pid: int) -> None:
+    """Remove a discarded child's record without replacing the failure being raised."""
+
+    try:
+        withdraw(pid)
+    except Exception:
+        logger.error("Failed to remove the record of discarded pid=%s", pid, exc_info=True)
+
+
+def _close_parent_handles(handles: list, *, quietly: bool = False) -> None:
+    """Close every handle, then raise the first failure unless ``quietly``.
+
+    Closing an already closed file is a no-op, so the failure path may call this
+    again after a close that raised part way through the list.
+    """
+
+    first_failure: Exception | None = None
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception as exc:
+            if quietly:
+                logger.debug("Failed to close a spawn handle after the spawn failed", exc_info=True)
+            elif first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure
 
 
 def spawn_background(
@@ -1226,8 +1270,19 @@ def spawn_background(
     env: dict[str, str] | None = None,
     *,
     memory_ui_secret: str | None = None,
+    start_info: ProcessStartInfo | None = None,
 ):
-    """Start a process recorded in ``pid_path``; the record exists iff the child does."""
+    """Start a process recorded in ``pid_path``; the record exists iff the child does.
+
+    With ``start_info`` the child is also captured as created before this
+    returns, inside the same guarded region: a caller that rolls back what
+    ``start_info`` names cannot miss a child this started.
+    """
+
+    def hand_over(process: subprocess.Popen) -> None:
+        pid_path.write_text(str(process.pid), encoding="utf-8")
+        if start_info is not None:
+            start_info.capture(process.pid, reused=False)
 
     return _spawn_owned_process(
         args,
@@ -1235,7 +1290,8 @@ def spawn_background(
         stderr_name,
         env,
         memory_ui_secret=memory_ui_secret,
-        record=lambda pid: pid_path.write_text(str(pid), encoding="utf-8"),
+        hand_over=hand_over,
+        withdraw=lambda pid: _forget_pid_record(pid_path, pid),
     ).pid
 
 
@@ -1246,8 +1302,18 @@ def spawn_service_background_process(
     env: dict[str, str] | None = None,
     *,
     memory_ui_secret: str | None = None,
+    hand_over: Callable[[subprocess.Popen], None] | None = None,
+    withdraw: Callable[[int], None] | None = None,
 ) -> subprocess.Popen:
-    return _spawn_owned_process(args, stdout_name, stderr_name, env, memory_ui_secret=memory_ui_secret)
+    return _spawn_owned_process(
+        args,
+        stdout_name,
+        stderr_name,
+        env,
+        memory_ui_secret=memory_ui_secret,
+        hand_over=hand_over,
+        withdraw=withdraw,
+    )
 
 
 def spawn_service_background(args, stdout_name: str, stderr_name: str, env: dict[str, str] | None = None) -> int:
@@ -1281,12 +1347,13 @@ def _reap_service_start_process(pid: int) -> None:
 
 def _clear_service_pid_reservation(pid: int) -> None:
     _reap_service_start_process(pid)
-    pid_path = paths.get_runtime_pid_path()
-    try:
-        recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return
-    if recorded_pid == pid:
+    _forget_pid_record(paths.get_runtime_pid_path(), pid)
+
+
+def _forget_pid_record(pid_path: Path, pid: int) -> None:
+    """Remove ``pid_path`` only while it still names ``pid``."""
+
+    if _read_pid_file(pid_path) == pid:
         pid_path.unlink(missing_ok=True)
 
 
@@ -2062,6 +2129,19 @@ def _resolve_service_pid(
             if memory_ui_secret is not None
             else {}
         )
+
+        # The reservation is how anything outside this frame finds a service that
+        # has not taken the lock yet -- `stop_service()` included, and so every
+        # rollback -- and `start_info` is how the caller knows it created one.
+        # Both are written inside the spawn primitive's guarded region, so a
+        # failure or a signal before the last of them kills the child instead of
+        # leaving one that nothing can stop. Only a findable child is recorded as
+        # created: whoever reads `start_info` may rely on the reservation too.
+        def hand_over(process: subprocess.Popen) -> None:
+            _SERVICE_START_PROCESSES[process.pid] = process
+            _record_service_pid_reservation(process.pid)
+            result(process.pid, reused=False)
+
         process = spawn_service_background_process(
             [*scope_prefix, launcher.python, launcher.main],
             "service_stdout.log",
@@ -2071,23 +2151,11 @@ def _resolve_service_pid(
                 "VIBE_DISABLE_STDOUT_LOGGING": "1",
                 SHUTDOWN_INTENT_ENV: "1",
             },
+            hand_over=hand_over,
+            withdraw=_clear_service_pid_reservation,
             **spawn_kwargs,
         )
         pid = process.pid
-        # The reservation is how anything outside this frame finds a service that
-        # has not taken the lock yet -- `stop_service()` included, and so every
-        # rollback. A child it could not be written for is one nothing else can
-        # ever stop, so it is killed here, the same rule the spawn primitive
-        # applies to its own steps. Only a child that is findable is recorded as
-        # created: whoever reads `start_info` may rely on the reservation too.
-        try:
-            _SERVICE_START_PROCESSES[pid] = process
-            _record_service_pid_reservation(pid)
-        except BaseException:
-            _SERVICE_START_PROCESSES.pop(pid, None)
-            discard_spawned_child(process)
-            raise
-        result(pid, reused=False)
         if scope_prefix:
             # Scoped launches resolve their pid via the authoritative lock holder
             # (poll-and-adopt), never by trusting the spawn pid alone.
@@ -2374,6 +2442,11 @@ def start_ui(
         if memory_ui_secret is not None
         else {}
     )
+    # `start_info` is captured inside the spawn, not after it returns: in between,
+    # a signal left a live UI with a pid record that `cmd_start`'s rollback,
+    # which undoes only what `start_info` names as created, never looked at.
+    if start_info is not None:
+        spawn_kwargs["start_info"] = start_info
     pid = spawn_background(
         [(launcher or current_service_launcher()).python, "-c", command],
         pid_path,
@@ -2381,8 +2454,6 @@ def start_ui(
         "ui_stderr.log",
         **spawn_kwargs,
     )
-    if start_info is not None:
-        start_info.capture(pid, reused=False)
     if wait_for_ready and not wait_for_ui_server(host, port):
         logger.warning(
             "Started UI pid=%s but required health checks did not pass for %s",
