@@ -575,6 +575,46 @@ fn every_navigation_stays_on_the_shell_or_the_proved_runtime_listener() {
 }
 
 #[test]
+fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
+    // Built only by the shell, never implicitly from config, so no instance of
+    // the window can exist without the handler.
+    assert_eq!(
+        config()["app"]["windows"][0]["create"],
+        Value::Bool(false),
+        "the main window must be built by ensure_main_window, not auto-created"
+    );
+    let source = shipping_source("src/lib.rs");
+    let builder = source
+        .split("fn ensure_main_window(")
+        .nth(1)
+        .expect("main window builder")
+        .split("\n}\n")
+        .next()
+        .expect("builder body");
+    assert!(
+        builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
+        "the main window must register the new-window handler"
+    );
+    let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
+    assert!(setup.contains("ensure_main_window(app.handle())"));
+    let handler = source
+        .split("fn handle_new_window_request(")
+        .nth(1)
+        .expect("new-window handler")
+        .split("\n}\n")
+        .next()
+        .expect("handler body");
+    assert!(handler.contains("new_window_decision(&url)"));
+    assert!(handler.contains("tauri_plugin_opener::open_url(url.as_str(), None::<&str>)"));
+    for forbidden in ["NewWindowResponse::Allow", "NewWindowResponse::Create"] {
+        assert!(
+            !source.contains(forbidden),
+            "the page must never get a second webview, found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
     let source = shipping_source("src/lib.rs");
     for required in [

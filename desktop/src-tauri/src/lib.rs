@@ -1038,7 +1038,9 @@ fn rediscover_after_runtime_rebind(app: AppHandle, origin: LoopbackOrigin) {
     });
 }
 
-/// Brings the existing window forward when a second instance is launched.
+/// Returns the shell's window, building it when there is none. This is the only
+/// place the window is built: its `tauri.conf.json` entry is `create: false`, so
+/// the window at startup and every recreated one carry the same new-window rule.
 fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         return Some(window);
@@ -1050,7 +1052,46 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .iter()
         .find(|config| config.label == MAIN_WINDOW)?
         .clone();
-    WebviewWindowBuilder::from_config(app, &config).ok()?.build().ok()
+    WebviewWindowBuilder::from_config(app, &config)
+        .ok()?
+        .on_new_window(|url, _features| handle_new_window_request(url))
+        .build()
+        .ok()
+}
+
+/// What happens to a browsing context the page asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum NewWindowDecision {
+    OpenInSystemBrowser,
+    Deny,
+}
+
+/// A web destination the page wanted in a new context (a `target="_blank"` link
+/// or `window.open(url)`) is read in the user's own browser. Anything else,
+/// `about:blank` included, has no destination the shell can hand over and is
+/// dropped, which is also what the platform does when no handler is registered.
+fn new_window_decision(url: &Url) -> NewWindowDecision {
+    match url.scheme() {
+        "http" | "https" => NewWindowDecision::OpenInSystemBrowser,
+        _ => NewWindowDecision::Deny,
+    }
+}
+
+/// The page never gets a second webview. On macOS a returned webview must share
+/// the opener's `WKWebViewConfiguration`, and wry registers each webview's init
+/// scripts and IPC handler on that shared content controller: every such window
+/// would add a copy of the scripts to this one and, when dropped, remove this
+/// window's IPC handler, leaving the bootstrap page unable to reach the shell.
+fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
+        // Off the main thread: this runs inside the webview's own delegate callback.
+        tauri::async_runtime::spawn_blocking(move || {
+            if tauri_plugin_opener::open_url(url.as_str(), None::<&str>).is_err() {
+                eprintln!("failed to open a Workbench link in the system browser");
+            }
+        });
+    }
+    tauri::webview::NewWindowResponse::Deny
 }
 
 /// Transfers a recreated window from an idle or stale monitor owner to a fresh
@@ -1458,7 +1499,7 @@ pub fn run() {
             open_install_docs
         ])
         .setup(|app| {
-            let window = app.get_webview_window(MAIN_WINDOW).ok_or_else(|| {
+            let window = ensure_main_window(app.handle()).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "the Avibe desktop window is missing")
             })?;
             let bootstrap_url = window.url()?;
@@ -2068,6 +2109,36 @@ mod tests {
             "http://192.168.1.10:5123/?next=remote",
         ] {
             assert!(!is_runtime_rebind_target(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
+    }
+
+    #[test]
+    fn only_web_destinations_leave_for_the_system_browser() {
+        for raw in [
+            "https://auth.openai.com/oauth/authorize?client_id=avibe&state=s",
+            "http://127.0.0.1:5123/show/page",
+        ] {
+            assert_eq!(
+                new_window_decision(&Url::parse(raw).expect("test URL")),
+                NewWindowDecision::OpenInSystemBrowser,
+                "{raw}"
+            );
+        }
+        for raw in [
+            "about:blank",
+            "javascript:alert(1)",
+            "data:text/html,<p>hi</p>",
+            "blob:http://127.0.0.1:5123/7f1c",
+            "file:///etc/hosts",
+            "mailto:someone@example.com",
+            "avibe://open",
+            "tauri://localhost/index.html",
+        ] {
+            assert_eq!(
+                new_window_decision(&Url::parse(raw).expect("test URL")),
+                NewWindowDecision::Deny,
+                "{raw}"
+            );
         }
     }
 }
