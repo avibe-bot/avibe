@@ -5308,7 +5308,7 @@
       "noEligible": "No model source in this route is available to this assistant",
       "readFailed": "Couldn't read every assistant's route; try again",
       "changed": "This assistant's route changed elsewhere; reopen the route editor",
-      "catalogFailed": "Couldn't add the preferred model to this assistant's catalog",
+      "catalogFailed": "Couldn't add the preferred model to this assistant's model list",
       "chainWriteFailed": "Couldn't save this assistant's preferred model route",
       "modelSwitchFailed": "The route was saved, but this assistant's model couldn't be switched",
       "selectAssistantModel": "Choose a model for {{name}}",
