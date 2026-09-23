@@ -1,11 +1,15 @@
 import type { SetupScreenId } from './setupFlow';
 
 type Piece = { node: HTMLElement; bounds: DOMRect };
+/** A piece the departing card carries but the arriving one has no place for, and how
+ *  long it is given to leave. The prototype dissolves them rather than cutting them
+ *  with the screen, which is what keeps the shrinking card readable mid-flight. */
+type FadingPiece = Piece & { duration: number; lift: number };
 type CardSnapshot = {
   bounds: DOMRect; surface: string; border: string; radius: string;
   /** Whether the source card wore the mint halo; the flight fades it through the token. */
   glow: boolean;
-  icon: Piece; name: Piece;
+  icon: Piece; name: Piece; fading: FadingPiece[];
 };
 export type SetupSnapshot = { cards: CardSnapshot[]; retiring?: Piece };
 const timing: KeyframeAnimationOptions = { duration: 860, easing: 'cubic-bezier(.32,0,.16,1)', fill: 'both' };
@@ -13,6 +17,20 @@ const timing: KeyframeAnimationOptions = { duration: 860, easing: 'cubic-bezier(
 const hooks = (screen: SetupScreenId) => screen === 'providers'
   ? { card: '.setup-destination', icon: '.setup-destination-logo', name: '.setup-destination-name' }
   : { card: screen === 'intro' ? '.onboarding-collaboration-card' : '.onboarding-assistant', icon: '.onboarding-card-logo', name: '.onboarding-card-name' };
+
+/**
+ * What a departing card holds beyond its identity: the story's role, caption and
+ * written work. The identity flies to the next screen; these have nowhere to land,
+ * so they leave on their own timing — the role first, because it sits on the line
+ * the identity is still moving along.
+ */
+const FADING: Partial<Record<SetupScreenId, { selector: string; duration: number; lift: number }[]>> = {
+  intro: [
+    { selector: '.onboarding-card-role', duration: 130, lift: 0 },
+    { selector: '.onboarding-story-status', duration: 190, lift: 12 },
+    { selector: '.onboarding-skeleton', duration: 190, lift: 12 },
+  ],
+};
 
 function capturePiece(element: HTMLElement): Piece {
   const node = element.cloneNode(true) as HTMLElement;
@@ -30,8 +48,12 @@ export function captureSetupCards(root: HTMLElement, screen: SetupScreenId): Set
     const name = card.querySelector<HTMLElement>(selectors.name);
     if (!icon || !name) return [];
     const style = getComputedStyle(card);
+    const fading = (FADING[screen] ?? []).flatMap(({ selector, duration, lift }) => {
+      const element = card.querySelector<HTMLElement>(selector);
+      return element ? [{ ...capturePiece(element), duration, lift }] : [];
+    });
     return [{ bounds: card.getBoundingClientRect(), surface: style.backgroundColor, border: style.borderColor,
-      radius: style.borderRadius, glow: style.boxShadow !== 'none', icon: capturePiece(icon), name: capturePiece(name) }];
+      radius: style.borderRadius, glow: style.boxShadow !== 'none', icon: capturePiece(icon), name: capturePiece(name), fading }];
   });
   const stage = screen === 'providers' ? root.querySelector<HTMLElement>('.setup-provider-stage') : null;
   const retiring = stage ? capturePiece(stage) : undefined;
@@ -97,6 +119,18 @@ export function playSetupHandoff(
     layer.append(arriving.node);
     animate(arriving.node, [{ opacity: 0, transform: 'translateY(-24px)' }, { opacity: 1, transform: 'translateY(0)' }]);
   }
+  // The screens swap their title at the end of the flight, so without this the
+  // journey spends the whole transition with no heading at all. The arriving one
+  // enters with the stage, from the position it will hold when it lands.
+  const heading = incoming.querySelector<HTMLElement>('.onboarding-heading');
+  if (heading) {
+    const arriving = capturePiece(heading);
+    position(arriving);
+    arriving.node.style.visibility = 'visible';
+    layer.append(arriving.node);
+    animate(arriving.node, [{ opacity: 0, transform: 'translateY(-12px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { ...timing, duration: 420 });
+  }
   snapshot.cards.forEach((source, index) => {
     const target = targets[index];
     if (!target) return;
@@ -127,6 +161,13 @@ export function playSetupHandoff(
         transform: `translate(${end.x - bounds.x - (piece.bounds.x - source.bounds.x)}px,${end.y - bounds.y - (piece.bounds.y - source.bounds.y)}px) scale(${end.width / piece.bounds.width},${end.height / piece.bounds.height})`,
         color: getComputedStyle(child).color,
       }]);
+    }
+    for (const piece of source.fading) {
+      Object.assign(piece.node.style, { position: 'absolute', left: `${piece.bounds.x - source.bounds.x}px`, top: `${piece.bounds.y - source.bounds.y}px`,
+        width: `${piece.bounds.width}px`, height: `${piece.bounds.height}px`, margin: '0', padding: '0' });
+      card.append(piece.node);
+      animate(piece.node, [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: `translateY(${piece.lift}px)` }],
+        { duration: piece.duration, easing: 'ease-out', fill: 'both' });
     }
     layer.append(card);
   });
