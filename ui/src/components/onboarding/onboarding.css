@@ -796,10 +796,15 @@
 }
 .onboarding-wire { stroke: var(--ob-wire); stroke-width: 1; }
 .onboarding-port { fill: var(--ob-port); stroke: var(--ob-port-border); stroke-width: 1; }
-/* A single 16-unit segment of a 100-unit path: the pulse crosses once and leaves. */
+/* A single segment of a 100-unit path: the pulse crosses once and leaves. How long
+   that segment is belongs to the surface drawing it — the story runs it at 16, the
+   setup band at the reference's 14 — so the length is a variable the keyframes read
+   too, and a scope changes the pulse by changing one number rather than by owning a
+   second pair of keyframes that would then have to be kept in step with these. */
 .onboarding-pulse-core, .onboarding-pulse-halo {
-  stroke-dasharray: 16 116;
-  stroke-dashoffset: 16;
+  --ob-pulse-dash: 16;
+  stroke-dasharray: var(--ob-pulse-dash) calc(var(--ob-pulse-dash) + 100);
+  stroke-dashoffset: var(--ob-pulse-dash);
   stroke-linecap: round;
   opacity: 0;
 }
@@ -810,15 +815,15 @@
    because there the pulse *is* the event; a standing route has no event to play, so
    it runs a cycle — and the two halves of that cycle are one relay, arriving at the
    gateway before anything leaves it. The offsets belong beside the dasharray above:
-   16 is the dash entering, -100 is a full path length past the far end, and reading
-   either one anywhere else would be reading half of a pair. */
+   the dash length is the segment entering, -100 is a full path length past the far
+   end, and reading either one anywhere else would be reading half of a pair. */
 @keyframes onboarding-pulse-converge {
-  0% { stroke-dashoffset: 16; opacity: 0; }
+  0% { stroke-dashoffset: var(--ob-pulse-dash); opacity: 0; }
   5%, 34% { opacity: 1; }
   40%, 100% { stroke-dashoffset: -100; opacity: 0; }
 }
 @keyframes onboarding-pulse-distribute {
-  0%, 48% { stroke-dashoffset: 16; opacity: 0; }
+  0%, 48% { stroke-dashoffset: var(--ob-pulse-dash); opacity: 0; }
   53%, 86% { opacity: 1; }
   92%, 100% { stroke-dashoffset: -100; opacity: 0; }
 }
@@ -1396,11 +1401,13 @@
   --ob-gateway-h: 72px;
   --ob-provider-card-h: 76px;
   --ob-provider-card-pad: 14px;
+  --ob-provider-card-gap: 10px;
   --ob-provider-card-logo: 32px;
   --ob-provider-card-name: 18px;
   --ob-provider-card-key: 11px;
   --ob-wire-h: 48px;
   --ob-destination-h: 76px;
+  --ob-summary-h: 45px;
   --ob-gap: 10px;
 }
 @media (max-height: 800px) and (min-width: 760px) {
@@ -1410,6 +1417,6 @@
   .onboarding-shell { --ob-gateway-h: 80px; --ob-provider-card-h: 88px; --ob-provider-card-logo: 35px; --ob-provider-card-name: 20px; --ob-provider-card-key: 12px; }
 }
 @media (max-width: 759px) {
-  .onboarding-shell { --ob-provider-card-h: 116px; --ob-provider-card-pad: 10px; --ob-provider-card-logo: 25px; --ob-provider-card-name: 13px; --ob-provider-card-key: 10px; --ob-wire-h: 42px; --ob-gap: 7px; --ob-destination-h: 120px; --ob-content-w: 460px; }
+  .onboarding-shell { --ob-provider-card-h: 116px; --ob-provider-card-pad: 10px; --ob-provider-card-gap: 6px; --ob-provider-card-logo: 25px; --ob-provider-card-name: 13px; --ob-provider-card-key: 10px; --ob-wire-h: 42px; --ob-gap: 7px; --ob-destination-h: 120px; --ob-content-w: 460px; }
   .onboarding-story-caption { display: none; }
 }

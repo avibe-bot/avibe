@@ -678,8 +678,11 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       sources,
       selected: selection.selectedBackends,
       failed: supplyFailed,
+      reading: sourceRead === 'reading',
     });
-    const summaryText = summary.kind === 'none'
+    const summaryText = summary.kind === 'pending'
+      ? ''
+      : summary.kind === 'none'
       ? t('onboarding.providers.summaryNone')
       : summary.kind === 'error'
         ? t('onboarding.providers.summaryError')

@@ -844,6 +844,17 @@ describe('providerSummary', () => {
     expect(providerSummary({ scan: null, sources: [], selected: [], failed: false })).toEqual({ kind: 'none' });
   });
 
+  it('withholds the verdict while the source read is still out', () => {
+    expect(providerSummary({ scan: null, sources: [], selected: [], failed: false, reading: true }))
+      .toEqual({ kind: 'pending' });
+  });
+
+  it('answers from a landed read even while another one is out', () => {
+    expect(providerSummary({
+      scan: null, sources: [source({ id: 'src_1', vendor: 'openai' })], selected: [], failed: false, reading: true,
+    })).toMatchObject({ kind: 'added', count: 1 });
+  });
+
   it('counts every added provider, not just the two on the stage', () => {
     const sources = [
       source({ id: 'src_1', vendor: 'openai' }),

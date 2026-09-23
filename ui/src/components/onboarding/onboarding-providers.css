@@ -41,6 +41,10 @@
   --obp-card-pv: var(--ob-provider-card-pad, calc(14 * var(--ob-u)));
   --obp-card-ph: var(--ob-provider-card-pad, calc(14 * var(--ob-u)));
   --obp-card-gap: var(--ob-provider-card-gap, calc(10 * var(--ob-u)));
+  /* L1 authors this tier by tier — 18 here, 20 on the tall tier, 13 on phones, which
+     is the reference's own ladder. Reading the story's `--ob-card-name` instead left
+     every name on this stage two pixels short of the frame it was measured against. */
+  --obp-card-name: var(--ob-provider-card-name, var(--ob-card-name));
   --obp-card-key: var(--ob-provider-card-key, calc(var(--ob-cap-fs) - 1px));
   --obp-check: var(--ob-provider-card-check, calc(20 * var(--ob-u)));
   --obp-add: var(--ob-provider-card-add, calc(28 * var(--ob-u)));
@@ -156,7 +160,7 @@
   flex-shrink: 0;
   width: var(--obp-add);
   height: var(--obp-add);
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 .setup-provider-copy {
   flex: 1 1 0;
@@ -166,9 +170,9 @@
   gap: calc(3 * var(--ob-u));
 }
 .setup-provider-name {
-  font-size: var(--ob-card-name);
+  font-size: var(--obp-card-name);
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.3333;
   color: var(--foreground);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -177,7 +181,7 @@
 .setup-provider-key {
   font-size: var(--obp-card-key);
   line-height: 1.45;
-  color: var(--muted-foreground);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -191,7 +195,7 @@
 .setup-provider-check { color: var(--mint-ink); }
 /* The plus states an offer, not a decision, so it is drawn in the same quiet ink the
    third card's plus wears rather than in the mint the check owns. */
-.setup-provider-add-mark { color: var(--muted-foreground); }
+.setup-provider-add-mark { color: var(--muted); }
 /* The count of what was added through Add more rides the card it describes. */
 .setup-provider-badge {
   flex-shrink: 0;
@@ -238,19 +242,21 @@
    and the departure from it, so the two bands read as one route rather than two loops
    that happen to overlap. Paused holds the frame; `.onboarding-shell`'s reduced-motion
    rule stops it outright, and a stopped pulse is already invisible. */
-.setup-wires .onboarding-pulse-core,
-.setup-wires .onboarding-pulse-halo {
+.setup-wires .onboarding-pulse-core {
+  /* The reference's own weight for this band: one 2-unit stroke carrying a 14-of-100
+     segment. The story's 1.6 is sized to a taller diagram; here it arrives with a
+     wider glow beneath it, and the two together blur the moment of arrival that this
+     screen exists to show. */
+  --ob-pulse-dash: 14;
+  stroke-width: 2;
   animation-duration: 3800ms;
   animation-timing-function: linear;
   animation-iteration-count: infinite;
   animation-play-state: paused;
 }
-.setup-wires--inbound .onboarding-pulse-core,
-.setup-wires--inbound .onboarding-pulse-halo { animation-name: onboarding-pulse-converge; }
-.setup-wires--outbound .onboarding-pulse-core,
-.setup-wires--outbound .onboarding-pulse-halo { animation-name: onboarding-pulse-distribute; }
-.setup-provider-stage[data-motion='running'] .setup-wires .onboarding-pulse-core,
-.setup-provider-stage[data-motion='running'] .setup-wires .onboarding-pulse-halo {
+.setup-wires--inbound .onboarding-pulse-core { animation-name: onboarding-pulse-converge; }
+.setup-wires--outbound .onboarding-pulse-core { animation-name: onboarding-pulse-distribute; }
+.setup-provider-stage[data-motion='running'] .setup-wires .onboarding-pulse-core {
   animation-play-state: running;
 }
 
@@ -318,7 +324,7 @@
   max-width: 100%;
   font-size: var(--obp-card-key);
   line-height: 1.45;
-  color: var(--muted-foreground);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -358,9 +364,9 @@
   background: var(--ob-card);
 }
 .setup-destination-name {
-  font-size: var(--ob-card-name);
+  font-size: var(--obp-card-name);
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.3333;
   color: var(--foreground);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -376,8 +382,8 @@
   justify-content: center;
   padding: 0 var(--obp-card-ph);
   font-size: var(--ob-cap-fs);
-  line-height: 1.45;
-  color: var(--muted-foreground);
+  line-height: 1.5;
+  color: var(--muted);
   text-align: center;
 }
 .setup-provider-summary[data-tone='error'] { color: var(--destructive-ink); }
@@ -446,7 +452,7 @@
 .setup-add-subtitle {
   font-size: 12.5px;
   line-height: 1.5;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 /* The same segmented control `ApiKeySourceForm` uses for protocol, at this
@@ -468,7 +474,7 @@
   border-radius: 7px;
   font-size: 12.5px;
   font-weight: 500;
-  color: var(--muted-foreground);
+  color: var(--muted);
   transition: background 0.15s ease, color 0.15s ease;
 }
 .setup-add-method:hover:not(:disabled) { color: var(--foreground); }
@@ -492,13 +498,13 @@
 .setup-add-note {
   font-size: 12px;
   line-height: 1.55;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-group {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-row {
@@ -557,7 +563,7 @@
 .setup-add-row-detail {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 11px;
-  color: var(--muted-foreground);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -573,7 +579,7 @@
 .setup-add-row-tag {
   flex: none;
   font-size: 11px;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-foot {
@@ -596,7 +602,7 @@
   gap: 6px;
   font-size: 11.5px;
   line-height: 1.4;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-status-icon {

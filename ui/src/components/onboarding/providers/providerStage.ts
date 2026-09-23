@@ -471,6 +471,8 @@ export function reconcileSelection(
 }
 
 export type ProviderSummary =
+  /** The source read has not landed, so the stage has nothing to say yet. */
+  | { kind: 'pending' }
   | { kind: 'none' }
   | { kind: 'added'; count: number; names: string[] }
   | { kind: 'selected'; count: number; names: string[] }
@@ -491,6 +493,8 @@ export function providerSummary(input: {
   sources: readonly Source[];
   selected: readonly AgentBackend[];
   failed: boolean;
+  /** Whether the source read is still out. An empty list is not yet an answer. */
+  reading?: boolean;
 }): ProviderSummary {
   if (input.failed) return { kind: 'error' };
   const added = new Map<string, string>();
@@ -503,7 +507,10 @@ export function providerSummary(input: {
     .filter((slot) => slotSelected(slot, input.selected))
     .map((slot) => slot.label);
   if (selected.length > 0) return { kind: 'selected', count: selected.length, names: selected };
-  return { kind: 'none' };
+  // Nothing found — but an unfinished read has not found nothing, it has not looked.
+  // Saying 「no provider selected」 here states a verdict about a question still open,
+  // which is what made the sentence flicker through a denial on the way in.
+  return input.reading ? { kind: 'pending' } : { kind: 'none' };
 }
 
 /**

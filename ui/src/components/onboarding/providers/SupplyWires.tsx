@@ -116,16 +116,16 @@ export const SupplyWires: FC<{
           {geometry.paths.map((path, index) => (
             <g key={`wire-${index}`}>
               <path className="onboarding-wire" d={path} fill="none" />
-              {/* `pathLength` is what makes the pulse a pulse: the dash is 16 of 100,
-                  so it is one segment crossing one wire whatever that wire measures.
-                  Without it the 16 is 16 user units and a long wire wears the pattern
-                  several times over — a row of chunks rather than a thing in motion.
-                  The halo and the core travel together and undelayed: the whole fan
-                  arriving at once is what reads as convergence. */}
-              {/* The halo is a wider, softer stroke of the same path — the reference's
-                  own glow. No blur filter: one on a band this short reads as an
-                  over-exposed bar rather than as light around a moving segment. */}
-              <path className="onboarding-pulse-halo" d={path} fill="none" pathLength={100} />
+              {/* `pathLength` is what makes the pulse a pulse: the dash is a fixed
+                  share of 100, so it is one segment crossing one wire whatever that
+                  wire measures. Without it the dash is user units and a long wire
+                  wears the pattern several times over — a row of chunks rather than a
+                  thing in motion. All six run undelayed off one clock: the whole fan
+                  arriving at once is what reads as convergence.
+                  One stroke, no halo. The reference draws this band's pulse as a
+                  single 2px line; a soft wider stroke under it spreads the segment
+                  across a band only 48px tall, and three spreading segments stop
+                  reading as three things arriving together. */}
               <path className="onboarding-pulse-core" d={path} fill="none" pathLength={100} />
             </g>
           ))}
