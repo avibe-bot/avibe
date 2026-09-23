@@ -801,6 +801,37 @@ describe('Hub route refresh', () => {
     await act(async () => delayed.resolve([hubChain('model-a')]));
   });
 
+  it('does not use an Agent archived after the brief read as a route target', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    saved.agents.codex.status = 'ok';
+    const codexAgent = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent(), codexAgent], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true,
+      agent: name === 'claude' ? { ...hubAgent(), archived: true } : codexAgent }));
+    mock.models.getAgentChains.mockImplementation(async (backend) => [{ ...hubChain('model-a'), backend }]);
+    mock.models.getAgentChain.mockResolvedValue({ ...hubChain('model-a'), backend: 'codex' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
+      { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'open' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await row('Claude Code').findByText(en.onboarding.setup.noteModelUnset);
+    expect(row('Claude Code').queryByText('model-a')).toBeNull();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(mock.models.getAgentChains).not.toHaveBeenCalledWith('claude');
+    const codexAction = row('Codex').getByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Codex'),
+    });
+    expect(codexAction.disabled).toBe(false);
+    fireEvent.click(codexAction);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
   it('distinguishes a confirmed missing Agent model from a configured model with an empty chain', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.status = 'ok';

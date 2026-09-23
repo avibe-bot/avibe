@@ -193,8 +193,8 @@ describe('explicit any-one-ready completion', () => {
     fireEvent.click(await setup()); await screen.findByTestId('destination');
     expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
   });
-  it.each(['start', 'legacy IM'])('keeps failed completion recoverable (%s)', async (failure) => {
-    if (failure !== 'start') mock.api.mutateConfig.mockRejectedValue(new Error("Config 'slack.bot_token' must be provided"));
+  it.each(['start', 'config write'])('keeps failed completion recoverable (%s)', async (failure) => {
+    if (failure !== 'start') mock.api.mutateConfig.mockRejectedValue(new Error('Config write unavailable'));
     const enter = await setup({ stopped: failure === 'start' });
     if (failure === 'start') mock.control.mockRejectedValue(new Error('Start unavailable'));
     fireEvent.click(enter);
@@ -237,10 +237,7 @@ describe('the correlated entry gate', () => {
     // binary detectCli does not find. Every condition is satisfied somewhere and none
     // of them meet. `connection.installed` is not the detector.
     allConnected();
-    mock.api.listVibeAgents.mockResolvedValue({
-      ok: true, default_agent_name: null,
-      agents: [CLAUDE_AGENT, { name: 'codex-agent', backend: 'codex', enabled: true, archived: false, source: 'builtin' }],
-    });
+    serveAgents(null, [CLAUDE_AGENT, { name: 'codex-agent', backend: 'codex', enabled: true, archived: false, source: 'builtin' }]);
     mock.models.listAgents.mockResolvedValue([hubSupply('claude', []), hubSupply('codex', [route('codex-agent')])]);
     const enter = await setup();
     mock.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', path: binary }));

@@ -295,8 +295,9 @@ builtin Agent in card order, then an available named Agent in stable backend/nam
 `api.mutateConfig` with an explicit field mutation, then validate a fresh uncached
 `apiFetch('/api/config', {cache:'no-store'})` readback before navigating. Use that same
 read/parse path after an unknown/failed write; cached pre-write data cannot settle it.
-Unknown writes are reconciled by reads, not treated as success or blindly retried. Keep `SetupPlatformRecovery` for
-existing invalid IM configuration. `SetupModelRecovery` is the shipped **Direct OpenCode**
+Unknown writes are reconciled by reads, not treated as success or blindly retried. Existing
+invalid IM configuration remains saved for later repair in Settings and does not gate Model
+Hub setup completion. `SetupModelRecovery` is the shipped **Direct OpenCode**
 recovery; it does not repair Hub models. A missing Hub Agent model is repaired in existing
 Agent/Model Hub settings, not chosen or written by Setup.
 
@@ -488,7 +489,7 @@ retry can reseed an actually absent config without overwriting user fields.
 A direct `apiFetch` POST **does not clear ApiContext's 30-second config cache or emit
 `onConfigChanged`/configuration convergence**. L1 explicitly installs the validated fresh
 GET into the shell's existing server-config state (`data` in today's Wizard), scoped to the
-current request/activation. Feed capability, platform recovery and bootstrap decisions from
+current request/activation. Feed capability and bootstrap decisions from
 that snapshot. Future authoritative setup reads use the same direct uncached read/parse
 path, including unknown-write reconciliation; do not replace it with cached `api.getConfig()`
 or assume a global notification occurred. C2's draft state/setter remains unchanged.
@@ -521,9 +522,10 @@ an explicit/active recovery attempt using fresh config and runtime evidence. A `
 can be the service's projection of failed demand, not proof of installed bytes. StatusProvider's
 `refreshStatus()` only refreshes service status and may return null; neither it nor a cached
 status alone proves config persistence or backend readiness. Missing CLI, sources, routes
-and incomplete setup do not forbid controller startup. Bad existing platform configuration
-uses `SetupPlatformRecovery`; do not disable configured transports or restart after an
-already-reconciled config write.
+and incomplete setup do not forbid controller startup. Saved incomplete platform
+configuration remains intact for repair in Settings; it does not block Model Hub setup
+completion. Do not disable configured transports or restart after an already-reconciled
+config write.
 
 Evidence is separated deliberately. The temporary frontend consumer imports the **actual
 ApiProvider, serializer and apiFetch** with mocked HTTP: empty mutations reject before POST;

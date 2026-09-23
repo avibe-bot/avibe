@@ -73,6 +73,7 @@ capabilities:
       - ui/src/components/settings/models/MigrationDialog.test.tsx
       - ui/src/components/settings/models/migrationScan.test.ts
       - ui/src/components/onboarding/providers/providerStage.test.ts
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
       - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

@@ -730,7 +730,7 @@ describe('ProvidersScreen — what it found but may not take', () => {
     expect(lastAction().labelArgs).toEqual({ count: 1 });
   });
 
-  it('submits the batch it counted, and keeps the blocked card after the rescan', async () => {
+  it('MH-MIG-004: submits the batch it counted, and keeps the blocked card after the rescan', async () => {
     serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION, CODEX_KEY] });
     const { handle } = renderScreen();
     await settled();

@@ -356,7 +356,7 @@ describe('pendingImportRows', () => {
     expect(rows.map((item) => item.id)).toEqual(['mig_1', 'mig_2']);
   });
 
-  it('MH-MIG-004: keeps a key whose display mask collides with a Hub source', () => {
+  it('MH-MIG-006: keeps a key whose display mask collides with a Hub source', () => {
     const selection = {
       scan: scanOf(row({ id: 'mig_1', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0001' })),
       selectedBackends: ['codex' as const],

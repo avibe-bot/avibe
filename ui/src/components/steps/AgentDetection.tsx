@@ -183,10 +183,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             !row.archived && row.backend === backend)
             .map(async (row) => {
               const detail = await api.getVibeAgent(row.name, { cache: false });
-              if (!detail.ok || !detail.agent) throw new Error('Agent detail unreadable');
+              if (!detail.ok || !detail.agent || detail.agent.name !== row.name) throw new Error('Agent detail unreadable');
               return detail.agent;
             }));
-          const candidates = details.filter((row) => row.backend === backend && isBuiltinAgent(row));
+          const candidates = details.filter((row) => row.backend === backend && !row.archived && isBuiltinAgent(row));
           const selected = candidates.find((row) => row.name === backend)
             ?? candidates.find((row) => row.name === 'default') ?? candidates[0];
           const model = selected?.model ?? null;
