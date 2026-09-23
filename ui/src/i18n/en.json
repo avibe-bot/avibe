@@ -5301,7 +5301,7 @@
     },
     "route": {
       "title": "Default model route",
-      "description": "Set a shared model order for the assistants shown below. Each tries its own model subset in that order; other routes stay unchanged.",
+      "description": "Set one model order for every enabled assistant. Saving updates each assistant's route.",
       "preferred": "Preferred",
       "backup": "Backup {{index}}",
       "singleNote": "This route has one model. Add a source, then select a backup model.",
