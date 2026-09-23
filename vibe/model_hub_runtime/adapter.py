@@ -1774,11 +1774,16 @@ class CLIProxyEngineAdapter:
 
         async with self._routing_lock:
             await self._transports_idle.wait()
-            auth_name, payload, _prefix, _already_active = await run_owned_in_thread(
-                self.state_store.activate_oauth_auth_file,
-                credential_ref,
+            def publish_grant(running: EngineClient | None):
+                return (*self.state_store.activate_oauth_auth_file(credential_ref), running)
+
+            # Published under the lifecycle exclusion: an engine a previous service
+            # left running is reaped first, so none can load or rotate the new grant
+            # outside this service's reconcile below.
+            auth_name, payload, _prefix, _already_active, client = await run_owned_in_thread(
+                self.supervisor.with_engine_excluded,
+                publish_grant,
             )
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
             if client is None:
                 # The next ordered lifecycle step starts CPA. The atomically
                 # published watched file is the source of truth; no management
@@ -2036,24 +2041,24 @@ class CLIProxyEngineAdapter:
         )
         if auth_name:
             if metadata.get("activation_state") != "staged":
-                client = await asyncio.to_thread(self.supervisor.client_if_running)
-                if client is not None:
-                    try:
-                        await asyncio.to_thread(
-                            client.management_request,
-                            "DELETE",
-                            "/auth-files",
-                            query={"name": str(auth_name)},
-                            timeout=1.0,
-                        )
-                    except EngineClientError as exc:
-                        raise EngineStateError(
-                            "unable to remove OAuth auth file"
-                        ) from exc
-                await asyncio.to_thread(
-                    self.state_store.delete_oauth_auth_file,
-                    str(auth_name),
-                )
+
+                def remove_grant(client: EngineClient | None) -> None:
+                    if client is not None:
+                        try:
+                            client.management_request(
+                                "DELETE",
+                                "/auth-files",
+                                query={"name": str(auth_name)},
+                                timeout=1.0,
+                            )
+                        except EngineClientError as exc:
+                            raise EngineStateError("unable to remove OAuth auth file") from exc
+                    self.state_store.delete_oauth_auth_file(str(auth_name))
+
+                # One supervisor operation: an engine left running by a previous
+                # service is reaped first, and none can start and load the grant
+                # before its file is gone.
+                await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
                 await asyncio.to_thread(
                     self.state_store.audit_auth_permissions,
                     enforce=True,
@@ -2099,12 +2104,7 @@ class CLIProxyEngineAdapter:
         auth_name = metadata.get("auth_name")
         if not isinstance(auth_name, str) or not auth_name:
             return False
-        client = await asyncio.to_thread(self.supervisor.client_if_running)
-        return await self._cleanup_oauth_material(
-            client,
-            auth_name,
-            credential_ref,
-        )
+        return await self._cleanup_oauth_material(auth_name, credential_ref)
 
     async def discover_models(
         self,
@@ -2755,7 +2755,6 @@ class CLIProxyEngineAdapter:
                 # may remain behind it. Both auth-file deletions must be
                 # confirmed before revocation can discard the minted ref.
                 if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
-                    client,
                     auth.name,
                     credential_ref,
                 ):
@@ -2780,37 +2779,26 @@ class CLIProxyEngineAdapter:
         flow.state = "success"
         self._release_provider(flow)
 
-    async def _cleanup_oauth_material(
-        self,
-        client: EngineClient | None,
-        auth_name: str,
-        credential_ref: str,
-    ) -> bool:
-        engine_delete_succeeded = client is None
-        if client is not None:
+    async def _cleanup_oauth_material(self, auth_name: str, credential_ref: str) -> bool:
+        def remove_grant(client: EngineClient | None) -> bool:
+            engine_delete_succeeded = True
+            if client is not None:
+                try:
+                    client.management_request("DELETE", "/auth-files", query={"name": auth_name})
+                except EngineClientError:
+                    engine_delete_succeeded = False
             try:
-                await asyncio.to_thread(
-                    client.management_request,
-                    "DELETE",
-                    "/auth-files",
-                    query={"name": auth_name},
-                )
-            except EngineClientError:
-                engine_delete_succeeded = False
-            else:
-                engine_delete_succeeded = True
+                self.state_store.delete_oauth_auth_file(auth_name)
+            except EngineStateError:
+                return False
+            return engine_delete_succeeded
 
+        # Atomic with the engine lifecycle: see ``revoke_credential``.
         try:
-            await asyncio.to_thread(
-                self.state_store.delete_oauth_auth_file,
-                auth_name,
-            )
-        except EngineStateError:
-            local_delete_succeeded = False
-        else:
-            local_delete_succeeded = True
-
-        if not (engine_delete_succeeded and local_delete_succeeded):
+            removed = await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
+        except EngineUnavailableError:
+            return False
+        if not removed:
             return False
         try:
             await asyncio.to_thread(

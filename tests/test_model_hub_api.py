@@ -7184,6 +7184,9 @@ def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
         def client_if_running(self):
             return self._client
 
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
+
     class RuntimeCleanupAdapter(FakeAdapter):
         def __init__(self, runtime_adapter):
             super().__init__()
