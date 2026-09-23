@@ -2904,6 +2904,23 @@ def test_retired_builtins_leave_the_picker_but_stay_routeable(monkeypatch, tmp_p
     ]
 
 
+def test_compatibility_projections_hide_retired_builtins_unless_requested(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+    store.requested_models["claude"] = "claude-sonnet-4"
+
+    payload = service.get_agent_sources("claude")
+
+    assert payload["builtin_models"] == ["claude-opus-5", "claude-sonnet-4"]
+    assert [row["model_id"] for row in payload["model_supply"]] == ["claude-opus-5", "claude-sonnet-4"]
+    assert [row["id"] for row in payload["catalog_models"]] == ["claude-opus-5", "claude-sonnet-4"]
+
+
 def test_a_snapshot_revived_retired_builtin_stays_in_the_picker(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.config.agents["claude"].models = [

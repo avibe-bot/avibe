@@ -235,26 +235,16 @@ def normalize_model_hub_vendor_id(value: object) -> str:
     return vendor
 
 
-def model_hub_retired_menu_ids(backend: str) -> frozenset[str]:
-    """Bundled fixed-menu ids the catalog has tombstoned."""
-
-    if backend not in {"claude", "codex"}:
-        return frozenset()
-    from vibe.backend_model_catalog import load_bundled_catalog, retired_backend_model_ids
-
-    return retired_backend_model_ids(backend, load_bundled_catalog())
-
-
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     """Return the bundled fixed-menu ids used by persisted Hub routes."""
 
     if backend not in {"claude", "codex"}:
         return ()
-    from vibe.backend_model_catalog import load_bundled_catalog, visible_backend_model_entries
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
     return tuple(
         entry["id"]
-        for entry in visible_backend_model_entries(backend, load_bundled_catalog())
+        for entry in backend_model_entries(backend, load_bundled_catalog())
     )
 
 
@@ -550,8 +540,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             not _legacy_mapping_is_valid(mapping) for mapping in mappings
         ):
             return payload, False, ()
-        # A released config may map an id that has since been retired.
-        fixed_menu_ids = set(model_hub_fixed_menu_ids(backend)) | model_hub_retired_menu_ids(backend)
+        fixed_menu_ids = set(model_hub_fixed_menu_ids(backend))
         if any(
             mapping["enabled"] and mapping["builtin_id"] not in fixed_menu_ids
             for mapping in mappings or []
@@ -644,7 +633,6 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         source_order = _legacy_source_order(migrated_model_hub, sources_by_id, agent, backend)
         source_settings = {"order": source_order}
         route_ids = list(model_hub_fixed_menu_ids(backend))
-        retired_ids = model_hub_retired_menu_ids(backend)
 
         if isinstance(agent.get("routes"), dict):
             routes = copy.deepcopy(agent["routes"])
@@ -660,8 +648,6 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 builtin_id = item.get("builtin_id")
                 if isinstance(builtin_id, str) and builtin_id not in mapping_by_menu:
                     mapping_by_menu[builtin_id] = item
-            # A retired id keeps a route only when a legacy mapping pinned it.
-            route_ids.extend(model_id for model_id in mapping_by_menu if model_id in retired_ids)
             routes = {}
             for model_id in route_ids:
                 mapping = mapping_by_menu.get(model_id)
@@ -680,10 +666,6 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                     warnings.append(
                         f"Model Hub route {backend}/{model_id} could not be mapped to a persisted source model"
                     )
-                if model_id in retired_ids and not hops:
-                    # An unmapped retired id has nothing to preserve; materializing
-                    # it would leave a manual catalog row no reconcile removes.
-                    continue
                 routes[model_id] = {"hops": hops}
 
         allowed_agent = {
@@ -3355,7 +3337,7 @@ def normalize_storable_backend_model_text(
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
     if backend not in {"claude", "codex"}:
         return []
-    from vibe.backend_model_catalog import load_bundled_catalog, visible_backend_model_entries
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
     return [
         ModelHubBackendModelConfig(
@@ -3364,7 +3346,7 @@ def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
             display_name=entry.get("label"),
             reasoning_efforts=list(entry.get("reasoning_efforts") or ()),
         )
-        for entry in visible_backend_model_entries(backend, load_bundled_catalog())
+        for entry in backend_model_entries(backend, load_bundled_catalog())
     ]
 
 

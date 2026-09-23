@@ -24,7 +24,6 @@ from config.v2_config import (
     ModelHubBackendModelConfig,
     ModelHubConfig,
     model_hub_fixed_menu_ids,
-    model_hub_retired_menu_ids,
     ModelHubMenuConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -4163,13 +4162,17 @@ class ModelHubService:
 
     def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
         # A retired built-in stays persisted and routeable, so any session,
-        # channel, or Agent pin keeps working; it only leaves the picker. A row
-        # the current snapshot revives, or a manual route pins, stays visible.
+        # channel, or Agent pin keeps working; it only leaves picker
+        # projections. A row the current snapshot revives, a manual route
+        # pins, or the backend currently requests stays visible.
         backend = cast(BackendName, agent.backend)
-        retired = model_hub_retired_menu_ids(backend)
+        from vibe.backend_model_catalog import load_bundled_catalog, retired_backend_model_ids
+
+        retired = retired_backend_model_ids(backend, load_bundled_catalog())
         if not retired:
             return set()
         current = {item["id"] for item in self._current_builtin_models(backend)}
+        current.add(self._requested_model(agent))
         return {
             model.id
             for model in agent.models
@@ -4190,8 +4193,9 @@ class ModelHubService:
         *, live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
     ) -> dict:
         backend = cast(BackendName, agent.backend)
+        hidden = self._hidden_retired_model_ids(agent)
         builtin_models = (
-            [model.id for model in agent.models]
+            [model.id for model in agent.models if model.id not in hidden]
             if agent.menu_kind == "fixed"
             else None
         )
@@ -4208,7 +4212,7 @@ class ModelHubService:
             unavailable_source_ids=unavailable_source_ids,
             live_recovery=live_recovery,
         )
-        menu_model_ids = [model.id for model in agent.models]
+        menu_model_ids = [model.id for model in agent.models if model.id not in hidden]
         model_supply = [
             {
                 "model_id": model_id,
@@ -5477,6 +5481,7 @@ class ModelHubService:
             cast(BackendName, backend),
         )
         live_recovery = self.recovery.annotations(config)
+        hidden = self._hidden_retired_model_ids(agent) - {requested_model}
         return [
             self._agent_chain(
                 config,
@@ -5486,7 +5491,9 @@ class ModelHubService:
                 unavailable_source_ids=unavailable_source_ids,
                 live_recovery=live_recovery,
             )
+            # The overview is a picker surface; routing keeps every persisted row.
             for model_id in self._agent_model_ids(agent, requested_model)
+            if model_id not in hidden
         ]
 
     def opencode_public_models(self) -> dict[str, dict[str, Any]]:

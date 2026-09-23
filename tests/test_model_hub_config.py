@@ -1919,28 +1919,9 @@ def test_config_reload_keeps_a_legacy_mapping_to_a_retired_model(monkeypatch, tm
     assert loaded.load_warnings == ()
     assert agent.mode == "hub"
     assert agent.routes["claude-sonnet-4"].hops[0].source_id == source["id"]
-    # Unmapped retired ids do not come back as routes or menu rows.
-    assert "claude-opus-4" not in agent.routes
-    assert "claude-opus-4" not in {model.id for model in agent.models}
-
-
-def test_config_reload_drops_an_unmappable_legacy_mapping_to_a_retired_model(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
-    legacy = _legacy_model_hub_payload(current["model_hub"])
-    legacy["agents"]["claude"]["mode"] = "hub"
-    legacy["agents"]["claude"]["mappings"] = [
-        {"builtin_id": "claude-sonnet-4", "target_model_id": "claude-sonnet-4", "enabled": True}
-    ]
-    current["model_hub"] = legacy
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(current), encoding="utf-8")
-
-    loaded = V2Config.load(config_path=config_path)
-
-    agent = loaded.model_hub.agents["claude"]
-    assert "claude-sonnet-4" not in agent.routes
-    assert "claude-sonnet-4" not in {model.id for model in agent.models}
+    # The released implicit menu is preserved, retired ids included, so pins
+    # stored outside `mappings` still resolve; only picker projections hide them.
+    assert "claude-opus-4" in {model.id for model in agent.models}
 
 
 def test_config_reload_spells_route_hops_like_the_inventory_they_name(monkeypatch, tmp_path):

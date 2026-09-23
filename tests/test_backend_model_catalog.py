@@ -969,12 +969,14 @@ def test_retired_claude_models_leave_the_merged_listing(monkeypatch):
         assert model in snapshot["models"], model
 
 
-def test_tombstones_stay_out_of_the_fixed_menu():
+def test_retired_models_stay_in_the_fixed_menu_for_released_configs():
+    """Persisted-shape rule: released configs imply the fixed menu, retired ids included."""
+
     from config.v2_config import model_hub_fixed_menu_ids
 
     fixed_menu = set(model_hub_fixed_menu_ids("claude"))
 
-    assert fixed_menu.isdisjoint(RETIRED_CLAUDE_MODELS)
+    assert set(RETIRED_CLAUDE_MODELS) <= fixed_menu
     assert "claude-opus-5" in fixed_menu
     # The bare aliases are why claude_builtin_ids exists: they carry no
     # "claude-"/"anthropic-" prefix, so dropping them would make every persisted
@@ -1050,12 +1052,6 @@ def test_an_explicitly_listed_remote_row_can_revive_a_retired_model():
     )
 
     assert "claude-opus-4" in {entry["id"] for entry in merged}
-
-
-def test_fresh_model_hub_catalog_omits_retired_models():
-    from config.v2_config import _default_backend_models
-
-    assert not {model.id for model in _default_backend_models("claude")} & set(RETIRED_CLAUDE_MODELS)
 
 
 def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp_path):
