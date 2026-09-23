@@ -4,6 +4,7 @@ import { ASSISTANT_ORDER } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
 import { routeChainMatchesAttempt, sameManualOverride, sameRouteDraft } from '../settings/models/routeChainDraft';
 import { catalogModels, chosenCandidate, draftRowFor, offeredCandidates } from '../settings/models/backendCatalog';
+import { eligibilityOf } from '../settings/models/eligibility';
 import type {
   AgentBackend,
   AgentChain,
@@ -105,14 +106,13 @@ export const chainMembership = (chain: AgentChain): RouteHop[] => {
 };
 
 /**
- * One route, taken whole by every assistant that is on.
+ * One shared order, projected through each assistant's server-owned eligibility.
  *
  * Setup states it as one thing — 「the default model, and what to fall back to」 —
- * and with Model Hub holding the credentials any assistant can call any model, so
- * the route each of them saves is the shared order itself. It used to be filtered
- * down to the hops that assistant already had, which quietly meant an assistant
- * with a route of its own kept it: the screen said every assistant shared one
- * model while two of them called different ones.
+ * and Hub credentials are available to every assistant. Backend-native sources
+ * remain backend-specific, so only those hops are excluded for other assistants.
+ * Filtering by each assistant's previous membership instead would silently keep
+ * different Hub routes even after the user saves a shared order.
  *
  * A model a backend's own catalog would not accept is reached the way Model Hub
  * already reaches one — the assistant keeps its menu model and that model's chain
@@ -121,6 +121,9 @@ export const chainMembership = (chain: AgentChain): RouteHop[] => {
  */
 export const targetChanged = (shared: RouteHop[], target: SetupRouteTargetSnapshot): boolean =>
   !sameRouteDraft(shared, chainMembership(target.chain));
+
+const eligibleRoute = (shared: RouteHop[], supply: AgentSupply): RouteHop[] =>
+  supply.sources ? shared.filter((hop) => eligibilityOf(supply, hop.source_id).eligible) : shared;
 
 export const withMembershipHop = (membership: RouteHop[], hop: RouteHop): RouteHop[] => {
   if (membership.some((row) => hopIdentity(row) === hopIdentity(hop))) return membership;
@@ -212,8 +215,8 @@ export async function hydrateSetupRoutes(
   supplies: readonly AgentSupply[],
 ): Promise<SetupRouteHydration> {
   const listing = await reads.listVibeAgents({ cache: false });
-  const briefs = listing.ok ? listing.agents : [];
-  const designated = await readSetupTargets(briefs, reads);
+  if (!listing.ok) throw new Error('onboarding.route.readFailed');
+  const designated = await readSetupTargets(listing.agents, reads, { requireReadable: true });
   const supplyByBackend = new Map(supplies.map((row) => [row.backend, row]));
   const grouped = new Map<string, { backend: AgentBackend; modelId: string; names: string[] }>();
 
@@ -239,7 +242,7 @@ export async function hydrateSetupRoutes(
         membership: chainMembership(chain),
       });
     } catch {
-      // Keep configure reachable; a failed chain is not a save target.
+      throw new Error('onboarding.route.readFailed');
     }
   }
 
@@ -415,12 +418,6 @@ export async function saveSetupRoutes(
   const results: TargetSaveResult[] = [];
   for (const target of targets) {
     const key = targetKey(target.backend, target.modelId);
-    const desired = shared;
-    const baselineHops = chainMembership(target.chain);
-    if (desired.length === 0 || sameRouteDraft(desired, baselineHops)) {
-      results.push({ key, kind: 'skipped' });
-      continue;
-    }
     const precheck = await precheckTarget(target, api);
     if (precheck === 'reconcile') {
       const chain = await api.getAgentChain(target.backend, target.modelId).catch(() => target.chain);
@@ -429,6 +426,16 @@ export async function saveSetupRoutes(
     }
     if (precheck.kind === 'failed') {
       results.push({ key, kind: 'failed', error: precheck.error });
+      continue;
+    }
+    const desired = eligibleRoute(shared, precheck.supply);
+    if (shared.length > 0 && desired.length === 0) {
+      results.push({ key, kind: 'failed', error: 'onboarding.route.noEligible' });
+      continue;
+    }
+    const baselineHops = chainMembership(target.chain);
+    if (desired.length === 0 || sameRouteDraft(desired, baselineHops)) {
+      results.push({ key, kind: 'skipped' });
       continue;
     }
     results.push(await writeTarget(target, desired, api, precheck.supply));
@@ -450,8 +457,7 @@ export async function retrySetupRoutes(
       results.push(prior ?? { key, kind: 'skipped' });
       continue;
     }
-    const desired = shared;
-    if (desired.length === 0) {
+    if (shared.length === 0) {
       results.push({ key, kind: 'skipped' });
       continue;
     }
@@ -460,15 +466,6 @@ export async function retrySetupRoutes(
       current = await api.getAgentChain(target.backend, target.modelId);
     } catch (error) {
       results.push({ key, kind: 'failed', error: errorMessage(error) });
-      continue;
-    }
-    const classification = classifyRetry(target, current, desired);
-    if (classification === 'skip') {
-      results.push({ key, kind: 'confirmed', chain: current });
-      continue;
-    }
-    if (classification === 'reconcile') {
-      results.push({ key, kind: 'reconcile', chain: current });
       continue;
     }
     // The chain above is only one of the three things the contract re-reads
@@ -488,6 +485,20 @@ export async function retrySetupRoutes(
       results.push({ key, kind: 'failed', error: precheck.error });
       continue;
     }
+    const desired = eligibleRoute(shared, precheck.supply);
+    if (desired.length === 0) {
+      results.push({ key, kind: 'failed', error: 'onboarding.route.noEligible' });
+      continue;
+    }
+    const classification = classifyRetry(target, current, desired);
+    if (classification === 'skip') {
+      results.push({ key, kind: 'confirmed', chain: current });
+      continue;
+    }
+    if (classification === 'reconcile') {
+      results.push({ key, kind: 'reconcile', chain: current });
+      continue;
+    }
     results.push(await writeTarget(target, desired, api, precheck.supply));
   }
   return results;
@@ -496,7 +507,13 @@ export async function retrySetupRoutes(
 export const saveNeedsRetry = (results: readonly TargetSaveResult[]): boolean =>
   results.some((row) => row.kind === 'failed' || row.kind === 'reconcile');
 
-/** Who a row applies to. Every enabled assistant saves the whole route, so the answer
-    is the same for every row — which is the point the list is making. */
-export const hopsFor = (targets: readonly SetupRouteTargetSnapshot[], _hop: RouteHop): string[] =>
-  [...new Set(targets.flatMap((target) => target.agentNames))];
+/** Hub sources reach every assistant; backend-native sources stay on eligible routes. */
+export const hopsFor = (
+  targets: readonly SetupRouteTargetSnapshot[],
+  hop: RouteHop,
+  supplies: readonly AgentSupply[],
+): string[] => [...new Set(targets.flatMap((target) => {
+  const supply = supplies.find((row) => row.backend === target.backend);
+  return !supply || !supply.sources || eligibilityOf(supply, hop.source_id).eligible
+    ? target.agentNames : [];
+}))];

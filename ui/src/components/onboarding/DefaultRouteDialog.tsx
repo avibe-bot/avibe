@@ -60,6 +60,9 @@ export function DefaultRouteDialog({
   onSaved,
 }: DefaultRouteDialogProps) {
   const { t } = useTranslation();
+  const routeErrorText = React.useCallback((message: string): string =>
+    message === 'onboarding.route.readFailed' || message === 'onboarding.route.noEligible'
+      ? t(message) : message, [t]);
   const api = useApi();
   const [phase, setPhase] = React.useState<'idle' | 'loading' | 'saving' | 'failed'>('idle');
   const [status, setStatus] = React.useState('');
@@ -67,14 +70,9 @@ export function DefaultRouteDialog({
   const [supplies, setSupplies] = React.useState<AgentSupply[]>([]);
   const [targets, setTargets] = React.useState<SetupRouteTargetSnapshot[]>([]);
   const [receipts, setReceipts] = React.useState<TargetSaveResult[]>([]);
-  const baselines = React.useRef<SetupRouteTargetSnapshot[]>([]);
+  const [loadFailed, setLoadFailed] = React.useState(false);
   const addButtonRef = React.useRef<HTMLButtonElement>(null);
   const loadToken = React.useRef(0);
-  const dirtyRef = React.useRef(flowState.routeOrderDirty);
-
-  React.useLayoutEffect(() => {
-    dirtyRef.current = flowState.routeOrderDirty;
-  }, [flowState.routeOrderDirty]);
 
   const writes = React.useMemo(() => ({
     getVibeAgent: (name: string, params?: { cache?: boolean }) => api.getVibeAgent(name, params),
@@ -90,6 +88,7 @@ export function DefaultRouteDialog({
     const token = ++loadToken.current;
     setPhase('loading');
     setStatus('');
+    setLoadFailed(false);
     try {
       const [supplyRead, listed] = await Promise.all([
         agentReads.read(),
@@ -105,22 +104,20 @@ export function DefaultRouteDialog({
         getAgentChain: modelsApi.getAgentChain,
       }, nextSupplies);
       if (token !== loadToken.current) return;
-      if (!dirtyRef.current || baselines.current.length === 0) {
-        baselines.current = hydration.targets;
-        setTargets(hydration.targets);
-        setFlowState((current) => (
-          current.routeOrderDirty
-            ? current
-            : { ...current, routeOrder: hydration.union, routeOrderDirty: false }
-        ));
-      }
+      setTargets(hydration.targets);
+      setFlowState((current) => (
+        current.routeOrderDirty
+          ? current
+          : { ...current, routeOrder: hydration.union, routeOrderDirty: false }
+      ));
       setPhase('idle');
     } catch (error) {
       if (token !== loadToken.current) return;
+      setLoadFailed(true);
       setPhase('failed');
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(routeErrorText(error instanceof Error ? error.message : String(error)));
     }
-  }, [agentReads, api, setFlowState]);
+  }, [agentReads, api, routeErrorText, setFlowState]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -139,6 +136,10 @@ export function DefaultRouteDialog({
 
   const persist = async (retry: boolean) => {
     if (phase === 'saving') return;
+    if (loadFailed) {
+      await load();
+      return;
+    }
     if (!flowState.routeOrderDirty) {
       onClose();
       return;
@@ -153,7 +154,7 @@ export function DefaultRouteDialog({
       if (saveNeedsRetry(next)) {
         setPhase('failed');
         const failed = next.find((row) => row.kind === 'failed' || row.kind === 'reconcile');
-        setStatus(failed && failed.kind === 'failed' ? failed.error : t('common.retry'));
+        setStatus(failed && failed.kind === 'failed' ? routeErrorText(failed.error) : t('common.retry'));
         return;
       }
       const confirmed = next.flatMap((row) => {
@@ -171,7 +172,6 @@ export function DefaultRouteDialog({
       if (confirmed.length) {
         const nextTargets = targets.map((target) =>
           confirmed.find((row) => row.backend === target.backend && row.modelId === target.modelId) ?? target);
-        baselines.current = nextTargets;
         setTargets(nextTargets);
       }
       setFlowState((current) => ({ ...current, routeOrderDirty: false }));
@@ -184,7 +184,7 @@ export function DefaultRouteDialog({
       if (savedFocus) await onSaved?.(savedFocus);
     } catch (error) {
       setPhase('failed');
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(routeErrorText(error instanceof Error ? error.message : String(error)));
     }
   };
 
@@ -263,7 +263,7 @@ export function DefaultRouteDialog({
               <p className="setup-add-note">{t('onboarding.route.singleNote')}</p>
             )}
             {rows.map((hop, index) => {
-              const names = hopsFor(targets, hop);
+              const names = hopsFor(targets, hop, supplies);
               return (
                 <div key={`${hop.source_id}:${hop.model_id}:${index}`} className="setup-add-row">
                   <div className="setup-add-row-copy">

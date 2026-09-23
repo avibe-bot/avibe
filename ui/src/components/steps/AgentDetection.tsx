@@ -566,6 +566,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           }));
         }
         await detect(name, installedPath || agents[name]?.cli_path || name);
+        if (!isPage && modelHubEnabled && !agents[name]?.enabled) toggle(name, true);
         await agentReads?.refresh();
       }
     } catch (e) {

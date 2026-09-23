@@ -56,6 +56,20 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('assistant installation presentation', () => {
+  it('enables a Hub assistant after a successful install', async () => {
+    const saved = data();
+    saved.agents.codex.enabled = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    mock.api.installAgent.mockResolvedValue({ ok: true, path: '/isolated/bin/codex', message: '' });
+    render(wrap(<AgentDetection data={{ ...saved, capabilities: { model_hub: { enabled: true } } }} onNext={vi.fn()} />));
+    fireEvent.click(await row('Codex').findByRole('button', { name: 'Install and enable' }));
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ kind: 'set', path: ['agents', 'codex', 'enabled'], value: true })]),
+    ));
+  });
   it('keeps fixed row order, independent installs and retry details', async () => {
     let finishClaude!: (value: unknown) => void;
     mock.api.installAgent.mockImplementation((name) => name === 'claude'

@@ -219,7 +219,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // Against the Hub's own inventory: a key it is already supplying is not a batch
     // this screen should ask for, and the action continues instead of opening a review
     // of work that is done.
-    const pending = React.useMemo(() => pendingImportRows(selection, sources), [selection, sources]);
+    const pending = React.useMemo(() => pendingImportRows(selection), [selection]);
     // ── Supply ──────────────────────────────────────────────────────────────
 
     // Whether the server's own row defaults have been honoured yet. A scan is nulled

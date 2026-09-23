@@ -153,6 +153,31 @@ describe('hydrateSetupRoutes', () => {
     expect(hydration.targets[0]?.modelId).toBe('opus-5');
     expect(hydration.union).toEqual([A, B]);
   });
+
+  it('does not present a partial target list as a complete shared route', async () => {
+    const claude = brief('claude', 'claude', 'opus-5');
+    const codex = brief('codex', 'codex', 'gpt-5');
+    await expect(hydrateSetupRoutes({
+      listVibeAgents: vi.fn(async () => ({ ok: true, agents: [claude, codex], default_agent_name: null })),
+      getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(name === 'claude' ? claude : codex) })),
+      getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) => {
+        if (backend === 'codex') throw new Error('unavailable');
+        return chainOf(backend, model, [A]);
+      }),
+    }, [supply('claude', []), supply('codex', [])])).rejects.toThrow('onboarding.route.readFailed');
+  });
+
+  it('also refuses a partial list when an enabled assistant detail is unreadable', async () => {
+    const claude = brief('claude', 'claude', 'opus-5');
+    const codex = brief('codex', 'codex', 'gpt-5');
+    await expect(hydrateSetupRoutes({
+      listVibeAgents: vi.fn(async () => ({ ok: true, agents: [claude, codex], default_agent_name: null })),
+      getVibeAgent: vi.fn(async (name: string) => name === 'codex'
+        ? { ok: false, agent: null }
+        : { ok: true, agent: full(claude) }),
+      getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) => chainOf(backend, model, [A])),
+    }, [supply('claude', []), supply('codex', [])])).rejects.toThrow('onboarding.route.readFailed');
+  });
 });
 
 describe('saveSetupRoutes', () => {
@@ -236,6 +261,25 @@ describe('saveSetupRoutes', () => {
     expect(api.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [A, C] });
     expect(results.every((row) => row.kind === 'confirmed')).toBe(true);
     expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([A, C]);
+  });
+
+  it('shares Hub keys while excluding backend-specific native subscription hops', async () => {
+    const claude = target('claude', 'opus-5', [A], ['claude']);
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api, store } = writes({ 'claude:opus-5': claude.chain, 'codex:gpt-5': codex.chain });
+    const shared = [A, C, D];
+    api.listAgents = vi.fn(async () => [
+      { ...supply('claude', []), sources: { order: ['src_a', 'src_c'], eligibility: [
+        { source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: false }, { source_id: 'src_c', eligible: true },
+      ] } },
+      { ...supply('codex', []), sources: { order: ['src_b', 'src_c'], eligibility: [
+        { source_id: 'src_a', eligible: false }, { source_id: 'src_b', eligible: true }, { source_id: 'src_c', eligible: true },
+      ] } },
+    ]);
+    const results = await saveSetupRoutes(shared, [claude, codex], api);
+    expect(results.every((row) => row.kind === 'confirmed')).toBe(true);
+    expect(store['claude:opus-5']?.manual_override?.hops).toEqual([A, D]);
+    expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([C, D]);
   });
 
   it('reordering an automatic chain persists a manual override and reads it back', async () => {
