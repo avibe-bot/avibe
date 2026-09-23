@@ -15,7 +15,7 @@
 // wire is *made of* — stroke, port, pulse — is the story's, by class: one screen's
 // circuit and this one are the same object seen twice, and there is one place to
 // change what that object looks like.
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FC } from 'react';
 
 /** The reference's y breakpoints as shares of its 38-unit band. */
@@ -68,7 +68,6 @@ export const SupplyWires: FC<{
   endpointSelector: string;
 }> = ({ direction, stage, endpointSelector }) => {
   const bandRef = useRef<HTMLDivElement | null>(null);
-  const glowId = useId();
   const [geometry, setGeometry] = useState<Geometry | null>(null);
 
   const measure = useCallback(() => {
@@ -114,9 +113,6 @@ export const SupplyWires: FC<{
     <div ref={bandRef} className={`setup-wires setup-wires--${direction}`} aria-hidden="true">
       {geometry && (
         <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} width={geometry.width} height={geometry.height}>
-          <defs>
-            <filter id={glowId} x="-100%" y="-500%" width="300%" height="1100%"><feGaussianBlur stdDeviation="3" /></filter>
-          </defs>
           {geometry.paths.map((path, index) => (
             <g key={`wire-${index}`}>
               <path className="onboarding-wire" d={path} fill="none" />
@@ -126,8 +122,10 @@ export const SupplyWires: FC<{
                   several times over — a row of chunks rather than a thing in motion.
                   The halo and the core travel together and undelayed: the whole fan
                   arriving at once is what reads as convergence. */}
-              <path className="onboarding-pulse-halo" d={path} fill="none" pathLength={100}
-                style={{ filter: `url(#${glowId})` }} />
+              {/* The halo is a wider, softer stroke of the same path — the reference's
+                  own glow. No blur filter: one on a band this short reads as an
+                  over-exposed bar rather than as light around a moving segment. */}
+              <path className="onboarding-pulse-halo" d={path} fill="none" pathLength={100} />
               <path className="onboarding-pulse-core" d={path} fill="none" pathLength={100} />
             </g>
           ))}

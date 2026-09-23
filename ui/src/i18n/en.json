@@ -5426,7 +5426,7 @@
       "summaryNone": "No provider selected",
       "summarySelected_one": "{{count}} provider selected: {{names}}",
       "summarySelected_other": "{{count}} providers selected: {{names}}",
-      "summarySelectedNote": "After migration is confirmed, Model Hub manages authentication for the selected assistants.",
+      "summarySelectedNote": "Copies only; your original configuration stays",
       "summaryAdded_one": "{{count}} provider added: {{names}}",
       "summaryAdded_other": "{{count}} providers added: {{names}}",
       "summaryError": "Connection failed. Check your configuration and retry.",

@@ -97,13 +97,13 @@
   cursor: not-allowed;
   opacity: 0.55;
 }
-/* The third card is an invitation rather than a thing that exists, so it is drawn as
-   an outline on nothing: no fill, and the dashed edge the handoff asks for in place of
-   the reference's solid one. */
+/* The third card is an invitation rather than a thing that exists, but it is one of
+   the row's three cards: the reference gives it the same shell as the two beside it,
+   so it carries the same surface and edge and says what it is through the plus and
+   its copy. */
 .setup-provider-card[data-state='add'] {
-  border-style: dashed;
-  border-color: var(--border-strong);
-  background: transparent;
+  border-color: var(--ob-card-border);
+  background: var(--ob-card);
 }
 .setup-provider-card[data-state='add']:hover,
 .setup-provider-card[data-state='add']:focus-visible {
@@ -260,12 +260,14 @@
   border: 1px solid var(--ob-card-border);
   background: var(--ob-card);
   text-align: center;
-  transition: border-color 150ms, background 150ms;
+  transition: border-color 150ms, box-shadow 150ms;
 }
-/* Running — including degraded but routable — is the state the diagram is drawn in. */
+/* Running — including degraded but routable — is the state the diagram is drawn in.
+   The reference states it on the edge, not in the fill: the hub keeps the surface
+   every other card on the stage wears and wears the story's active halo instead. */
 .setup-gateway[data-state='running'] {
-  border-color: var(--mint);
-  background: var(--card-wash);
+  border-color: var(--ob-active-border);
+  box-shadow: var(--ob-active-shadow);
 }
 /* The one place the band's fixed height gives way, because what replaces the tagline
    is two sentences and a way out of them. The wires re-measure on the stage's resize,

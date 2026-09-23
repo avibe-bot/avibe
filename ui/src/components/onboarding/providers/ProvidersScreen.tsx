@@ -687,12 +687,17 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       ? t('onboarding.providers.summaryNone')
       : summary.kind === 'error'
         ? t('onboarding.providers.summaryError')
-        : t(
-          summary.kind === 'added'
-            ? 'onboarding.providers.summaryAdded'
-            : 'onboarding.providers.summarySelected',
-          { count: summary.count, names: formatNames(summary.names, i18n.language) },
-        );
+        : [
+          t(
+            summary.kind === 'added'
+              ? 'onboarding.providers.summaryAdded'
+              : 'onboarding.providers.summarySelected',
+            { count: summary.count, names: formatNames(summary.names, i18n.language) },
+          ),
+          // What a consented-but-not-yet-taken-over credential is about to do, which
+          // is the half of the sentence that answers 「what happens to my key」.
+          ...(summary.kind === 'selected' ? [t('onboarding.providers.summarySelectedNote')] : []),
+        ].join(' · ');
 
     // ── The way on when nothing is connected ────────────────────────────────
 
