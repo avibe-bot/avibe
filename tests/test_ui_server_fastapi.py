@@ -157,7 +157,7 @@ def test_session_archive_delegates_terminal_mutation_to_controller(
     async def _noop(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(internal_client, "memory_archive_session", _archive_via_controller)
+    monkeypatch.setattr(internal_client, "archive_session", _archive_via_controller)
     monkeypatch.setattr(sessions_service, "archive_session", _archive)
     monkeypatch.setattr(ui_server, "_archive_cancel_turn", _noop)
 
@@ -199,7 +199,7 @@ def test_session_archive_fails_closed_when_controller_is_unavailable(
     async def _unavailable(_session_id: str):
         raise internal_client.InternalServerUnavailable("controller unavailable")
 
-    monkeypatch.setattr(internal_client, "memory_archive_session", _unavailable)
+    monkeypatch.setattr(internal_client, "archive_session", _unavailable)
     client = app.test_client()
     response = client.delete(
         f"/api/sessions/{session_id}",
@@ -210,6 +210,84 @@ def test_session_archive_fails_closed_when_controller_is_unavailable(
     assert response.json()["code"] == "session_archive_unavailable"
     with engine.connect() as conn:
         assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_archive_http_rpc_waits_for_accepted_durable_outcome(monkeypatch, tmp_path, failure):
+    import httpx
+    from types import MethodType
+    from core import internal_server
+    from core.controller import Controller
+    from storage.db import create_sqlite_engine
+    from storage import workbench_sessions_service as sessions
+    from tests.test_internal_server import _build_controller_double
+    from vibe import internal_client
+
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session_id = sessions.create_session(conn, scope_id=None, agent_backend="claude", title="归档")['id']
+    accepted = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    outcomes = []
+    controller = _build_controller_double()
+    controller.archive_session = MethodType(Controller.archive_session, controller)
+    internal_app = internal_server.create_app(controller)
+
+    async def delayed_lifecycle(actual_id, operation, **kwargs):
+        assert actual_id == session_id
+        accepted.set()
+        assert await asyncio.to_thread(release.wait, 5)
+        if failure:
+            raise LookupError(session_id)
+        return await operation()
+
+    monkeypatch.setattr(controller.session_turns, "run_session_lifecycle", delayed_lifecycle)
+
+    class ArchiveTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            assert request.url.path == "/internal/sessions/archive"
+            assert request.extensions["timeout"] == {
+                "connect": 5.0, "read": None, "write": None, "pool": None,
+            }
+            return await httpx.ASGITransport(app=internal_app).handle_async_request(request)
+
+    async def verified(_path):
+        return tmp_path / "test-only.sock"
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(internal_client, "_verified_socket_path_async", verified)
+    monkeypatch.setattr(internal_client.httpx, "AsyncHTTPTransport", lambda **kwargs: ArchiveTransport())
+    monkeypatch.setattr(ui_server, "_archive_cancel_turn", noop)
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def request_archive():
+        try:
+            outcomes.append(client.delete(f"/api/sessions/{session_id}", headers=headers))
+        except BaseException as exc:
+            outcomes.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=request_archive)
+    worker.start()
+    try:
+        assert accepted.wait(5), outcomes
+        assert not finished.is_set()
+        with engine.connect() as conn:
+            assert sessions.get_session(conn, session_id)["status"] == "active"
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert len(outcomes) == 1 and not isinstance(outcomes[0], BaseException), outcomes
+    assert outcomes[0].status_code == (404 if failure else 200)
+    with engine.connect() as conn:
+        assert sessions.get_session(conn, session_id)["status"] == ("active" if failure else "archived")
 
 
 @pytest.mark.parametrize("session_kind", ["missing", "reserved", "archived"])
@@ -245,7 +323,7 @@ def test_session_archive_preflight_skips_controller_lifecycle_for_ineligible_row
             archive_session(conn, session_id)
 
     archive_session = AsyncMock()
-    monkeypatch.setattr(internal_client, "memory_archive_session", archive_session)
+    monkeypatch.setattr(internal_client, "archive_session", archive_session)
     client = app.test_client()
 
     response = client.delete(

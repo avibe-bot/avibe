@@ -11,7 +11,6 @@ import platform
 import select as select_module
 import shlex
 import shutil
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -33,7 +32,7 @@ from apscheduler.triggers.cron import CronTrigger
 from tzlocal import get_localzone_name
 from sqlalchemy import select
 
-from config import SettingsStore, paths
+from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
@@ -71,7 +70,6 @@ from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
-    MemoryRequirementUnreadableError,
     PACKAGE_NAME,
     AtomicActivation,
     DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
@@ -83,7 +81,6 @@ from vibe.upgrade import (
     atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
-    configured_memory_enabled,
     execute_upgrade_plan,
     defer_upgrade_activation,
     get_latest_version_info,
@@ -135,7 +132,6 @@ DOCTOR_REPAIR_TARGETS = (
     "avault",
     "model-hub-engine",
     "git-runtime",
-    "memory-runtime",
     "show-runtime",
     "tmux",
 )
@@ -150,7 +146,6 @@ DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
     "avault": "doctor.repair.dryAvault",
     "model-hub-engine": "doctor.repair.dryModelHubEngine",
     "git-runtime": "doctor.repair.dryGitRuntime",
-    "memory-runtime": "doctor.repair.dryMemoryRuntime",
     "show-runtime": "doctor.repair.dryShowRuntime",
     "tmux": "doctor.repair.dryTmux",
 }
@@ -554,343 +549,6 @@ def _configured_cli_language() -> str:
         return normalize_language(language if isinstance(language, str) else None)
     except Exception:
         return "en"
-
-
-def _memory_cli_language() -> str:
-    return _configured_cli_language()
-
-
-_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS = {
-    "disabled": "memory.cli.runtimeState.disabled",
-    "starting": "memory.cli.runtimeState.starting",
-    "running": "memory.cli.runtimeState.running",
-    "degraded": "memory.cli.runtimeState.degraded",
-    "needs_repair": "memory.cli.runtimeState.needsRepair",
-}
-_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
-    "ok": "memory.cli.providerState.ok",
-}
-_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS = {
-    "ready": "memory.cli.attachmentCaptureState.ready",
-    "not_configured": "memory.cli.attachmentCaptureState.notConfigured",
-    "unavailable": "memory.cli.attachmentCaptureState.unavailable",
-}
-_MEMORY_CLI_REASON_I18N_KEYS = {
-    "memory_disabled": "memory.cli.reason.memoryDisabled",
-    "memory_invalid_input": "memory.cli.reason.invalidInput",
-    "memory_access_denied": "memory.cli.reason.accessDenied",
-    "memory_input_too_large": "memory.cli.reason.inputTooLarge",
-    "memory_queue_full": "memory.cli.reason.queueFull",
-    "memory_low_disk_space": "memory.cli.reason.lowDiskSpace",
-    "memory_store_unavailable": "memory.cli.reason.storeUnavailable",
-    "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
-    "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
-    "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
-    "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
-    "memory_wake_failed": "memory.cli.reason.wakeFailed",
-    "memory_runtime_busy": "memory.cli.reason.runtimeBusy",
-    "memory_permission_denied": "memory.cli.reason.permissionDenied",
-    "memory_disk_unavailable": "memory.cli.reason.diskUnavailable",
-    "memory_local_data_unusable": "memory.cli.reason.localDataUnusable",
-    "memory_legacy_recovery_required": "memory.cli.reason.legacyRecoveryRequired",
-    "memory_sidecar_unavailable": "memory.cli.reason.sidecarUnavailable",
-    "memory_provider_timeout": "memory.cli.reason.providerTimeout",
-    "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
-    "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
-    "memory_processing_failed": "memory.cli.reason.processingFailed",
-    "memory_loss_confirmation_required": "memory.cli.reason.lossConfirmationRequired",
-    "memory_embedding_unavailable": "memory.cli.reason.embeddingUnavailable",
-    "memory_llm_unavailable": "memory.cli.reason.llmUnavailable",
-    "memory_rerank_unavailable": "memory.cli.reason.rerankUnavailable",
-    "memory_multimodal_unavailable": "memory.cli.reason.multimodalUnavailable",
-    "memory_repair_failed": "memory.cli.reason.repairFailed",
-    "memory_repair_not_required": "memory.cli.reason.repairNotRequired",
-    "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
-    "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
-    "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
-    "memory_implementation_unavailable": "memory.cli.reason.implementationUnavailable",
-    "memory_implementation_incompatible": "memory.cli.reason.implementationIncompatible",
-}
-_DOCTOR_MEMORY_REASON_I18N_KEYS = {
-    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
-    "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
-    "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
-    "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",
-    "memory_runtime_preparation_scrubber_failed": "memory.cli.reason.runtimePreparationScrubberFailed",
-    "memory_runtime_preparation_sync_contract_failed": "memory.cli.reason.runtimePreparationSyncContractFailed",
-    "memory_runtime_preparation_failed": "memory.cli.reason.runtimePreparationFailed",
-}
-
-
-def _memory_cli_label(
-    value: object,
-    *,
-    keys: dict[str, str],
-    fallback_key: str,
-    language: str,
-) -> str:
-    token = value.strip() if isinstance(value, str) else ""
-    return i18n_t(keys.get(token, fallback_key), language)
-
-
-def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
-    payload = {
-        "schema_version": 1,
-        "ok": False,
-        "kind": f"memory_{operation}",
-        "code": code,
-        "error": code,
-    }
-    if as_json:
-        print(json.dumps(payload, indent=2))
-    else:
-        display_code = _memory_cli_label(
-            code,
-            keys=_MEMORY_CLI_REASON_I18N_KEYS,
-            fallback_key="memory.cli.reason.unknown",
-            language=language,
-        )
-        print(
-            i18n_t("memory.cli.error", language, operation=operation, code=display_code),
-            file=sys.stderr,
-        )
-    return 1
-
-
-def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
-    """Validate the closed controller response shape used by ``vibe memory``."""
-
-    from vibe.memory_contract import is_memory_error_code
-
-    if not isinstance(response, dict):
-        return None, "memory_provider_response_invalid"
-    body = response.get("body")
-    if not isinstance(body, dict):
-        return None, "memory_provider_response_invalid"
-    error = body.get("error")
-    if response.get("status_code") != 200 or body.get("status") == "failed":
-        return None, error if is_memory_error_code(error) else fallback
-    return body, None
-
-
-def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> None:
-    if operation == "remember":
-        print(i18n_t("memory.cli.remembered", language))
-        return
-    if operation == "status":
-        runtime_state_label = _memory_cli_label(
-            result.get("state"),
-            keys=_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS,
-            fallback_key="memory.cli.runtimeState.unknown",
-            language=language,
-        )
-        print(
-            i18n_t(
-                "memory.cli.status",
-                language,
-                state=runtime_state_label,
-            )
-        )
-        health = result.get("health")
-        if isinstance(health, dict):
-            version = health.get("version")
-            provider_state = health.get("status")
-            provider_state_label = _memory_cli_label(
-                provider_state,
-                keys=_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
-                fallback_key="memory.cli.providerState.unknown",
-                language=language,
-            )
-            print(
-                i18n_t(
-                    "memory.cli.provider",
-                    language,
-                    version=(
-                        version
-                        if isinstance(version, str) and version
-                        else i18n_t("memory.cli.unknownVersion", language)
-                    ),
-                    state=provider_state_label,
-                )
-            )
-        attachment_capture = result.get("attachment_capture")
-        if isinstance(attachment_capture, dict):
-            attachment_state_label = _memory_cli_label(
-                attachment_capture.get("status"),
-                keys=_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS,
-                fallback_key="memory.cli.attachmentCaptureState.unknown",
-                language=language,
-            )
-            print(
-                i18n_t(
-                    "memory.cli.attachmentCapture",
-                    language,
-                    state=attachment_state_label,
-                )
-            )
-        reason = result.get("reason")
-        if isinstance(reason, str) and reason:
-            reason_label = _memory_cli_label(
-                reason,
-                keys=_MEMORY_CLI_REASON_I18N_KEYS,
-                fallback_key="memory.cli.reason.unknown",
-                language=language,
-            )
-            print(i18n_t("memory.cli.sourceReason", language, reason=reason_label))
-        return
-
-    warnings = result.get("warnings")
-    if operation == "list":
-        if isinstance(warnings, list) and "memory_list_truncated" in warnings:
-            print(i18n_t("memory.cli.listWarning.truncated", language), file=sys.stderr)
-    elif (
-        operation in {"search", "profile"}
-        and isinstance(warnings, list)
-        and "memory_search_partial" in warnings
-    ):
-        print(i18n_t("memory.cli.readWarning.partial", language), file=sys.stderr)
-
-    items = result.get("items")
-    if not isinstance(items, list) or not items:
-        print(i18n_t("memory.cli.empty", language))
-        return
-    if operation == "list":
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            timestamp = item.get("timestamp")
-            subject = item.get("subject")
-            summary = item.get("summary")
-            body = item.get("body")
-            lines = [
-                value
-                for value in (subject, summary, body)
-                if isinstance(value, str) and value
-            ]
-            if not lines:
-                continue
-            prefix = f"{timestamp} " if isinstance(timestamp, str) and timestamp else ""
-            print(f"{prefix}{lines[0]}")
-            for line in lines[1:]:
-                print(line)
-        return
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        text = item.get("text")
-        if not isinstance(text, str):
-            continue
-        date = item.get("date")
-        origin = item.get("origin")
-        origin_prefix = ""
-        if operation in {"search", "profile"} and origin in {"user", "agent", "both"}:
-            origin_prefix = i18n_t(
-                "memory.cli.originPrefix",
-                language,
-                origin=i18n_t(f"memory.cli.origin.{origin}", language),
-            )
-        date_prefix = f"{date} " if isinstance(date, str) and date else ""
-        prefix = f"{origin_prefix}{date_prefix}"
-        print(f"{prefix}{text}")
-
-
-def cmd_memory(args) -> int:
-    """Present direct Memory reads from the controller's verified UDS only."""
-
-    from vibe import internal_client
-    from core.caller_context import caller_context_from_env
-    from vibe.memory_contract import (
-        MAX_MEMORY_LIST_PAGE_SIZE,
-        MAX_MEMORY_SEARCH_RESULTS,
-    )
-
-    operation = args.memory_command
-    as_json = bool(getattr(args, "json", False))
-    language = _memory_cli_language()
-    query = ""
-    if operation not in {"status", "profile", "list", "search", "remember"}:
-        return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
-    if operation == "search":
-        query = args.query.strip() if isinstance(args.query, str) else ""
-        if (
-            not query
-            or not isinstance(args.limit, int)
-            or isinstance(args.limit, bool)
-            or not 1 <= args.limit <= MAX_MEMORY_SEARCH_RESULTS
-        ):
-            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
-    if operation == "list" and (
-        not isinstance(args.page, int)
-        or isinstance(args.page, bool)
-        or args.page < 1
-        or not isinstance(args.limit, int)
-        or isinstance(args.limit, bool)
-        or not 1 <= args.limit <= MAX_MEMORY_LIST_PAGE_SIZE
-    ):
-        return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
-    if operation == "remember":
-        query = args.text if isinstance(args.text, str) else ""
-        if not query.strip():
-            return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
-    try:
-        caller = caller_context_from_env()
-        access = (
-            {"caller_session_id": caller.session_id}
-            if caller is not None
-            else {}
-        )
-        if operation == "status":
-            response = internal_client.memory_status_sync(**access)
-        elif operation == "profile":
-            response = internal_client.memory_profile_sync(**access)
-        elif operation == "list":
-            response = internal_client.memory_list_sync(
-                page=args.page,
-                limit=args.limit,
-                project=getattr(args, "project", None),
-                **access,
-            )
-        elif operation == "search":
-            response = internal_client.memory_search_sync(
-                query,
-                args.limit,
-                mode=args.mode,
-                project=getattr(args, "project", None),
-                **access,
-            )
-        else:
-            response = internal_client.memory_remember_sync(
-                query,
-                project=getattr(args, "project", None),
-                **access,
-            )
-    except internal_client.InternalServerUnavailable:
-        return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
-
-    result, error = _memory_cli_body(response, fallback="memory_sidecar_unavailable")
-    if error is not None:
-        return _print_memory_cli_error(operation, error, as_json=as_json, language=language)
-    assert result is not None
-    if operation == "remember":
-        outcome = result.get("status")
-        if outcome not in {"accepted", "duplicate"}:
-            code = result.get("reason") or result.get("error") or "memory_store_unavailable"
-            return _print_memory_cli_error(operation, code, as_json=as_json, language=language)
-    if as_json:
-        print(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "ok": True,
-                    "kind": f"memory_{operation}",
-                    "result": result,
-                },
-                indent=2,
-            )
-        )
-    else:
-        _print_memory_cli_human(operation, result, language=language)
-    return 0
 
 
 def cmd_skill(args) -> int:
@@ -4702,7 +4360,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
     try:
         updated = store.set_enabled(task_id, enabled)
     except TaskResumeBlocked as exc:
-        lang = _memory_cli_language()
+        lang = _configured_cli_language()
         _print_task_error(
             TaskCliError(
                 i18n_t("error.taskOwnerUnavailable.message", lang),
@@ -4717,7 +4375,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         )
         return 1
     except TaskScheduleRetired as exc:
-        lang = _memory_cli_language()
+        lang = _configured_cli_language()
         _print_task_error(
             TaskCliError(
                 i18n_t("error.taskScheduleRetired.message", lang),
@@ -11740,7 +11398,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         "model-hub-engine": i18n_t("doctor.value.modelHubEngine", language),
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
-        "memory-runtime": i18n_t("doctor.value.memoryRuntime", language),
         "node": "Node.js",
     }
     repair_targets = {
@@ -11748,7 +11405,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         "avault": "avault",
         "model-hub-engine": "model-hub-engine",
         "git-runtime": "git-runtime",
-        "memory-runtime": "memory-runtime",
         "tmux": "tmux",
     }
     items: list[dict] = []
@@ -11795,7 +11451,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 "dependency_reason": dependency.get("reason"),
                 "dependency_required": bool(dependency.get("required")),
             }
-            if dependency_id == "memory-runtime"
+            if False
             else {}
         )
         if ready:
@@ -11817,7 +11473,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                         version=version,
                     ),
                     code=f"dependencies.{dependency_id}.ready",
-                    dependency_status=status if dependency_id == "memory-runtime" else None,
+                    dependency_status=None,
                     **memory_details,
                 )
             continue
@@ -11843,10 +11499,10 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 i18n_t("doctor.action.dependencyPlatformUnsupported", language),
                 code=(
                     f"dependencies.{dependency_id}.unsupported"
-                    if dependency_id == "memory-runtime"
+                    if False
                     else f"dependencies.{dependency_id}.platform_unsupported"
                 ),
-                dependency_status=status if dependency_id == "memory-runtime" else None,
+                dependency_status=None,
                 **memory_details,
             )
             continue
@@ -11892,32 +11548,13 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             severity,
-            (
-                i18n_t(
-                    (
-                        "doctor.item.memoryRuntimeMissing"
-                        if status == "missing"
-                        else "doctor.item.memoryRuntimeError"
-                    ),
-                    language,
-                    reason=_doctor_memory_reason(dependency_reason, language),
-                )
-                if dependency_id == "memory-runtime"
-                else i18n_t("doctor.item.dependencyNotReady", language, label=label)
-            ),
+            i18n_t("doctor.item.dependencyNotReady", language, label=label),
             i18n_t("doctor.action.dependencyNotReady", language, retry=retry_action),
-            code=(
-                f"dependencies.{dependency_id}.{status}"
-                if dependency_id == "memory-runtime"
-                else f"dependencies.{dependency_id}.not_ready"
-            ),
+            code=f"dependencies.{dependency_id}.not_ready",
             repair_target=repair_target,
             repair_risk="low",
             dependency_status=status,
-            **memory_details,
         )
-        if dependency_id == "memory-runtime":
-            continue
         if not deep:
             continue
 
@@ -13111,17 +12748,6 @@ def _doctor_display_value(value: object, category: str, language: str) -> str:
     return i18n_t(key, language) if key else i18n_t("doctor.value.unknown", language)
 
 
-def _doctor_memory_reason(reason: object, language: str) -> str:
-    reason_code = reason.strip() if isinstance(reason, str) else ""
-    key = _DOCTOR_MEMORY_REASON_I18N_KEYS.get(
-        reason_code,
-        _MEMORY_CLI_REASON_I18N_KEYS.get(reason_code),
-    )
-    if key:
-        return i18n_t(key, language)
-    return reason_code or i18n_t("doctor.value.unknownError", language)
-
-
 def _doctor_managed_reason_key(reason: str) -> str | None:
     projections = DOCTOR_DISPLAY_PROJECTIONS
     key = projections["repair_reason"].get(reason)
@@ -13197,19 +12823,9 @@ def _start_service_after_repair(
     *,
     stopped_pids: list[int],
 ) -> dict:
-    from vibe.memory_ui_access import generate_ui_read_secret
-
-    # This repair stopped the old service and starts a replacement, so it is the
-    # same shape ``cmd_start`` handles when it starts a service beside a
-    # surviving UI: the Memory UI read proof reaches a child only over stdin and
-    # is never persisted, so a bare CLI holds no secret to pass on and the new
-    # controller would verify with None while the live UI keeps signing with the
-    # old one. Mint a secret for the process being started and realign the UI.
-    memory_ui_secret = generate_ui_read_secret()
-    live_ui_pid = _live_ui_server_pid()
     language = _configured_cli_language()
     try:
-        new_pid = runtime.start_service(memory_ui_secret=memory_ui_secret)
+        new_pid = runtime.start_service()
     except Exception as exc:
         _write_refreshed_runtime_status()
         return _doctor_repair_result(
@@ -13219,24 +12835,6 @@ def _start_service_after_repair(
             stopped_pids=stopped_pids,
         )
     ui_pid = runtime.read_status().get("ui_pid")
-    if live_ui_pid is not None:
-        # Remote access keeps running across the UI restart, matching cmd_start.
-        try:
-            runtime.stop_ui(stop_remote_access=False)
-            config = _ensure_config()
-            ui_pid = runtime.start_ui(
-                runtime.effective_ui_bind_host(config),
-                config.ui.setup_port,
-                memory_ui_secret=memory_ui_secret,
-            )
-        except Exception:
-            # The service repair itself succeeded; report it rather than failing
-            # the whole repair because the UI could not be realigned.
-            logger.exception(
-                "Repaired the service but could not restart the Web UI pid=%s to share the Memory UI proof secret; "
-                "Memory profile, search and clear stay unavailable until both processes restart together",
-                live_ui_pid,
-            )
     runtime.write_status("running", f"pid={new_pid}", new_pid, ui_pid)
     return _doctor_repair_result(
         target,
@@ -13550,54 +13148,6 @@ def _repair_tmux(*, dry_run: bool = False) -> dict:
     return _repair_managed_dependency("tmux", ensure_tmux_installed, dry_run=dry_run)
 
 
-def _repair_memory_runtime(*, dry_run: bool = False) -> dict:
-    target = "memory-runtime"
-    language = _configured_cli_language()
-    if dry_run:
-        return _doctor_repair_result(
-            target,
-            "planned",
-            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
-        )
-
-    try:
-        from vibe import internal_client
-
-        response = internal_client.memory_install_runtime_sync()
-    except Exception as exc:  # noqa: BLE001
-        return _doctor_repair_result(
-            target,
-            "failed",
-            i18n_t("doctor.repair.memoryRuntimeControllerUnavailable", language, reason=exc),
-            reason="memory_runtime_install_failed",
-        )
-
-    payload = response.get("body") if isinstance(response.get("body"), dict) else {}
-    reason = str(payload.get("reason") or "memory_runtime_install_failed")
-    download_error = (
-        payload.get("download_error")
-        if isinstance(payload.get("download_error"), dict)
-        else None
-    )
-    if response.get("status_code") == 200 and payload.get("ok") is True:
-        return _doctor_repair_result(
-            target,
-            "repaired",
-            i18n_t("doctor.repair.memoryRuntimeReady", language),
-        )
-    return _doctor_repair_result(
-        target,
-        "failed",
-        i18n_t(
-            "doctor.repair.memoryRuntimeFailed",
-            language,
-            reason=_doctor_memory_reason(reason, language),
-        ),
-        reason=reason,
-        download_error=download_error,
-    )
-
-
 def _repair_git_runtime(*, dry_run: bool = False) -> dict:
     from core.git_runtime import GitRuntimeManager
 
@@ -13751,7 +13301,6 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
         "avault": _repair_avault,
         "model-hub-engine": _repair_model_hub_engine,
         "git-runtime": _repair_git_runtime,
-        "memory-runtime": _repair_memory_runtime,
         "show-runtime": _repair_show_runtime,
         "tmux": _repair_tmux,
     }
@@ -13782,17 +13331,6 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def _live_ui_server_pid() -> int | None:
-    """Return the recorded UI pid while it is still a live Avibe UI server."""
-
-    if not runtime.ui_pid_file_points_to_running_ui():
-        return None
-    try:
-        return int(paths.get_runtime_ui_pid_path().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-
-
 def cmd_start():
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
@@ -13809,52 +13347,16 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    from vibe.memory_ui_access import generate_ui_read_secret
-
-    # The Memory UI read proof is a per-launch secret: it reaches a child only
-    # over stdin and is deliberately never persisted, so this launcher can only
-    # align a pair it starts itself. It cannot read the copy a surviving process
-    # already holds. Minting a fresh secret while reusing one live process is
-    # what left Memory profile/search/clear answering memory_access_denied after
-    # a partial restart, so track which side actually started here.
-    memory_ui_secret = generate_ui_read_secret()
     live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
-    live_ui_pid = _live_ui_server_pid()
     service_pid = runtime.start_service(
         wait_for_ready=False,
-        memory_ui_secret=memory_ui_secret,
     )
     service_reused = live_service_pid is not None and service_pid == live_service_pid
-    if service_reused:
-        # The reused service still verifies proofs with the secret it was started
-        # with. Signing with a different one would only produce requests it
-        # rejects, so leave the surviving pair's own secret authoritative.
-        ui_memory_secret = None
-    else:
-        ui_memory_secret = memory_ui_secret
-        if live_ui_pid is not None:
-            # A surviving UI signs with the previous secret, which the service
-            # started just now cannot verify. Restart it so the pair shares one
-            # secret; remote access keeps running across the UI restart.
-            runtime.stop_ui(stop_remote_access=False)
-            live_ui_pid = None
     bind_host = runtime.effective_ui_bind_host(config)
     ui_pid = runtime.start_ui(
         bind_host,
         config.ui.setup_port,
-        memory_ui_secret=ui_memory_secret,
     )
-    if service_reused and ui_pid != live_ui_pid:
-        logger.warning(
-            "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "
-            "Memory profile, search and clear stay unavailable until both processes restart together",
-            ui_pid,
-            service_pid,
-        )
-        if bool(getattr(getattr(config, "memory", None), "enabled", False)):
-            language = normalize_language(getattr(config, "language", None))
-            print(i18n_t("memory.cli.partialRestartWarning", language))
-            print("")
     # The WAIT below is asked unconditionally. The predicate that used to guard
     # it is the lock, which is taken before the database is migrated -- so it is
     # already true of a process that has not finished starting and may never, and
@@ -15631,12 +15133,8 @@ def cmd_upgrade():
     try:
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,
-            memory_enabled=configured_memory_enabled(),
             target_version=info.get("latest"),
         )
-    except MemoryRequirementUnreadableError:
-        print(f"\033[31m{i18n_t('update.memoryRequirementUnreadable')}\033[0m")
-        return 1
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1
@@ -16176,23 +15674,6 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
-    def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
-        try:
-            from avibe_memory.artifact import get_memory_artifact_manager
-        except ModuleNotFoundError as exc:
-            if exc.name not in {"avibe_memory", "avibe_memory.artifact"}:
-                raise
-            return {
-                "ok": True,
-                "removed": [],
-                "skipped": True,
-                "reason": "memory_implementation_unavailable",
-            }
-
-        return get_memory_artifact_manager().clean(
-            keep_previous=keep_previous,
-            dry_run=dry_run,
-        )
 
     def clean_model_hub(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
         return EngineRuntimeManager().clean(
@@ -16208,7 +15689,6 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
 
     return (
         ("git", _clean_git_runtime),
-        ("memory-runtime", clean_memory),
         ("model_hub_engine", clean_model_hub),
         ("tmux", clean_tmux),
     )
@@ -16269,7 +15749,6 @@ def _runtime_clean_verdict(result: Mapping[str, Any], *, dry_run: bool) -> _Runt
 def _managed_runtime_label(runtime_id: str) -> str:
     labels = {
         "git": "Git Runtime",
-        "memory-runtime": "Memory Runtime",
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
     }
@@ -16515,16 +15994,6 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
-    memory_help_language = _memory_cli_language()
-    memory_parser = subparsers.add_parser(
-        "memory",
-        help=i18n_t("memory.cli.help.command", memory_help_language),
-    )
-    memory_subparsers = memory_parser.add_subparsers(
-        dest="memory_command",
-        metavar="{status,profile,list,search,remember}",
-    )
-    memory_subparsers.required = True
     skill_help_language = _configured_cli_language()
     skill_parser = subparsers.add_parser(
         "skill",
@@ -16582,98 +16051,6 @@ def build_parser():
         choices=("json",),
         default="json",
         help=i18n_t("debug.cli.help.promptFormat", debug_help_language),
-    )
-    memory_status_parser = memory_subparsers.add_parser(
-        "status",
-        help=i18n_t("memory.cli.help.status", memory_help_language),
-    )
-    memory_status_parser.add_argument(
-        "--json",
-        action="store_true",
-        help=i18n_t("memory.cli.help.json", memory_help_language),
-    )
-    memory_profile_parser = memory_subparsers.add_parser(
-        "profile",
-        help=i18n_t("memory.cli.help.profile", memory_help_language),
-    )
-    memory_profile_parser.add_argument(
-        "--json",
-        action="store_true",
-        help=i18n_t("memory.cli.help.json", memory_help_language),
-    )
-    memory_list_parser = memory_subparsers.add_parser(
-        "list",
-        help=i18n_t("memory.cli.help.list", memory_help_language),
-    )
-    memory_list_parser.add_argument(
-        "--project",
-        default=None,
-        help=i18n_t("memory.cli.help.project", memory_help_language),
-    )
-    memory_list_parser.add_argument(
-        "--page",
-        type=int,
-        default=1,
-        help=i18n_t("memory.cli.help.page", memory_help_language),
-    )
-    memory_list_parser.add_argument(
-        "--limit",
-        type=int,
-        default=20,
-        help=i18n_t("memory.cli.help.pageLimit", memory_help_language),
-    )
-    memory_list_parser.add_argument(
-        "--json",
-        action="store_true",
-        help=i18n_t("memory.cli.help.json", memory_help_language),
-    )
-    memory_search_parser = memory_subparsers.add_parser(
-        "search",
-        help=i18n_t("memory.cli.help.search", memory_help_language),
-    )
-    memory_search_parser.add_argument(
-        "query",
-        help=i18n_t("memory.cli.help.query", memory_help_language),
-    )
-    memory_search_parser.add_argument(
-        "--limit",
-        type=int,
-        default=8,
-        help=i18n_t("memory.cli.help.limit", memory_help_language),
-    )
-    memory_search_parser.add_argument(
-        "--mode",
-        choices=("hybrid", "keyword", "vector", "agentic"),
-        default="hybrid",
-        help=i18n_t("memory.cli.help.mode", memory_help_language),
-    )
-    memory_search_parser.add_argument(
-        "--project",
-        default=None,
-        help=i18n_t("memory.cli.help.project", memory_help_language),
-    )
-    memory_search_parser.add_argument(
-        "--json",
-        action="store_true",
-        help=i18n_t("memory.cli.help.json", memory_help_language),
-    )
-    memory_remember_parser = memory_subparsers.add_parser(
-        "remember",
-        help=i18n_t("memory.cli.help.remember", memory_help_language),
-    )
-    memory_remember_parser.add_argument(
-        "text",
-        help=i18n_t("memory.cli.help.text", memory_help_language),
-    )
-    memory_remember_parser.add_argument(
-        "--project",
-        default=None,
-        help=i18n_t("memory.cli.help.project", memory_help_language),
-    )
-    memory_remember_parser.add_argument(
-        "--json",
-        action="store_true",
-        help=i18n_t("memory.cli.help.json", memory_help_language),
     )
     runtime_parser = subparsers.add_parser(
         "runtime",
@@ -18419,12 +17796,6 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
     ("debug", "prompt", "export"): None,
-    # Memory owns its own verified identity and proof lifecycle.
-    ("memory", "status"): None,
-    ("memory", "profile"): None,
-    ("memory", "list"): None,
-    ("memory", "search"): None,
-    ("memory", "remember"): None,
     # Runtime, configuration and retention are operational management.
     (): "member",
     ("start",): "member",
@@ -18664,8 +18035,6 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
     if args.command == "status":
         sys.exit(cmd_status())
-    if args.command == "memory":
-        sys.exit(cmd_memory(args))
     if args.command == "skill":
         sys.exit(cmd_skill(args))
     if args.command == "debug":

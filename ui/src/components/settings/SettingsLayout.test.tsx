@@ -278,7 +278,6 @@ describe('SettingsLayout', () => {
     expect(screen.getByText('settings.groups.system')).toBeTruthy();
     await waitFor(() => {
       expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
-      expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
     });
   });
 
@@ -459,27 +458,6 @@ describe('SettingsLayout', () => {
     expect(screen.queryByText('service-body')).toBeNull();
   });
 
-  it('keeps remembering a section whose rail row a feature flag took down', async () => {
-    // Memory's row leaves the rail when memory is switched off, but the page
-    // stays the setup surface — the one the Dependencies page's Configure
-    // button links to. Being somewhere the rail cannot show as current is a
-    // real place to be, so it is a real place to come back to.
-    renderLayout('/settings/memory');
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
-    });
-
-    api.getMemorySettings.mockResolvedValueOnce({ status: 'ok', enabled: false });
-    act(() => window.dispatchEvent(new Event('avibe:memory-settings-changed')));
-
-    // The row going is how this test knows the projection settled; before that
-    // an absent row is only a read that has not landed.
-    await waitFor(() => {
-      expect(screen.queryByRole('link', { name: 'settings.sections.memory' })).toBeNull();
-    });
-    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
-      .toBe('/settings/memory');
-  });
 
   it('follows a disabled section to the page it redirects to', async () => {
     // Model Hub answers a disabled hub with its own redirect, so a resumed
@@ -557,19 +535,6 @@ describe('SettingsLayout', () => {
     await waitFor(() => expect(screen.getByText('general-body')).toBeTruthy());
   });
 
-  it('refreshes Memory visibility after its settings change', async () => {
-    renderLayout('/settings/replies');
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
-    });
-
-    api.getMemorySettings.mockResolvedValueOnce({ status: 'ok', enabled: false });
-    act(() => window.dispatchEvent(new Event('avibe:memory-settings-changed')));
-
-    await waitFor(() => {
-      expect(screen.queryByRole('link', { name: 'settings.sections.memory' })).toBeNull();
-    });
-  });
 
   it('keeps the mobile header below the safe-area inset', () => {
     renderLayout('/settings/replies');

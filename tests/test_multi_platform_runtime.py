@@ -836,244 +836,6 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
     assert wechat.sent == [("clear_typing", "wechat", "user-1", "ctx-1")]
 
 
-@pytest.mark.parametrize("custom_prompt", ["", "Custom Agent：保留 {text}。"])
-def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, custom_prompt):
-    from core.system_prompt_injection import build_system_prompt_injection
-
-    monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
-    snapshot_id = "f" * 64
-    snapshot_root = f"/old-avibe-home/builtin-skills/{snapshot_id}"
-    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", snapshot_id)
-    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_ROOT", snapshot_root)
-    calls = []
-    active_polls = []
-    active_poll_updates = []
-    recovery_order = []
-    overlay_reservation = object()
-    configured_overlays = []
-    active_registrations = []
-    released_reservations = []
-    prompt_skill_cwds = []
-    prompt_memory_modes = []
-
-    def build_prompt(**kwargs):
-        prompt_skill_cwds.append(kwargs.get("skills_cwd"))
-        prompt_memory_modes.append(kwargs.get("memory_enabled"))
-        return build_system_prompt_injection(**kwargs)
-
-    monkeypatch.setattr(
-        "modules.agents.opencode.agent.build_system_prompt_injection",
-        build_prompt,
-    )
-
-    class _Server:
-        async def configure_model_hub_overlay(self, overlay):
-            configured_overlays.append(overlay)
-            return overlay_reservation
-
-        async def ensure_running(self):
-            return None
-
-        async def list_messages(self, session_id, directory):
-            return []
-
-        async def get_available_models(self, directory):
-            return {
-                "providers": [
-                    {
-                        "id": "openai",
-                        "models": {
-                            "gpt-5.4": {
-                                "variants": {"high": {}},
-                            }
-                        },
-                    }
-                ]
-            }
-
-        async def prompt_async(self, **kwargs):
-            recovery_order.append("prompt")
-            calls.append(kwargs)
-
-        async def mark_run_active(self, session_id, *, overlay_reservation=None):
-            active_registrations.append((session_id, overlay_reservation))
-
-        async def release_model_hub_overlay_reservation(self, reservation):
-            released_reservations.append(reservation)
-
-        async def mark_run_inactive(self, session_id):
-            return None
-
-        def get_default_agent_from_config(self):
-            return None
-
-        def get_agent_model_from_config(self, _agent):
-            return None
-
-        def get_agent_reasoning_effort_from_config(self, _agent):
-            return None
-
-    class _SessionManager:
-        async def ensure_working_dir(self, path):
-            return None
-
-        async def get_or_create_session_id(self, request, server):
-            return "oc-session"
-
-        def set_request_session(self, *args):
-            return None
-
-        def set_agent_session_id(self, *_args):
-            return None
-
-        def mark_initialized(self, session_id):
-            return False
-
-    class _Sessions:
-        def add_active_poll(self, **kwargs):
-            recovery_order.append("poll")
-            active_polls.append(kwargs)
-            return None
-
-        def remove_active_poll(self, session_id):
-            return None
-
-        def update_active_poll_state(self, session_id, **kwargs):
-            recovery_order.append("accepted")
-            active_poll_updates.append((session_id, kwargs))
-
-    class _PollLoop:
-        async def run_prompt_poll(self, *args, **kwargs):
-            return "done", True
-
-    async def _get_server():
-        return _Server()
-
-    async def _async_noop():
-        return None
-
-    class _Controller:
-        def __init__(self):
-            self.config = type(
-                "Config",
-                (),
-                {
-                    "platform": "avibe",
-                    "reply_enhancements": True,
-                    "remote_access": None,
-                    "language": "en",
-                    "memory": type("MemoryConfig", (), {"enabled": True})(),
-                    "opencode": type(
-                            "OpenCodeConfig",
-                            (),
-                            {
-                                "default_provider": "openai",
-                                "default_reasoning_effort": "high",
-                            },
-                    )(),
-                },
-            )()
-            self.im_client = _StubClient("avibe")
-            self.settings_manager = type("Settings", (), {"sessions": _Sessions()})()
-            self.sessions = self.settings_manager.sessions
-            self.processing_indicator = type("Processing", (), {"snapshot_request": lambda self, request: {}})()
-
-        def get_opencode_overrides(self, context):
-            return None, "openai/gpt-5.4", None
-
-    agent = OpenCodeAgent.__new__(OpenCodeAgent)
-    agent.controller = _Controller()
-    agent.config = agent.controller.config
-    agent.im_client = agent.controller.im_client
-    agent.settings_manager = agent.controller.settings_manager
-    agent.sessions = agent.controller.sessions
-    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
-    agent._session_manager = _SessionManager()
-    agent._poll_loop = _PollLoop()
-    agent._steering_states = {}
-    agent._get_server = _get_server
-    agent._delete_ack = lambda request: _async_noop()
-    agent._remove_ack_reaction = lambda request: _async_noop()
-    agent.emit_result_message = lambda *args, **kwargs: _async_noop()
-
-    async def _run():
-        request = AgentRequest(
-            context=MessageContext(
-                user_id="u",
-                channel_id="c",
-                platform="slack",
-                platform_specific={
-                    "agent_session_id": "ses_test",
-                    "turn_token": "logical-turn",
-                    "delivery_start_attempt_id": ATTEMPT_ID,
-                },
-            ),
-            message="hello",
-            user_message="hello",
-            working_path="/tmp/work",
-            base_session_id="base",
-            composite_session_id="base:/tmp/work",
-            session_key="avibe::c",
-            vibe_agent_system_prompt=custom_prompt,
-        )
-        await agent._process_message(request)
-
-    asyncio.run(_run())
-
-    assert calls
-    assert calls[0]["system"].startswith("# Avibe")
-    if custom_prompt:
-        assert calls[0]["system"].endswith("\n\n" + custom_prompt)
-        assert calls[0]["system"].count(custom_prompt) == 1
-    assert calls[0]["tools"] == {"question": False, "skill": False}
-    assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
-    assert calls[0]["reasoning_effort"] == "high"
-    assert calls[0]["attempt_id"] == ATTEMPT_ID
-    assert "message_id" not in calls[0]
-    assert recovery_order[:3] == ["poll", "prompt", "accepted"]
-    assert configured_overlays == [None]
-    assert active_registrations == [("oc-session", overlay_reservation)]
-    assert released_reservations == []
-    assert active_poll_updates[0][0] == "oc-session"
-    assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
-    steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
-    assert steering_snapshot["system"] == calls[0]["system"]
-    assert active_polls[0]["processing_indicator"][
-        "opencode_managed_skill_builtin_snapshot"
-    ] == {"id": snapshot_id, "root": snapshot_root}
-    assert prompt_skill_cwds == ["/tmp/work"]
-    assert prompt_memory_modes == [True]
-
-    binding_failures = []
-
-    def fail_binding(*args, **kwargs):
-        raise OSError("binding unavailable")
-
-    async def record_failure(context, error_text):
-        binding_failures.append(error_text)
-
-    async def emit_failure(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(
-        "modules.agents.opencode.agent.bind_caller_context_session",
-        fail_binding,
-    )
-    monkeypatch.setattr(
-        "modules.agents.opencode.agent.emit_backend_failure",
-        emit_failure,
-    )
-    agent.record_model_hub_native_failure = record_failure
-    calls.clear()
-
-    asyncio.run(_run())
-
-    assert calls
-    assert calls[0]["tools"] == {"question": False, "skill": False}
-    assert prompt_skill_cwds == ["/tmp/work", None]
-    assert binding_failures == []
-
-
 def test_opencode_clears_default_variant_for_non_reasoning_model():
     catalog = {
         "providers": [
@@ -4003,3 +3765,237 @@ def test_multi_im_client_transport_ready_callbacks_do_not_repeat_runtime_ready()
 
     client._emit_runtime_ready_once()
     assert ready_calls == [True]
+
+
+@pytest.mark.parametrize("custom_prompt", ["", "Custom Agent：保留 {text}。"])
+def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, custom_prompt):
+    from core.system_prompt_injection import build_system_prompt_injection
+
+    monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
+    snapshot_id = "f" * 64
+    snapshot_root = f"/old-avibe-home/builtin-skills/{snapshot_id}"
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", snapshot_id)
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_ROOT", snapshot_root)
+    calls = []
+    active_polls = []
+    active_poll_updates = []
+    recovery_order = []
+    overlay_reservation = object()
+    configured_overlays = []
+    active_registrations = []
+    released_reservations = []
+    prompt_skill_cwds = []
+
+    def build_prompt(**kwargs):
+        prompt_skill_cwds.append(kwargs.get("skills_cwd"))
+        return build_system_prompt_injection(**kwargs)
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        build_prompt,
+    )
+
+    class _Server:
+        async def configure_model_hub_overlay(self, overlay):
+            configured_overlays.append(overlay)
+            return overlay_reservation
+
+        async def ensure_running(self):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return []
+
+        async def get_available_models(self, directory):
+            return {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "models": {
+                            "gpt-5.4": {
+                                "variants": {"high": {}},
+                            }
+                        },
+                    }
+                ]
+            }
+
+        async def prompt_async(self, **kwargs):
+            recovery_order.append("prompt")
+            calls.append(kwargs)
+
+        async def mark_run_active(self, session_id, *, overlay_reservation=None):
+            active_registrations.append((session_id, overlay_reservation))
+
+        async def release_model_hub_overlay_reservation(self, reservation):
+            released_reservations.append(reservation)
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, _agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, _agent):
+            return None
+
+    class _SessionManager:
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "oc-session"
+
+        def set_request_session(self, *args):
+            return None
+
+        def set_agent_session_id(self, *_args):
+            return None
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            recovery_order.append("poll")
+            active_polls.append(kwargs)
+            return None
+
+        def remove_active_poll(self, session_id):
+            return None
+
+        def update_active_poll_state(self, session_id, **kwargs):
+            recovery_order.append("accepted")
+            active_poll_updates.append((session_id, kwargs))
+
+    class _PollLoop:
+        async def run_prompt_poll(self, *args, **kwargs):
+            return "done", True
+
+    async def _get_server():
+        return _Server()
+
+    async def _async_noop():
+        return None
+
+    class _Controller:
+        def __init__(self):
+            self.config = type(
+                "Config",
+                (),
+                {
+                    "platform": "avibe",
+                    "reply_enhancements": True,
+                    "remote_access": None,
+                    "language": "en",
+                    "opencode": type(
+                            "OpenCodeConfig",
+                            (),
+                            {
+                                "default_provider": "openai",
+                                "default_reasoning_effort": "high",
+                            },
+                    )(),
+                },
+            )()
+            self.im_client = _StubClient("avibe")
+            self.settings_manager = type("Settings", (), {"sessions": _Sessions()})()
+            self.sessions = self.settings_manager.sessions
+            self.processing_indicator = type("Processing", (), {"snapshot_request": lambda self, request: {}})()
+
+        def get_opencode_overrides(self, context):
+            return None, "openai/gpt-5.4", None
+
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = _Controller()
+    agent.config = agent.controller.config
+    agent.im_client = agent.controller.im_client
+    agent.settings_manager = agent.controller.settings_manager
+    agent.sessions = agent.controller.sessions
+    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
+    agent._get_server = _get_server
+    agent._delete_ack = lambda request: _async_noop()
+    agent._remove_ack_reaction = lambda request: _async_noop()
+    agent.emit_result_message = lambda *args, **kwargs: _async_noop()
+
+    async def _run():
+        request = AgentRequest(
+            context=MessageContext(
+                user_id="u",
+                channel_id="c",
+                platform="slack",
+                platform_specific={
+                    "agent_session_id": "ses_test",
+                    "turn_token": "logical-turn",
+                    "delivery_start_attempt_id": ATTEMPT_ID,
+                },
+            ),
+            message="hello",
+            user_message="hello",
+            working_path="/tmp/work",
+            base_session_id="base",
+            composite_session_id="base:/tmp/work",
+            session_key="avibe::c",
+            vibe_agent_system_prompt=custom_prompt,
+        )
+        await agent._process_message(request)
+
+    asyncio.run(_run())
+
+    assert calls
+    assert calls[0]["system"].startswith("# Avibe")
+    if custom_prompt:
+        assert calls[0]["system"].endswith("\n\n" + custom_prompt)
+        assert calls[0]["system"].count(custom_prompt) == 1
+    assert calls[0]["tools"] == {"question": False, "skill": False}
+    assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
+    assert calls[0]["reasoning_effort"] == "high"
+    assert calls[0]["attempt_id"] == ATTEMPT_ID
+    assert "message_id" not in calls[0]
+    assert recovery_order[:3] == ["poll", "prompt", "accepted"]
+    assert configured_overlays == [None]
+    assert active_registrations == [("oc-session", overlay_reservation)]
+    assert released_reservations == []
+    assert active_poll_updates[0][0] == "oc-session"
+    assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
+    steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
+    assert steering_snapshot["system"] == calls[0]["system"]
+    assert active_polls[0]["processing_indicator"][
+        "opencode_managed_skill_builtin_snapshot"
+    ] == {"id": snapshot_id, "root": snapshot_root}
+    assert prompt_skill_cwds == ["/tmp/work"]
+
+    binding_failures = []
+
+    def fail_binding(*args, **kwargs):
+        raise OSError("binding unavailable")
+
+    async def record_failure(context, error_text):
+        binding_failures.append(error_text)
+
+    async def emit_failure(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        fail_binding,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        emit_failure,
+    )
+    agent.record_model_hub_native_failure = record_failure
+    calls.clear()
+
+    asyncio.run(_run())
+
+    assert calls
+    assert calls[0]["tools"] == {"question": False, "skill": False}
+    assert prompt_skill_cwds == ["/tmp/work", None]
+    assert binding_failures == []

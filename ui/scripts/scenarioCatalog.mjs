@@ -93,7 +93,7 @@ const caseName = (fullName) => fullName.split(' > ').at(-1);
  * case's readable full name — and one containment rule covers both, rather than
  * a rule per catalog, which is a policy each new catalog could contradict.
  * Containment and not a prefix because an ID is not always first: one case can
- * carry two scenarios (`[MEMORY-LIST-004][MEMORY-LIST-006] browses …`), and each
+ * carry two scenarios (`[MH-ROW-A][MH-ROW-B] browses …`), and each
  * of them cites it by its own ID. What bounds the looseness is the count below —
  * exactly one collected case may match — so a citation loose enough to reach two
  * cases fails for the same reason as one that reaches none.
@@ -110,8 +110,8 @@ const citableNames = (entry) => [caseName(entry.name), entry.name.replaceAll(' >
  * first one is literal, and the inputs are what the substitutions were. The
  * literal tail is dropped rather than parsed, which costs nothing because the
  * count is what decides — for `accepts the declared failure %s with result %s`
- * with `[memory_repair_failed, timed_out]`, one collected case carries all
- * three terms and the other seven carry two.
+ * with `[request_failed, timed_out]`, one collected case carries all
+ * three terms and the other case carries two.
  */
 const citedTerms = (row) => [row.cited.split('%')[0], ...(row.inputs ?? [])];
 
@@ -131,7 +131,7 @@ const sameFile = (collectedFile, file) => {
  * A citation must **name a case**, which is the whole rule and the reason there
  * is no file-only shape left. Accepting a bare file made the gate ask whether the
  * file runs, and a file runs for reasons that have nothing to do with the citing
- * row: `MEMORY-LIST-006` and `MEMORY-LIST-007` both named `MemorySearchPanel`
+ * row: `MH-ROW-B` and `MH-ROW-C` both named `SettingsPanel`
  * and nothing else, so deleting either one's case left the other keeping the
  * file collected and both rows green. That is this gate's own failure — a row
  * reading `covered` with nothing executable tied to *it* — so the file is

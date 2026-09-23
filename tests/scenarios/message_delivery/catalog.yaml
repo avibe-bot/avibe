@@ -333,17 +333,17 @@ scenarios:
     layer: contract
     test: tests/test_background_work_banner.py::test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries
   - id: MESSAGE-DELIVERY-316
-    name: WeChat outbound send uses the hydrated platform author, not the Memory principal
+    name: WeChat outbound send uses the hydrated platform author, not legacy private identity
     status: covered
     kind: regression
     layer: scenario
     test: tests/test_session_delivery_fsm.py::test_wechat_outbound_send_uses_hydrated_author_id
   - id: MESSAGE-DELIVERY-317
-    name: Delivery metadata stays separate from canonical Message and Memory content
+    name: Recovery prompts preserve canonical user text and authenticated sender metadata
     status: covered
     kind: regression
     layer: contract
-    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_durable_input_keeps_canonical_text_for_memory_and_user_message
+    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_durable_input_keeps_canonical_text_and_authenticated_sender
   - id: MESSAGE-DELIVERY-318
     name: Native dispatch samples Now after runtime preparation without rewriting user content
     status: covered

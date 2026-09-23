@@ -179,15 +179,7 @@ def _context_block(
     context: Optional[MessageContext],
     *,
     fallback_platform: Optional[str] = None,
-    memory_enabled: bool = False,
-    profile_enabled: bool = True,
 ) -> RenderedPromptBlock:
-    if memory_enabled:
-        block = render_prompt_block("memory-context-prompt")
-        if not profile_enabled:
-            lines = [line for line in block.text.splitlines() if "vibe memory profile" not in line]
-            block = RenderedPromptBlock(block.module_id, "\n".join(lines) + "\n")
-        return block
     platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
     return render_prompt_block(
         "preferences-context-prompt",
@@ -203,8 +195,6 @@ def build_system_prompt_blocks(
     include_quick_replies: bool = True,
     include_codex_generated_images: bool = False,
     include_context_guidance: bool = True,
-    memory_enabled: bool = False,
-    profile_enabled: bool = True,
     context: Optional[MessageContext] = None,
     fallback_platform: Optional[str] = None,
     enabled_agents: Optional[Iterable[Any]] = None,
@@ -258,8 +248,6 @@ def build_system_prompt_blocks(
         blocks.append(_context_block(
             context,
             fallback_platform=fallback_platform,
-            memory_enabled=memory_enabled,
-            profile_enabled=profile_enabled,
         ))
     if skills is not None:
         from core.managed_skills import render_skill_catalog_blocks
