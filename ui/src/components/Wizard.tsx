@@ -8,7 +8,7 @@ import { loadingRegion, readyRegion, beginRegionRead, failRegionRead } from './s
 import { modelsApi } from './settings/models/modelsApi';
 import { apiFetch } from '@/lib/apiFetch';
 import { INITIAL_SETUP_FLOW_STATE, setupBackTarget, setupCapability, setupNavigationReady, type SetupAction, type SetupCapability, type SetupScreenId, type SetupScreenHandle, type SetupScreenProps } from './onboarding/setupFlow';
-import { mediaQuery, playSetupHandoff, setupHandoffAllowed } from './onboarding/setupHandoff';
+import { captureSetupCards, mediaQuery, playSetupHandoff, setupHandoffAllowed, type SetupSnapshot } from './onboarding/setupHandoff';
 import { fetchSetupConfig, type SetupConfigRead, type SetupConfigSnapshot } from './onboarding/setupConfig';
 import { SETUP_REGISTERED_SCREENS } from './onboarding/setupScreenRegistry';
 import './onboarding/onboarding.css';
@@ -123,11 +123,29 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   const current = useRef(activation);
   const transition = useRef<(() => void) | null>(null);
   const transitioning = useRef(false);
+  /** A flight waiting for the screen it lands on to be on screen. */
+  const flight = useRef<{ snapshot: SetupSnapshot; to: SetupScreenId } | null>(null);
   const ready = setupNavigationReady(capability, gatewayEnabled);
   const policy = useRef({ ready, sequence, locked: navigationLocked, routeActive });
   useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence, locked: navigationLocked, routeActive }; });
   useLayoutEffect(() => {
     roots.current[activation.id]?.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
+  }, [activation]);
+  // The screens swap first and the identities fly afterwards, onto the screen that is
+  // now really there. Landing into a live diagram is what the reference does, and it
+  // is what keeps the wires, the summary and the action from appearing in one jump
+  // once the flight is already over.
+  useLayoutEffect(() => {
+    const pending = flight.current;
+    const incoming = roots.current[activation.id];
+    if (!pending || pending.to !== activation.id || !host.current || !incoming) return;
+    flight.current = null;
+    const finish = () => {
+      transition.current = null;
+      transitioning.current = false;
+      setHandoff(false);
+    };
+    transition.current = playSetupHandoff(host.current, pending.snapshot, incoming, pending.to, finish);
   }, [activation]);
   useEffect(() => () => transition.current?.(), []);
 
@@ -148,29 +166,25 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
     const backwards = policy.current.sequence.indexOf(target) < policy.current.sequence.indexOf(previous.id);
     if (!backwards && !policy.current.ready) return;
     const next = { id: target, epoch: previous.epoch + 1 };
-    const finish = () => {
-      transition.current = null;
-      transitioning.current = false;
-      current.current = next;
-      setAction(null);
-      setHandoff(false);
-      setActivation(next);
-    };
     if (mediaQuery('(max-width: 759px)')) {
       host.current?.closest('.onboarding-shell')?.scrollTo({ top: 0, behavior: 'instant' });
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
-    if (backwards || !setupHandoffAllowed(paused) || !host.current || !roots.current[previous.id] || !roots.current[target]) {
-      finish(); return;
+    const animated = !backwards && setupHandoffAllowed(paused) && target !== 'intro'
+      && !!host.current && !!roots.current[previous.id] && !!roots.current[target];
+    if (animated) {
+      transitioning.current = true;
+      flight.current = { snapshot: captureSetupCards(roots.current[previous.id]!, previous.id), to: target };
     }
-    transitioning.current = true;
-    setHandoff(target === 'intro' ? false : target);
-    transition.current = playSetupHandoff(host.current, roots.current[previous.id]!, roots.current[target]!, previous.id, target, finish);
+    current.current = next;
+    setAction(null);
+    setHandoff(animated ? target : false);
+    setActivation(next);
   }, [paused]);
   // A callback belongs to this activation, even if an asynchronous consumer saves it.
   const feeds = useMemo(() => Object.fromEntries(sequence.map((id) => [id, {
     onActionChange: (next: SetupAction) => {
-      if (current.current.id === id && current.current.epoch === activation.epoch && !transitioning.current) setAction(next);
+      if (current.current.id === id && current.current.epoch === activation.epoch) setAction(next);
     },
     onNavigate: (target: SetupScreenId) => {
       if (current.current.id === id && current.current.epoch === activation.epoch) navigate(target);
@@ -185,7 +199,7 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
         const active = routeActive && id === activation.id;
         return <div key={id} ref={(node) => { roots.current[id] = node; }} data-setup-screen-root={id}
           hidden={id !== activation.id} inert={!active || !!handoff}>
-          <RouteSurfaceActiveContext.Provider value={active && !handoff}>
+          <RouteSurfaceActiveContext.Provider value={active}>
             <SetupScreenContent id={id} screenProps={{ active, handoff, capability, gatewayEnabled, runtimeRead,
               onRetrySetup, flowState, setFlowState, ...feeds[id] }} renderScreen={renderScreen}
               ref={(handle) => { handles.current[id] = handle; }} />
