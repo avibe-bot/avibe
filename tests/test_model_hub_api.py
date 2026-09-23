@@ -2998,6 +2998,18 @@ def test_a_native_source_cannot_reoffer_a_removed_retired_builtin(tmp_path):
     assert "claude-opus-4" not in providers
 
 
+def test_a_legacy_only_retired_codex_row_leaves_the_picker(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].models = [
+        ModelHubBackendModelConfig(id="gpt-6-sol", origin="builtin"),
+        ModelHubBackendModelConfig(id="gpt-5.1-codex-max", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["codex"] = [{"id": "gpt-6-sol"}]
+
+    assert [row["id"] for row in service.backend_catalog_models("codex")] == ["gpt-6-sol"]
+    assert [model.id for model in store.config.agents["codex"].models] == ["gpt-6-sol", "gpt-5.1-codex-max"]
+
+
 def test_picker_reads_schedule_the_remote_catalog_refresh(monkeypatch, tmp_path):
     from vibe import backend_model_catalog
 

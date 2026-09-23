@@ -4174,10 +4174,13 @@ class ModelHubService:
             load_bundled_catalog,
             load_cached_remote_catalog,
             retired_backend_model_ids,
+            unlisted_retired_backend_model_ids,
         )
 
-        retired = retired_backend_model_ids(backend, load_bundled_catalog()) | retired_backend_model_ids(
-            backend, load_cached_remote_catalog()
+        retired = (
+            retired_backend_model_ids(backend, load_bundled_catalog())
+            | retired_backend_model_ids(backend, load_cached_remote_catalog())
+            | unlisted_retired_backend_model_ids(backend)
         )
         if not retired:
             return set()
