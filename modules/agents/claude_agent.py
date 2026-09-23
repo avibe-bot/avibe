@@ -3168,86 +3168,108 @@ class ClaudeAgent(BaseAgent):
             return False
 
         detached = owner == "detached"
-        formatter = self._get_formatter(context)
-        for message, frame_steering_generation in messages:
-            assistant_text = self._extract_text_blocks(message, context)
-            context_tokens = self._extract_context_tokens(message)
-            if context_tokens:
-                self.controller.note_session_tokens(context, total=context_tokens)
-            toolcalls = []
-            for block in getattr(message, "content", []) or []:
-                if not isinstance(block, ToolUseBlock):
-                    continue
-                self._track_tool_activity_mode(
-                    composite_key,
-                    block,
-                    detached=detached,
-                )
-                if formatter is not None:
-                    toolcalls.append(
-                        (
-                            formatter.format_toolcall(
-                                block.name,
-                                block.input,
-                                get_relative_path=lambda path: self.get_relative_path(path, context),
-                            ),
-                            formatter.format_toolcall_label(
-                                block.name,
-                                block.input,
-                                get_relative_path=lambda path: self.get_relative_path(path, context),
-                            ),
-                        )
-                    )
-
-            if detached:
-                if assistant_text:
-                    if composite_key in self._detached_activity_outputs:
-                        self._detached_assistant_text[composite_key] = assistant_text
-                    else:
-                        self._detached_unsolicited_text[composite_key] = assistant_text
-                continue
-
-            failure_disposition = await self._process_assistant_terminal_frame(
-                context,
+        try:
+            formatter = self._get_formatter(context)
+        except Exception:  # noqa: BLE001 - terminal settlement must survive replay formatting
+            formatter = None
+            logger.warning(
+                "Failed to create Claude formatter while replaying buffered "
+                "Assistant frames for %s",
                 composite_key,
-                message,
-                assistant_text,
-                terminal_steering_generation=(
-                    frame_steering_generation
-                    if frame_steering_generation is not None
-                    else terminal_steering_generation
-                ),
+                exc_info=True,
             )
-            if failure_disposition in {"teardown", "superseded", "auth", "failure"}:
-                if failure_disposition == "auth":
-                    return True
-                continue
-            if assistant_text:
-                self._last_assistant_text[composite_key] = assistant_text
-            pending = self._pending_requests.get(composite_key) or []
-            self._adopt_pending_turn_token(
-                context,
-                pending[0] if pending else None,
-            )
-            previous = self._pending_assistant_message.pop(composite_key, None)
-            if previous:
-                await self.controller.emit_agent_message(
+        for message, frame_steering_generation in messages:
+            try:
+                assistant_text = self._extract_text_blocks(message, context)
+                context_tokens = self._extract_context_tokens(message)
+                if context_tokens:
+                    self.controller.note_session_tokens(context, total=context_tokens)
+                toolcalls = []
+                for block in getattr(message, "content", []) or []:
+                    if not isinstance(block, ToolUseBlock):
+                        continue
+                    self._track_tool_activity_mode(
+                        composite_key,
+                        block,
+                        detached=detached,
+                    )
+                    if formatter is not None:
+                        toolcalls.append(
+                            (
+                                formatter.format_toolcall(
+                                    block.name,
+                                    block.input,
+                                    get_relative_path=lambda path: self.get_relative_path(path, context),
+                                ),
+                                formatter.format_toolcall_label(
+                                    block.name,
+                                    block.input,
+                                    get_relative_path=lambda path: self.get_relative_path(path, context),
+                                ),
+                            )
+                        )
+
+                if detached:
+                    if assistant_text:
+                        if composite_key in self._detached_activity_outputs:
+                            self._detached_assistant_text[composite_key] = assistant_text
+                        else:
+                            self._detached_unsolicited_text[composite_key] = assistant_text
+                    continue
+
+                failure_disposition = await self._process_assistant_terminal_frame(
                     context,
-                    "assistant",
-                    previous,
-                    parse_mode="markdown",
+                    composite_key,
+                    message,
+                    assistant_text,
+                    terminal_steering_generation=(
+                        frame_steering_generation
+                        if frame_steering_generation is not None
+                        else terminal_steering_generation
+                    ),
                 )
-            for toolcall_text, toolcall_label in toolcalls:
-                await self.controller.emit_agent_message(
+                if failure_disposition in {"teardown", "superseded", "auth", "failure"}:
+                    if failure_disposition == "auth":
+                        return True
+                    continue
+                if assistant_text:
+                    self._last_assistant_text[composite_key] = assistant_text
+                pending = self._pending_requests.get(composite_key) or []
+                self._adopt_pending_turn_token(
                     context,
-                    "toolcall",
-                    toolcall_text,
-                    parse_mode="markdown",
-                    status_label=toolcall_label,
+                    pending[0] if pending else None,
                 )
-            if formatter is not None and assistant_text:
-                self._pending_assistant_message[composite_key] = (
-                    formatter.format_assistant_message([assistant_text])
+                previous = self._pending_assistant_message.pop(composite_key, None)
+                if previous:
+                    await self.controller.emit_agent_message(
+                        context,
+                        "assistant",
+                        previous,
+                        parse_mode="markdown",
+                    )
+                for toolcall_text, toolcall_label in toolcalls:
+                    await self.controller.emit_agent_message(
+                        context,
+                        "toolcall",
+                        toolcall_text,
+                        parse_mode="markdown",
+                        status_label=toolcall_label,
+                    )
+                if formatter is not None and assistant_text:
+                    self._pending_assistant_message[composite_key] = (
+                        formatter.format_assistant_message([assistant_text])
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Assistant replay is ancillary to the terminal Result. Keep
+                # the Result on the receiver so its provenance can still settle
+                # the owning human/Activity phase.
+                logger.warning(
+                    "Failed to replay buffered Claude Assistant frame for %s; "
+                    "continuing to terminal Result",
+                    composite_key,
+                    exc_info=True,
                 )
         return False
 
@@ -3856,6 +3878,20 @@ class ClaudeAgent(BaseAgent):
                 pending = self._pending_requests.get(composite_key) or []
                 pending_request = pending[0] if pending else None
                 if pending_request is not None:
+                    if (
+                        not allow_closing
+                        and self._buffered_assistant_messages.get(composite_key)
+                    ):
+                        # An origin-less Assistant phase is waiting for its
+                        # terminal Result to identify the owner. Do not let
+                        # this grace flush bind the Activity to the pending
+                        # human request before that provenance arrives.
+                        logger.info(
+                            "Deferring Claude Activity flush until buffered "
+                            "Assistant provenance is classified for %s",
+                            composite_key,
+                        )
+                        return True
                     if self._request_activities(pending_request):
                         # A bound claim set is one concrete outbound batch. Later
                         # completions, even from the same Turn, wait for the next

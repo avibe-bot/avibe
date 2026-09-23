@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -19,7 +19,7 @@ from core.native_dispatch_phase import (
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock
 from modules.agents.claude_agent import ClaudeAgent
 
-from tests.test_claude_agent_initiated_turn import _build_agent
+from tests.test_claude_agent_initiated_turn import _build_agent, _dispatcher_owned_emit
 
 
 class TaskStartedMessage:
@@ -232,6 +232,103 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(agent.emit_result_message.await_count, 1)
+        self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+        self.assertFalse(service.activities.has_completed_output("claude", key))
+
+    async def test_activity_flush_defers_until_buffered_phase_has_terminal_owner(self):
+        key = "session-provenance-flush-race:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = _dispatcher_owned_emit(service)
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-provenance-flush-race",
+            activity_id="task-flush-race",
+            kind="local_agent",
+            turn_id="task-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=key,
+            activity_id="task-flush-race",
+            status="completed",
+            metadata={"summary": "background finished"},
+            expects_output=True,
+        )
+        agent._buffered_assistant_messages[key] = [
+            (
+                AssistantMessage(
+                    _block(TextBlock, text="ambiguous assistant phase"),
+                ),
+                agent._steering_generation(key),
+            )
+        ]
+
+        should_retry = await agent._flush_completed_activity_outputs(key, context)
+
+        self.assertTrue(should_retry)
+        self.assertIs(agent._pending_requests[key][0], request)
+        self.assertTrue(service.activities.has_completed_output("claude", key))
+        agent.emit_result_message.assert_not_awaited()
+
+        await agent._receive_messages(
+            _client(
+                [
+                    ResultMessage("human reply", origin={"kind": "human"}),
+                ]
+            ),
+            "sess-provenance-flush-race",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertGreaterEqual(agent.emit_result_message.await_count, 1)
+        self.assertIs(
+            next(
+                call.kwargs["request"]
+                for call in agent.emit_result_message.await_args_list
+                if call.kwargs.get("request") is request
+            ),
+            request,
+        )
+        self.assertFalse(service.activities.has_completed_output("claude", key))
+
+    async def test_buffered_assistant_replay_failure_still_settles_terminal_result(self):
+        key = "session-buffered-replay-failure:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+
+        class _Formatter:
+            format_assistant_message = Mock(side_effect=RuntimeError("replay failed"))
+
+        agent._get_formatter = lambda _context: _Formatter()
+
+        await agent._receive_messages(
+            _client(
+                [
+                    TaskStartedMessage("task-replay-failure"),
+                    AssistantMessage(
+                        _block(TextBlock, text="buffered before terminal"),
+                    ),
+                    ResultMessage("human reply", origin={"kind": "human"}),
+                ]
+            ),
+            "sess-buffered-replay-failure",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertFalse(agent._has_pending_requests(key))
+        agent.emit_result_message.assert_awaited_once()
         self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
         self.assertFalse(service.activities.has_completed_output("claude", key))
 
