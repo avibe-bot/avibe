@@ -4061,6 +4061,15 @@ class Controller:
                 )
         results = await asyncio.gather(*service_stops, return_exceptions=True)
         errors = [result for result in results if isinstance(result, BaseException)]
+        # Stopping the task service settles its in-flight Runs. Disposable
+        # runtimes waiting on those rows must then finish before the loop exits,
+        # especially adopted OpenCode servers that survive normal shutdown.
+        drain_close_after = getattr(dispatcher, "drain_close_after_runtime", None)
+        if callable(drain_close_after):
+            try:
+                await drain_close_after()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
         stop_supervisor = getattr(supervisor, "stop", None)
         if callable(stop_supervisor):
             try:

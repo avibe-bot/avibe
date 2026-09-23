@@ -15,6 +15,7 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.resource_governance import AgentResourceFailure
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.base import BaseAgent as RealBaseAgent
@@ -186,6 +187,61 @@ for name, module in _saved_modules.items():
         sys.modules.pop(name, None)
     else:
         sys.modules[name] = module
+
+
+class CodexExitPressureCacheTests(unittest.TestCase):
+    def _agent_with_transport(self, transport):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(language="en"))
+        agent._session_mgr = SimpleNamespace(get_cwd=lambda _base: "/work")
+        agent._transports = {"/work": transport}
+        return agent
+
+    def test_concurrent_sessions_share_positive_exit_observation(self):
+        transport = SimpleNamespace(_process=SimpleNamespace(returncode=137))
+        agent = self._agent_with_transport(transport)
+        failure = AgentResourceFailure(
+            kind="pids", message="shared PID event", pids_current=10, pids_max=32
+        )
+        first = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "one"})
+        )
+        second = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "two"})
+        )
+
+        with patch.object(
+            _MODULE, "observe_agent_resource_pressure", return_value=failure
+        ) as observe:
+            assert first() == second()
+        observe.assert_called_once()
+
+    def test_negative_exit_observation_is_cached_only_for_that_transport(self):
+        old_transport = SimpleNamespace(_process=SimpleNamespace(returncode=137))
+        agent = self._agent_with_transport(old_transport)
+        first = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "one"})
+        )
+        second = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "two"})
+        )
+        newer_failure = AgentResourceFailure(kind="memory", message="new event")
+
+        with patch.object(
+            _MODULE,
+            "observe_agent_resource_pressure",
+            side_effect=[None, newer_failure],
+        ) as observe:
+            assert first() is None
+            assert second() is None
+            agent._transports["/work"] = SimpleNamespace(
+                _process=SimpleNamespace(returncode=137)
+            )
+            third = agent.capture_backend_exit_failure(
+                SimpleNamespace(platform_specific={"turn_base_session_id": "three"})
+            )
+            assert "new event" in third()[0]
+        assert observe.call_count == 2
 
 
 class _StubSessionManager:

@@ -537,10 +537,13 @@ def test_close_after_waits_for_backend_terminal_cleanup() -> None:
             "core.services.running_agents.end_running_agent", new=end_running_agent
         ):
             dispatcher._schedule_close_after_runtime(context)
+            drain = asyncio.create_task(dispatcher.drain_close_after_runtime())
             await asyncio.sleep(0)
             assert not closed.is_set()
+            assert not drain.done()
             cleanup.set()
             await asyncio.wait_for(closed.wait(), timeout=1)
+            await asyncio.wait_for(drain, timeout=1)
 
     asyncio.run(exercise())
 

@@ -1434,7 +1434,11 @@ class CodexAgent(BaseAgent):
         process = getattr(transport, "_process", None)
         if process is None or getattr(process, "returncode", None) is None:
             return None
+        if getattr(transport, "_vibe_resource_failure_checked", False):
+            return getattr(transport, "_vibe_resource_failure", None)
         failure = observe_agent_resource_pressure(self.controller)
+        setattr(transport, "_vibe_resource_failure", failure)
+        setattr(transport, "_vibe_resource_failure_checked", True)
         if failure is not None:
             logger.error(
                 "Codex app-server exited while the shared Agent cgroup reported resource pressure: %s",

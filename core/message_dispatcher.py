@@ -1851,6 +1851,13 @@ class ConsolidatedMessageDispatcher:
         self._close_after_runtime_tasks.add(task)
         task.add_done_callback(self._close_after_runtime_tasks.discard)
 
+    async def drain_close_after_runtime(self) -> None:
+        """Join admitted disposable-runtime teardowns before the loop stops."""
+
+        while self._close_after_runtime_tasks:
+            tasks = tuple(self._close_after_runtime_tasks)
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+
     def _schedule_agent_run_activity(
         self,
         context: MessageContext,

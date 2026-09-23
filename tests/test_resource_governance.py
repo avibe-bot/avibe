@@ -474,9 +474,11 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
                 "cpu.weight",
                 "io.weight",
                 "pids.max",
+                "pids.events",
                 "cgroup.procs",
             ):
                 (group / name).write_text("", encoding="utf-8")
+            (group / "pids.events").write_text("max 0\n", encoding="utf-8")
         if path == runtime_group:
             (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
@@ -490,6 +492,8 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
                 remaining = "1002\n" if value == "1001" else ""
                 (base / "cgroup.procs").write_text(remaining, encoding="utf-8")
             return
+        if path == group / "cgroup.procs":
+            (group / "pids.events").write_text("max 1\n", encoding="utf-8")
         path.write_text(f"{value}\n", encoding="utf-8")
 
     monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
@@ -506,6 +510,28 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "50"
     assert (group / "io.weight").read_text(encoding="utf-8").strip() == "default 50"
     assert (group / "pids.max").read_text(encoding="utf-8").strip() == "3072"
+    assert governor.observe_resource_pressure().kind == "pids"
+
+
+def test_existing_agent_group_baseline_precedes_migrated_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    group.mkdir(parents=True)
+    (group / "cgroup.procs").write_text("", encoding="utf-8")
+    (group / "pids.events").write_text("max 4\n", encoding="utf-8")
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+
+    def migrate(*_args, **_kwargs):
+        (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    monkeypatch.setattr(governor, "_prepare_base_cgroup", migrate)
+    monkeypatch.setattr(governor, "_enable_subtree_controllers", lambda _base: None)
+
+    assert governor._ensure_group(known_agent_pids={4321}) == group
+    assert governor.observe_resource_pressure().event_delta == 1
 
 
 def test_governor_falls_back_when_memory_controller_is_missing(
@@ -659,6 +685,7 @@ def test_governor_allows_known_agent_pids_during_base_migration(
         if path == group:
             for name in ("cpu.weight", "io.weight", "pids.max", "cgroup.procs"):
                 (group / name).write_text("", encoding="utf-8")
+            (group / "pids.events").write_text("max 0\n", encoding="utf-8")
         if path == runtime_group:
             (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
@@ -668,6 +695,7 @@ def test_governor_allows_known_agent_pids_during_base_migration(
             runtime_writes.append(value)
         elif path == group / "cgroup.procs":
             agent_writes.append(value)
+            (group / "pids.events").write_text("max 1\n", encoding="utf-8")
         else:
             path.write_text(f"{value}\n", encoding="utf-8")
             return
@@ -687,6 +715,7 @@ def test_governor_allows_known_agent_pids_during_base_migration(
     assert runtime_writes == ["1001"]
     assert agent_writes == ["5001", "5002", "5001", "5002"]
     assert governor.group_path == group
+    assert governor.observe_resource_pressure().kind == "pids"
 
 
 def test_governor_falls_back_when_subtree_control_enable_fails(

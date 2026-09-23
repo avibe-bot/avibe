@@ -532,13 +532,11 @@ class AgentResourceGovernor:
         group = self._ensure_group(known_agent_pids=known_agent_pids)
         if group is None:
             return False
+        if self._event_baseline is None:
+            self._event_baseline = self.snapshot()
         moved = self._move_pid(group, pid, label=label)
         for child_pid in descendant_pids:
             self._move_pid(group, child_pid, label=f"{label} child", warn=False)
-        if moved:
-            snapshot = self.snapshot()
-            if snapshot is not None and self._event_baseline is None:
-                self._event_baseline = snapshot
         return moved
 
     def snapshot(self) -> AgentResourceSnapshot | None:
@@ -547,6 +545,10 @@ class AgentResourceGovernor:
         group = self._group
         if group is None:
             return None
+        return self._snapshot_group(group)
+
+    @staticmethod
+    def _snapshot_group(group: Path) -> AgentResourceSnapshot:
         return AgentResourceSnapshot(
             pids_current=_parse_non_negative_int(_read_text(group / "pids.current")),
             pids_max=_parse_pids_max(_read_text(group / "pids.max")),
@@ -639,9 +641,15 @@ class AgentResourceGovernor:
         group = base / group_name
         runtime_group = base / runtime_group_name
         try:
+            # An existing constrained group may receive known agent PIDs during
+            # base migration, before the newly discovered PID is adopted.
+            if self._event_baseline is None and group.exists():
+                self._event_baseline = self._snapshot_group(group)
             self._prepare_base_cgroup(base, runtime_group, group, root, known_agent_pids=known_agent_pids)
             self._enable_subtree_controllers(base)
             group.mkdir(exist_ok=True)
+            if self._event_baseline is None:
+                self._event_baseline = self._snapshot_group(group)
             limits = derive_agent_limits(
                 tenant_memory_limit_bytes(base, root),
                 self.config,
@@ -745,6 +753,8 @@ class AgentResourceGovernor:
                         if not (agent_group / "cgroup.procs").exists():
                             raise OSError(f"agent cgroup.procs is unavailable in {agent_group}")
                         agent_group_ready = True
+                    if self._event_baseline is None:
+                        self._event_baseline = self._snapshot_group(agent_group)
                     target_group = agent_group
                     target_label = "known agent"
                 try:
