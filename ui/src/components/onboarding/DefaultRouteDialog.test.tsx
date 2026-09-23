@@ -168,6 +168,7 @@ describe('DefaultRouteDialog', () => {
   });
 
   it('requires an explicit menu model before a model-less assistant can join the route', async () => {
+    const user = userEvent.setup();
     let configured = false;
     const missing = { ...agent, model: null };
     mock.api.listVibeAgents.mockImplementation(async () => ({
@@ -175,13 +176,20 @@ describe('DefaultRouteDialog', () => {
     }));
     mock.api.getVibeAgent.mockImplementation(async () => ({ ok: true, agent: configured ? agent : missing }));
     mock.api.updateVibeAgent.mockImplementation(async () => { configured = true; return { ok: true, agent }; });
+    mock.models.getAgentChain.mockResolvedValue(chainOf([], 'automatic'));
     const reads = { ...agentReads, read: async () => ({ kind: 'current' as const, value: [{ ...supplies[0]!, builtin_models: ['opus-5'] }] }) };
     render(<Host reads={reads} />);
     const choose = await screen.findByRole('combobox', { name: 'Choose a model for claude' });
     expect(screen.getByRole('button', { name: en.onboarding.route.done }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Set model' }).hasAttribute('disabled')).toBe(true);
+    await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.addHop }));
+    await user.click(screen.getByRole('option', { name: /opus-5/ }));
+    await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.add.confirm }));
     fireEvent.change(choose, { target: { value: 'opus-5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Set model' }));
+    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [A] }));
     await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('claude', { model: 'opus-5' }));
+    expect(mock.models.putAgentChain.mock.invocationCallOrder[0]).toBeLessThan(mock.api.updateVibeAgent.mock.invocationCallOrder[0]!);
     await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Choose a model for claude' })).toBeNull());
     expect(screen.getByRole('button', { name: en.onboarding.route.done }).hasAttribute('disabled')).toBe(false);
   });
@@ -223,6 +231,20 @@ describe('DefaultRouteDialog', () => {
     await waitFor(() => expect(mock.models.getAgentChain).toHaveBeenCalledTimes(2));
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
     await waitFor(() => expect(screen.getByRole('button', { name: en.common.retry })).toBeTruthy());
+    expect(mock.models.putAgentChain).not.toHaveBeenCalled();
+  });
+
+  it('does not save a dirty draft to a model selected elsewhere while the dialog was away', async () => {
+    render(<Host />);
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.moveDownNamed.replace('{{name}}', 'Anthropic · opus-5') }));
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.addSource }));
+    const changed = { ...agent, model: 'sonnet-4' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [changed], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: changed });
+    mock.models.getAgentChain.mockResolvedValue({ ...chainOf([B, A]), model_id: 'sonnet-4' });
+    fireEvent.click(screen.getByRole('button', { name: 'reopen' }));
+    expect(await screen.findByText(en.onboarding.route.changed)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.common.retry }));
     expect(mock.models.putAgentChain).not.toHaveBeenCalled();
   });
 

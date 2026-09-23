@@ -358,7 +358,7 @@ const precheckTarget = async (
  * given an answer nobody gave.
  */
 const adoptTargetModel = async (
-  target: SetupRouteTargetSnapshot,
+  target: Pick<SetupRouteTargetSnapshot, 'backend' | 'modelId'>,
   api: SetupRouteWriteApi,
   supply: AgentSupply,
 ): Promise<AgentSupply> => {
@@ -378,6 +378,76 @@ const adoptTargetModel = async (
     expected_suppliers: { [adopted.id]: chosen.expected_suppliers },
   });
 };
+
+/** Repair a model-less Agent only after its chosen menu model has a confirmed route. */
+export async function repairMissingSetupModel(
+  backend: AgentBackend,
+  agentName: string,
+  selectedModel: string,
+  shared: RouteHop[],
+  api: SetupRouteWriteApi,
+): Promise<string> {
+  if (shared.length === 0) throw new Error('onboarding.route.noEligible');
+  const modelId = backend === 'claude' ? selectedModel : shared[0]!.model_id;
+  if (!modelId) throw new Error('onboarding.route.catalogFailed');
+  const before = await api.getVibeAgent(agentName, { cache: false });
+  if (!before.ok || !before.agent || before.agent.backend !== backend
+    || (before.agent.model && before.agent.model !== modelId)) {
+    throw new Error('onboarding.route.changed');
+  }
+  const supply = (await api.listAgents()).find((row) => row.backend === backend);
+  if (supply?.mode !== 'hub') throw new Error('onboarding.route.changed');
+  const desired = eligibleRoute(shared, supply);
+  if (desired.length === 0) throw new Error('onboarding.route.noEligible');
+  let adopted: AgentSupply;
+  try {
+    adopted = await adoptTargetModel({ backend, modelId }, api, supply);
+  } catch {
+    throw new Error('onboarding.route.catalogFailed');
+  }
+  let chain: AgentChain;
+  try {
+    chain = await api.getAgentChain(backend, modelId);
+  } catch {
+    throw new Error('onboarding.route.chainWriteFailed');
+  }
+  const target: SetupRouteTargetSnapshot = {
+    backend, modelId, agentNames: [agentName], designatedNames: [agentName],
+    chain, membership: chainMembership(chain),
+  };
+  const saved = await writeTarget(target, desired, api, adopted);
+  if (saved.kind !== 'confirmed') {
+    try {
+      const readback = await api.getAgentChain(backend, modelId);
+      if (!routeChainMatchesAttempt(readback, {
+        backend, modelId, submitted: desired, manual_override: { hops: desired },
+      })) throw new Error('unconfirmed');
+    } catch {
+      throw new Error(saved.kind === 'reconcile' ? 'onboarding.route.changed' : 'onboarding.route.chainWriteFailed');
+    }
+  }
+  const current = await api.getVibeAgent(agentName, { cache: false });
+  if (!current.ok || !current.agent || current.agent.backend !== backend
+    || (current.agent.model && current.agent.model !== modelId)) {
+    throw new Error('onboarding.route.changed');
+  }
+  if (current.agent.model !== modelId) {
+    try {
+      await api.updateVibeAgent(agentName, { model: modelId });
+    } catch {
+      // A lost response may follow a committed write; the read below decides.
+    }
+  }
+  try {
+    const readback = await api.getVibeAgent(agentName, { cache: false });
+    if (readback.ok && readback.agent?.backend === backend && readback.agent.model === modelId) {
+      return modelId;
+    }
+  } catch {
+    // Keep the stage visible and retryable when the read is unavailable.
+  }
+  throw new Error('onboarding.route.modelSwitchFailed');
+}
 
 const writePreferredTarget = async (
   target: SetupRouteTargetSnapshot,

@@ -173,7 +173,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         }))),
       ]);
       const supplies = supplyRead.kind === 'current' ? supplyRead.value : [];
-      const enabledBackends = new Set(connections.filter(({ state }) => state.ok && state.enabled)
+      const enabledBackends = new Set(connections.filter(({ backend, state }) => state.ok && state.enabled
+        && (state.supply_mode ?? supplies.find((row) => row.backend === backend)?.mode) === 'hub')
         .map(({ backend }) => backend));
       const hydration = await hydrateSetupRoutes({
         listVibeAgents: (params) => api.listVibeAgents(params),
@@ -228,6 +229,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
   const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
+  const adoptionFailed = useRef<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [pendingWrites, setPendingWrites] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [entering, setEntering] = useState(false);
   const [entryError, setEntryError] = useState('');
@@ -274,7 +276,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setConnectionPending((current) => ({ ...current, [name]: true }));
     // Nothing owed means nothing to say about the write, which is not the same as
     // saying it went fine: an ordinary refresh leaves a reported failure standing.
-    if (owed) setConnectionErrors((current) => ({ ...current, [name]: owed.message }));
+    if (owed && !adoptionFailed.current[name]) setConnectionErrors((current) => ({ ...current, [name]: owed.message }));
     try {
       const result = await api.getBackendConnection(name);
       if (!owns()) return;
@@ -287,7 +289,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       // meanwhile is still owed to whoever reads next.
       const retire = acknowledge && owed && enableReceipt.current[name] === owed;
       if (retire) delete enableReceipt.current[name];
-      setConnectionErrors((current) => ({ ...current, [name]: retire ? '' : owed?.message || '' }));
+      setConnectionErrors((current) => ({
+        ...current,
+        [name]: adoptionFailed.current[name] ? current[name] : retire ? '' : owed?.message || '',
+      }));
     } catch (error) {
       if (!owns()) return;
       setConnections((current) => ({ ...current, [name]: undefined }));
@@ -471,6 +476,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setAgents((prev) => ({ ...prev, [name]: { ...prev[name], enabled } }));
     if (isPage) return;
     const backend = name as RuntimeBackendId;
+    if (!enabled) delete adoptionFailed.current[backend];
     const intent = (enableIntent.current[backend] || 0) + 1;
     enableIntent.current[backend] = intent;
     pendingEnable.current[backend] = intent;
@@ -506,7 +512,17 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       // failed, and it does not bury what the write had to say.
       try {
         await agentReads?.refresh();
-        if (enabled && modelHubEnabled && canEditSetupRoute) await adoptSharedRoute(backend);
+        const connection = await api.getBackendConnection(backend);
+        if (enabled && modelHubEnabled && canEditSetupRoute && connection.ok
+          && connection.enabled && connection.supply_mode === 'hub') {
+          try {
+            await adoptSharedRoute(backend);
+            delete adoptionFailed.current[backend];
+          } catch (error) {
+            adoptionFailed.current[backend] = true;
+            throw error;
+          }
+        }
         else if (!enabled && modelHubEnabled && canEditSetupRoute) await readSharedRoute();
       } catch (error) {
         if (enableIntent.current[backend] !== intent) return;
@@ -924,8 +940,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const result = installResults[name];
           const error = detectionErrors[name] ? { message: detectionErrors[name] }
             : result && !result.ok && result.message ? result : undefined;
-          const hubRoute = connections[name]?.supply_mode === 'hub'
-            || Boolean(canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
+          const supplyMode = connections[name]?.supply_mode;
+          const hubRoute = supplyMode === 'hub'
+            || Boolean(!supplyMode && canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
@@ -950,12 +967,31 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               : !connectionErrors[name] && connections[name]?.ready
                 ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
                 : undefined}
-            hubManaged={Boolean(canEditSetupRoute && modelHubEnabled)}
+            hubManaged={supplyMode === 'hub' || Boolean(!supplyMode && canEditSetupRoute && modelHubEnabled)}
             enabled={agent.enabled}
             route={routeViewFor(name)}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
-            onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
+            onRefreshConnection={() => {
+              if (!adoptionFailed.current[name]) {
+                void refreshConnection(name, { acknowledge: true });
+                return;
+              }
+              void (async () => {
+                try {
+                  const connection = await api.getBackendConnection(name);
+                  if (!connection.ok || !connection.enabled || connection.supply_mode !== 'hub') {
+                    throw new Error(t('onboarding.route.changed'));
+                  }
+                  await adoptSharedRoute(name);
+                  delete adoptionFailed.current[name];
+                  setConnectionErrors((current) => ({ ...current, [name]: '' }));
+                  await refreshConnection(name, { acknowledge: true });
+                } catch (error) {
+                  setConnectionErrors((current) => ({ ...current, [name]: String(error) }));
+                }
+              })();
+            }}
             configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
               || (hubRoute
                 ? agent.status !== 'ok'

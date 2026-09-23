@@ -14,6 +14,7 @@ import type {
 import {
   classifyRetry,
   hydrateSetupRoutes,
+  repairMissingSetupModel,
   retrySetupRoutes,
   saveSetupRoutes,
   selectSetupRouteTarget,
@@ -246,6 +247,36 @@ describe('saveSetupRoutes', () => {
       },
     };
   };
+
+  it('confirms a lost chain response before assigning a missing Agent model', async () => {
+    const { api, store } = writes({});
+    let model: string | null = null;
+    api.getVibeAgent = vi.fn(async () => ({
+      ok: true, agent: { ...full(brief('claude', 'claude', 'opus-5')), model },
+    }));
+    api.updateVibeAgent = vi.fn(async () => {
+      model = 'opus-5';
+      throw new Error('response lost');
+    });
+    api.putAgentChain = vi.fn(async (backend, modelId, body) => {
+      store[`${backend}:${modelId}`] = chainOf(backend, modelId, body.hops);
+      throw new Error('response lost');
+    });
+    await expect(repairMissingSetupModel('claude', 'claude', 'opus-5', [A], api)).resolves.toBe('opus-5');
+    expect(store['claude:opus-5']?.manual_override?.hops).toEqual([A]);
+    expect(api.putAgentChain.mock.invocationCallOrder[0]).toBeLessThan(api.updateVibeAgent.mock.invocationCallOrder[0]!);
+  });
+
+  it('does not assign a missing Agent model when its route write is unconfirmed', async () => {
+    const { api } = writes({});
+    api.getVibeAgent = vi.fn(async () => ({
+      ok: true, agent: { ...full(brief('claude', 'claude', 'opus-5')), model: null },
+    }));
+    api.putAgentChain = vi.fn(async () => { throw new Error('write failed'); });
+    await expect(repairMissingSetupModel('claude', 'claude', 'opus-5', [A], api))
+      .rejects.toThrow('onboarding.route.chainWriteFailed');
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+  });
 
   it('opening without an edit writes nothing, even when displayed union differs', async () => {
     const claude = target('claude', 'opus-5', [A, B], ['claude']);

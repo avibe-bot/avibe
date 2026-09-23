@@ -23,6 +23,7 @@ import {
   hydrateSetupRoutes,
   moveRouteHop,
   retrySetupRoutes,
+  repairMissingSetupModel,
   saveNeedsRetry,
   saveSetupRoutes,
   selectSetupRouteTarget,
@@ -125,9 +126,16 @@ export function DefaultRouteDialog({
         listVibeAgents: (params) => api.listVibeAgents(params),
         getVibeAgent: (name, params) => api.getVibeAgent(name, params),
         getAgentChain: modelsApi.getAgentChain,
-      }, nextSupplies, new Set(connections.filter(({ state }) => state.ok && state.enabled)
+      }, nextSupplies, new Set(connections.filter(({ backend, state }) => state.ok && state.enabled
+        && (state.supply_mode ?? nextSupplies.find((row) => row.backend === backend)?.mode) === 'hub')
         .map(({ backend }) => backend)));
       if (token !== loadToken.current) return;
+      if (dirtyRef.current && hydration.targets.some((fresh) => baselines.current.some((old) =>
+        old.backend === fresh.backend && old.modelId !== fresh.modelId
+        && (old.designatedNames ?? old.agentNames).some((name) =>
+          (fresh.designatedNames ?? fresh.agentNames).includes(name))))) {
+        throw new Error('onboarding.route.changed');
+      }
       setMissingModels(hydration.missingModels);
       const nextTargets = dirtyRef.current
         ? [...baselines.current, ...hydration.targets.filter((target) => !baselines.current.some((old) =>
@@ -164,21 +172,16 @@ export function DefaultRouteDialog({
     onNavigate('providers');
   };
 
-  const setAssistantModel = async (agentName: string, model: string) => {
+  const setAssistantModel = async (backend: AgentSupply['backend'], agentName: string, model: string) => {
     if (!model || phase === 'saving') return;
     setPhase('saving');
     setStatus('');
     try {
-      const current = await api.getVibeAgent(agentName, { cache: false });
-      if (!current.ok || !current.agent || current.agent.name !== agentName || current.agent.model) {
-        throw new Error(t('onboarding.route.changed'));
-      }
-      const result = await api.updateVibeAgent(agentName, { model });
-      if (!result.ok) throw new Error(t('onboarding.route.changed'));
+      await repairMissingSetupModel(backend, agentName, model, flowState.routeOrder, writes);
       await load();
     } catch (error) {
       setPhase('failed');
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(routeErrorText(error instanceof Error ? error.message : String(error)));
     }
   };
 
@@ -247,19 +250,20 @@ export function DefaultRouteDialog({
     : pickerTarget?.chain.route_origin ?? null;
 
   const rows = flowState.routeOrder;
-  const pickerSupply = pickerTarget
-    ? supplies.find((row) => row.backend === pickerTarget.backend && row.mode === 'hub') ?? null
+  const candidateBackend = pickerTarget?.backend ?? missingModels[0]?.backend;
+  const pickerSupply = candidateBackend
+    ? supplies.find((row) => row.backend === candidateBackend && row.mode === 'hub') ?? null
     : null;
   const addCandidates = pickerSupply
     ? routeCandidates(pickerSupply, sources, pickerTarget?.membership ?? [])
     : [];
   const targetSources = pickerSupply ? eligibleSources(sources, pickerSupply) : [];
-  const canAddHop = Boolean(pickerTarget)
+  const canAddHop = Boolean(pickerSupply)
     && (addCandidates.length > 0 || targetSources.some((source) => source.kind === 'api_key'));
 
   const applyHop = (candidate: RouteCandidate) => {
-    if (!pickerTarget || phase === 'saving') return;
-    setTargets((current) => current.map((target) => (
+    if (phase === 'saving') return;
+    if (pickerTarget) setTargets((current) => current.map((target) => (
       target.backend === pickerTarget.backend && target.modelId === pickerTarget.modelId
         ? { ...target, membership: withMembershipHop(target.membership, candidate.hop) }
         : target
@@ -315,21 +319,25 @@ export function DefaultRouteDialog({
                 id,
                 label: supply.catalog_models?.find((row) => row.id === id)?.display_name || id,
               })) : [];
+              const preferred = rows[0]?.model_id;
+              const choices = backend === 'claude' ? models
+                : preferred ? [{ id: preferred, label: preferred }] : [];
               return (
                 <div className="setup-add-row" key={agentName}>
                   <div className="setup-add-row-copy">
                     <span className="setup-add-row-name">{t('onboarding.route.selectAssistantModel', { name: agentName })}</span>
-                    {models.length === 0 && <a href="/settings/models">{t('onboarding.route.openModelSettings')}</a>}
+                    {choices.length === 0 && backend === 'claude' && <a href="/settings/models">{t('onboarding.route.openModelSettings')}</a>}
                   </div>
-                  {models.length > 0 && <>
+                  {choices.length > 0 && <>
                     <select aria-label={t('onboarding.route.selectAssistantModel', { name: agentName })}
-                      value={modelChoices[agentName] ?? ''}
+                      value={backend === 'claude' ? modelChoices[agentName] ?? '' : preferred}
+                      disabled={backend !== 'claude'}
                       onChange={(event) => setModelChoices((current) => ({ ...current, [agentName]: event.target.value }))}>
-                      <option value="">{t('onboarding.route.chooseModel')}</option>
-                      {models.map(({ id, label }) => <option value={id} key={id}>{label}</option>)}
+                      {backend === 'claude' && <option value="">{t('onboarding.route.chooseModel')}</option>}
+                      {choices.map(({ id, label }) => <option value={id} key={id}>{label}</option>)}
                     </select>
-                    <Button type="button" variant="outline" size="sm" disabled={!modelChoices[agentName] || phase === 'saving'}
-                      onClick={() => void setAssistantModel(agentName, modelChoices[agentName])}>
+                    <Button type="button" variant="outline" size="sm" disabled={!(backend === 'claude' ? modelChoices[agentName] : preferred) || phase === 'saving'}
+                      onClick={() => void setAssistantModel(backend, agentName, backend === 'claude' ? modelChoices[agentName] : preferred!)}>
                       {t('onboarding.route.setModel')}
                     </Button>
                   </>}
@@ -392,7 +400,7 @@ export function DefaultRouteDialog({
                 </div>
               );
             })}
-            {canAddHop && pickerTarget && (
+            {canAddHop && (
               <RouteCandidatePopover
                 candidates={addCandidates}
                 sources={targetSources}
