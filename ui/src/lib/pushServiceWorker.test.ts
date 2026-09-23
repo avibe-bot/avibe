@@ -130,6 +130,74 @@ describe('push service worker notification launches', () => {
     });
   });
 
+  it('uses the last confirmed endpoint when the rotation event has no old subscription', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const oldEndpoint = 'https://push.example.test/sub/old';
+    const newEndpoint = 'https://push.example.test/sub/new';
+    const cache = {
+      match: vi.fn(async () => Response.json({ endpoint: oldEndpoint })),
+      put: vi.fn(async () => undefined),
+    };
+    const subscription = {
+      endpoint: newEndpoint,
+      options: { applicationServerKey: new Uint8Array([1, 2, 3, 4]).buffer },
+      toJSON: () => ({
+        endpoint: newEndpoint,
+        keys: { p256dh: 'new-key', auth: 'new-auth' },
+      }),
+    };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      caches: { open: vi.fn(async () => cache) },
+      registration: { pushManager: { subscribe: vi.fn() } },
+      atob,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
+      if (input === '/api/web-push/vapid-public-key') {
+        return Response.json({ public_key: 'AQIDBA' });
+      }
+      if (input === '/api/csrf-token') {
+        return Response.json({ csrf_token: 'csrf-token' });
+      }
+      return Response.json({ accepted: true });
+    });
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: {},
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+      Uint8Array,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('pushsubscriptionchange')?.({
+      newSubscription: subscription,
+      oldSubscription: null,
+      waitUntil: (promise: Promise<unknown>) => {
+        completion = promise;
+      },
+    });
+    await completion;
+
+    expect(cache.match).toHaveBeenCalledWith('https://avibe.local/__avibe/web-push-endpoint');
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toMatchObject({
+      previous_endpoints: [oldEndpoint],
+      background_rotation: true,
+    });
+    expect(cache.put).toHaveBeenCalledWith(
+      'https://avibe.local/__avibe/web-push-endpoint',
+      expect.any(Response),
+    );
+    expect(await cache.put.mock.calls[0][1].json()).toEqual({ endpoint: newEndpoint });
+  });
+
   it('replaces a browser-provided subscription when its VAPID key is stale', async () => {
     const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
     const handlers = new Map<string, (event: unknown) => void>();

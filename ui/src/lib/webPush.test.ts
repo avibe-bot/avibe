@@ -41,6 +41,7 @@ describe('web push recovery', () => {
       },
     };
     const localStorage = new Map<string, string>();
+    const endpointCache = { put: vi.fn(async () => undefined) };
     vi.stubGlobal('window', {
       PushManager: class {},
       Notification: { requestPermission: vi.fn(async () => 'granted'), permission: 'granted' },
@@ -49,6 +50,8 @@ describe('web push recovery', () => {
         getItem: (key: string) => localStorage.get(key) ?? null,
         setItem: (key: string, value: string) => localStorage.set(key, value),
       },
+      caches: { open: vi.fn(async () => endpointCache) },
+      location: { origin: 'https://avibe.local' },
       matchMedia: () => ({ matches: false }),
       atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
     });
@@ -75,5 +78,12 @@ describe('web push recovery', () => {
       'device-1',
       ['https://push.example.test/sub/old'],
     );
+    expect(endpointCache.put).toHaveBeenCalledWith(
+      'https://avibe.local/__avibe/web-push-endpoint',
+      expect.any(Response),
+    );
+    expect(await endpointCache.put.mock.calls[0][1].json()).toEqual({
+      endpoint: 'https://push.example.test/sub/new',
+    });
   });
 });

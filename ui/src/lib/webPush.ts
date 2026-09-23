@@ -3,6 +3,8 @@ import { isIosDevice, isStandalonePwa } from './platform';
 
 const WEB_PUSH_DEVICE_ID_KEY = 'vibe.webPush.deviceId';
 const WEB_PUSH_ENDPOINTS_KEY = 'vibe.webPush.endpoints';
+const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
+const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
 
 export type WebPushSupportState =
   | { supported: true; standalone: boolean; requiresStandalone: boolean }
@@ -59,13 +61,23 @@ export function getRememberedWebPushEndpoints(): string[] {
   return [];
 }
 
-export function rememberWebPushEndpoint(endpoint: string | undefined): void {
+export async function rememberWebPushEndpoint(endpoint: string | undefined): Promise<void> {
   if (!endpoint) return;
   const endpoints = [endpoint, ...getRememberedWebPushEndpoints().filter((candidate) => candidate !== endpoint)].slice(0, 8);
   try {
     window.localStorage.setItem(WEB_PUSH_ENDPOINTS_KEY, JSON.stringify(endpoints));
   } catch {
     // Best-effort persistence only.
+  }
+  if (!('caches' in window)) return;
+  try {
+    const cache = await window.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    const entryUrl = new URL(WEB_PUSH_ENDPOINT_ENTRY_PATH, window.location.origin).href;
+    await cache.put(entryUrl, new Response(JSON.stringify({ endpoint }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+  } catch {
+    // Local endpoint history still supports foreground recovery.
   }
 }
 
@@ -130,7 +142,7 @@ export async function enableWebPush(
     ...getRememberedWebPushEndpoints(),
   ];
   await api.subscribeWebPush(json, undefined, getWebPushDeviceId(), previousEndpoints);
-  rememberWebPushEndpoint(endpoint);
+  await rememberWebPushEndpoint(endpoint);
   return json;
 }
 

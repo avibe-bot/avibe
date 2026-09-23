@@ -69,7 +69,7 @@ export const WebPushControl: React.FC = () => {
             previous_endpoints: getRememberedWebPushEndpoints(),
           });
           if (repairedStatus.current_subscription_enabled) {
-            rememberWebPushEndpoint(repaired.endpoint);
+            await rememberWebPushEndpoint(repaired.endpoint);
             setStatus('enabled');
             return;
           }
@@ -79,7 +79,7 @@ export const WebPushControl: React.FC = () => {
       }
     }
     if (existing && serverStatus?.current_subscription_enabled) {
-      rememberWebPushEndpoint(existing.endpoint);
+      await rememberWebPushEndpoint(existing.endpoint);
     }
     setStatus(existing && serverStatus?.current_subscription_enabled ? 'enabled' : 'disabled');
   };

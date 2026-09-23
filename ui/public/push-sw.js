@@ -17,6 +17,36 @@ function syncAppBadge(count) {
 
 const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
 const WEB_PUSH_LAUNCH_ENTRY_PATH = '/__avibe/web-push-launch';
+const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
+const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
+
+function endpointCacheUrl() {
+  return new URL(WEB_PUSH_ENDPOINT_ENTRY_PATH, self.location.origin).href;
+}
+
+async function rememberedPushEndpoint() {
+  if (!self.caches) return null;
+  try {
+    const cache = await self.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    const response = await cache.match(endpointCacheUrl());
+    const payload = response ? await response.json() : null;
+    return typeof payload?.endpoint === 'string' && payload.endpoint ? payload.endpoint : null;
+  } catch {
+    return null;
+  }
+}
+
+async function rememberPushEndpoint(endpoint) {
+  if (!self.caches || !endpoint) return;
+  try {
+    const cache = await self.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    await cache.put(endpointCacheUrl(), new Response(JSON.stringify({ endpoint }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+  } catch {
+    // Foreground reconciliation remains available if Cache Storage fails.
+  }
+}
 
 function urlBase64ToUint8Array(value) {
   const padding = '='.repeat((4 - (value.length % 4)) % 4);
@@ -87,6 +117,8 @@ async function syncPushSubscription(subscription, previousEndpoints) {
     response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
   }
   if (!response.ok) throw new Error(`Push subscription sync failed (${response.status})`);
+  const payload = await response.json();
+  return payload?.accepted !== false;
 }
 
 async function fetchVapidPublicKey() {
@@ -136,12 +168,15 @@ function rememberPendingNotificationLaunch(url) {
 
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(
-    replacementSubscription(event).then((subscription) =>
-      syncPushSubscription(
+    (async () => {
+      const previousEndpoint = event.oldSubscription?.endpoint ?? await rememberedPushEndpoint();
+      const subscription = await replacementSubscription(event);
+      const accepted = await syncPushSubscription(
         subscription,
-        event.oldSubscription?.endpoint ? [event.oldSubscription.endpoint] : [],
-      ),
-    ).catch(() => undefined),
+        previousEndpoint ? [previousEndpoint] : [],
+      );
+      if (accepted) await rememberPushEndpoint(subscription.endpoint);
+    })().catch(() => undefined),
   );
 });
 
