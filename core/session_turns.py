@@ -3478,6 +3478,7 @@ class SessionTurnManager:
         interrupt_target_id: str | None = None
         should_interrupt = False
         should_cancel_prewrite = False
+        prewrite_retire_delivery_ids: set[str] | None = None
         joined = False
         with self._runtime_start_owner(
             request.session_id,
@@ -3611,6 +3612,17 @@ class SessionTurnManager:
                             current_id,
                             cancellation,
                         )
+                    # A pre-write stop retires only this Run's input; claimed
+                    # batch siblings replay instead of sharing its cancellation.
+                    prewrite_retire_delivery_ids = {
+                        str(value)
+                        for value in conn.execute(
+                            select(agent_runs.c.delivery_id).where(
+                                agent_runs.c.id == cancel_run_id
+                            )
+                        ).scalars()
+                        if value
+                    }
                 control_in_progress = current.get("control_state") in {
                     "pending",
                     "interrupting",
@@ -3800,6 +3812,7 @@ class SessionTurnManager:
             canceled = await self._cancel_prewrite_durable_turn(
                 request.session_id,
                 interrupt_target_id,
+                retire_delivery_ids=prewrite_retire_delivery_ids,
             )
             if delivery_id is not None:
                 return self._committed_delivery_result(
@@ -3837,8 +3850,14 @@ class SessionTurnManager:
         self,
         session_id: str,
         logical_turn_id: str | None,
+        *,
+        retire_delivery_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Cancel a live Turn that has definitive evidence of no native write."""
+        """Cancel a live Turn that has definitive evidence of no native write.
+
+        Session Stop retires every claimed input. A Run cancel passes only its
+        own input, so the other claimed inputs return to the queue.
+        """
 
         projected = self.in_flight.get(session_id)
         if (
@@ -3865,6 +3884,8 @@ class SessionTurnManager:
                 )
                 if row["state"] == "claimed"
             }
+        if retire_delivery_ids is not None:
+            initial_delivery_ids &= retire_delivery_ids
         if turn is None:
             return {"state": "reconciling", "reason": "turn_missing"}
         if turn["state"] == "terminal":
@@ -8276,7 +8297,8 @@ class SessionTurnManager:
             }
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
-        if result.state == "settled":
+        # ``claimed``: a pre-write stop settled the Turn and started its successor.
+        if result.state in {"settled", "claimed"}:
             if normalized_agent_run_id:
                 return {
                     "ok": True,

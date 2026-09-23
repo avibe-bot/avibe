@@ -7908,6 +7908,113 @@ def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_pa
     assert surviving["turn_id"] != turn_id
 
 
+def test_run_cancel_of_a_prewrite_batch_member_replays_its_siblings(
+    monkeypatch,
+    tmp_path,
+):
+    """Stopping a live pre-write batch retires only the canceled Run's input."""
+
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_prewrite_batch_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    runs = [
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+        )
+        for message in ("canceled batch participant", "surviving batch participant")
+    ]
+    assert all(request_store.claim(run.id) is not None for run in runs)
+
+    with engine.begin() as conn:
+        deliveries = [
+            _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                text=text,
+            )
+            for text in ("canceled batch participant", "surviving batch participant")
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="claude",
+            deliveries=deliveries,
+            dispatch_text="canceled batch participant\n\nsurviving batch participant",
+        )
+        for run, delivery in zip(runs, claimed["deliveries"], strict=True):
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session_id,
+                delivery_id=str(delivery["id"]),
+            )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    dispatched: list[str] = []
+
+    async def _record_start(_session_id, _context, text, **_kwargs):
+        dispatched.append(text)
+
+    monkeypatch.setattr(manager, "_run", _record_start)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+
+    async def _go():
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight[session_id] = session_turns.Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        try:
+            return await manager.cancel(session_id, agent_run_id=runs[0].id)
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+
+    result = asyncio.run(_go())
+
+    assert result["ok"] is True, result
+    controller.command_handler.handle_stop.assert_not_awaited()
+    assert dispatched == ["surviving batch participant"]
+    assert request_store.get_run(runs[0].id)["status"] == "canceled"
+    assert request_store.get_run(runs[1].id)["status"] == "running"
+    with engine.connect() as conn:
+        original = message_deliveries.get_turn(conn, turn_id)
+        canceled = message_deliveries.get_delivery(
+            conn,
+            str(claimed["deliveries"][0]["id"]),
+        )
+        surviving = message_deliveries.get_delivery(
+            conn,
+            str(claimed["deliveries"][1]["id"]),
+        )
+    assert original is not None and original["terminal_outcome"] == "not_written"
+    assert canceled is not None and canceled["state"] == "retired"
+    assert surviving is not None and surviving["state"] == "claimed"
+    assert surviving["turn_id"] != turn_id
+
+
 def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
     """A stale observed Turn cannot detach a Run that owns the current Turn."""
 
