@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
-import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { AccessTiles } from './onboarding/AccessTiles';
 import { RouteSurfaceActiveContext, useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
@@ -220,7 +220,11 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
         disabled={loading || !!handoff || navigationLocked || (!retry && (!action || action.disabled || action.busy || !ready))}
         onClick={() => { if (transitioning.current || policy.current.locked) return; if (retry) onRetrySetup(); else if (ready && action && !action.disabled && !action.busy) handles.current[current.current.id]?.activate(); }}>
         {t(loading ? 'common.loading' : retry ? 'common.retry' : action?.labelKey ?? 'common.loading', action?.labelArgs)}
-        {(loading || action?.busy || action?.icon === 'spinner') ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
+        {(loading || action?.busy || action?.icon === 'spinner')
+          ? activation.id === 'providers'
+            ? <LoaderCircle size={16} className="motion-safe:animate-spin" />
+            : <RefreshCw size={16} className="motion-safe:animate-spin" />
+          : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
       </Button>
       <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" style={{ visibility: back ? 'visible' : 'hidden' }}
         disabled={!back || !!handoff || !!action?.busy || navigationLocked} onClick={() => { if (back) navigate(back); }}>

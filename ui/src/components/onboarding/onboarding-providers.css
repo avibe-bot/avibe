@@ -71,6 +71,10 @@
   gap: 0;
 }
 
+.onboarding-step[data-setup-screen="providers"] .onboarding-primary-action:disabled {
+  opacity: 0.4;
+}
+
 /* ---- Provider sources ---------------------------------------------------- */
 
 /* The same three tracks the story's cards use, so the diagram's columns and the
