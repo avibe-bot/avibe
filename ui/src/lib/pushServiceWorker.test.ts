@@ -57,6 +57,7 @@ describe('push service worker notification launches', () => {
     const requests: Array<{ input: string; init?: RequestInit }> = [];
     const newSubscription = {
       endpoint: 'https://push.example.test/sub/new',
+      options: { applicationServerKey: new Uint8Array([1, 2, 3, 4]).buffer },
       toJSON: () => ({
         endpoint: 'https://push.example.test/sub/new',
         keys: { p256dh: 'new-key', auth: 'new-auth' },
@@ -74,6 +75,9 @@ describe('push service worker notification launches', () => {
       requests.push({ input, init });
       if (input === '/api/csrf-token') {
         return { ok: true, json: async () => ({ csrf_token: 'csrf-token' }) };
+      }
+      if (input === '/api/web-push/vapid-public-key') {
+        return { ok: true, json: async () => ({ public_key: 'AQIDBA' }) };
       }
       return { ok: true, json: async () => ({}) };
     });
@@ -101,9 +105,10 @@ describe('push service worker notification launches', () => {
     });
     await completion;
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(requests[0].input).toBe('/api/csrf-token');
-    expect(requests[1]).toMatchObject({
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(requests[0].input).toBe('/api/web-push/vapid-public-key');
+    expect(requests[1].input).toBe('/api/csrf-token');
+    expect(requests[2]).toMatchObject({
       input: '/api/web-push/subscriptions',
       init: {
         method: 'POST',
@@ -115,11 +120,90 @@ describe('push service worker notification launches', () => {
         },
       },
     });
-    expect(JSON.parse(String(requests[1].init?.body))).toEqual({
+    expect(JSON.parse(String(requests[2].init?.body))).toEqual({
       subscription: {
         endpoint: 'https://push.example.test/sub/new',
         keys: { p256dh: 'new-key', auth: 'new-auth' },
       },
+      previous_endpoints: ['https://push.example.test/sub/old'],
+    });
+  });
+
+  it('replaces a browser-provided subscription when its VAPID key is stale', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const requests: Array<{ input: string; init?: RequestInit }> = [];
+    const staleSubscription = {
+      endpoint: 'https://push.example.test/sub/stale',
+      options: { applicationServerKey: new Uint8Array([9, 9, 9, 9]).buffer },
+      unsubscribe: vi.fn(async () => true),
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/sub/stale',
+        keys: { p256dh: 'stale-key', auth: 'stale-auth' },
+      }),
+    };
+    const currentSubscription = {
+      endpoint: 'https://push.example.test/sub/current',
+      options: { applicationServerKey: new Uint8Array([1, 2, 3, 4]).buffer },
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/sub/current',
+        keys: { p256dh: 'current-key', auth: 'current-auth' },
+      }),
+    };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      caches: { open: vi.fn() },
+      clients: { matchAll: vi.fn(), openWindow: vi.fn() },
+      registration: {
+        showNotification: vi.fn(),
+        pushManager: {
+          subscribe: vi.fn(async () => currentSubscription),
+        },
+      },
+      atob,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      requests.push({ input, init });
+      if (input === '/api/web-push/vapid-public-key') {
+        return { ok: true, json: async () => ({ public_key: 'AQIDBA' }) };
+      }
+      if (input === '/api/csrf-token') {
+        return { ok: true, json: async () => ({ csrf_token: 'csrf-token' }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: {},
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+      Uint8Array,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('pushsubscriptionchange')?.({
+      newSubscription: staleSubscription,
+      oldSubscription: { endpoint: 'https://push.example.test/sub/old' },
+      waitUntil: (promise: Promise<unknown>) => {
+        completion = promise;
+      },
+    });
+    await completion;
+
+    expect(staleSubscription.unsubscribe).toHaveBeenCalledOnce();
+    expect(worker.registration.pushManager.subscribe).toHaveBeenCalledWith({
+      userVisibleOnly: true,
+      applicationServerKey: new Uint8Array([1, 2, 3, 4]),
+    });
+    expect(JSON.parse(String(requests[2].init?.body))).toEqual({
+      subscription: currentSubscription.toJSON(),
       previous_endpoints: ['https://push.example.test/sub/old'],
     });
   });

@@ -27,6 +27,16 @@ function urlBase64ToUint8Array(value) {
   return output;
 }
 
+function arrayBuffersEqual(left, right) {
+  if (!left || left.byteLength !== right.byteLength) return false;
+  const leftView = new Uint8Array(left);
+  const rightView = new Uint8Array(right);
+  for (let i = 0; i < leftView.length; i += 1) {
+    if (leftView[i] !== rightView[i]) return false;
+  }
+  return true;
+}
+
 async function fetchCsrfToken() {
   const response = await fetch('/api/csrf-token', {
     credentials: 'same-origin',
@@ -57,22 +67,30 @@ async function syncPushSubscription(subscription, previousEndpoints) {
   if (!response.ok) throw new Error(`Push subscription sync failed (${response.status})`);
 }
 
-async function replacementSubscription(event) {
-  if (event.newSubscription) return event.newSubscription;
-
-  let applicationServerKey = event.oldSubscription?.options?.applicationServerKey;
-  if (!applicationServerKey) {
-    const response = await fetch('/api/web-push/vapid-public-key', {
-      credentials: 'same-origin',
-    });
-    if (!response.ok) throw new Error(`VAPID key request failed (${response.status})`);
-    const payload = await response.json();
-    if (typeof payload?.public_key !== 'string' || !payload.public_key) {
-      throw new Error('VAPID public key missing from response');
-    }
-    applicationServerKey = urlBase64ToUint8Array(payload.public_key);
+async function fetchVapidPublicKey() {
+  const response = await fetch('/api/web-push/vapid-public-key', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`VAPID key request failed (${response.status})`);
+  const payload = await response.json();
+  if (typeof payload?.public_key !== 'string' || !payload.public_key) {
+    throw new Error('VAPID public key missing from response');
   }
+  return urlBase64ToUint8Array(payload.public_key);
+}
 
+async function replacementSubscription(event) {
+  const applicationServerKey = await fetchVapidPublicKey();
+  const replacement = event.newSubscription;
+  if (
+    replacement
+    && arrayBuffersEqual(replacement.options?.applicationServerKey, applicationServerKey)
+  ) {
+    return replacement;
+  }
+  if (replacement) {
+    await replacement.unsubscribe();
+  }
   return self.registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey,
