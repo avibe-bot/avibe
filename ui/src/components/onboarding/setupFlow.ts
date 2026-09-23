@@ -27,9 +27,10 @@ export type SetupScreenId = (typeof SETUP_SCREENS)[number];
 /**
  * Which transition is playing, or `false` when none is. Named for the screen being
  * ENTERED, because the snapshot is taken from the screen being left: `providers` shrinks
- * the story cards into the destination row, `assistants` lifts that row into full cards.
+ * the story cards into the destination row, `assistants` lifts that row into full cards,
+ * and `intro` grows the row back into the story it came from.
  */
-export type SetupHandoffTarget = Exclude<SetupScreenId, 'intro'>;
+export type SetupHandoffTarget = SetupScreenId;
 
 /** The leading glyph the shell draws inside the primary action. */
 export type SetupActionIcon = 'none' | 'arrow-right' | 'spinner';

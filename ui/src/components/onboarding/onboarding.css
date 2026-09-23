@@ -1393,6 +1393,7 @@
 /* The card an identity is flying onto is held until it lands: the moving shell is the
    one that should be seen crossing, and the two drawn at once read as a double. */
 .onboarding-step[data-handoff="providers"] .setup-destinations,
+.onboarding-step[data-handoff="intro"] .onboarding-collaboration-card,
 .onboarding-step[data-handoff="assistants"] .onboarding-assistant { visibility: hidden; }
 .onboarding-step[data-handoff] .onboarding-primary-action:disabled { opacity: 1; }
 .onboarding-heading h1:focus { outline: none; }
