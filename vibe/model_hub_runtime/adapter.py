@@ -2789,6 +2789,13 @@ class CLIProxyEngineAdapter:
         auth_name: str,
         credential_ref: str,
     ) -> bool:
+        # Before any deletion: with no local handle, an engine a previous service
+        # left running would keep this grant loaded after its file is gone.
+        if client is None:
+            try:
+                await asyncio.to_thread(self.supervisor.reap_untracked_engines)
+            except EngineUnavailableError:
+                return False
         engine_delete_succeeded = client is None
         if client is not None:
             try:

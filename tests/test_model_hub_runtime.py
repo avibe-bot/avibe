@@ -3282,6 +3282,38 @@ def test_oauth_revoke_keeps_the_grant_while_a_previous_engine_is_unconfirmed(tmp
     asyncio.run(run())
 
 
+def test_orphaned_oauth_cleanup_keeps_the_grant_while_a_previous_engine_is_unconfirmed(tmp_path: Path) -> None:
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+        def reap_untracked_engines(self) -> None:
+            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+
+        def client_if_running(self):
+            return None
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", auth_file.name)
+        store.sync_sources([])
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is False
+
+        assert auth_file.exists()
+        assert store.credential_metadata_if_present(credential_ref) is not None
+
+    asyncio.run(run())
+
+
 def test_supervisor_keeps_a_marker_only_record_when_the_scan_cannot_read_a_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

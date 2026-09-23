@@ -1530,10 +1530,7 @@ class ManagedWatchService:
                             live_identity.create_time,
                         )
                     else:
-                        worker_is_gone = (
-                            live_identity.create_time
-                            != expected_identity.create_time
-                        )
+                        worker_is_gone = process_identity_recycled(expected_identity, live_identity)
             except Exception:
                 logger.debug(
                     "Failed to recheck blocked stale watch pid=%s watch_id=%s",
