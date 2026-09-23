@@ -167,6 +167,36 @@ class CodexBackendAliveTests(unittest.TestCase):
         self.assertIn("Resource diagnosis: shared cgroup limit event", diagnostic)
         self.assertIn("(0/4096)", visible)
 
+    def test_captured_exit_failure_caches_negative_pressure_check(self):
+        process = types.SimpleNamespace(returncode=None)
+        accepted = types.SimpleNamespace(is_alive=False, _process=process)
+        agent = self._agent(
+            cwd_for_session={"b1": "/repo"},
+            transports={"/repo": accepted},
+        )
+        agent.controller = types.SimpleNamespace(
+            config=types.SimpleNamespace(language="en")
+        )
+        diagnose = agent.capture_backend_exit_failure(self._ctx_base("b1"))
+        self.assertIsNotNone(diagnose)
+        later_pressure = AgentResourceFailure(
+            kind="memory",
+            message="pressure from a later process",
+        )
+
+        with patch(
+            "modules.agents.codex.agent.observe_agent_resource_pressure",
+            side_effect=[None, later_pressure],
+        ) as observe:
+            # The first liveness failure is not yet a confirmed process exit.
+            self.assertIsNone(diagnose())
+            observe.assert_not_called()
+            process.returncode = 137
+            self.assertIsNone(diagnose())
+            self.assertIsNone(diagnose())
+
+        observe.assert_called_once_with(agent.controller)
+
 
 class OpenCodeResourceExitTests(unittest.TestCase):
     def test_adopted_exit_consumes_pressure_only_after_original_generation_exits(self):

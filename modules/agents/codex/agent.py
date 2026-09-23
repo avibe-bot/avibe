@@ -280,13 +280,21 @@ class CodexAgent(BaseAgent):
             return None
 
         cached_diagnosis: tuple[str, str] | None = None
+        exit_checked = False
 
         def diagnose() -> tuple[str, str] | None:
-            nonlocal cached_diagnosis
-            if cached_diagnosis is not None:
+            nonlocal cached_diagnosis, exit_checked
+            if exit_checked:
                 return cached_diagnosis
+            process = getattr(transport, "_process", None)
+            if process is None or getattr(process, "returncode", None) is None:
+                # A liveness failure may precede a definitive process exit.
+                return None
             failure = self._resource_failure_for_transport(transport)
             if failure is None:
+                # Shared cgroup observations belong to this exit boundary only.
+                # A later retry must not attach a newer event to an older death.
+                exit_checked = True
                 return None
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
@@ -301,11 +309,13 @@ class CodexAgent(BaseAgent):
             elif failure.kind == "memory":
                 visible = i18n_t("error.agentMemoryLimit", language)
             else:
+                exit_checked = True
                 return None
             cached_diagnosis = (
                 f"backend_runtime_exited_before_terminal\nResource diagnosis: {failure.message}",
                 f"❌ {visible}",
             )
+            exit_checked = True
             return cached_diagnosis
 
         return diagnose
