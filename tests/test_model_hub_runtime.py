@@ -6359,19 +6359,37 @@ def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() ->
 
 
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    "message",
     [
-        (
-            "[Update required](https://attacker.example/fix) to continue",
-            "Update required (https://attacker.example/fix) to continue",
-        ),
-        ("see <https://attacker.example|the docs>", "see the docs (https://attacker.example)"),
-        ("[a]( https://x.example ) and [b](https://y.example)", "a (https://x.example) and b (https://y.example)"),
-        ("array[0] (index) is out of range", "array[0] (index) is out of range"),
+        "[Update required](https://attacker.example/fix) to continue",
+        "[Update required](https://attacker.example/fix_(now)) to continue",
+        "[Update required] (<https://attacker.example/fix>)",
+        "see <https://attacker.example|the docs>",
     ],
 )
-def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str, expected: str) -> None:
-    assert client_module._bounded_upstream_detail(message) == expected
+def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str) -> None:
+    detail = client_module._bounded_upstream_detail(message)
+
+    assert detail is not None
+    assert "](" not in detail.replace(" ", "")
+    assert "<h" not in detail
+    # Only zero-width breaks were inserted: the destination still reads as written.
+    assert detail.replace("\u200b", "") == message
+
+
+def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
+    assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
+        "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
+    )
+
+
+def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
+    payload = b'{"error": {"message": "bad \\ud800 byte"}}'
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail == "bad \ufffd byte"
+    detail.encode("utf-8")
 
 
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:

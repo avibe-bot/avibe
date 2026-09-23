@@ -132,7 +132,9 @@ class MessageOutput:
 # character covers the Slack/Discord broadcasts AND a bare Telegram ``@username``
 # (which ``TelegramFormatter.render`` HTML-escapes without defusing), and a new
 # adapter inherits the guard instead of needing its own.
-_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
+# A handle only at a word start, so ``support@example.com`` stays a usable address;
+# a broadcast word anywhere, since a renderer may resolve ``x@everyone`` too.
+_MENTION_SIGIL_PATTERN = re.compile(r"@(?=(?:everyone|here|channel)\b)|(?<![\w.+-])@(?=\w)", re.IGNORECASE)
 _ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
 _MENTION_BREAK = "\u200b"
 
@@ -150,22 +152,32 @@ def neutralize_mentions(text: str) -> str:
     return _ID_MENTION_PATTERN.sub("<" + _MENTION_BREAK, neutralized)
 
 
-# Masked-link unmaskers for text an untrusted party wrote but Avibe republishes under
-# its own copy (an upstream provider's error message). Markdown ``[label](url)`` is a
-# clickable link on Discord, Telegram (``TelegramFormatter`` renders it to ``<a>``),
-# and the Web UI, and Slack resolves ``<url|label>`` the same way, so the label could
-# dress an attacker-chosen URL as Avibe's own call to action. Rewriting both forms to
-# ``label (url)`` keeps every word readable while leaving the destination in plain
-# sight; a bare URL may still autolink, but it can no longer hide behind other text.
-_MARKDOWN_MASKED_LINK_PATTERN = re.compile(r"\[([^\[\]]*)\]\(\s*([^()\s]+)\s*\)")
-_SLACK_MASKED_LINK_PATTERN = re.compile(r"<([^<>|\s]+)\|([^<>]*)>")
+# Link defusers for text an untrusted party wrote but Avibe republishes under its own
+# copy (an upstream provider's error message). A masked link lets the label dress an
+# attacker-chosen URL as Avibe's own call to action: Markdown ``[label](url)`` on
+# Discord, Telegram (``TelegramFormatter`` renders it to ``<a>``), and the Web UI, and
+# Slack's ``<url|label>``. Parsing destinations is a losing game (balanced parens,
+# escapes, angle-bracket forms), so the syntax itself is broken instead: a zero-width
+# space between ``]`` and ``(`` and after every ``<`` leaves no renderer a link to
+# build, and the text, destination included, still reads exactly as written.
+_MARKDOWN_LINK_JOIN_PATTERN = re.compile(r"\](?=\s*\()")
+# A lone surrogate (``\ud800`` in upstream JSON) survives parsing but cannot be
+# encoded, so the notification would fail to persist; U+FFFD keeps the rest.
+_LONE_SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 
 
-def unmask_links(text: str) -> str:
-    """Rewrite every masked link in *text* so its destination is shown, not hidden."""
+def plain_untrusted_text(text: str) -> str:
+    """Make untrusted *text* render as the plain words it holds on every platform.
 
-    unmasked = _MARKDOWN_MASKED_LINK_PATTERN.sub(r"\1 (\2)", text or "")
-    return _SLACK_MASKED_LINK_PATTERN.sub(r"\2 (\1)", unmasked)
+    Mentions are neutralized, masked links defused, and unencodable code points
+    replaced, so the result can be sent and persisted under Avibe's own copy.
+    """
+
+    text = _LONE_SURROGATE_PATTERN.sub("\ufffd", text or "")
+    text = _MARKDOWN_LINK_JOIN_PATTERN.sub("]" + _MENTION_BREAK, text)
+    text = _MENTION_SIGIL_PATTERN.sub("@" + _MENTION_BREAK, text)
+    # Every ``<``, not only the id-mention forms: Slack also builds ``<url|label>``.
+    return text.replace("<", "<" + _MENTION_BREAK)
 
 
 def output_for_message(message_type: str, output: MessageOutput | None) -> MessageOutput:
