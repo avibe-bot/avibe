@@ -6422,7 +6422,7 @@ def web_push_status():
         current_subscription_repairable = bool(
             current_subscription
             and not current_subscription_enabled
-            and current_subscription.get("last_failure_at")
+            and current_subscription.get("provider_invalidated_at")
         )
     return jsonify(
         {

@@ -120,14 +120,18 @@ export async function enableWebPush(
   const registration = await navigator.serviceWorker.register('/push-sw.js');
   const serverKey = urlBase64ToArrayBuffer((await api.getWebPushVapidPublicKey()).public_key);
   const existing = await registration.pushManager.getSubscription();
+  let current = existing;
   if (
     existing
     && (options.forceResubscribe
       || !arrayBuffersEqual(existing.options.applicationServerKey, serverKey))
   ) {
     await existing.unsubscribe();
+    current = await registration.pushManager.getSubscription();
+    if (current?.endpoint === existing.endpoint) {
+      throw new Error('unsubscribe_failed');
+    }
   }
-  const current = await registration.pushManager.getSubscription();
   const subscription =
     current ??
     (await registration.pushManager.subscribe({

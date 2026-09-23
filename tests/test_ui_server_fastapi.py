@@ -3470,9 +3470,13 @@ def test_web_push_status_sync_disables_client_known_previous_endpoint(monkeypatc
         ) is not None
 
 
-def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider_invalidated", [True, False])
+def test_web_push_status_sync_does_not_reenable_disabled_endpoint(
+    monkeypatch, tmp_path, provider_invalidated
+):
     from storage import web_push_service
     from storage.db import create_sqlite_engine
+    from storage.models import web_push_subscriptions
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
@@ -3493,6 +3497,12 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         web_push_service.mark_send_failure(conn, endpoint=subscription["endpoint"], disable=True)
+        if not provider_invalidated:
+            conn.execute(
+                web_push_subscriptions.update()
+                .where(web_push_subscriptions.c.endpoint == subscription["endpoint"])
+                .values(provider_invalidated_at=None)
+            )
 
     status = client.post(
         "/api/web-push/status",
@@ -3507,7 +3517,7 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     assert status.status_code == 200
     assert status.get_json()["subscription_count"] == 0
     assert status.get_json()["current_subscription_enabled"] is False
-    assert status.get_json()["current_subscription_repairable"] is True
+    assert status.get_json()["current_subscription_repairable"] is provider_invalidated
     with engine.connect() as conn:
         assert web_push_service.get_enabled_by_endpoint(
             conn,

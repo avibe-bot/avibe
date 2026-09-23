@@ -139,6 +139,7 @@ def upsert_subscription(
             "device_label": device_label,
             "enabled": 1,
             "last_failure_at": None,
+            "provider_invalidated_at": None,
             "failure_count": 0,
             "updated_at": now,
         },
@@ -170,7 +171,7 @@ def upsert_background_rotated_subscription(
         .where(web_push_subscriptions.c.endpoint.in_(previous_candidates))
         .where(
             (web_push_subscriptions.c.enabled == 1)
-            | web_push_subscriptions.c.last_failure_at.is_not(None)
+            | web_push_subscriptions.c.provider_invalidated_at.is_not(None)
         )
         .limit(1)
     ).mappings().first()
@@ -178,7 +179,7 @@ def upsert_background_rotated_subscription(
         return None
 
     current = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
-    if current is not None and not current["enabled"] and not current.get("last_failure_at"):
+    if current is not None and not current["enabled"] and not current.get("provider_invalidated_at"):
         return None
     return upsert_subscription(
         conn,
@@ -218,7 +219,7 @@ def attach_device_to_enabled_subscription(
             .where(web_push_subscriptions.c.endpoint.in_(previous_candidates))
             .where(
                 (web_push_subscriptions.c.enabled == 1)
-                | web_push_subscriptions.c.last_failure_at.is_not(None)
+                | web_push_subscriptions.c.provider_invalidated_at.is_not(None)
             )
         ).mappings().all()
         for previous_row in previous_rows:
@@ -286,7 +287,7 @@ def disable_subscription(conn: Connection, *, endpoint: str, user_key: str | Non
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     result = conn.execute(
-        stmt.values(enabled=0, last_failure_at=None, updated_at=now)
+        stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=now)
     )
     return bool(result.rowcount)
 
@@ -313,7 +314,7 @@ def disable_device_subscription(
     else:
         stmt = stmt.where(web_push_subscriptions.c.device_id == device_id)
     result = conn.execute(
-        stmt.values(enabled=0, last_failure_at=None, updated_at=_utc_now_iso())
+        stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=_utc_now_iso())
     )
     return bool(result.rowcount)
 
@@ -379,7 +380,7 @@ def mark_send_success(conn: Connection, *, endpoint: str) -> None:
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.endpoint == endpoint)
-        .values(last_success_at=now, last_failure_at=None, failure_count=0, updated_at=now)
+        .values(last_success_at=now, last_failure_at=None, provider_invalidated_at=None, failure_count=0, updated_at=now)
     )
 
 
@@ -392,6 +393,10 @@ def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False)
     }
     if disable:
         values["enabled"] = 0
+        values["provider_invalidated_at"] = now
     conn.execute(
-        web_push_subscriptions.update().where(web_push_subscriptions.c.endpoint == endpoint).values(**values)
+        web_push_subscriptions.update()
+        .where(web_push_subscriptions.c.endpoint == endpoint)
+        .where(web_push_subscriptions.c.enabled == 1)
+        .values(**values)
     )
