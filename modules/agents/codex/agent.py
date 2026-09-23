@@ -50,7 +50,7 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from core.resource_governance import (
-    diagnose_agent_process_exit,
+    observe_agent_resource_pressure,
     governor_from_controller,
 )
 from core.runtime_activation import RuntimeActivationIdentity
@@ -1356,13 +1356,10 @@ class CodexAgent(BaseAgent):
         process = getattr(transport, "_process", None)
         if process is None or getattr(process, "returncode", None) is None:
             return None
-        failure = diagnose_agent_process_exit(
-            self.controller,
-            getattr(process, "pid", None),
-        )
+        failure = observe_agent_resource_pressure(self.controller)
         if failure is not None:
             logger.error(
-                "Codex app-server exited under an Agent resource limit: %s",
+                "Codex app-server exited while the shared Agent cgroup reported resource pressure: %s",
                 failure.message,
             )
         return failure

@@ -45,7 +45,7 @@ from core.native_dispatch_phase import (
 )
 from core.resource_governance import (
     AgentResourceFailure,
-    diagnose_agent_process_exit,
+    observe_agent_resource_pressure,
     governor_from_controller,
 )
 from core.runtime_activation import RuntimeActivationIdentity
@@ -985,15 +985,20 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         server: OpenCodeServerManager | None,
     ) -> AgentResourceFailure | None:
         process = getattr(server, "_process", None)
-        if process is None or getattr(process, "returncode", None) is None:
+        if process is not None:
+            if getattr(process, "returncode", None) is None:
+                return None
+            pid = getattr(process, "pid", None)
+        else:
+            pid = getattr(server, "_last_start_failure_pid", None)
+        if not isinstance(pid, int) or pid <= 0:
             return None
-        failure = diagnose_agent_process_exit(
-            self.controller,
-            getattr(process, "pid", None),
-        )
+        failure = observe_agent_resource_pressure(self.controller)
+        if server is not None:
+            setattr(server, "_last_start_failure_pid", None)
         if failure is not None:
             logger.error(
-                "OpenCode server exited under an Agent resource limit: %s",
+                "OpenCode server exited while the shared Agent cgroup reported resource pressure: %s",
                 failure.message,
             )
         return failure

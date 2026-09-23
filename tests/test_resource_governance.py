@@ -47,10 +47,10 @@ def test_governor_diagnoses_pid_limit_from_counter_delta(
 
     governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
     monkeypatch.setattr(governor, "_group", group)
-    governor._pid_event_baselines[123] = governor.snapshot()  # type: ignore[assignment]
+    governor._event_baseline = governor.snapshot()
     (group / "pids.events").write_text("max 5\n", encoding="utf-8")
 
-    failure = governor.diagnose_process_exit(123)
+    failure = governor.observe_resource_pressure()
 
     assert failure is not None
     assert failure.kind == "pids"
@@ -58,6 +58,7 @@ def test_governor_diagnoses_pid_limit_from_counter_delta(
     assert failure.pids_max == 4096
     assert failure.event_delta == 1
     assert "events.max_delta=1" in failure.message
+    assert "shared Agent cgroup" in failure.message
 
 
 def test_governor_diagnoses_memory_limit_from_counter_delta(
@@ -79,10 +80,10 @@ def test_governor_diagnoses_memory_limit_from_counter_delta(
 
     governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
     governor._group = group
-    governor._pid_event_baselines[123] = governor.snapshot()  # type: ignore[assignment]
+    governor._event_baseline = governor.snapshot()
     (group / "memory.events").write_text("max 2\noom 0\noom_kill 0\n", encoding="utf-8")
 
-    failure = governor.diagnose_process_exit(123)
+    failure = governor.observe_resource_pressure()
 
     assert failure is not None
     assert failure.kind == "memory"

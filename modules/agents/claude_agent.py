@@ -2255,8 +2255,8 @@ class ClaudeAgent(BaseAgent):
         contained = False
         if returncode is not None:
             eof_error = RuntimeError(terminal_error)
-            error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
             diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
+            error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
             failure_context = getattr(pending_request, "context", context)
             intentional_teardown = self._teardown_is_intentional(
                 composite_key, eof_error, client=client

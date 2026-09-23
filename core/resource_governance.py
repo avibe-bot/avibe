@@ -419,7 +419,7 @@ class AgentResourceGovernor:
         self._group: Path | None = None
         self._limits: AgentResourceLimits | None = None
         self._disabled_reason: str | None = None
-        self._pid_event_baselines: dict[int, AgentResourceSnapshot] = {}
+        self._event_baseline: AgentResourceSnapshot | None = None
 
     @property
     def mode(self) -> str:
@@ -440,7 +440,7 @@ class AgentResourceGovernor:
         self._group = None
         self._limits = None
         self._disabled_reason = None
-        self._pid_event_baselines.clear()
+        self._event_baseline = None
 
     def apply_to_pid(self, pid: int | None, *, label: str = "agent") -> bool:
         if not isinstance(pid, int) or pid <= 0:
@@ -455,8 +455,8 @@ class AgentResourceGovernor:
             self._move_pid(group, child_pid, label=f"{label} child", warn=False)
         if moved:
             snapshot = self.snapshot()
-            if snapshot is not None:
-                self._pid_event_baselines[pid] = snapshot
+            if snapshot is not None and self._event_baseline is None:
+                self._event_baseline = snapshot
         return moved
 
     def snapshot(self) -> AgentResourceSnapshot | None:
@@ -472,18 +472,15 @@ class AgentResourceGovernor:
             memory_events=_parse_counter_file(group / "memory.events"),
         )
 
-    def diagnose_process_exit(self, pid: int | None) -> AgentResourceFailure | None:
-        """Classify a process exit from counters observed since it was adopted."""
+    def observe_resource_pressure(self) -> AgentResourceFailure | None:
+        """Observe a shared Agent cgroup limit event without process attribution."""
 
-        if not isinstance(pid, int) or pid <= 0:
-            return None
         current = self.snapshot()
-        baseline = self._pid_event_baselines.pop(pid, None)
-        if current is None:
+        baseline = self._event_baseline
+        if current is None or baseline is None:
             return None
 
-        baseline_pids_max = (baseline.pids_events.get("max", 0) if baseline else 0)
-        pids_max_delta = current.pids_events.get("max", 0) - baseline_pids_max
+        pids_max_delta = current.pids_events.get("max", 0) - baseline.pids_events.get("max", 0)
         if pids_max_delta > 0:
             current_label = (
                 str(current.pids_current)
@@ -498,23 +495,24 @@ class AgentResourceGovernor:
             return AgentResourceFailure(
                 kind="pids",
                 message=(
-                    "agent cgroup pids limit reached "
-                    f"(current={current_label}, max={limit_label}, events.max_delta={pids_max_delta})"
+                    "shared Agent cgroup recorded a pids limit event "
+                    f"(current={current_label}, max={limit_label}, events.max_delta={pids_max_delta}); "
+                    "concurrent Agent processes may be affected"
                 ),
                 pids_current=current.pids_current,
                 pids_max=current.pids_max,
                 event_delta=pids_max_delta,
             )
 
-        baseline_memory = baseline.memory_events if baseline else {}
         for event_name in ("oom_kill", "oom", "max"):
-            delta = current.memory_events.get(event_name, 0) - baseline_memory.get(event_name, 0)
+            delta = current.memory_events.get(event_name, 0) - baseline.memory_events.get(event_name, 0)
             if delta > 0:
                 return AgentResourceFailure(
                     kind="memory",
                     message=(
-                        "agent cgroup memory limit reached "
-                        f"(event={event_name}, events_delta={delta})"
+                        "shared Agent cgroup recorded a memory limit event "
+                        f"(event={event_name}, events_delta={delta}); "
+                        "concurrent Agent processes may be affected"
                     ),
                     event_delta=delta,
                 )
@@ -762,7 +760,7 @@ def governor_from_controller(controller: Any) -> AgentResourceGovernor:
     return governor
 
 
-def diagnose_agent_process_exit(controller: Any, pid: int | None) -> AgentResourceFailure | None:
-    """Return a resource-limit diagnosis for one adopted backend process."""
+def observe_agent_resource_pressure(controller: Any) -> AgentResourceFailure | None:
+    """Return a shared Agent cgroup resource observation."""
 
-    return governor_from_controller(controller).diagnose_process_exit(pid)
+    return governor_from_controller(controller).observe_resource_pressure()

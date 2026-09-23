@@ -246,6 +246,7 @@ class OpenCodeServerManager:
         self.resource_governor = resource_governor
         self.host = DEFAULT_OPENCODE_HOST
         self._process: Optional[Process] = None
+        self._last_start_failure_pid: int | None = None
         # The event loop ``_process`` was created on. Subprocess transports
         # bind their internal Future / wait helpers to the creating loop;
         # ``process.wait()`` or ``terminate_process_tree(process)`` from a
@@ -1837,6 +1838,7 @@ class OpenCodeServerManager:
         # ``runtime.stop_pid``) is loop-agnostic and is the correct
         # cleanup path; just detach the dangling Python object first.
         current_loop = asyncio.get_running_loop()
+        self._last_start_failure_pid = None
         if (
             self._process
             and self._process.returncode is None
@@ -1934,12 +1936,14 @@ class OpenCodeServerManager:
                 break
             await asyncio.sleep(0.5)
 
-        exit_code = self._process.returncode
+        process = self._process
+        exit_code = process.returncode
+        self._last_start_failure_pid = getattr(process, "pid", None)
         if exit_code is None:
             # A late-starting process must not become a healthy but unmanaged
             # server after this call reports failure and clears its PID file.
             await terminate_process_tree(
-                self._process,
+                process,
                 logger,
                 "OpenCode server after startup timeout",
                 terminate_timeout=5,

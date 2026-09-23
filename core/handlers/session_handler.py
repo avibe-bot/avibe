@@ -50,7 +50,7 @@ from core.managed_skills import (
 from core.memory_cli_access import configure_memory_cli_access
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import (
-    diagnose_agent_process_exit,
+    observe_agent_resource_pressure,
     governor_from_controller,
 )
 from core.runtime_activation import RuntimeActivationIdentity
@@ -2844,10 +2844,7 @@ class SessionHandler(BaseHandler):
             diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"
             resource_failure = getattr(client, "_vibe_resource_failure", None)
             if resource_failure is None:
-                resource_failure = diagnose_agent_process_exit(
-                    self.controller,
-                    get_claude_client_pid(client),
-                )
+                resource_failure = observe_agent_resource_pressure(self.controller)
                 if resource_failure is not None:
                     setattr(client, "_vibe_resource_failure", resource_failure)
             if resource_failure is not None:

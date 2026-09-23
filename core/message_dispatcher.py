@@ -408,8 +408,13 @@ class ConsolidatedMessageDispatcher:
     def _release_runtime_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "agent_service", None)
         release = getattr(service, "release_runtime_turn", None)
-        if callable(release):
-            release(context)
+        try:
+            if callable(release):
+                release(context)
+        finally:
+            payload = getattr(context, "platform_specific", None) or {}
+            if payload.pop("_close_after_runtime_pending", False):
+                self._schedule_close_after_runtime(context)
 
     async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "processing_indicator", None)
@@ -1609,7 +1614,17 @@ class ConsolidatedMessageDispatcher:
             if store is not None:
                 store.close()
         if semantics.settles_run:
-            self._schedule_close_after_runtime(context)
+            payload = getattr(context, "platform_specific", None) or {}
+            defer_close_after = bool(
+                payload.get("close_after")
+                and semantics.completes_turn
+                and not semantics.detached
+                and self._is_current_runtime_turn(context)
+            )
+            if defer_close_after:
+                payload["_close_after_runtime_pending"] = True
+            else:
+                self._schedule_close_after_runtime(context)
 
     def _schedule_close_after_runtime(self, context: MessageContext) -> None:
         """Release a runtime explicitly marked disposable after its Run settles."""
@@ -1625,10 +1640,20 @@ class ConsolidatedMessageDispatcher:
             or target.get("agent_backend")
             or ""
         ).strip()
-        if not session_id or backend not in {"claude", "codex", "opencode"}:
+        base_session_id = str(
+            target.get("session_anchor")
+            or payload.get("backend_base_session_id")
+            or ""
+        ).strip()
+        if (
+            not session_id
+            or not base_session_id
+            or backend not in {"claude", "codex", "opencode"}
+        ):
             logger.warning(
-                "close-after requested without a disposable runtime target: session_id=%s backend=%s",
+                "close-after requested without a disposable runtime target: session_id=%s base_session_id=%s backend=%s",
                 session_id,
+                base_session_id,
                 backend,
             )
             return
@@ -1647,6 +1672,7 @@ class ConsolidatedMessageDispatcher:
                     self.controller,
                     backend=backend,
                     session_id=session_id,
+                    base_session_id=base_session_id or None,
                 )
                 if not result.get("ok") and result.get("error") != "session_not_live":
                     logger.warning(
