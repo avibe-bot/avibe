@@ -615,6 +615,38 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
 }
 
 #[test]
+fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
+    let source = shipping_source("src/lib.rs");
+    let builder = source
+        .split("fn ensure_main_window(")
+        .nth(1)
+        .expect("main window builder")
+        .split("\n}\n")
+        .next()
+        .expect("builder body");
+    assert!(
+        builder.contains(".initialization_script(DESKTOP_SHELL_MARKER)"),
+        "every main window must define the marker before Workbench scripts run"
+    );
+    assert!(!source.contains("initialization_script_for_all_frames"));
+    let marker = source
+        .split("const DESKTOP_SHELL_MARKER: &str =")
+        .nth(1)
+        .expect("marker script")
+        .split("\";\n")
+        .next()
+        .expect("marker literal");
+    // Show Page content runs in subframes, and WebView2 injects there regardless.
+    assert!(marker.contains("if (window.self === window.top)"));
+    assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true })"));
+    let reader = read_to_string(&crate_dir().join("../../ui/src/lib/desktopShell.ts"));
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_SHELL__ === true"),
+        "the Workbench must read the same marker the shell defines"
+    );
+}
+
+#[test]
 fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
     let source = shipping_source("src/lib.rs");
     for required in [

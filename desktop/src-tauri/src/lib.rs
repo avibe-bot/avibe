@@ -1054,10 +1054,18 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .clone();
     WebviewWindowBuilder::from_config(app, &config)
         .ok()?
+        .initialization_script(DESKTOP_SHELL_MARKER)
         .on_new_window(|url, _features| handle_new_window_request(url))
         .build()
         .ok()
 }
+
+/// Tells the Workbench, before any of its scripts run, that it is rendered by
+/// this shell rather than a browser tab or a PWA: it hides what the shell cannot
+/// do (a pre-opened `about:blank` tab never exists here). Top-level document only;
+/// WebView2 runs initialization scripts in subframes too, hence the frame check.
+const DESKTOP_SHELL_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });";
 
 /// What happens to a browsing context the page asks for.
 #[derive(Debug, PartialEq, Eq)]
