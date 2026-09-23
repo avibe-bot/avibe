@@ -77,11 +77,6 @@ import {
 import '../onboarding.css';
 import '../onboarding-providers.css';
 
-/** The wires' first arrival, staggered so the fan-in lands before the fan-out leaves.
- *  Two numbers rather than a timeline: each band's own 3-wire stagger is the CSS's. */
-const INBOUND_DELAY_MS = 120;
-const OUTBOUND_DELAY_MS = 570;
-
 /** A resume attempt this screen started. `step` is the step currently being attempted:
  *  it opens on what the authoritative read called for and follows the lifecycle
  *  helper's own report across the install/start boundary. */
@@ -214,7 +209,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     const [importOpen, setImportOpen] = React.useState(false);
     const [importFailed, setImportFailed] = React.useState(false);
     const [verifying, setVerifying] = React.useState(false);
-    const [pulse, setPulse] = React.useState({ inbound: false, outbound: false });
 
     const selection = flowState.providerSelection;
     const ready = setupNavigationReady(capability, gatewayEnabled);
@@ -632,24 +626,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       },
     }), [action.kind, action.blocked, onNavigate, openAdd, openImport, retrySupply]);
 
-    // ── First-entry sequence ────────────────────────────────────────────────
-
-    React.useEffect(() => {
-      if (!active) {
-        // Reset so a re-entry replays: the pulse is a `<g>` that has to remount.
-        setPulse({ inbound: false, outbound: false });
-        return;
-      }
-      // Paused mid-sequence keeps the frame it is on rather than snapping back —
-      // `data-motion` holds the CSS side, and clearing the timers holds this one.
-      if (!motion.running) return;
-      const timers = [
-        window.setTimeout(() => setPulse((state) => ({ ...state, inbound: true })), INBOUND_DELAY_MS),
-        window.setTimeout(() => setPulse((state) => ({ ...state, outbound: true })), OUTBOUND_DELAY_MS),
-      ];
-      return () => timers.forEach(window.clearTimeout);
-    }, [active, motion.running]);
-
     // ── Writes landing ──────────────────────────────────────────────────────
 
     const landSource = React.useCallback(async (created: SourceCreated | null, viaMore: boolean) => {
@@ -799,7 +775,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               direction="inbound"
               stage={stage}
               endpointSelector=".setup-provider-card"
-              pulse={pulse.inbound}
             />
 
             <GatewayCard
@@ -812,7 +787,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               direction="outbound"
               stage={stage}
               endpointSelector=".setup-destination"
-              pulse={pulse.outbound}
             />
 
             <DestinationRow />

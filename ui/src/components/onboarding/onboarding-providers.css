@@ -217,34 +217,25 @@
   overflow: visible;
   pointer-events: none;
 }
-.setup-wire {
-  fill: none;
-  stroke: var(--ob-wire);
-  stroke-width: 1;
+/* What a wire, a port and a pulse *are* is the story's, by class. This band only says
+   where they run and when they move: one 3.8s cycle carries the arrival at the gateway
+   and the departure from it, so the two bands read as one route rather than two loops
+   that happen to overlap. Paused holds the frame; `.onboarding-shell`'s reduced-motion
+   rule stops it outright, and a stopped pulse is already invisible. */
+.setup-wires .onboarding-pulse-core,
+.setup-wires .onboarding-pulse-halo {
+  animation-duration: 3800ms;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-play-state: paused;
 }
-/* One 16-unit segment of a 100-unit path: the pulse crosses once and leaves, the
-   same signature the story's circuit uses. */
-.setup-wire-pulse {
-  fill: none;
-  stroke: var(--ob-pulse);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-dasharray: 16 116;
-  stroke-dashoffset: 16;
-  opacity: 0;
-}
-.setup-wire-pulse-halo {
-  stroke: var(--ob-pulse-glow);
-  stroke-width: 4;
-}
-.setup-provider-stage[data-motion='running'] .setup-wire-pulse {
-  animation: setup-wire-pulse 1100ms ease-in-out var(--setup-pulse-delay, 0ms) 1 both;
-}
-@keyframes setup-wire-pulse {
-  0% { stroke-dashoffset: 16; opacity: 0; }
-  15% { opacity: 1; }
-  85% { opacity: 1; }
-  100% { stroke-dashoffset: -116; opacity: 0; }
+.setup-wires--inbound .onboarding-pulse-core,
+.setup-wires--inbound .onboarding-pulse-halo { animation-name: onboarding-pulse-converge; }
+.setup-wires--outbound .onboarding-pulse-core,
+.setup-wires--outbound .onboarding-pulse-halo { animation-name: onboarding-pulse-distribute; }
+.setup-provider-stage[data-motion='running'] .setup-wires .onboarding-pulse-core,
+.setup-provider-stage[data-motion='running'] .setup-wires .onboarding-pulse-halo {
+  animation-play-state: running;
 }
 
 /* ---- Gateway ------------------------------------------------------------- */
@@ -639,7 +630,4 @@
     width: calc(100vw - 24px);
     max-height: calc(100dvh - 32px);
   }
-}
-@media (prefers-reduced-motion: reduce) {
-  .setup-wire-pulse { animation: none !important; }
 }

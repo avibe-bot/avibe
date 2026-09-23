@@ -7,29 +7,42 @@
 // measured — every endpoint is the real horizontal centre of a real element, read
 // after layout and read again when the box changes size.
 //
-// The authored shape is a drop, a curve and a drop. In the reference's 976x40 band
-// the wire leaves at y=12, flattens onto y=28 and lands at 40; those three numbers
-// are 0.3, 0.7 and 1 of the band, so writing them as fractions of the measured
-// height reproduces the frame exactly where it was drawn and holds at every tier
-// without a second set of numbers.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { CSSProperties, FC } from 'react';
+// The authored shape is the reference's own: a short drop off the card, a rounded
+// corner onto the band's midline, the run that gathers toward the gateway, a second
+// corner, and the drop in. Those breakpoints are y=7, 19 and 31 of a 38-unit band, so
+// writing them as fractions of the measured height reproduces the frame exactly where
+// it was drawn and holds at every tier without a second set of numbers. Everything the
+// wire is *made of* — stroke, port, pulse — is the story's, by class: one screen's
+// circuit and this one are the same object seen twice, and there is one place to
+// change what that object looks like.
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import type { FC } from 'react';
 
-/** Where the fan-in enters the gateway, as the reference's 24 scaled by the band. */
-const ENTRY_SPREAD = 24 / 40;
-const LEAVE = 0.3;
-const FLATTEN = 0.7;
+/** The reference's y breakpoints as shares of its 38-unit band. */
+const LEAVE = 7 / 38;
+const RUN = 19 / 38;
+const ENTER = 31 / 38;
+/** The reference's corner, in px: the band scales vertically, the corner does not. */
+const CORNER = 12;
+/** The story draws its ports at r=3 in a 350-unit box; this band is the reference's
+ *  own 38, and 2.5 is the dot it draws there. */
+const PORT_R = 2.5;
 
-type Geometry = { width: number; height: number; paths: string[] };
+type Geometry = { width: number; height: number; paths: string[]; ports: number[] };
 
-/** One drop-curve-drop from `sx` at the top to `tx` at the bottom. A wire that does
- *  not have to move sideways is drawn straight rather than as a flat curve. */
+const round = (value: number) => Math.round(value * 100) / 100;
+
+/** One drop-corner-run-corner-drop from `sx` at the top to `tx` at the bottom. A wire
+ *  that does not have to move sideways is drawn straight rather than as a flat curve. */
 function wirePath(sx: number, tx: number, height: number): string {
-  const round = (value: number) => Math.round(value * 100) / 100;
   if (Math.abs(sx - tx) < 0.5) return `M ${round(sx)} 0 V ${round(height)}`;
   const leave = round(height * LEAVE);
-  const flatten = round(height * FLATTEN);
-  return `M ${round(sx)} 0 V ${leave} Q ${round(sx)} ${flatten} ${round(tx)} ${flatten} V ${round(height)}`;
+  const run = round(height * RUN);
+  const enter = round(height * ENTER);
+  // A corner cannot be wider than half the run it turns, or the two would cross.
+  const corner = Math.min(CORNER, Math.abs(tx - sx) / 2) * Math.sign(tx - sx);
+  return `M ${round(sx)} 0 V ${leave} Q ${round(sx)} ${run} ${round(sx + corner)} ${run}`
+    + ` H ${round(tx - corner)} Q ${round(tx)} ${run} ${round(tx)} ${enter} V ${round(height)}`;
 }
 
 const centreIn = (element: Element, originX: number): number => {
@@ -38,13 +51,11 @@ const centreIn = (element: Element, originX: number): number => {
 };
 
 /**
- * @param direction `inbound` fans several sources into one gateway; `outbound` fans
- *   one gateway out to several destinations. The reference spreads the inbound
- *   landings across the gateway's top and leaves every outbound wire from its
- *   centre, which is what makes the two bands read as convergence and distribution
- *   rather than as one symmetric shape drawn twice.
+ * @param direction `inbound` gathers several sources into one gateway; `outbound` fans
+ *   one gateway out to several destinations. Both land on the gateway's centre — the
+ *   reference converges rather than spreading, which is what lets the two bands read
+ *   as one route through the middle card instead of two symmetric fans.
  * @param endpointSelector the elements at the far side of the gateway.
- * @param pulse replays the arrival once when it turns true.
  * @param stage the element every measurement is taken inside. Passed as the element
  *   rather than as a ref on purpose: a ref object's identity never changes, so the
  *   first measurement would have to happen before the parent's own ref was attached
@@ -55,9 +66,9 @@ export const SupplyWires: FC<{
   direction: 'inbound' | 'outbound';
   stage: HTMLElement | null;
   endpointSelector: string;
-  pulse: boolean;
-}> = ({ direction, stage, endpointSelector, pulse }) => {
+}> = ({ direction, stage, endpointSelector }) => {
   const bandRef = useRef<HTMLDivElement | null>(null);
+  const glowId = useId();
   const [geometry, setGeometry] = useState<Geometry | null>(null);
 
   const measure = useCallback(() => {
@@ -72,14 +83,10 @@ export const SupplyWires: FC<{
     if (!gateway || endpoints.length === 0 || box.width === 0 || box.height === 0) return;
 
     const gatewayX = centreIn(gateway, box.left);
-    const spread = box.height * ENTRY_SPREAD;
-    const offset = (index: number) => (index - (endpoints.length - 1) / 2) * spread;
-    const paths = endpoints.map((endpoint, index) => {
-      const endpointX = centreIn(endpoint, box.left);
-      return direction === 'inbound'
-        ? wirePath(endpointX, gatewayX + offset(index), box.height)
-        : wirePath(gatewayX, endpointX, box.height);
-    });
+    const ports = endpoints.map((endpoint) => round(centreIn(endpoint, box.left)));
+    const paths = ports.map((endpointX) => (direction === 'inbound'
+      ? wirePath(endpointX, gatewayX, box.height)
+      : wirePath(gatewayX, endpointX, box.height)));
 
     setGeometry((previous) =>
       previous
@@ -88,7 +95,7 @@ export const SupplyWires: FC<{
         && previous.paths.length === paths.length
         && previous.paths.every((path, index) => path === paths[index])
         ? previous
-        : { width: box.width, height: box.height, paths });
+        : { width: box.width, height: box.height, paths, ports });
   }, [direction, endpointSelector, stage]);
 
   useLayoutEffect(measure, [measure]);
@@ -107,16 +114,27 @@ export const SupplyWires: FC<{
     <div ref={bandRef} className={`setup-wires setup-wires--${direction}`} aria-hidden="true">
       {geometry && (
         <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} width={geometry.width} height={geometry.height}>
+          <defs>
+            <filter id={glowId} x="-100%" y="-500%" width="300%" height="1100%"><feGaussianBlur stdDeviation="3" /></filter>
+          </defs>
           {geometry.paths.map((path, index) => (
-            <path key={`wire-${index}`} className="setup-wire" d={path} />
-          ))}
-          {pulse && geometry.paths.map((path, index) => (
-            // The halo and the core travel together; staggering them across the fan
-            // is what makes three wires read as one arrival rather than a flash.
-            <g key={`pulse-${index}`} style={{ '--setup-pulse-delay': `${index * 90}ms` } as CSSProperties}>
-              <path className="setup-wire-pulse setup-wire-pulse-halo" d={path} />
-              <path className="setup-wire-pulse" d={path} />
+            <g key={`wire-${index}`}>
+              <path className="onboarding-wire" d={path} fill="none" />
+              {/* `pathLength` is what makes the pulse a pulse: the dash is 16 of 100,
+                  so it is one segment crossing one wire whatever that wire measures.
+                  Without it the 16 is 16 user units and a long wire wears the pattern
+                  several times over — a row of chunks rather than a thing in motion.
+                  The halo and the core travel together and undelayed: the whole fan
+                  arriving at once is what reads as convergence. */}
+              <path className="onboarding-pulse-halo" d={path} fill="none" pathLength={100}
+                style={{ filter: `url(#${glowId})` }} />
+              <path className="onboarding-pulse-core" d={path} fill="none" pathLength={100} />
             </g>
+          ))}
+          {/* The far end of every wire, on the edge it leaves from. */}
+          {geometry.ports.map((x, index) => (
+            <circle key={`port-${index}`} className="onboarding-port" cx={x}
+              cy={direction === 'inbound' ? 0 : geometry.height} r={PORT_R} />
           ))}
         </svg>
       )}

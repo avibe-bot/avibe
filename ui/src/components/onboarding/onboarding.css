@@ -806,6 +806,23 @@
 .onboarding-pulse-core { stroke: var(--ob-pulse); stroke-width: 1.6; }
 .onboarding-pulse-halo { stroke: var(--ob-pulse-glow); stroke-width: 4; }
 
+/* The same crossing, on a clock instead of a handoff. The story plays one per event,
+   because there the pulse *is* the event; a standing route has no event to play, so
+   it runs a cycle — and the two halves of that cycle are one relay, arriving at the
+   gateway before anything leaves it. The offsets belong beside the dasharray above:
+   16 is the dash entering, -100 is a full path length past the far end, and reading
+   either one anywhere else would be reading half of a pair. */
+@keyframes onboarding-pulse-converge {
+  0% { stroke-dashoffset: 16; opacity: 0; }
+  5%, 34% { opacity: 1; }
+  40%, 100% { stroke-dashoffset: -100; opacity: 0; }
+}
+@keyframes onboarding-pulse-distribute {
+  0%, 48% { stroke-dashoffset: 16; opacity: 0; }
+  53%, 86% { opacity: 1; }
+  92%, 100% { stroke-dashoffset: -100; opacity: 0; }
+}
+
 /* The caption rides the return wire rather than the container floor: the wire's
    horizontal run is at y=338 of the wire box, whose height is the card times 350/300,
    so this is the same line at every tier. Centring on it (rather than sitting under
