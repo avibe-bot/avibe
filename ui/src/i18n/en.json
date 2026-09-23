@@ -856,8 +856,8 @@
           "1.detail": "When your Claude subscription is exhausted, it moves to the next source you added and the conversation continues.",
           "2": "One key supplies several backends",
           "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
-          "3": "Decide per backend and per model",
-          "3.detail": "You can specify which source each model on each backend uses."
+          "3": "Mix and match models freely",
+          "3.detail": "Pair any backend with any model from any source."
         },
         "note": {
           "perBackend": "Switch one backend at a time — the others stay direct. You can switch back at any time."
