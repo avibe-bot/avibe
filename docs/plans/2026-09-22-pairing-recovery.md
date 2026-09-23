@@ -56,8 +56,12 @@ durable and never promises recovery across an unrecorded crash.
   already-unpaired settings save. Unreadable journals block a real revocation,
   but do not block unrelated writes on an already-unpaired configuration.
 - Web owners receive only a credential-free phase/action projection through
-  status. The projection is advisory; the existing pairing owner revalidates
-  every recovery under its lock. Members cannot inspect or replay the record.
+  status. A redeemed record advertises resume only while the current identity
+  is its source or exact target; an applied record requires its exact target.
+  When the current config cannot be read, status does not promise credential
+  recovery; a terminal cleanup marker can still be retired without reading it.
+  The projection is advisory; the existing pairing owner revalidates every
+  recovery under its lock. Members cannot inspect or replay the record.
 - Web submission clears the one-time key even on failure. A durable recoverable
   record offers local recovery after failure or page reload, including when
   config is already paired. Replacing it requires a separate new-key action.
@@ -76,6 +80,11 @@ Local preflight protects predictable local publication failures before redeem.
 It cannot eliminate every remote/local crash window. If the cloud has consumed
 a key and no redeemed response was durably recorded, the result is reported as
 indeterminate rather than presented as recoverable.
+
+A config-read failure during a keyless retry is a structured, retryable local
+recovery failure and leaves the journal unchanged. It differs from a read
+failure after a new redeem response, which cannot promise a durably recoverable
+response unless publication actually succeeded.
 
 An unchanged generic config write is not a pending-operation cancellation
 command. In particular, writing `enabled: false` when the saved identity is

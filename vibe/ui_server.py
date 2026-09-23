@@ -6940,7 +6940,7 @@ def remote_access_status():
         }
     authorization_context = getattr(g, "authorization_context", None)
     if authorization_context is not None and authorization_context.can_manage_access_members:
-        status_payload["pending_pairing"] = remote_access.pending_pairing_status()
+        status_payload["pending_pairing"] = remote_access.pending_pairing_status(config)
     return jsonify(status_payload)
 
 

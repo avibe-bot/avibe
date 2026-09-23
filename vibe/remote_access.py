@@ -4894,7 +4894,7 @@ def pending_pairing_record_exists() -> bool:
     return _pending_pairing_path().exists()
 
 
-def pending_pairing_status() -> dict[str, Any] | None:
+def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
     """Project advisory local actions, never journal credentials or provenance.
 
     Atomic publication permits a read-only snapshot here. ``pair`` must still
@@ -4908,9 +4908,16 @@ def pending_pairing_status() -> dict[str, Any] | None:
     if record is None:
         return None
     phase = record["phase"]
+    can_resume = phase == "retirement_pending"
+    if config is not None and phase in {"redeemed", "applied"}:
+        current_identity = _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
+        current_fingerprint = _pairing_identity_fingerprint(current_identity)
+        can_resume = current_fingerprint == record["target_fingerprint"] or (
+            phase == "redeemed" and current_fingerprint == record["source_fingerprint"]
+        )
     return {
         "phase": phase,
-        "can_resume": phase in {"redeemed", "applied", "retirement_pending"},
+        "can_resume": can_resume,
     }
 
 
@@ -5334,6 +5341,12 @@ def _persist_pairing_impl(
             current_config = V2Config.load()
         except FileNotFoundError:
             current_config = V2Config.default()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "pairing_recovery_unavailable",
+                "detail": f"current pairing config could not be read: {exc}",
+            }
         current_identity = _pairing_identity_from_cloud(current_config.remote_access.vibe_cloud)
         target_identity = record["target_identity"]
         current_fingerprint = _pairing_identity_fingerprint(current_identity)

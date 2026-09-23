@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import inspect
 import json
 import multiprocessing
 import os
@@ -256,11 +257,126 @@ def test_pending_status_projects_only_phase_and_action(pairing_host, phase):
     if phase == "retirement_pending":
         claim["retirement"] = {"kind": "definitive_redeem_failure", "error": "invalid_pairing_key"}
     remote_access._write_pending_pairing_record(claim)
-    assert remote_access.pending_pairing_status() == {
+    assert remote_access.pending_pairing_status(V2Config.load()) == {
         "phase": phase, "can_resume": phase == "retirement_pending",
     }
     remote_access._pending_pairing_path().write_text("{invalid")
-    assert remote_access.pending_pairing_status() == {"phase": "invalid", "can_resume": False}
+    assert remote_access.pending_pairing_status(V2Config.load()) == {
+        "phase": "invalid", "can_resume": False,
+    }
+
+
+@pytest.mark.parametrize("consumer", ["direct", "http", "cli"])
+def test_keyless_config_read_failure_preserves_redeemed_recovery(
+    pairing_host, monkeypatch, capsys, consumer,
+):
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert remote_access.pair("key_A", "https://backend.test")["error"] == (
+        "pairing_save_failed_after_redeem"
+    )
+    journal = root / "state/pending-pairing.json"
+    original_record = journal.read_bytes()
+    original_load = V2Config.load
+
+    def fail_recovery_config_read(*args, **kwargs):
+        if any(frame.function == "_persist_pairing_impl" for frame in inspect.stack()):
+            raise PermissionError("fixture config read failure")
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(V2Config, "load", fail_recovery_config_read)
+    if consumer == "direct":
+        result = remote_access.pair("", "")
+        assert result["error"] == "pairing_recovery_unavailable"
+        assert "pairing" not in result or not result["pairing"].get("recoverable")
+    elif consumer == "http":
+        client = ui_server.app.test_client()
+        response = client.post(
+            "/api/remote-access/vibe-cloud/pair",
+            json={"pairing_key": ""},
+            headers=csrf_headers(client),
+        )
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "pairing_recovery_unavailable"
+    else:
+        monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+        monkeypatch.setattr(
+            cli.getpass, "getpass",
+            lambda prompt: pytest.fail("keyless recovery must not ask for another key"),
+        )
+        assert cli.cmd_remote_pair(SimpleNamespace(pairing_key=None)) == 1
+        assert "Local pairing recovery could not start" in capsys.readouterr().err
+
+    assert journal.read_bytes() == original_record
+    assert len(calls) == 1
+    monkeypatch.setattr(V2Config, "load", original_load)
+    assert remote_access.pair("", "")["ok"]
+    saved = V2Config.load().remote_access.vibe_cloud
+    binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert saved.instance_id == binding["instance_id"] == "inst_A"
+    assert saved.session_secret == json.loads(original_record)["pairing"]["session_secret"]
+    assert not journal.exists()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("phase", "identity", "can_resume"),
+    [
+        ("redeemed", "source", True),
+        ("redeemed", "target", True),
+        ("redeemed", "other", False),
+        ("applied", "source", False),
+        ("applied", "target", True),
+        ("applied", "other", False),
+    ],
+)
+def test_owner_status_advertises_only_identity_valid_recovery(
+    pairing_host, monkeypatch, phase, identity, can_resume,
+):
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert remote_access.pair("key_A", "https://backend.test")["error"] == (
+        "pairing_save_failed_after_redeem"
+    )
+    journal = root / "state/pending-pairing.json"
+    record = json.loads(journal.read_text(encoding="utf-8"))
+    record["phase"] = phase
+    remote_access._write_pending_pairing_record(record)
+    if identity == "target":
+        config = V2Config.load()
+        for field, value in record["target_identity"].items():
+            setattr(config.remote_access.vibe_cloud, field, value)
+        config.save()
+    elif identity == "other":
+        _save_paired_identity("inst_B")
+
+    original_record = journal.read_bytes()
+    owner = ui_server.app.test_client()
+    response = owner.get("/api/remote-access/status")
+    assert response.status_code == 200
+    assert response.get_json()["pending_pairing"] == {
+        "phase": phase, "can_resume": can_resume,
+    }
+    assert journal.read_bytes() == original_record
+    assert len(calls) == 1
+
+
+def test_owner_status_does_not_offer_resume_without_readable_config(pairing_host, monkeypatch):
+    root, _ = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert remote_access.pair("key_A", "https://backend.test")["error"] == (
+        "pairing_save_failed_after_redeem"
+    )
+    journal = root / "state/pending-pairing.json"
+    original_record = journal.read_bytes()
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: None)
+
+    response = ui_server.app.test_client().get("/api/remote-access/status")
+    assert response.status_code == 200
+    assert response.get_json()["pending_pairing"] == {
+        "phase": "redeemed", "can_resume": False,
+    }
+    assert journal.read_bytes() == original_record
 
 
 def test_cli_does_not_prompt_for_unrecoverable_pending_record(pairing_host, monkeypatch, capsys):
