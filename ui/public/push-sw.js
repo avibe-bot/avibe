@@ -262,6 +262,8 @@ function rememberPendingNotificationLaunch(url) {
     .catch(() => {});
 }
 
+let notificationClickQueue = Promise.resolve();
+
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(
     (async () => {
@@ -311,7 +313,9 @@ self.addEventListener('notificationclick', (event) => {
     type: 'vibe.notification-click',
     url: targetUrl.pathname + targetUrl.search + targetUrl.hash,
   };
-  event.waitUntil(
+  // A slow first focus must not post its target after a later tap has posted
+  // another one. Keep the handoff, focus, and message in click order.
+  const click = notificationClickQueue.then(() =>
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
         if ('focus' in client && isAppShellClient(client)) {
@@ -343,4 +347,6 @@ self.addEventListener('notificationclick', (event) => {
       return undefined;
     }),
   );
+  notificationClickQueue = click.catch(() => {});
+  event.waitUntil(click);
 });

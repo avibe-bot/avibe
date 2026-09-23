@@ -110,3 +110,32 @@ export function createResumedWebPushLaunchReader(
 }
 
 export const takeResumedWebPushLaunchPath = createResumedWebPushLaunchReader();
+
+// Worker clicks arrive in order, but a page's cache read can finish after a
+// later click or another reactivation. Only the newest request may navigate.
+export function createWebPushLaunchNavigation(
+  read: (expectedPath?: string) => Promise<string | null>,
+  navigate: (path: string) => void,
+) {
+  let generation = 0;
+  let active = true;
+
+  return {
+    notificationClick(path: string) {
+      if (!active) return;
+      generation += 1;
+      void read(path).catch(() => {});
+      navigate(path);
+    },
+    reactivated() {
+      if (!active) return;
+      const current = ++generation;
+      void read().then((path) => {
+        if (active && current === generation && path) navigate(path);
+      }).catch(() => {});
+    },
+    dispose() {
+      active = false;
+    },
+  };
+}

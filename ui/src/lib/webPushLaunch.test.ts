@@ -3,11 +3,51 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createPendingWebPushLaunchReader,
   createResumedWebPushLaunchReader,
+  createWebPushLaunchNavigation,
   parsePendingWebPushLaunch,
   WEB_PUSH_LAUNCH_MAX_AGE_MS,
 } from './webPushLaunch';
 
 describe('pending web-push launches', () => {
+  it('does not let a delayed resume read override a later click message', async () => {
+    let finishResume: (path: string | null) => void = () => {};
+    const resume = new Promise<string | null>((resolve) => {
+      finishResume = resolve;
+    });
+    const read = vi.fn((expectedPath?: string) => expectedPath ? Promise.resolve(null) : resume);
+    const navigate = vi.fn();
+    const navigation = createWebPushLaunchNavigation(read, navigate);
+
+    navigation.reactivated();
+    navigation.notificationClick('/chat/session-2');
+    finishResume('/chat/session-1');
+    await resume;
+    await Promise.resolve();
+
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith('/chat/session-2');
+    expect(read).toHaveBeenCalledWith('/chat/session-2');
+    navigation.dispose();
+  });
+
+  it('keeps only the newest of two overlapping resume reads', async () => {
+    const finish: Array<(path: string | null) => void> = [];
+    const read = vi.fn(() => new Promise<string | null>((resolve) => finish.push(resolve)));
+    const navigate = vi.fn();
+    const navigation = createWebPushLaunchNavigation(read, navigate);
+
+    navigation.reactivated();
+    navigation.reactivated();
+    finish[1]('/chat/session-2');
+    await Promise.resolve();
+    finish[0]('/chat/session-1');
+    await Promise.resolve();
+
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith('/chat/session-2');
+    navigation.dispose();
+  });
+
   it('accepts only fresh canonical app paths', () => {
     const now = 1_000_000;
     expect(parsePendingWebPushLaunch({ url: '/chat/session-1?from=push', createdAt: now - 1 }, now)).toBe(

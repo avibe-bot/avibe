@@ -102,7 +102,11 @@ import {
   shouldRestorePwaLaunch,
   writeLastPwaPath,
 } from './lib/pwaRouteMemory';
-import { takePendingWebPushLaunchPath, takeResumedWebPushLaunchPath } from './lib/webPushLaunch';
+import {
+    createWebPushLaunchNavigation,
+    takePendingWebPushLaunchPath,
+    takeResumedWebPushLaunchPath,
+} from './lib/webPushLaunch';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -252,24 +256,21 @@ const WebPushNotificationNavigator = () => {
 
     useEffect(() => {
         if (!('serviceWorker' in navigator)) return;
+        const launchNavigation = createWebPushLaunchNavigation(takeResumedWebPushLaunchPath, navigate);
 
         const onMessage = (event: MessageEvent) => {
             const data = event.data;
             if (!data || typeof data !== 'object' || data.type !== 'vibe.notification-click') return;
             const path = notificationClickPath(data.url);
             if (path) {
-                void takeResumedWebPushLaunchPath(path);
-                navigate(path);
+                launchNavigation.notificationClick(path);
             }
         };
 
-        const unsubscribeResume = onPageReactivated(() => {
-            void takeResumedWebPushLaunchPath().then((path) => {
-                if (path) navigate(path);
-            });
-        });
+        const unsubscribeResume = onPageReactivated(() => launchNavigation.reactivated());
         navigator.serviceWorker.addEventListener('message', onMessage);
         return () => {
+            launchNavigation.dispose();
             unsubscribeResume();
             navigator.serviceWorker.removeEventListener('message', onMessage);
         };

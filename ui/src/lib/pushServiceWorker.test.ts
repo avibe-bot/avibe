@@ -46,6 +46,48 @@ describe('push service worker notification launches', () => {
     expect(openWindow).not.toHaveBeenCalled();
   });
 
+  it('delivers rapid clicks in tap order even when the first focus is delayed', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    let finishFirstFocus: (client: unknown) => void = () => {};
+    const firstFocus = new Promise<unknown>((resolve) => {
+      finishFirstFocus = resolve;
+    });
+    const client = {
+      url: 'https://avibe.local/settings/general',
+      focus: vi.fn().mockImplementationOnce(() => firstFocus).mockImplementationOnce(async () => client),
+      postMessage: vi.fn(),
+    };
+    const cache = { put: vi.fn(async () => {}) };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      caches: { open: vi.fn(async () => cache) },
+      clients: { matchAll: vi.fn(async () => [client]) },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    const click = (url: string) => {
+      let completion: Promise<unknown> | undefined;
+      handlers.get('notificationclick')?.({
+        notification: { close: vi.fn(), data: { url } },
+        waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+      });
+      return completion;
+    };
+    const first = click('/chat/session-1');
+    await vi.waitFor(() => expect(client.focus).toHaveBeenCalledTimes(1));
+    const second = click('/chat/session-2');
+    expect(client.postMessage).not.toHaveBeenCalled();
+
+    finishFirstFocus(client);
+    await Promise.all([first, second]);
+    expect(client.postMessage.mock.calls.map(([message]) => message.url)).toEqual([
+      '/chat/session-1',
+      '/chat/session-2',
+    ]);
+  });
+
   it('posts to a reused window without WindowClient.navigate support', async () => {
     const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
     const handlers = new Map<string, (event: unknown) => void>();
