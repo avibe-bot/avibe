@@ -24,6 +24,7 @@ from core.handlers.model_hub.adapter import (
     ObservationDiscovery,
     ObservationOutcome,
     OAuthFlowState,
+    OAuthSubmissionRejectedError,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
@@ -2584,6 +2585,7 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("OAuth submission is empty")
             # A transport failure after submission begins cannot prove whether
             # the engine wrote grant material.
+            grant_write_possible = flow.grant_write_possible
             flow.grant_write_possible = True
             payload: dict[str, str] = {
                 "provider": flow.callback_provider,
@@ -2601,7 +2603,22 @@ class CLIProxyEngineAdapter:
                     "/oauth-callback",
                     payload=payload,
                 )
-            except (EngineClientError, EngineUnavailableError):
+            except EngineClientError as error:
+                if error.status_code == 400:
+                    # The engine validates the value before it touches the
+                    # session, so a 400 wrote nothing and its session still
+                    # waits: the user can paste the right address again.
+                    flow.grant_write_possible = grant_write_possible
+                    logger.info(
+                        "OAuth submission rejected by the engine: flow=%s provider=%s reason=%s",
+                        flow.flow_id,
+                        flow.callback_provider,
+                        ",".join(error.error_candidates) or error.error_type or "unknown",
+                    )
+                    raise OAuthSubmissionRejectedError(flow_id) from None
+                self._fail_flow(flow, "models.oauth.submission_failed")
+                return flow.snapshot()
+            except EngineUnavailableError:
                 self._fail_flow(flow, "models.oauth.submission_failed")
                 return flow.snapshot()
             flow.state = "verifying"

@@ -12,11 +12,13 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import {
+  callbackValueCarriesResult,
   catalogSaveFailureKey,
   modelsDevFillFailureKey,
   NATIVE_LOGIN_IN_PROGRESS_FAILURE,
   NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
   oauthFailureKey,
+  PASTE_REJECTED_KEY,
   oauthStartFailureKey,
   serverText,
   TIER_EDIT_MANAGED_FAILURE,
@@ -292,6 +294,27 @@ describe('modelsDevFillFailureKey', () => {
   it('keeps every other cause on the plain unreachable line', () => {
     for (const detail of [undefined, 'engine_down', 'modelHub.errors.some_future_code']) {
       expect(modelsDevFillFailureKey(detail)).toBe('settings.models.gateway.modelEditor.fillFailed');
+    }
+  });
+});
+
+describe('pasted OAuth callback value', () => {
+  it('accepts an address that carries the provider answer, or a bare code', () => {
+    expect(callbackValueCarriesResult('http://localhost:1455/auth/callback?code=abc&state=s')).toBe(true);
+    expect(callbackValueCarriesResult('http://localhost:1455/auth/callback?error=access_denied')).toBe(true);
+    expect(callbackValueCarriesResult('  abc#state  ')).toBe(true);
+  });
+
+  it('refuses a page address that carries no answer', () => {
+    expect(callbackValueCarriesResult('https://chatgpt.com/')).toBe(false);
+    expect(callbackValueCarriesResult('https://auth.openai.com/log-in')).toBe(false);
+    expect(callbackValueCarriesResult('http://localhost:1455/success?id_token=x')).toBe(false);
+    expect(callbackValueCarriesResult('http://[broken')).toBe(false);
+  });
+
+  it('explains the refusal in both bundles', () => {
+    for (const lng of ['en', 'zh'] as const) {
+      expect(t(lng)(PASTE_REJECTED_KEY)).not.toBe(PASTE_REJECTED_KEY);
     }
   });
 });

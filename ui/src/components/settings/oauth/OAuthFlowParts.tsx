@@ -50,27 +50,41 @@ export const OAuthSubmitRow: React.FC<{
   placeholder?: string;
   submitLabel: string;
   submittingLabel: string;
-}> = ({ id, value, onChange, onSubmit, submitting, placeholder, submitLabel, submittingLabel }) => (
-  <div className="flex gap-2">
-    <Input
-      id={id}
-      type="text"
-      autoComplete="off"
-      spellCheck={false}
-      placeholder={placeholder}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="font-mono"
-      disabled={submitting}
-    />
-    <Button
-      type="button"
-      variant="brand"
-      size="sm"
-      onClick={onSubmit}
-      disabled={submitting || !value.trim()}
-    >
-      {submitting ? submittingLabel : submitLabel}
-    </Button>
-  </div>
-);
+  /** Why the last submission was refused; the value stays editable for another try. */
+  error?: string;
+}> = ({ id, value, onChange, onSubmit, submitting, placeholder, submitLabel, submittingLabel, error }) => {
+  const errorId = React.useId();
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex gap-2">
+        <Input
+          id={id}
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="font-mono"
+          disabled={submitting}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+        />
+        <Button
+          type="button"
+          variant="brand"
+          size="sm"
+          onClick={onSubmit}
+          disabled={submitting || !value.trim()}
+        >
+          {submitting ? submittingLabel : submitLabel}
+        </Button>
+      </div>
+      {error && (
+        <p id={errorId} role="alert" className="text-[12px] leading-relaxed text-destructive-ink">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+};

@@ -99,6 +99,12 @@ class OriginNotAllowedError(Exception):
     ``RawCallOutcome`` and never triggers fallback."""
 
 
+class OAuthSubmissionRejectedError(Exception):
+    """Raised by ``submit_oauth`` when the provider refuses the pasted value
+    before touching the flow. Nothing was written and the flow still awaits a
+    submission, so the user can paste again on the same flow."""
+
+
 class InvokeCancelledError(asyncio.CancelledError):
     """Owner cancellation carrying wire facts observed before transport cleanup."""
 
@@ -664,7 +670,11 @@ class EngineAdapter(Protocol):
     async def oauth_status(self, flow_id: str) -> OAuthFlowState: ...
 
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
-        """``value`` per ``expects``: pasted code or callback URL."""
+        """``value`` per ``expects``: pasted code or callback URL.
+
+        A value the provider refuses without writing anything raises
+        ``OAuthSubmissionRejectedError`` and leaves the flow awaiting action.
+        """
         ...
 
     async def cancel_oauth(self, flow_id: str) -> None: ...

@@ -57,6 +57,7 @@ from .adapter import (
     InvokeCancelledError,
     InvokeHandle,
     OAuthFlowState,
+    OAuthSubmissionRejectedError,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
@@ -1063,6 +1064,8 @@ class ModelHubService:
                 status=409,
                 detail="modelHub.errors.native_login_in_progress",
             ) from None
+        except OAuthSubmissionRejectedError:
+            raise ModelHubError("submission_rejected", status=422) from None
         except ModelHubError:
             raise
         except Exception:

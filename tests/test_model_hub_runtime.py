@@ -28,6 +28,7 @@ from core.process_isolation import PROCESS_IDENTITY_ENV, fingerprint_process_mar
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     EngineHealth,
+    OAuthSubmissionRejectedError,
     OriginNotAllowedError,
     RawOutcomeKind,
     RetainedMaterialDisposition,
@@ -8342,6 +8343,58 @@ def test_oauth_terminal_uncertainty_never_claims_cleanup(tmp_path: Path) -> None
         assert expired.state == "failed"
         assert expired.retained_material_disposition is RetainedMaterialDisposition.UNKNOWN
         assert expired.retained_credential_ref is None
+
+    asyncio.run(run())
+
+
+def test_oauth_rejected_paste_keeps_flow_awaiting_a_corrected_value(tmp_path: Path) -> None:
+    submitted: list[dict] = []
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                return {"files": []}
+            if path == "/codex-auth-url":
+                return {"state": "browser-state", "url": "https://example.test/oauth"}
+            if path == "/oauth-callback":
+                submitted.append(dict(payload))
+                if "code=" not in payload.get("redirect_url", ""):
+                    raise EngineClientError(
+                        "code or error is required",
+                        status_code=400,
+                        error_candidates=("code or error is required",),
+                    )
+                return {"status": "ok"}
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, Client()),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        with pytest.raises(OAuthSubmissionRejectedError):
+            await adapter.submit_oauth(flow.flow_id, "https://chatgpt.com/")
+        held = adapter._oauth_flows[flow.flow_id]
+        assert held.state == "awaiting_action"
+        assert held.error_key is None
+        assert held.grant_write_possible is False
+
+        corrected = await adapter.submit_oauth(
+            flow.flow_id,
+            "http://localhost:1455/auth/callback?code=abc&state=browser-state",
+        )
+        assert corrected.state == "verifying"
+        assert len(submitted) == 2
 
     asyncio.run(run())
 

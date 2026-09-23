@@ -37,6 +37,7 @@ from core.handlers.model_hub.adapter import (
     ObservationDiscovery,
     ObservationOutcome,
     OAuthFlowState,
+    OAuthSubmissionRejectedError,
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
@@ -8487,6 +8488,24 @@ def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
     assert exc_info.value.code == "flow_expired"
     assert adapter.secret_lengths == []
     assert service.oauth_flows.channel(flow["flow_id"]) is None
+
+
+def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path):
+    service, _, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
+
+    async def reject(_flow_id, _value):
+        raise OAuthSubmissionRejectedError(_flow_id)
+
+    adapter.submit_oauth = reject
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_submit({"flow_id": flow["flow_id"], "value": "https://chatgpt.com/"}))
+
+    assert exc_info.value.code == "submission_rejected"
+    assert exc_info.value.status == 422
+    assert service.oauth_flows.channel(flow["flow_id"]) == "hub"
+    status = asyncio.run(service.oauth_status(flow["flow_id"]))
+    assert status["flow"]["state"] == "awaiting_action"
 
 
 @pytest.mark.parametrize("suffix", ["+00:00", "Z", ""])

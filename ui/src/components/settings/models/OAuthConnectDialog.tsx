@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
+import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
 import {
@@ -45,7 +46,16 @@ import {
   takeProviderTabForNavigation,
 } from './providerTab';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
+import {
+  NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
+  PASTE_REJECTED_KEY,
+  SUBMISSION_REJECTED_FAILURE,
+  callbackValueCarriesResult,
+  oauthFailureKey,
+  oauthStartFailureKey,
+  serverText,
+  type OAuthJourney,
+} from './serverCopy';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -95,6 +105,10 @@ export const OAuthConnectDialog: React.FC<{
   const [view, setView] = React.useState<FlowView>(initialFlowView);
   const [code, setCode] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
+  // A paste the provider refused before touching the flow. The flow is still
+  // waiting, so this stays beside the input instead of settling the dialog:
+  // the user fixes the value and submits again on the same authorization.
+  const [pasteError, setPasteError] = React.useState<TranslationKey | null>(null);
   // Seed the chooser from the opening snapshot. Radix may autofocus a control
   // before the passive open effect runs; deriving this here prevents an occupied
   // native row from ever being the initially focused/selected option.
@@ -469,6 +483,7 @@ export const OAuthConnectDialog: React.FC<{
     // isn't shown while the new startOAuth request is in flight.
     transition({ kind: 'reset' });
     setCode('');
+    setPasteError(null);
     setSubmitting(false);
     setAdoption(null);
     setRepair(null);
@@ -613,6 +628,11 @@ export const OAuthConnectDialog: React.FC<{
     const authority = flowAuthorityRef.current;
     const cur = authority?.current().flow;
     if (!cur || !code.trim()) return;
+    if (cur.presentation?.expects === 'paste_callback_url' && !callbackValueCarriesResult(code)) {
+      setPasteError(PASTE_REJECTED_KEY);
+      return;
+    }
+    setPasteError(null);
     const isCurrent = () =>
       flowAuthorityRef.current === authority && authority.current().flow?.flow_id === cur.flow_id;
     setSubmitting(true);
@@ -651,6 +671,10 @@ export const OAuthConnectDialog: React.FC<{
       // the flow id, so a submit rejecting afterwards is still current and still
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
+      if (failure?.code === SUBMISSION_REJECTED_FAILURE) {
+        setPasteError(PASTE_REJECTED_KEY);
+        return;
+      }
       const failureClass = classifyOAuthFailure(failure);
       const step = authority.transition({
         kind: 'error',
@@ -1000,7 +1024,11 @@ export const OAuthConnectDialog: React.FC<{
                   ) : (
                     <OAuthSubmitRow
                       value={code}
-                      onChange={setCode}
+                      onChange={(next) => {
+                        setCode(next);
+                        setPasteError(null);
+                      }}
+                      error={pasteError ? (t(pasteError) as string) : undefined}
                       onSubmit={() => void submit()}
                       submitting={submitting || state === 'verifying'}
                       placeholder={

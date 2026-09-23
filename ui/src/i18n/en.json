@@ -1572,7 +1572,8 @@
           "hint": "After you sign in and approve, paste the code back here"
         },
         "callback": {
-          "hint": "After signing in, paste the callback URL your browser landed on"
+          "hint": "After signing in, paste the callback URL your browser landed on",
+          "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again."
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"

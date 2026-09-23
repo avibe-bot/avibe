@@ -966,6 +966,7 @@
       "source_not_found": "Model source not found.",
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
+      "submission_rejected": "That is not the authorization callback address. Paste the full address shown after authorizing.",
       "discovery_failed": "Could not validate or discover this source.",
       "ambiguous_source": "Connected, but we could not identify the model interface.",
       "inventory_unavailable": "The interface was confirmed, but its model list is unavailable.",
