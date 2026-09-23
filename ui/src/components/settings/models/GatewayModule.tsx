@@ -14,10 +14,12 @@ type GatewayModuleProps = Omit<React.ComponentProps<typeof AgentCard>, 'agents'>
   runtime: FreshRuntimeProjection | null;
   runtimeSnapshot: RuntimeDependency | null;
   onRetry: () => void;
+  retryDisabled?: boolean;
+  retryRef?: React.Ref<HTMLButtonElement>;
   readFailureCopy?: string;
 };
 
-export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSnapshot, supply, onRetry, readFailureCopy, ...props }) => {
+export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSnapshot, supply, onRetry, retryDisabled = false, retryRef, readFailureCopy, ...props }) => {
   const { t } = useTranslation();
   const agents = foldRegionRead<AgentSupply[], AgentSupply[] | undefined>(supply, {
     loading: () => undefined,
@@ -39,9 +41,9 @@ export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSn
         {supply.kind === 'loading' && agents === undefined
           ? <div className="flex h-full min-h-36 items-center justify-center"><LoaderCircle className="size-4 animate-spin text-muted" /></div>
           : supply.kind === 'unread'
-            ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.gateway.supply.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.gateway.retry')}</Button></div>
+            ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.gateway.supply.unread')}</p><Button ref={retryRef} variant="outline" size="xs" disabled={retryDisabled} onClick={onRetry}>{t('settings.models.gateway.retry')}</Button></div>
             : <>
-                {supply.kind === 'degraded' && supply.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive-ink">{readFailureCopy ?? t('settings.models.gateway.supply.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.gateway.retry')}</Button></div>}
+                {supply.kind === 'degraded' && supply.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive-ink">{readFailureCopy ?? t('settings.models.gateway.supply.unread')}</p><Button ref={retryRef} variant="outline" size="xs" disabled={retryDisabled} onClick={onRetry}>{t('settings.models.gateway.retry')}</Button></div>}
                 <AgentCard agents={agents ?? []} runtime={runtime} {...props} />
               </>}
       </div>

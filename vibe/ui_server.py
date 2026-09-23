@@ -7031,6 +7031,9 @@ def remote_access_status():
             for key in _REMOTE_ACCESS_STATUS_PUBLIC_FIELDS
             if key in status_payload
         }
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is not None and authorization_context.can_manage_access_members:
+        status_payload["pending_pairing"] = remote_access.pending_pairing_status(config)
     return jsonify(status_payload)
 
 

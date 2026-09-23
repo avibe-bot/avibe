@@ -98,6 +98,42 @@ def test_retention_help_ignores_oversized_configured_window(monkeypatch, tmp_pat
     assert cli._configured_trace_retention_days("en") == 30
 
 
+@pytest.mark.parametrize(
+    ("language", "resume_hint", "replacement_hint"),
+    [
+        (
+            "en",
+            "Without a key, the CLI resumes a recoverable local pairing",
+            "To replace an uncertain pending attempt",
+        ),
+        (
+            "zh",
+            "不提供密钥时，命令会继续本机可恢复的配对",
+            "要替换结果不确定的待处理配对",
+        ),
+    ],
+)
+def test_remote_pair_help_localizes_recovery_guidance(
+    monkeypatch, tmp_path, capsys, language, resume_hint, replacement_hint,
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"language": language}), encoding="utf-8")
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["remote", "pair", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert resume_hint in output
+    assert replacement_hint in output
+    assert "vibe remote pair --backend-url https://avibe.bot" in output
+    if language == "zh":
+        assert "Without a key, the CLI resumes" not in output
+
+
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):
     _make_fake_uv_tool(tmp_path, revisions=["20260606_0018"])
     db_path = tmp_path / "state" / "vibe.sqlite"

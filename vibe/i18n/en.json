@@ -968,6 +968,26 @@
       "oauth_time_mismatch_body": "Avibe Cloud finished the sign-in, but this machine rejected the security token because the local clock appears out of sync. Correct the system time, then try again.",
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
+    },
+    "cli": {
+      "pairHelpEpilog": "Guidance:\n  This is the direct pairing command for users who already have a pairing key.\n  For the guided setup flow, run `vibe remote`.\n  Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.\n  To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.\n  Pairing saves the remote-access config and then starts the managed tunnel automatically.\n  The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.\n\nExamples:\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
+      "localWriteUnavailableTitle": "Remote access setup stopped before contacting Avibe Cloud.",
+      "localWriteUnavailableBody": "The local config cannot durably accept a pairing, so no pairing key was consumed.",
+      "saveFailedAfterRedeemTitle": "The pairing was redeemed cloud-side but could not be saved locally.",
+      "orphanedBinding": "Orphaned binding: instance {instance_id} (device {device_name}).",
+      "recoveryRetained": "The redeemed credentials are kept on this host, so no new pairing key is needed.",
+      "retryAfterLocalFix": "Fix the local config problem, then run:",
+      "recoveryInvalid": "The saved pairing recovery record is invalid and cannot be replayed.",
+      "recoveryUnavailable": "Local pairing recovery could not start. No new pairing key was consumed.",
+      "recoveryNotReady": "A pairing operation has no durably recorded response. It may still be running or may have consumed the key. A keyless retry cannot recover it.",
+      "recoveryRevoked": "The saved pairing recovery was invalidated by a local unpair operation.",
+      "recoveryIndeterminate": "The pairing outcome is uncertain or was superseded locally. No recoverable response is guaranteed; do not reuse the submitted key.",
+      "replacePendingPairing": "Check the cloud console and ensure no pairing is still running. To explicitly replace the pending attempt, substitute a fresh key and the intended backend URL in this command (the default backend is https://avibe.bot):",
+      "retirementFailed": "Pairing was applied, but its recovery record could not be retired. Retry without a new key.",
+      "failedClaimCleanup": "This pairing attempt failed and was not applied. Fix local storage, then retry without a key to clear its failed-operation record.",
+      "failedClaimUnrecorded": "This pairing attempt failed and was not applied. Its cleanup could not be recorded. After fixing local storage, supply a fresh pairing key explicitly to 'vibe remote pair'; a keyless retry cannot recover this result.",
+      "failedClaimRetired": "The failed pairing record was cleared. Get a fresh pairing key, then run the following command to enter it securely:",
+      "retryPairCommand": "Retry local pairing recovery with:"
     }
   },
   "turn": {

@@ -114,9 +114,6 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
     await expect.poll(async () => (await api.agentChain(gateway.backend, gateway.model)).manual_override).toBeNull();
     expect(identities(await api.agentChain(gateway.backend, gateway.model))).toEqual(identities(inherited));
     expect(mutations).toEqual(['DELETE', 'DELETE']);
-    const done = labelledButton(dialog, copy('routeDialog.impact.done'));
-    await expect(done).toBeEnabled();
-    await done.click();
     await expect(dialog).toHaveCount(0);
     await page.reload();
     const reloaded = await api.agentChain(gateway.backend, gateway.model);
