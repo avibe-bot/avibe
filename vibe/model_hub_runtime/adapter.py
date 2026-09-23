@@ -1247,6 +1247,9 @@ class CLIProxyEngineAdapter:
         self._active_transports = 0
         self._transports_idle = asyncio.Event()
         self._transports_idle.set()
+        self._unsent_requests = 0
+        self._requests_sent = asyncio.Event()
+        self._requests_sent.set()
         self._installation_lock = asyncio.Lock()
         self._install_task: asyncio.Task[None] | None = None
         self._install_admission: asyncio.Future[EngineStatus] | None = None
@@ -1682,9 +1685,14 @@ class CLIProxyEngineAdapter:
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
         async with self._routing_lock:
-            await self._transports_idle.wait()
-            # Cancellation must retain the barrier until the finite transaction
-            # has either restarted or restored the prior projection.
+            # The routing lock orders the projection against new admissions.
+            # An admitted request keeps the projection it was admitted under
+            # until the engine has read it; established streams keep their
+            # connection, since CPA hot-reloads the config, so a save neither
+            # waits for them nor restarts. Cancellation must retain the lock
+            # until the finite transaction has applied or restored the prior
+            # projection.
+            await self._requests_sent.wait()
             await run_owned_in_thread(self._sync_sources_transaction, tuple(bindings))
 
     def _sync_sources_transaction(self, bindings: Sequence[SourceBinding]) -> None:
@@ -1692,20 +1700,35 @@ class CLIProxyEngineAdapter:
             previous = self.state_store.list_sources()
         except EngineStateError:
             previous = []
-        was_running = self.supervisor.client_if_running() is not None
         self.state_store.sync_sources(bindings)
         try:
-            self.supervisor.restart_if_running()
+            self.supervisor.reload_config_if_running(previous)
         except Exception:
+            applied = self.state_store.list_sources()
             self.state_store.replace_sources(previous)
-            if was_running:
-                try:
-                    self.supervisor.ensure_running()
-                except Exception as restore_error:
-                    raise EngineStateError(
-                        "source sync failed and the previous engine state could not be restored"
-                    ) from restore_error
+            try:
+                self.supervisor.reload_config_if_running(applied)
+            except Exception as restore_error:
+                raise EngineStateError(
+                    "source sync failed and the previous engine state could not be restored"
+                ) from restore_error
             raise
+
+    def _hold_unsent_request(self) -> Callable[[], None]:
+        self._unsent_requests += 1
+        self._requests_sent.clear()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._unsent_requests -= 1
+            if self._unsent_requests == 0:
+                self._requests_sent.set()
+
+        return release
 
     def _acquire_transport(self) -> Callable[[], None]:
         self._active_transports += 1
@@ -2627,10 +2650,12 @@ class CLIProxyEngineAdapter:
                     )
                 )
             release = self._acquire_transport()
+            request_sent = self._hold_unsent_request()
             try:
                 if on_admitted is not None:
                     on_admitted()
             except BaseException:
+                request_sent()
                 release()
                 raise
         try:
@@ -2646,10 +2671,13 @@ class CLIProxyEngineAdapter:
                 request_protocol=request_protocol,
                 request_headers=getattr(request, "headers", None),
                 on_transport_done=release,
+                on_request_sent=request_sent,
             )
         except BaseException:
             release()
             raise
+        finally:
+            request_sent()
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True

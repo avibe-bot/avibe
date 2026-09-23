@@ -355,6 +355,56 @@ class EngineClient:
             timeout=timeout,
         )
 
+    def put_config_yaml(self, text: str, *, timeout: float | None = None) -> dict[str, Any]:
+        """Replace the running engine config through its hot-reload endpoint."""
+        return self._request_json_projection(
+            "PUT",
+            "/v0/management/config.yaml",
+            _load_json_object,
+            data=text.encode(),
+            content_type="application/yaml",
+            headers={"X-Management-Key": self.connection.management_key},
+            timeout=timeout,
+        )
+
+    def list_model_ids(self, *, timeout: float | None = None) -> frozenset[str]:
+        payload = self._request_json(
+            "GET",
+            "/v1/models",
+            headers={"Authorization": f"Bearer {self.connection.gateway_token}"},
+            timeout=timeout,
+        )
+        entries = payload.get("data")
+        if not isinstance(entries, list):
+            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json")
+        return frozenset(
+            str(entry["id"]) for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        )
+
+    def list_model_names(self, *, timeout: float | None = None) -> dict[str, str]:
+        """Routed model ID to registered display name.
+
+        CPA's default OpenAI listing drops display names; its Grok-client
+        listing keeps the routed ID and names every provider's registration.
+        """
+        payload = self._request_json(
+            "GET",
+            "/v1/models",
+            headers={
+                "Authorization": f"Bearer {self.connection.gateway_token}",
+                "User-Agent": "grok-shell",
+            },
+            timeout=timeout,
+        )
+        entries = payload.get("data")
+        if not isinstance(entries, list):
+            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json")
+        return {
+            str(entry["id"]): str(entry.get("name") or "")
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        }
+
     async def invoke(
         self,
         source: SourceRecord,
@@ -365,6 +415,7 @@ class EngineClient:
         request_protocol: str | None = None,
         request_headers: Mapping[str, str] | None = None,
         on_transport_done: Callable[[], None] | None = None,
+        on_request_sent: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
         request_protocol = request_protocol or source.protocol
         endpoint = _endpoint_for_protocol(request_protocol)
@@ -393,7 +444,21 @@ class EngineClient:
         # Connecting to the local engine is bounded. Once connected, headers
         # and response bytes can wait on upstream inference for any duration;
         # completion, transport failure, or owner cancellation ends that wait.
-        session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
+        trace_configs: list[aiohttp.TraceConfig] = []
+        if on_request_sent is not None:
+            # CPA resolves the route as soon as it reads the body, while a
+            # config write only applies after its 150ms reload debounce, so a
+            # body written to the loopback socket precedes any route removal.
+            # CPA sends no earlier acknowledgment: response headers wait for
+            # the upstream's first chunk, which a save must never wait on.
+            trace = aiohttp.TraceConfig()
+
+            async def request_sent(*_args: Any) -> None:
+                on_request_sent()
+
+            trace.on_request_chunk_sent.append(request_sent)
+            trace_configs.append(trace)
+        session = aiohttp.ClientSession(timeout=timeout, trust_env=False, trace_configs=trace_configs)
         response: aiohttp.ClientResponse | None = None
         retry_after: str | None = None
         response_received_at: datetime | None = None
@@ -686,16 +751,19 @@ class EngineClient:
         *,
         query: Mapping[str, str] | None = None,
         payload: Mapping[str, Any] | None = None,
+        data: bytes | None = None,
+        content_type: str = "application/json",
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> _ProjectedJSON:
         url = self._url(path, query=query)
         request_timeout = timeout or self.timeout
         deadline = time.monotonic() + request_timeout
-        data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        if payload is not None:
+            data = json.dumps(payload, separators=(",", ":")).encode()
         request_headers = dict(headers or {})
         if data is not None:
-            request_headers["Content-Type"] = "application/json"
+            request_headers["Content-Type"] = content_type
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
         try:
             opener = urllib.request.build_opener(
