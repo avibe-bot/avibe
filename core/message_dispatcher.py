@@ -1702,26 +1702,30 @@ class ConsolidatedMessageDispatcher:
         async def _close() -> None:
             # A backend may finish its own post-result cleanup after the shared
             # terminal boundary. Keep its gate reserved until that task exits.
+            current_lease = lease
             try:
                 await asyncio.sleep(0)
-                if lease is not None and lease[2] is not None:
-                    await asyncio.wait({lease[2]})
+                if current_lease is not None and current_lease[2] is not None:
+                    await asyncio.wait({current_lease[2]})
                 runtime_key = str(
                     payload.get("agent_runtime_turn_key") or ""
                 ).strip()
-                runtime_active = getattr(
-                    getattr(self.controller, "agent_service", None),
-                    "runtime_turn_active",
-                    None,
-                )
-                if lease is None and runtime_key and callable(runtime_active) and runtime_active(runtime_key):
-                    logger.info(
-                        "Skipping close-after teardown for Agent Session %s: "
-                        "a successor turn owns or is queued on runtime %s",
-                        session_id,
-                        runtime_key,
+                service = getattr(self.controller, "agent_service", None)
+                if current_lease is None:
+                    reserve_idle = getattr(service, "reserve_idle_close_after_teardown", None)
+                    current_lease = (
+                        await reserve_idle(runtime_key)
+                        if runtime_key and callable(reserve_idle)
+                        else False
                     )
-                    return
+                    if current_lease is False:
+                        logger.info(
+                            "Skipping close-after teardown for Agent Session %s: "
+                            "runtime %s is busy or its gate identity is unavailable",
+                            session_id,
+                            runtime_key,
+                        )
+                        return
                 from core.services.running_agents import end_running_agent
 
                 result = await end_running_agent(
@@ -1743,14 +1747,14 @@ class ConsolidatedMessageDispatcher:
                     exc_info=True,
                 )
             finally:
-                if lease is not None:
+                if current_lease is not None and current_lease is not False:
                     release_lease = getattr(
                         getattr(self.controller, "agent_service", None),
                         "release_runtime_turn_key",
                         None,
                     )
                     if callable(release_lease):
-                        release_lease(lease[0], lease[1])
+                        release_lease(current_lease[0], current_lease[1])
                 self._close_after_session_ids.discard(session_id)
 
         task = asyncio.create_task(

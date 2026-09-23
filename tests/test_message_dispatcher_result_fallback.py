@@ -726,6 +726,10 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         which no lane may settle, and the row would be left ``running``.
         """
         controller = self._terminal_lifecycle_controller()
+        controller.agent_service.reserve_idle_close_after_teardown = mock.AsyncMock(
+            return_value=("runtime-1", "close-after:test", None)
+        )
+        controller.agent_service.release_runtime_turn_key = mock.Mock()
 
         with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist, mock.patch(
             "core.services.running_agents.end_running_agent",

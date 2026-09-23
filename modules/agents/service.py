@@ -1014,6 +1014,25 @@ class AgentService:
         self.release_runtime_turn_key(runtime_key, runtime_token, reserve_token=reservation)
         return runtime_key, reservation, turn_task
 
+    async def reserve_idle_close_after_teardown(
+        self, runtime_key: str
+    ) -> tuple[str, str, None] | bool:
+        """Reserve an idle runtime before detached close-after teardown.
+
+        The uncontended acquire completes without yielding. If a successor owns
+        or is queued on the gate, leave it untouched rather than stop its runtime.
+        """
+        runtime_key = str(runtime_key or "").strip()
+        if not runtime_key:
+            return False
+        gate = self._get_turn_gate(runtime_key)
+        if gate.lock.locked() or self._lock_has_live_waiters(gate.lock) or gate.token:
+            return False
+        await gate.lock.acquire()
+        reservation = f"close-after:{uuid.uuid4().hex}"
+        gate.token = reservation
+        return runtime_key, reservation, None
+
     def release_runtime_turn_key(
         self,
         runtime_key: str,

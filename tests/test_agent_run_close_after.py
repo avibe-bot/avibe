@@ -12,6 +12,7 @@ from modules.agents.service import AgentService
 
 def test_close_after_releases_the_owned_runtime_after_terminal_result() -> None:
     controller = SimpleNamespace()
+    controller.agent_service = AgentService(controller)
     dispatcher = ConsolidatedMessageDispatcher(controller)
     context = MessageContext(
         user_id="user",
@@ -21,6 +22,7 @@ def test_close_after_releases_the_owned_runtime_after_terminal_result() -> None:
             "agent_session_id": "session-1",
             "agent_backend": "claude",
             "close_after": True,
+            "agent_runtime_turn_key": "runtime-1",
             "agent_session_target": {
                 "agent_backend": "claude",
                 "session_anchor": "base-session-1",
@@ -52,7 +54,11 @@ def test_close_after_waits_until_runtime_turn_release() -> None:
     release_order: list[str] = []
     controller = SimpleNamespace(
         agent_service=SimpleNamespace(
-            release_runtime_turn=lambda _context: release_order.append("release")
+            release_runtime_turn=lambda _context: release_order.append("release"),
+            reserve_idle_close_after_teardown=AsyncMock(
+                return_value=("runtime-1", "close-after:test", None)
+            ),
+            release_runtime_turn_key=lambda *_args: None,
         )
     )
     dispatcher = ConsolidatedMessageDispatcher(controller)
@@ -64,6 +70,7 @@ def test_close_after_waits_until_runtime_turn_release() -> None:
             "agent_session_id": "session-1",
             "agent_backend": "codex",
             "close_after": True,
+            "agent_runtime_turn_key": "runtime-1",
             "agent_session_target": {
                 "agent_backend": "codex",
                 "session_anchor": "base-session-1",
@@ -252,9 +259,168 @@ def test_close_after_does_not_close_when_successor_is_already_queued() -> None:
     asyncio.run(exercise())
 
 
+def test_detached_close_after_reserves_idle_gate_before_teardown() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "old-turn",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        closing = asyncio.Event()
+        finish_close = asyncio.Event()
+
+        async def end_running_agent(*_args, **_kwargs):
+            assert gate.lock.locked()
+            assert gate.token.startswith("close-after:")
+            closing.set()
+            await finish_close.wait()
+            return {"ok": True}
+
+        with (
+            patch("core.message_dispatcher.SQLiteBackgroundTaskStore"),
+            patch(
+                "core.services.running_agents.end_running_agent",
+                new=end_running_agent,
+            ),
+        ):
+            dispatcher._terminal_agent_run_ids = lambda *_args: ["run-1"]
+            dispatcher._record_agent_run_terminal_for_ids = lambda **_kwargs: None
+            dispatcher._record_agent_run_terminal_result(
+                context,
+                "done",
+                None,
+                is_error=False,
+                output_semantics=MessageOutput(
+                    completes_turn=False,
+                    completes_run=True,
+                    detached=True,
+                ),
+            )
+            await asyncio.wait_for(closing.wait(), timeout=1)
+            successor = asyncio.create_task(gate.lock.acquire())
+            await asyncio.sleep(0)
+            assert not successor.done()
+            finish_close.set()
+            await asyncio.wait_for(successor, timeout=1)
+            gate.lock.release()
+
+    asyncio.run(exercise())
+
+
+def test_detached_close_after_does_not_stop_successor_that_won_gate() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        end_running_agent = AsyncMock(return_value={"ok": True})
+
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._schedule_close_after_runtime(context)
+            await gate.lock.acquire()
+            gate.token = "successor-turn"
+            await asyncio.sleep(0.01)
+            end_running_agent.assert_not_awaited()
+            assert gate.token == "successor-turn"
+            service.release_runtime_turn_key("runtime-1", "successor-turn")
+
+    asyncio.run(exercise())
+
+
+def test_idle_close_after_does_not_bypass_queued_successor() -> None:
+    async def exercise() -> None:
+        service = AgentService(SimpleNamespace())
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        successor = asyncio.create_task(gate.lock.acquire())
+        await asyncio.sleep(0)
+        gate.lock.release()
+
+        assert await service.reserve_idle_close_after_teardown("runtime-1") is False
+        await asyncio.wait_for(successor, timeout=1)
+        gate.lock.release()
+
+    asyncio.run(exercise())
+
+
+def test_detached_close_after_without_runtime_identity_does_not_teardown() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        controller.agent_service = AgentService(controller)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+            },
+        )
+        end_running_agent = AsyncMock(return_value={"ok": True})
+
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._schedule_close_after_runtime(context)
+            await asyncio.sleep(0.01)
+
+        end_running_agent.assert_not_awaited()
+        assert dispatcher._close_after_session_ids == set()
+
+    asyncio.run(exercise())
+
+
 def test_resultless_close_after_stop_schedules_teardown() -> None:
     controller = SimpleNamespace(
-        agent_service=SimpleNamespace(release_runtime_turn=lambda _context: None)
+        agent_service=SimpleNamespace(
+            release_runtime_turn=lambda _context: None,
+            reserve_idle_close_after_teardown=AsyncMock(
+                return_value=("runtime-1", "close-after:test", None)
+            ),
+            release_runtime_turn_key=lambda *_args: None,
+        )
     )
     dispatcher = ConsolidatedMessageDispatcher(controller)
     context = MessageContext(
@@ -265,6 +431,7 @@ def test_resultless_close_after_stop_schedules_teardown() -> None:
             "agent_session_id": "session-1",
             "agent_backend": "claude",
             "close_after": True,
+            "agent_runtime_turn_key": "runtime-1",
             "agent_session_target": {
                 "agent_backend": "claude",
                 "session_anchor": "base-session-1",
