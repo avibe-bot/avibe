@@ -1011,9 +1011,8 @@ describe('setup route editor on the registered journey', () => {
     expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
   });
 
-  it('saves the Codex card onto Codex and refreshes Enter after the real PUT', async () => {
-    const user = userEvent.setup();
-    const saved: Record<string, typeof hops> = { claude: [], codex: [] };
+  it('saves a Codex card reorder to every enabled assistant and shows the named preferred model', async () => {
+    const saved: Record<string, typeof hops> = { claude: [...hops], codex: [...hops] };
     serveAgents('claude-agent', [
       { ...CLAUDE_AGENT, model: 'opus-5' },
       { name: 'codex', backend: 'codex', model: 'gpt-5' },
@@ -1022,6 +1021,12 @@ describe('setup route editor on the registered journey', () => {
       hubSupply('claude', [route('claude-agent', { effective_model_id: 'opus-5' })]),
       hubSupply('codex', [route('codex', { effective_model_id: 'gpt-5' })]),
     ]);
+    mock.models.listSources.mockResolvedValue([{
+      ...HUB_SOURCE,
+      models: HUB_SOURCE.models.map((model) => model.id === 'gpt-4.1'
+        ? { ...model, display_name: 'GPT 4.1' }
+        : model),
+    }]);
     mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({
       ok: true, backend, enabled: true, installed: true, auth: 'none',
       application: 'applied',
@@ -1047,16 +1052,18 @@ describe('setup route editor on the registered journey', () => {
     await arriveAtProviders();
     fireEvent.click(primaryAction());
     const enter = await screen.findByRole('button', { name: 'Enter workspace' });
-    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(true));
-    fireEvent.click(await assistantCard('Codex').findByRole('button', { name: en.onboarding.setup.configureRoute }));
-    await user.click(await screen.findByRole('button', { name: en.settings.models.routeDialog.addHop }));
-    await user.click(screen.getByRole('option', { name: /gpt-5/ }));
-    await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.add.confirm }));
-    await user.click(screen.getByRole('button', { name: en.onboarding.route.done }));
-    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [hops[0]] }));
-    expect(mock.models.putAgentChain).not.toHaveBeenCalledWith('claude', expect.anything(), expect.anything());
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(await assistantCard('Codex').findByRole('button', { name: routeButton('Codex') }));
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.moveDownNamed.replace('{{name}}', 'OpenAI · gpt-5') }));
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
+    const reordered = [hops[1], hops[0]];
+    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: reordered }));
+    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: reordered }));
+    expect(saved.claude).toEqual(reordered);
+    expect(saved.codex).toEqual(reordered);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(assistantCard('Codex').getByText('GPT 4.1')).toBeTruthy());
+    expect(assistantCard('Claude Code').getByText('GPT 4.1')).toBeTruthy();
     fireEvent.click(enter);
     expect(await screen.findByTestId('destination')).toBeTruthy();
   });

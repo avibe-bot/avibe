@@ -5297,7 +5297,6 @@
       "noteNotInstalled": "安装 {{name}}，使用已添加的模型",
       "defaultModelWithBackups_one": "默认模型 · 另有 {{count}} 个备选",
       "defaultModelWithBackups_other": "默认模型 · 另有 {{count}} 个备选",
-      "routeFallbackInUse": "首选不可用，已改用备选",
       "noteNoModels": "还没有可用的模型"
     },
     "route": {

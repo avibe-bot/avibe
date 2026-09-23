@@ -5297,7 +5297,6 @@
       "noteNotInstalled": "Install {{name}} to use your models",
       "defaultModelWithBackups_one": "Default model · 1 backup",
       "defaultModelWithBackups_other": "Default model · {{count}} backups",
-      "routeFallbackInUse": "Using a backup model",
       "noteNoModels": "No usable model yet"
     },
     "route": {

@@ -11,13 +11,10 @@ import type { AssistantId } from './collaborationTimeline';
 /** One card's reading of the route every enabled assistant shares. */
 export type AssistantRouteView = {
   loading: boolean;
-  /** What this assistant will actually call first: the shared preferred model, or the
-      backup it falls to when it cannot reach that one. Null when there is no route. */
+  /** What this assistant's stored chain will call first. Null when there is no route. */
   model: string | null;
   /** How many models sit behind that one. */
   backups: number;
-  /** Set when this assistant's first model is not the shared preferred one. */
-  fallback: boolean;
 };
 
 export interface AssistantRowProps {
@@ -82,12 +79,8 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
     : status === 'ok' ? (enabled ? 'enabled' : 'idle')
       : status === 'missing' ? 'missing'
         : 'checking';
-  // The route the step read for all three cards. An assistant that cannot reach the
-  // shared preferred model says which model it will actually call instead, because
-  // that — not the route's own first row — is what this assistant will do.
   const routeModel = route?.model ?? null;
-  const routeLead = (live: boolean) => (route?.fallback ? t('onboarding.setup.routeFallbackInUse')
-    : live && route?.backups ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
+  const routeLead = (live: boolean) => (live && route?.backups ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
       : t('onboarding.setup.defaultModel'));
   // Off, the card still shows the model the assistant would call, so switching it on
   // has no surprise in it. It is a statement then, not a control: no chevron, nothing

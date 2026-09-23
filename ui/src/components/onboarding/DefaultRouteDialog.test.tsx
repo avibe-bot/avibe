@@ -202,7 +202,7 @@ describe('DefaultRouteDialog', () => {
     expect(screen.getByText(en.onboarding.route.backup.replace('{{index}}', '1')).closest('.setup-add-row')?.textContent).toContain('sonnet-4');
   });
 
-  it('saves the focused Codex card onto Codex, not the default Claude target', async () => {
+  it('saves the focused Codex card route to both enabled targets', async () => {
     const user = userEvent.setup();
     const onSaved = vi.fn();
     const codex = {
@@ -258,7 +258,7 @@ describe('DefaultRouteDialog', () => {
     await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.add.confirm }));
     await user.click(screen.getByRole('button', { name: en.onboarding.route.done }));
     await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [A] }));
-    expect(mock.models.putAgentChain).not.toHaveBeenCalledWith('claude', 'opus-5', expect.anything());
+    expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [A] });
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ backend: 'codex', agentName: 'codex' }));
   });
 });

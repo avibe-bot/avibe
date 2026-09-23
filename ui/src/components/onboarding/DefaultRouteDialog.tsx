@@ -146,12 +146,9 @@ export function DefaultRouteDialog({
     setPhase('saving');
     setStatus('');
     try {
-      const persistTargets = focus
-        ? [selectSetupRouteTarget(targets, focus)].filter((row): row is SetupRouteTargetSnapshot => row !== null)
-        : targets;
       const next = retry
-        ? await retrySetupRoutes(flowState.routeOrder, persistTargets, receipts, writes)
-        : await saveSetupRoutes(flowState.routeOrder, persistTargets, writes, { dirty: true });
+        ? await retrySetupRoutes(flowState.routeOrder, targets, receipts, writes)
+        : await saveSetupRoutes(flowState.routeOrder, targets, writes, { dirty: true });
       setReceipts(next);
       if (saveNeedsRetry(next)) {
         setPhase('failed');

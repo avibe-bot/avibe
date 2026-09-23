@@ -153,8 +153,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // the same chain, so the three cards share one read instead of asking for their own,
   // and the dialog reads into the same state. Whatever it or the person has since put
   // there is the fresher copy, so this only ever fills an empty one.
-  const [routeRead, setRouteRead] = useState<{ done: boolean; targets: SetupRouteTargetSnapshot[]; sources: Source[] }>(
-    { done: false, targets: [], sources: [] });
+  const [routeRead, setRouteRead] = useState<{ done: boolean; targets: SetupRouteTargetSnapshot[]; sources: Source[]; supplies: AgentSupply[] }>(
+    { done: false, targets: [], sources: [], supplies: [] });
   const routeReadStarted = useRef(false);
   const readSharedRoute = useCallback(async () => {
     if (!agentReads || !setFlowState) return;
@@ -163,12 +163,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         agentReads.read(),
         modelsApi.listSources().catch(() => [] as Source[]),
       ]);
+      const supplies = supplyRead.kind === 'current' ? supplyRead.value : [];
       const hydration = await hydrateSetupRoutes({
         listVibeAgents: (params) => api.listVibeAgents(params),
         getVibeAgent: (name, params) => api.getVibeAgent(name, params),
         getAgentChain: modelsApi.getAgentChain,
-      }, supplyRead.kind === 'current' ? supplyRead.value : []);
-      setRouteRead({ done: true, targets: hydration.targets, sources: Array.isArray(listed) ? listed : [] });
+      }, supplies);
+      setRouteRead({ done: true, targets: hydration.targets, sources: Array.isArray(listed) ? listed : [], supplies });
       setFlowState((current) => (current.routeOrderDirty || current.routeOrder.length > 0
         ? current
         : { ...current, routeOrder: hydration.union }));
@@ -218,19 +219,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     }
     await readSharedRoute();
   }, [agentReads, api, setFlowState, readSharedRoute]);
-  // A model is named the way its Source names it, and by its id when the Source has
-  // no name for it — the card shows what the person picked, not an internal id.
+  // Source and backend catalogs come from the same route read; no per-card fetch.
   const modelLabel = (hop: RouteHop): string => {
     const source = routeRead.sources.find((row) => row.id === hop.source_id);
     const model = source?.models?.find((row) => row.id === hop.model_id);
-    return model?.display_name?.trim() || hop.model_id;
+    const catalog = routeRead.supplies.flatMap((supply) => supply.catalog_models ?? [])
+      .find((row) => row.id === hop.model_id);
+    return model?.display_name?.trim() || catalog?.display_name?.trim() || hop.model_id;
   };
   const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
     const loading = Boolean(canEditSetupRoute && modelHubEnabled && !routeRead.done && sharedRoute.length === 0);
-    const preferred = sharedRoute[0] ?? null;
-    // What this assistant will actually call. It matches the shared preferred model
-    // unless its own chain cannot start there, which is the one case the card has to
-    // say out loud rather than promise a model that will not answer.
+    // The stored chain is what this assistant actually calls. A different first hop
+    // alone says nothing about why it differs from the shared draft.
     const own = routeRead.targets.find((target) => target.backend === backend);
     const ownHops = own ? chainMembership(own.chain) : [];
     // Its own chain when it has one, the shared order when it does not: the card
@@ -242,7 +242,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       loading,
       model: mine ? modelLabel(mine) : null,
       backups: Math.max(0, hops.length - 1),
-      fallback: Boolean(mine && preferred && (mine.source_id !== preferred.source_id || mine.model_id !== preferred.model_id)),
     };
   };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
