@@ -2610,10 +2610,9 @@ class CLIProxyEngineAdapter:
                     # waits: the user can paste the right address again.
                     flow.grant_write_possible = grant_write_possible
                     logger.info(
-                        "OAuth submission rejected by the engine: flow=%s provider=%s reason=%s",
+                        "OAuth submission rejected by the engine (HTTP 400, no code in the value?): flow=%s provider=%s",
                         flow.flow_id,
                         flow.callback_provider,
-                        ",".join(error.error_candidates) or error.error_type or "unknown",
                     )
                     raise OAuthSubmissionRejectedError(flow_id) from None
                 self._fail_flow(flow, "models.oauth.submission_failed")
