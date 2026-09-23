@@ -123,7 +123,14 @@ def _runtime_agent_cli_path(
     # by Claude, Codex, or OpenCode can never disagree.
     from vibe.cli_paths import resolve_cli_path
 
-    return resolve_cli_path(selected) or selected
+    # ``include_npm_global`` is the only branch of the resolver that spawns a
+    # process: it shells out to ``npm config get prefix`` with a five-second
+    # timeout, uncached, and only when the CLI was not found by any cheap means.
+    # ``to_app_config`` is reached from async request paths, so that call would
+    # block an event loop for up to five seconds per missing backend. The cheap
+    # candidates it keeps -- ~/.local/bin, ~/.bun/bin, Homebrew, /usr/local/bin
+    # and every NVM version -- already cover what a GUI-launched Runtime needs.
+    return resolve_cli_path(selected, include_npm_global=False) or selected
 
 
 def to_app_config(

@@ -3450,3 +3450,51 @@ def test_tracking_a_create_retires_the_previous_teardown_record(monkeypatch, tmp
 
     assert asyncio.run(scenario()) is False
     assert composite_key not in handler.claude_intentional_teardowns
+
+
+def test_to_app_config_never_spawns_npm_on_async_request_paths(monkeypatch, tmp_path: Path) -> None:
+    """Runtime path projection must not shell out to npm.
+
+    ``to_app_config`` is reached from async request handlers, and the npm-global
+    branch of the resolver runs ``npm config get prefix`` with a five-second
+    timeout. One missing backend would stall an event loop for that long.
+    """
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
+
+    # Recorded rather than raised: ``_npm_prefix_for`` wraps its spawn in a bare
+    # ``except Exception``, so an assertion raised here would be swallowed and
+    # the test would pass while the subprocess still ran.
+    spawned: list[object] = []
+
+    def _record_spawn(*args, **kwargs):
+        spawned.append(args)
+        raise FileNotFoundError("npm")
+
+    monkeypatch.setattr("vibe.cli_paths.subprocess.run", _record_spawn)
+
+    v2 = V2Config(
+        mode="self_host",
+        version="2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd="/tmp/workdir"),
+        # Names no host can resolve, so every cheap candidate misses and the
+        # npm-global branch is actually reached. Real binary names would be
+        # found in Homebrew or /usr/local on a developer machine and the test
+        # would pass without proving anything.
+        agents=AgentsConfig(
+            claude=ClaudeConfig(cli_path="avibe-absent-claude-cli"),
+            codex=CodexConfig(cli_path="avibe-absent-codex-cli"),
+            opencode=OpenCodeConfig(cli_path="avibe-absent-opencode-cli"),
+        ),
+    )
+
+    compat = to_app_config(v2)
+
+    assert spawned == [], f"resolution spawned {len(spawned)} subprocess(es) on an async request path"
+    # Unresolvable selectors fall through to the saved value rather than failing.
+    assert compat.claude.cli_path == "avibe-absent-claude-cli"
+    assert compat.codex is not None and compat.codex.binary == "avibe-absent-codex-cli"
+    assert compat.opencode is not None and compat.opencode.binary == "avibe-absent-opencode-cli"

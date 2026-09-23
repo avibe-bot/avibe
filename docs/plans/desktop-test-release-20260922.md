@@ -600,6 +600,76 @@ SID and a non-protected DACL are still rejected. They cannot prove the Win32
 behavior underneath; as with H9, only the next prerelease's Windows leg settles
 that.
 
+## H12 — CLI discovery must not run on an async request path
+
+The runtime path projection added in this PR made `to_app_config` call
+`resolve_cli_path`, whose last-resort branch runs `npm config get prefix` with a
+five-second timeout and no caching. `to_app_config` is reached from async
+handlers — `_reconcile_platforms` on the controller loop, `opencode_options_async`
+and `_opencode_get_server` on the UI server loop — so a missing backend CLI would
+stall an event loop for up to five seconds, once per missing backend.
+
+Fixed by passing `include_npm_global=False`: that branch is the only one in the
+resolver that spawns a process, and the cheap candidates it keeps —
+`~/.local/bin`, `~/.bun/bin`, Homebrew, `/usr/local/bin` and every NVM version —
+already cover what a GUI-launched Runtime needs. The cost is narrow and stated:
+a CLI installed via `npm -g` into a non-default prefix that is *also* absent from
+`PATH` will no longer be discovered by the Runtime. A GUI-launched process is
+exactly the context where such a prefix is unreliable anyway.
+
+Memoizing the npm prefix was the alternative and is worse: it still blocks the
+loop once and buys a staleness question that the keyword does not.
+
+## H13 — Banked: why the Windows service lock self-check fails
+
+Not fixed. Windows is shelved; this is recorded so the next attempt starts from
+a cause rather than from the logs again.
+
+The rc8 Windows leg reported two symptoms that look separate and are one bug:
+the probe said pid 3176 had not acquired the service lock after 5s, and 47
+seconds later the service stopped itself through `_stop_for_lost_lease`. The
+control IPC owner error in that window is on the shutdown path, i.e. downstream.
+
+The cause is that the lock byte sits on top of the data it guards.
+`_try_lock_file` seeks to 0 and calls `msvcrt.locking(fd, LK_NBLCK, 1)`, so it
+locks byte 0. `_lock_file_pid` then seeks to 0 and reads — the same byte. On
+POSIX this is harmless because `fcntl.flock` is advisory and never blocks a
+read. On Windows byte-range locks are **mandatory and per-handle**: Microsoft's
+documentation states that if the locking process attempts to access a locked
+byte range through a second file handle, the attempt fails, and that an
+exclusive lock denies all other processes both read and write access to the
+range. Every read of that byte through any other handle therefore fails with
+`ERROR_LOCK_VIOLATION`.
+
+Both symptoms follow directly:
+
+- The external probe calls `read_service_instance_lock_record()`, which opens
+  the file fresh and reads byte 0. The read raises, the `except OSError` returns
+  `None`, and the probe concludes the lock was never acquired — while the
+  service is in fact holding it.
+- `current_process_owns_service_instance()` calls `service_lock_held_by`, which
+  opens a **second handle in the same process**. Its `_try_lock_file` correctly
+  fails, and then `_lock_file_pid` reads the locked byte through that second
+  handle and also fails, yielding `None`. `None == os.getpid()` is false, so a
+  process that genuinely owns the lock reports that it does not, and
+  `_stop_for_lost_lease` shuts the service down.
+
+The smallest fix is to stop overlapping the two: on Windows, lock a sentinel
+byte at a fixed offset past any plausible record instead of byte 0, leaving the
+JSON payload readable by every handle while the lock is held. POSIX keeps
+`flock`, which is whole-file and unaffected. The compatibility caveat to decide
+before shipping it: a process locking byte 0 and one locking the sentinel byte
+do not exclude each other, so a mixed-version transition needs the old service
+stopped first.
+
+This is reproducible on `windows-latest` without any packaged Runtime — it needs
+one lock file, two handles and a read — so an existing Windows CI job could hold
+the regression test whenever this is picked up. Two related notes found while
+diagnosing and deliberately left alone: `storage/lock.py::_try_lock` has the
+same overlap shape for the migration lock, and the `_stop_for_lost_lease` log
+line claims the service "no longer owns" the lock, which asserts a transition
+nobody observed — it should say the ownership check failed.
+
 ## Known-by-design ledger additions
 
 - **Deferred.** `clamp_window_frame` picks the single largest-overlap monitor and
