@@ -1141,6 +1141,7 @@ web_push_subscriptions = Table(
     Column("enabled", Integer, nullable=False),
     Column("last_success_at", String, nullable=True),
     Column("last_failure_at", String, nullable=True),
+    Column("provider_invalidated_at", String, nullable=True),
     Column("failure_count", Integer, nullable=False),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),

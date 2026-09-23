@@ -159,7 +159,7 @@ HEAD_ONLY_REQUIRED_COLUMNS = {
         "organization_id",
         "created_at",
     },
-    "web_push_subscriptions": {"device_id"},
+    "web_push_subscriptions": {"device_id", "provider_invalidated_at"},
     "remote_access_authorizations": {
         "instance_id",
         "subject",
@@ -673,6 +673,9 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
 
     if "web_push_subscriptions" in tables and "device_id" not in _column_names(conn, "web_push_subscriptions"):
         conn.execute('alter table "web_push_subscriptions" add column "device_id" VARCHAR')
+        changed = True
+    if "web_push_subscriptions" in tables and "provider_invalidated_at" not in _column_names(conn, "web_push_subscriptions"):
+        conn.execute('alter table "web_push_subscriptions" add column "provider_invalidated_at" VARCHAR')
         changed = True
 
     _ensure_head_indexes(conn, tables)
