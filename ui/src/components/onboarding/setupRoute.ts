@@ -31,6 +31,7 @@ export type SetupRouteHydration = {
   defaultAgentName: string | null;
   targets: SetupRouteTargetSnapshot[];
   union: RouteHop[];
+  missingModels: { backend: AgentBackend; agentName: string }[];
 };
 
 /** The assistant card that opened the route editor. */
@@ -219,11 +220,15 @@ export async function hydrateSetupRoutes(
   const designated = await readSetupTargets(listing.agents, reads, { requireReadable: true });
   const supplyByBackend = new Map(supplies.map((row) => [row.backend, row]));
   const grouped = new Map<string, { backend: AgentBackend; modelId: string; names: string[] }>();
+  const missingModels: SetupRouteHydration['missingModels'] = [];
 
   for (const agent of designated) {
     const backend = agent.backend as AgentBackend;
     const modelId = menuModelFor(agent, supplyByBackend.get(backend));
-    if (!modelId) continue;
+    if (!modelId) {
+      missingModels.push({ backend, agentName: agent.name });
+      continue;
+    }
     const key = targetKey(backend, modelId);
     const existing = grouped.get(key);
     if (existing) existing.names.push(agent.name);
@@ -251,6 +256,7 @@ export async function hydrateSetupRoutes(
     defaultAgentName: listing.default_agent_name,
     targets: ordered,
     union: unionRouteOrder(ordered, listing.default_agent_name),
+    missingModels,
   };
 }
 
@@ -454,7 +460,10 @@ export async function retrySetupRoutes(
     const key = targetKey(target.backend, target.modelId);
     const prior = previous.find((row) => row.key === key);
     if (!prior || prior.kind === 'skipped') {
-      results.push(prior ?? { key, kind: 'skipped' });
+      // A skipped receipt belongs to the old draft. A later edit may now require
+      // this target, so compare it against the current order again.
+      const [rechecked] = await saveSetupRoutes(shared, [target], api);
+      results.push(rechecked ?? { key, kind: 'skipped' });
       continue;
     }
     if (shared.length === 0) {

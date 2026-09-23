@@ -16,6 +16,7 @@ const mock = vi.hoisted(() => ({
   api: {
     listVibeAgents: vi.fn(),
     getVibeAgent: vi.fn(),
+    updateVibeAgent: vi.fn(),
   },
   models: {
     listSources: vi.fn(),
@@ -134,6 +135,7 @@ describe('DefaultRouteDialog', () => {
     Element.prototype.scrollIntoView = vi.fn();
     mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [agent], default_agent_name: 'claude' });
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
+    mock.api.updateVibeAgent.mockResolvedValue({ ok: true, agent });
     mock.models.listSources.mockResolvedValue(sources);
     mock.models.getAgentChain.mockResolvedValue(chainOf([A, B]));
     mock.models.previewAgentChain.mockImplementation(async (_backend, _model, body) =>
@@ -160,6 +162,25 @@ describe('DefaultRouteDialog', () => {
     fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.done }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(mock.models.putAgentChain).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit menu model before a model-less assistant can join the route', async () => {
+    let configured = false;
+    const missing = { ...agent, model: null };
+    mock.api.listVibeAgents.mockImplementation(async () => ({
+      ok: true, agents: [configured ? agent : missing], default_agent_name: 'claude',
+    }));
+    mock.api.getVibeAgent.mockImplementation(async () => ({ ok: true, agent: configured ? agent : missing }));
+    mock.api.updateVibeAgent.mockImplementation(async () => { configured = true; return { ok: true, agent }; });
+    const reads = { ...agentReads, read: async () => ({ kind: 'current' as const, value: [{ ...supplies[0]!, builtin_models: ['opus-5'] }] }) };
+    render(<Host reads={reads} />);
+    const choose = await screen.findByRole('combobox', { name: 'Choose a model for claude' });
+    expect(screen.getByRole('button', { name: en.onboarding.route.done }).hasAttribute('disabled')).toBe(true);
+    fireEvent.change(choose, { target: { value: 'opus-5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set model' }));
+    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('claude', { model: 'opus-5' }));
+    await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Choose a model for claude' })).toBeNull());
+    expect(screen.getByRole('button', { name: en.onboarding.route.done }).hasAttribute('disabled')).toBe(false);
   });
 
   it('keeps a dirty draft when adding a source and returning', async () => {

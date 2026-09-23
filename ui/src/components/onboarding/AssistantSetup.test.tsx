@@ -439,6 +439,7 @@ describe('Hub route refresh', () => {
   it('refreshes entry readiness after adopting a route on enable', async () => {
     let enabled = false;
     let routeSaved = false;
+    const existing = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const, model: 'gpt-5' };
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     for (const name of ['claude', 'codex', 'opencode']) saved.agents[name].enabled = false;
     saved.agents.claude.status = 'ok';
@@ -449,20 +450,50 @@ describe('Hub route refresh', () => {
       entry_eligible: backend === 'claude' && enabled && routeSaved, supply_mode: 'hub',
     }));
     mock.api.listVibeAgents.mockImplementation(async () => ({
-      ok: true, agents: enabled ? [hubAgent()] : [], default_agent_name: 'claude',
+      ok: true, agents: enabled ? [existing, hubAgent()] : [existing], default_agent_name: 'codex',
     }));
-    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
-    mock.models.getAgentChain.mockImplementation(async () => routeSaved ? hubChain('model-a') : {
-      ...hubChain('model-a'), manual_override: null, current: null, chain: [], route_origin: 'automatic',
-    });
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true, agent: name === 'codex' ? existing : hubAgent() }));
+    mock.models.getAgentChain.mockImplementation(async (backend) => backend === 'codex'
+      ? { ...hubChain('model-a'), backend: 'codex', model_id: 'gpt-5' }
+      : routeSaved ? hubChain('model-a') : {
+        ...hubChain('model-a'), manual_override: null, current: null, chain: [], route_origin: 'automatic',
+      });
     mock.models.previewAgentChain.mockResolvedValue(hubChain('model-a'));
     mock.models.putAgentChain.mockImplementation(async () => { routeSaved = true; return { chain: hubChain('model-a') }; });
-    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={{ ...INITIAL_SETUP_FLOW_STATE, routeOrder: [{ source_id: 'src_a', model_id: 'model-a' }] }} setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={{ ...INITIAL_SETUP_FLOW_STATE, routeOrder: [{ source_id: 'src_a', model_id: 'unsaved-draft' }], routeOrderDirty: true }} setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
     const enter = screen.getByRole('button', { name: 'Enter workspace' });
     expect(enter.hasAttribute('disabled')).toBe(true);
     fireEvent.click(row('Claude Code').getByRole('switch'));
     await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalled());
+    expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [{ source_id: 'src_a', model_id: 'model-a' }] });
     await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+  });
+
+  it('shows a route-adoption failure instead of silently treating enable as ready', async () => {
+    let enabled = false;
+    const existing = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const, model: 'gpt-5' };
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    for (const name of ['claude', 'codex', 'opencode']) saved.agents[name].enabled = false;
+    saved.agents.claude.status = 'ok';
+    mock.api.mutateConfig.mockImplementation(async () => { enabled = true; return {}; });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: backend === 'claude' && enabled,
+      auth: 'api_key', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    mock.api.listVibeAgents.mockImplementation(async () => ({
+      ok: true, agents: enabled ? [existing, hubAgent()] : [existing], default_agent_name: 'codex',
+    }));
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true, agent: name === 'codex' ? existing : hubAgent() }));
+    mock.models.getAgentChain.mockImplementation(async (backend) => backend === 'codex'
+      ? { ...hubChain('model-a'), backend: 'codex', model_id: 'gpt-5' }
+      : { ...hubChain('model-a'), manual_override: null, current: null, chain: [], route_origin: 'automatic' });
+    mock.models.previewAgentChain.mockRejectedValue(new Error('route denied'));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={{ ...INITIAL_SETUP_FLOW_STATE, routeOrder: [{ source_id: 'src_a', model_id: 'model-a' }] }} setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    fireEvent.click(row('Claude Code').getByRole('switch'));
+    await waitFor(() => expect(mock.models.previewAgentChain).toHaveBeenCalled());
+    await waitFor(() => expect(row('Claude Code').getByRole('alert').textContent).toContain('route denied'));
+    expect(mock.models.putAgentChain).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
   });
 });
 

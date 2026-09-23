@@ -11,7 +11,7 @@ import { eligibleSources } from '@/components/settings/models/eligibility';
 import { modelsApi } from '@/components/settings/models/modelsApi';
 import { RouteCandidatePopover } from '@/components/settings/models/RouteCandidatePopover';
 import { RouteOriginBadge } from '@/components/settings/models/RouteOriginBadge';
-import { routeCandidates, type RouteCandidate } from '@/components/settings/models/routeChainDraft';
+import { routeCandidates, sameRouteDraft, type RouteCandidate } from '@/components/settings/models/routeChainDraft';
 import type { AgentSupply, RouteHop, Source } from '@/components/settings/models/types';
 
 import type { SetupFlowState, SetupScreenId } from './setupFlow';
@@ -69,12 +69,15 @@ export function DefaultRouteDialog({
   const [sources, setSources] = React.useState<Source[]>([]);
   const [supplies, setSupplies] = React.useState<AgentSupply[]>([]);
   const [targets, setTargets] = React.useState<SetupRouteTargetSnapshot[]>([]);
+  const [missingModels, setMissingModels] = React.useState<{ backend: AgentSupply['backend']; agentName: string }[]>([]);
+  const [modelChoices, setModelChoices] = React.useState<Record<string, string>>({});
   const [receipts, setReceipts] = React.useState<TargetSaveResult[]>([]);
   const [loadFailed, setLoadFailed] = React.useState(false);
   const baselines = React.useRef<SetupRouteTargetSnapshot[]>([]);
   const addButtonRef = React.useRef<HTMLButtonElement>(null);
   const loadToken = React.useRef(0);
   const dirtyRef = React.useRef(flowState.routeOrderDirty);
+  const attemptedOrder = React.useRef<RouteHop[] | null>(null);
 
   React.useLayoutEffect(() => {
     dirtyRef.current = flowState.routeOrderDirty;
@@ -110,15 +113,18 @@ export function DefaultRouteDialog({
         getAgentChain: modelsApi.getAgentChain,
       }, nextSupplies);
       if (token !== loadToken.current) return;
-      if (!dirtyRef.current || baselines.current.length === 0) {
-        baselines.current = hydration.targets;
-        setTargets(hydration.targets);
-        setFlowState((current) => (
-          current.routeOrderDirty
-            ? current
-            : { ...current, routeOrder: hydration.union, routeOrderDirty: false }
-        ));
-      }
+      setMissingModels(hydration.missingModels);
+      const nextTargets = dirtyRef.current
+        ? [...baselines.current, ...hydration.targets.filter((target) => !baselines.current.some((old) =>
+          old.backend === target.backend && old.modelId === target.modelId))]
+        : hydration.targets;
+      baselines.current = nextTargets;
+      setTargets(nextTargets);
+      setFlowState((current) => (
+        current.routeOrderDirty
+          ? current
+          : { ...current, routeOrder: hydration.union, routeOrderDirty: false }
+      ));
       setPhase('idle');
     } catch (error) {
       if (token !== loadToken.current) return;
@@ -143,12 +149,31 @@ export function DefaultRouteDialog({
     onNavigate('providers');
   };
 
+  const setAssistantModel = async (agentName: string, model: string) => {
+    if (!model || phase === 'saving') return;
+    setPhase('saving');
+    setStatus('');
+    try {
+      const current = await api.getVibeAgent(agentName, { cache: false });
+      if (!current.ok || !current.agent || current.agent.name !== agentName || current.agent.model) {
+        throw new Error(t('onboarding.route.changed'));
+      }
+      const result = await api.updateVibeAgent(agentName, { model });
+      if (!result.ok) throw new Error(t('onboarding.route.changed'));
+      await load();
+    } catch (error) {
+      setPhase('failed');
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const persist = async (retry: boolean) => {
     if (phase === 'saving') return;
     if (loadFailed) {
       await load();
       return;
     }
+    if (missingModels.length > 0) return;
     if (!flowState.routeOrderDirty) {
       onClose();
       return;
@@ -156,16 +181,11 @@ export function DefaultRouteDialog({
     setPhase('saving');
     setStatus('');
     try {
-      const next = retry
+      const next = retry && attemptedOrder.current && sameRouteDraft(attemptedOrder.current, flowState.routeOrder)
         ? await retrySetupRoutes(flowState.routeOrder, targets, receipts, writes)
         : await saveSetupRoutes(flowState.routeOrder, targets, writes, { dirty: true });
+      attemptedOrder.current = flowState.routeOrder;
       setReceipts(next);
-      if (saveNeedsRetry(next)) {
-        setPhase('failed');
-        const failed = next.find((row) => row.kind === 'failed' || row.kind === 'reconcile');
-        setStatus(failed && failed.kind === 'failed' ? routeErrorText(failed.error) : t('common.retry'));
-        return;
-      }
       const confirmed = next.flatMap((row) => {
         if (row.kind !== 'confirmed') return [];
         const live = targets.find((target) => targetKey(target.backend, target.modelId) === row.key);
@@ -183,6 +203,12 @@ export function DefaultRouteDialog({
           confirmed.find((row) => row.backend === target.backend && row.modelId === target.modelId) ?? target);
         baselines.current = nextTargets;
         setTargets(nextTargets);
+      }
+      if (saveNeedsRetry(next)) {
+        setPhase('failed');
+        const failed = next.find((row) => row.kind === 'failed' || row.kind === 'reconcile');
+        setStatus(failed && failed.kind === 'failed' ? routeErrorText(failed.error) : t('common.retry'));
+        return;
       }
       setFlowState((current) => ({ ...current, routeOrderDirty: false }));
       setPhase('idle');
@@ -266,6 +292,31 @@ export function DefaultRouteDialog({
             {phase === 'loading' && (
               <p className="setup-add-note">{t('common.loading')}</p>
             )}
+            {missingModels.map(({ backend, agentName }) => {
+              const supply = supplies.find((row) => row.backend === backend);
+              const models = supply?.catalog_models?.map((row) => ({ id: row.id, label: row.display_name || row.id }))
+                ?? supply?.builtin_models?.map((id) => ({ id, label: id })) ?? [];
+              return (
+                <div className="setup-add-row" key={agentName}>
+                  <div className="setup-add-row-copy">
+                    <span className="setup-add-row-name">{t('onboarding.route.selectAssistantModel', { name: agentName })}</span>
+                    {models.length === 0 && <a href="/settings/models">{t('onboarding.route.openModelSettings')}</a>}
+                  </div>
+                  {models.length > 0 && <>
+                    <select aria-label={t('onboarding.route.selectAssistantModel', { name: agentName })}
+                      value={modelChoices[agentName] ?? ''}
+                      onChange={(event) => setModelChoices((current) => ({ ...current, [agentName]: event.target.value }))}>
+                      <option value="">{t('onboarding.route.chooseModel')}</option>
+                      {models.map(({ id, label }) => <option value={id} key={id}>{label}</option>)}
+                    </select>
+                    <Button type="button" variant="outline" size="sm" disabled={!modelChoices[agentName] || phase === 'saving'}
+                      onClick={() => void setAssistantModel(agentName, modelChoices[agentName])}>
+                      {t('onboarding.route.setModel')}
+                    </Button>
+                  </>}
+                </div>
+              );
+            })}
             {rows.length === 0 && phase !== 'loading' && (
               <p className="setup-add-note">{t('settings.models.routing.draftEmpty')}</p>
             )}
@@ -368,7 +419,7 @@ export function DefaultRouteDialog({
               type="button"
               variant="brand"
               size="sm"
-              disabled={phase === 'loading' || phase === 'saving'}
+              disabled={phase === 'loading' || phase === 'saving' || missingModels.length > 0}
               onClick={() => void persist(phase === 'failed')}
             >
               {phase === 'failed' ? t('common.retry') : t('onboarding.route.done')}

@@ -167,6 +167,18 @@ describe('hydrateSetupRoutes', () => {
     }, [supply('claude', []), supply('codex', [])])).rejects.toThrow('onboarding.route.readFailed');
   });
 
+  it('reports a model-less enabled assistant alongside existing route targets', async () => {
+    const claude = brief('claude', 'claude', 'opus-5');
+    const codex = { ...brief('codex', 'codex', 'gpt-5'), model: null };
+    const hydration = await hydrateSetupRoutes({
+      listVibeAgents: vi.fn(async () => ({ ok: true, agents: [claude, codex], default_agent_name: null })),
+      getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(name === 'claude' ? claude : codex) })),
+      getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) => chainOf(backend, model, [A])),
+    }, [supply('claude', []), supply('codex', [])]);
+    expect(hydration.targets).toHaveLength(1);
+    expect(hydration.missingModels).toEqual([{ backend: 'codex', agentName: 'codex' }]);
+  });
+
   it('also refuses a partial list when an enabled assistant detail is unreadable', async () => {
     const claude = brief('claude', 'claude', 'opus-5');
     const codex = brief('codex', 'codex', 'gpt-5');
@@ -320,6 +332,22 @@ describe('saveSetupRoutes', () => {
     expect(retried.api.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [B, A] });
     expect(second[0]?.kind).toBe('confirmed');
     expect(second[1]?.kind).toBe('confirmed');
+  });
+
+  it('rechecks a skipped target when the route draft changes before retry', async () => {
+    const claude = target('claude', 'opus-5', [A, B], ['claude']);
+    const codex = target('codex', 'gpt-5', [B, A], ['codex']);
+    const { api, store } = writes({
+      'claude:opus-5': claude.chain,
+      'codex:gpt-5': codex.chain,
+    }, { failOn: 'codex:gpt-5' });
+    const first = await saveSetupRoutes([A, B], [claude, codex], api);
+    expect(first.map((row) => row.kind)).toEqual(['skipped', 'failed']);
+
+    const retried = writes(store);
+    const next = await retrySetupRoutes([B, A], [claude, codex], first, retried.api);
+    expect(retried.api.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [B, A] });
+    expect(next.every((row) => row.kind === 'confirmed' || row.kind === 'skipped')).toBe(true);
   });
 
   // A retry is separated from the hydration it was built on by however long the

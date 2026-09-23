@@ -102,3 +102,27 @@ it('keeps drafts and DOM identity, focuses each heading, and rejects old activat
   expect(container.querySelectorAll('.onboarding-setup-footer')).toHaveLength(1);
   expect(container.querySelectorAll('.onboarding-primary-action')).toHaveLength(1);
 });
+
+it('focuses the arriving heading only after its animated handoff clears inert', () => {
+  vi.useFakeTimers();
+  const originalAnimate = HTMLElement.prototype.animate;
+  Object.defineProperty(HTMLElement.prototype, 'animate', {
+    configurable: true,
+    value: vi.fn(() => ({ cancel: vi.fn() })),
+  });
+  try {
+    const { container } = render(show());
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'intro' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    const arriving = container.querySelector<HTMLElement>('[data-setup-screen-root="providers"]')!;
+    expect(arriving.hasAttribute('inert')).toBe(true);
+    expect(document.activeElement).not.toBe(arriving.querySelector('h1'));
+    act(() => vi.advanceTimersByTime(900));
+    expect(arriving.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(arriving.querySelector('h1'));
+  } finally {
+    vi.useRealTimers();
+    if (originalAnimate) Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: originalAnimate });
+    else Reflect.deleteProperty(HTMLElement.prototype, 'animate');
+  }
+});

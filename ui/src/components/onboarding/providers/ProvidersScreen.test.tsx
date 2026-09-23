@@ -1040,8 +1040,27 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     expect(within(screen.getByRole('dialog')).getByText(CODEX_KEY.masked_detail!)).toBeTruthy();
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Not now' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Nothing was consumed: the offer is exactly the one it was.
-    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
+    // Declining the review lets setup continue without changing the native key.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+  });
+
+  it('remembers Not now across reloads and offers newly discovered keys', async () => {
+    serve({ scan: [CODEX_KEY] });
+    const first = renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(first.handle);
+    await userEvent.setup().click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    first.unmount();
+
+    const again = renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    again.unmount();
+
+    server.scan = [CODEX_KEY, OPENCODE_KEY];
+    renderScreen();
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 2 } }));
   });
 
   it('refuses a take-over the host cannot install an engine for, and still writes a key', async () => {

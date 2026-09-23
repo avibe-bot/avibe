@@ -127,8 +127,9 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   const policy = useRef({ ready, sequence, locked: navigationLocked, routeActive });
   useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence, locked: navigationLocked, routeActive }; });
   useLayoutEffect(() => {
+    if (handoff || !routeActive) return;
     roots.current[activation.id]?.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
-  }, [activation]);
+  }, [activation, handoff, routeActive]);
   // The screens swap first and the identities fly afterwards, onto the screen that is
   // now really there. Landing into a live diagram is what the reference does, and it
   // is what keeps the wires, the summary and the action from appearing in one jump

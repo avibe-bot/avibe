@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { clearMigrationDismissed, isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import { Button } from '@/components/ui/button';
 import {
   createAgentCollectionReadAuthority,
@@ -52,6 +53,7 @@ import {
   addedThroughMoreCount,
   adoptionBackend,
   defaultSelection,
+  offeredImportKeys,
   gatewayEvidenceSettled,
   gatewayIntent,
   pendingImportRows,
@@ -220,6 +222,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // this screen should ask for, and the action continues instead of opening a review
     // of work that is done.
     const pending = React.useMemo(() => pendingImportRows(selection), [selection]);
+    const importDeclined = selection.selectedBackends.length === 0
+      && isMigrationDismissed(offeredImportKeys(selection));
     // ── Supply ──────────────────────────────────────────────────────────────
 
     // Whether the server's own row defaults have been honoured yet. A scan is nulled
@@ -314,12 +318,17 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
           // server's own defaults — the same rows the shipped dialog opens ticked.
           // Afterwards the selection is the person's, and survives only where this
           // scan asks the same question the last one did.
+          const offer = offeredImportKeys({ scan: scanned, selectedBackends: [] });
+          const priorDismissed = isMigrationDismissed(offeredImportKeys(previous.providerSelection));
+          const dismissed = isMigrationDismissed(offer);
           const selectedBackends = first && previous.providerSelection.scan === null
-            ? defaultSelection(scanned)
-            : reconcileSelection(
-              { scan: scanned, selectedBackends: previous.providerSelection.selectedBackends },
-              previous.providerSelection.scan,
-            );
+            ? (dismissed ? [] : defaultSelection(scanned))
+            : priorDismissed && !dismissed && previous.providerSelection.selectedBackends.length === 0
+              ? defaultSelection(scanned)
+              : reconcileSelection(
+                { scan: scanned, selectedBackends: previous.providerSelection.selectedBackends },
+                previous.providerSelection.scan,
+              );
           return { ...previous, providerSelection: { scan: scanned, selectedBackends } };
         });
         seededSelectionRef.current = true;
@@ -562,7 +571,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       pendingCount: pending.length,
       importFailed,
       supply: sourceRead === 'read'
-        ? { kind: 'read', hasSource }
+        ? { kind: 'read', hasSource: hasSource || importDeclined }
         : { kind: sourceRead },
       gatewayBusy,
       // The same admission the dialogs are opened and submitted against, so the footer
@@ -648,6 +657,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     }, [setFlowState, sourceReads]);
 
     const changeSelection = React.useCallback((selectedBackends: AgentBackend[]) => {
+      if (selectedBackends.length > 0) clearMigrationDismissed();
       // Editing the selection retires the verdict the server gave about the batch it
       // no longer describes.
       setImportFailed(false);
@@ -659,14 +669,17 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
 
     const toggleSlot = React.useCallback((slot: ProviderSlot) => {
       setImportFailed(false);
-      setFlowState((previous) => ({
-        ...previous,
-        providerSelection: {
-          ...previous.providerSelection,
-          selectedBackends: toggleSlotSelection(previous.providerSelection, slot),
-        },
-      }));
+      setFlowState((previous) => {
+        const selectedBackends = toggleSlotSelection(previous.providerSelection, slot);
+        if (selectedBackends.length > 0) clearMigrationDismissed();
+        return { ...previous, providerSelection: { ...previous.providerSelection, selectedBackends } };
+      });
     }, [setFlowState]);
+
+    const declineImport = React.useCallback(() => {
+      writeMigrationDismissed(offeredImportKeys(selection));
+      changeSelection([]);
+    }, [selection, changeSelection]);
 
     // ── Sentence ────────────────────────────────────────────────────────────
 
@@ -718,7 +731,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       setActionAside(setupRoot.current?.closest('.onboarding-step')
         ?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null);
     }, [onActionChange]);
-    const onwardNode = sourceRead === 'read' && !hasSource ? (
+    const onwardNode = sourceRead === 'read' && !hasSource && !importDeclined ? (
       <div className="onboarding-setup-hint">
         <p className="text-center text-xs text-muted">
           {t('onboarding.providers.continueHint')}{' '}
@@ -863,6 +876,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               setSupplyToken((token) => token + 1);
             }}
             onClose={() => setImportOpen(false)}
+            onDecline={declineImport}
           />
         )}
 

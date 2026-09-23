@@ -157,6 +157,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [routeRead, setRouteRead] = useState<{ done: boolean; targets: SetupRouteTargetSnapshot[]; sources: Source[]; supplies: AgentSupply[] }>(
     { done: false, targets: [], sources: [], supplies: [] });
   const routeReadToken = useRef(0);
+  const confirmedRoute = useRef<RouteHop[]>([]);
+  const confirmedRouteRead = useRef(false);
   const readSharedRoute = useCallback(async () => {
     if (!agentReads || !setFlowState) return;
     const token = ++routeReadToken.current;
@@ -173,6 +175,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         getAgentChain: modelsApi.getAgentChain,
       }, supplies);
       if (token !== routeReadToken.current || epoch !== activation.current) return;
+      confirmedRoute.current = hydration.union;
+      confirmedRouteRead.current = true;
       setRouteRead({ done: true, targets: hydration.targets, sources: Array.isArray(listed) ? listed : [], supplies });
       setFlowState((current) => (current.routeOrderDirty
         ? current
@@ -189,8 +193,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     void readSharedRoute();
   }, [active, modelHubEnabled, canEditSetupRoute, readSharedRoute]);
   const sharedRoute = flowState?.routeOrder ?? [];
-  const sharedRouteRef = useRef(sharedRoute);
-  sharedRouteRef.current = sharedRoute;
   // Source and backend catalogs come from the same route read; no per-card fetch.
   const modelLabel = (hop: RouteHop): string => {
     const source = routeRead.sources.find((row) => row.id === hop.source_id);
@@ -291,8 +293,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }, [api, t]);
   // A newly enabled assistant joins the saved route before readiness is measured.
   const adoptSharedRoute = useCallback(async (backend: RuntimeBackendId) => {
-    const shared = sharedRouteRef.current;
-    if (!agentReads || !setFlowState || shared.length === 0) return;
+    if (!agentReads || !setFlowState) return;
+    if (!confirmedRouteRead.current) await readSharedRoute();
+    const shared = confirmedRoute.current;
+    if (shared.length === 0) return;
+    let failure: Error | null = null;
     try {
       const supplyRead = await agentReads.read();
       const hydration = await hydrateSetupRoutes({
@@ -311,13 +316,19 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           getAgentModelCandidates: modelsApi.getAgentModelCandidates,
           putAgentModels: modelsApi.putAgentModels,
         }, { dirty: true });
-        if (!saveNeedsRetry(outcomes)) await refreshConnection(backend);
+        if (saveNeedsRetry(outcomes)) {
+          const failed = outcomes.find((row) => row.kind === 'failed' || row.kind === 'reconcile');
+          const message = failed?.kind === 'failed' ? failed.error : 'onboarding.route.changed';
+          throw new Error(message === 'onboarding.route.changed' ? t('onboarding.route.changed') : message);
+        }
+        await refreshConnection(backend);
       }
-    } catch {
-      // A failed write leaves the card showing its last confirmed chain.
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
     }
     await readSharedRoute();
-  }, [agentReads, api, setFlowState, readSharedRoute, refreshConnection]);
+    if (failure) throw failure;
+  }, [agentReads, api, setFlowState, readSharedRoute, refreshConnection, t]);
   const onRoutesSaved = async (_saved: SetupRouteFocus) => {
     await agentReads?.refresh();
     await Promise.all(ASSISTANT_ORDER.map((backend) => refreshConnection(backend)));
