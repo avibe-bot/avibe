@@ -2315,12 +2315,12 @@ def agent_run_input_reached_turn(
     )
     if not in_turn:
         return False, "run_not_owned_by_turn"
-    if turn.get("control_mode") == "replace" and turn.get("control_state") in {
-        "pending",
-        "interrupting",
-        "waiting_terminal",
-        "reconciling",
-    }:
+    # Only an accepted replacement owns the Turn's end; before its receipt the
+    # caller waits for it, and a refusal leaves this Run to stop the Turn.
+    if (
+        turn.get("control_mode") == "replace"
+        and turn.get("control_state") == "waiting_terminal"
+    ):
         successor_turn_id = str(turn.get("control_successor_turn_id") or "")
         successor_delivery_id = str(
             turn.get("control_successor_delivery_id") or ""

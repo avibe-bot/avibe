@@ -171,7 +171,13 @@
         "failed": "本次 run 在产出结果前失败，因此没有结果。"
       },
       "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
-      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
+      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。",
+      "cli": {
+        "help": {
+          "cancel": "\u8bf7\u6c42\u5c3d\u529b\u53d6\u6d88\u4e00\u4e2a run\uff1b\u82e5\u8be5 run \u5df2\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn\uff0c\u4f1a\u50cf Session Stop \u4e00\u6837\u505c\u6b62\u6574\u4e2a turn"
+        },
+        "canceledBeforeLiveTurn": "\u8be5 run \u5728\u5176\u8f93\u5165\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn \u4e4b\u524d\u5df2\u88ab\u53d6\u6d88\u3002"
+      }
     },
     "notice": {
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",

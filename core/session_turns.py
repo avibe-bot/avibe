@@ -488,7 +488,8 @@ def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
 
 
 # A Run cancel joining another Stop waits this long for that Stop's receipt.
-_RUN_CANCEL_JOIN_WAIT_SECONDS = 20.0
+# Together with one retried Stop it must fit the CLI's 30s cancel timeout.
+_RUN_CANCEL_JOIN_WAIT_SECONDS = 10.0
 _RUN_CANCEL_JOIN_POLL_SECONDS = 0.05
 
 @dataclass
