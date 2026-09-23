@@ -3,6 +3,7 @@ import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
 import type {
   AgentChain,
   AgentSupply,
+  BackendModelCandidates,
   BackendModel,
   BackendModelsPut,
   ModelCandidate,
@@ -133,6 +134,21 @@ describe('setup route projection', () => {
 });
 
 describe('hydrateSetupRoutes', () => {
+  it('excludes disabled backends and their unique hops from the shared route', async () => {
+    const claude = brief('claude', 'claude', 'opus-5');
+    const codex = brief('codex', 'codex', 'gpt-5');
+    const reads = {
+      listVibeAgents: vi.fn(async () => ({ ok: true, agents: [claude, codex], default_agent_name: null })),
+      getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(name === 'claude' ? claude : codex) })),
+      getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) =>
+        chainOf(backend, model, backend === 'claude' ? [A] : [C])),
+    };
+    const hydration = await hydrateSetupRoutes(reads, [supply('claude', []), supply('codex', [])], new Set(['claude']));
+    expect(hydration.targets.map((row) => row.backend)).toEqual(['claude']);
+    expect(hydration.union).toEqual([A]);
+    expect(reads.getVibeAgent).not.toHaveBeenCalledWith('codex', expect.anything());
+  });
+
   it('uses each designated Agent\'s exact saved model, not selected_model_id', async () => {
     const claude = brief('claude', 'claude', 'opus-5');
     const custom = brief('mine', 'claude', 'other-model');
@@ -225,7 +241,7 @@ describe('saveSetupRoutes', () => {
           store[key] = next;
           return { chain: next };
         }),
-        getAgentModelCandidates: vi.fn(async () => ({ builtin: [], providers: [], in_list: [] })),
+        getAgentModelCandidates: vi.fn(async (): Promise<BackendModelCandidates> => ({ builtin: [], providers: [], in_list: [] })),
         putAgentModels: vi.fn(async () => supply('claude', [{ name: 'claude', model: 'opus-5' }])),
       },
     };
@@ -309,6 +325,29 @@ describe('saveSetupRoutes', () => {
     expect(store['claude:opus-5']?.manual_override?.hops).toEqual(order);
   });
 
+  it('adds a Codex provider candidate without an OpenCode-only protocol before switching models', async () => {
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api, store } = writes({ 'codex:gpt-5': codex.chain });
+    const preferred = hop('src_a', 'claude-opus-5-5');
+    api.listAgents = vi.fn(async () => [{
+      ...supply('codex', [{ name: 'codex', model: 'gpt-5' }]), catalog_models: [],
+    }]);
+    api.getAgentModelCandidates = vi.fn(async () => ({
+      builtin: [], in_list: [], providers: [{
+        id: preferred.model_id, display_name: null, reasoning_efforts: [], origin: 'provider' as const,
+        suppliers: [{ source_id: preferred.source_id, source_name: 'Anthropic', model_id: preferred.model_id }],
+      }],
+    }));
+    const results = await saveSetupRoutes([preferred, C], [codex], api);
+    expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
+    expect(api.putAgentModels).toHaveBeenCalledWith('codex', expect.objectContaining({
+      models: [expect.objectContaining({ id: preferred.model_id, origin: 'provider' })],
+      expected_suppliers: { [preferred.model_id]: [preferred] },
+    }));
+    expect(store[`codex:${preferred.model_id}`]?.manual_override?.hops).toEqual([preferred, C]);
+    expect(api.updateVibeAgent).toHaveBeenCalledWith('codex', { model: preferred.model_id });
+  });
+
   it('keeps the old Agent model when writing the preferred chain fails', async () => {
     const codex = target('codex', 'gpt-5', [C], ['codex']);
     const { api } = writes({ 'codex:gpt-5': codex.chain }, { failOn: 'codex:opus-5' });
@@ -329,6 +368,19 @@ describe('saveSetupRoutes', () => {
     expect(second[0]?.kind).toBe('confirmed');
     expect(api.putAgentChain).toHaveBeenCalledTimes(1);
     expect(api.updateVibeAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('confirms a model switch whose response was lost after the write committed', async () => {
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api } = writes({ 'codex:gpt-5': codex.chain });
+    const switchModel = api.updateVibeAgent;
+    api.updateVibeAgent = vi.fn(async (name: string, payload: { model: string }) => {
+      await switchModel(name, payload);
+      throw new Error('connection closed after commit');
+    });
+    const results = await saveSetupRoutes([A, C], [codex], api);
+    expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
+    expect(api.putAgentChain).toHaveBeenCalledExactlyOnceWith('codex', 'opus-5', { hops: [A, C] });
   });
 
   it('keeps a confirmed switched target during retry when its eligible route is a subset', async () => {

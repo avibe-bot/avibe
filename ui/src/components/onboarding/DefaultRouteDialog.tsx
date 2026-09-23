@@ -16,6 +16,7 @@ import { routeCandidates, sameRouteDraft, type RouteCandidate } from '@/componen
 import type { AgentSupply, RouteHop, Source } from '@/components/settings/models/types';
 
 import type { SetupFlowState, SetupScreenId } from './setupFlow';
+import { ASSISTANT_ORDER } from './collaborationTimeline';
 import {
   appendSharedHop,
   hopsFor,
@@ -109,9 +110,12 @@ export function DefaultRouteDialog({
     setStatus('');
     setLoadFailed(false);
     try {
-      const [supplyRead, listed] = await Promise.all([
+      const [supplyRead, listed, connections] = await Promise.all([
         agentReads.read(),
         modelsApi.listSources().catch(() => [] as Source[]),
+        Promise.all(ASSISTANT_ORDER.map(async (backend) => ({
+          backend, state: await api.getBackendConnection(backend),
+        }))),
       ]);
       if (token !== loadToken.current) return;
       const nextSupplies = supplyRead.kind === 'current' ? supplyRead.value : [];
@@ -121,7 +125,8 @@ export function DefaultRouteDialog({
         listVibeAgents: (params) => api.listVibeAgents(params),
         getVibeAgent: (name, params) => api.getVibeAgent(name, params),
         getAgentChain: modelsApi.getAgentChain,
-      }, nextSupplies);
+      }, nextSupplies, new Set(connections.filter(({ state }) => state.ok && state.enabled)
+        .map(({ backend }) => backend)));
       if (token !== loadToken.current) return;
       setMissingModels(hydration.missingModels);
       const nextTargets = dirtyRef.current

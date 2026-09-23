@@ -165,16 +165,21 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     const epoch = activation.current;
     confirmedRouteRead.current = false;
     try {
-      const [supplyRead, listed] = await Promise.all([
+      const [supplyRead, listed, connections] = await Promise.all([
         agentReads.read(),
         modelsApi.listSources().catch(() => [] as Source[]),
+        Promise.all(ASSISTANT_ORDER.map(async (backend) => ({
+          backend, state: await api.getBackendConnection(backend),
+        }))),
       ]);
       const supplies = supplyRead.kind === 'current' ? supplyRead.value : [];
+      const enabledBackends = new Set(connections.filter(({ state }) => state.ok && state.enabled)
+        .map(({ backend }) => backend));
       const hydration = await hydrateSetupRoutes({
         listVibeAgents: (params) => api.listVibeAgents(params),
         getVibeAgent: (name, params) => api.getVibeAgent(name, params),
         getAgentChain: modelsApi.getAgentChain,
-      }, supplies);
+      }, supplies, enabledBackends);
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
       confirmedRoute.current = hydration.union;
       confirmedRouteRead.current = true;
@@ -502,6 +507,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       try {
         await agentReads?.refresh();
         if (enabled && modelHubEnabled && canEditSetupRoute) await adoptSharedRoute(backend);
+        else if (!enabled && modelHubEnabled && canEditSetupRoute) await readSharedRoute();
       } catch (error) {
         if (enableIntent.current[backend] !== intent) return;
         setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));

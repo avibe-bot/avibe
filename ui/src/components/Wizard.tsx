@@ -198,7 +198,7 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   return <div className="onboarding-step" data-setup-sequence={sequence.join(' ')} data-setup-screen={activation.id} data-handoff={handoff || undefined}>
     <div className="onboarding-screens" ref={host}>
       {sequence.map((id) => {
-        const active = routeActive && id === activation.id;
+        const active = routeActive && id === activation.id && !handoff;
         return <div key={id} ref={(node) => { roots.current[id] = node; }} data-setup-screen-root={id}
           hidden={id !== activation.id} inert={!active || !!handoff}>
           <RouteSurfaceActiveContext.Provider value={active}>

@@ -442,10 +442,11 @@ describe('Hub route refresh', () => {
     const existing = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const, model: 'gpt-5' };
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     for (const name of ['claude', 'codex', 'opencode']) saved.agents[name].enabled = false;
+    saved.agents.codex.enabled = true;
     saved.agents.claude.status = 'ok';
     mock.api.mutateConfig.mockImplementation(async () => { enabled = true; return {}; });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
-      ok: true, backend, installed: true, enabled: backend === 'claude' && enabled,
+      ok: true, backend, installed: true, enabled: backend === 'codex' || (backend === 'claude' && enabled),
       auth: 'api_key', application: 'applied', ready: backend === 'claude' && enabled && routeSaved,
       entry_eligible: backend === 'claude' && enabled && routeSaved, supply_mode: 'hub',
     }));
@@ -474,10 +475,11 @@ describe('Hub route refresh', () => {
     const existing = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const, model: 'gpt-5' };
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     for (const name of ['claude', 'codex', 'opencode']) saved.agents[name].enabled = false;
+    saved.agents.codex.enabled = true;
     saved.agents.claude.status = 'ok';
     mock.api.mutateConfig.mockImplementation(async () => { enabled = true; return {}; });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
-      ok: true, backend, installed: true, enabled: backend === 'claude' && enabled,
+      ok: true, backend, installed: true, enabled: backend === 'codex' || (backend === 'claude' && enabled),
       auth: 'api_key', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
     }));
     mock.api.listVibeAgents.mockImplementation(async () => ({

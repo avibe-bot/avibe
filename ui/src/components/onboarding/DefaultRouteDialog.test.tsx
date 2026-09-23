@@ -18,6 +18,7 @@ const mock = vi.hoisted(() => ({
     listVibeAgents: vi.fn(),
     getVibeAgent: vi.fn(),
     updateVibeAgent: vi.fn(),
+    getBackendConnection: vi.fn(),
   },
   models: {
     listSources: vi.fn(),
@@ -137,6 +138,7 @@ describe('DefaultRouteDialog', () => {
     mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [agent], default_agent_name: 'claude' });
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
     mock.api.updateVibeAgent.mockResolvedValue({ ok: true, agent });
+    mock.api.getBackendConnection.mockImplementation(async (backend: string) => ({ ok: true, backend, enabled: true }));
     mock.models.listSources.mockResolvedValue(sources);
     mock.models.getAgentChain.mockResolvedValue(chainOf([A, B]));
     mock.models.previewAgentChain.mockImplementation(async (_backend, _model, body) =>

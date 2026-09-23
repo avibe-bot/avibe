@@ -119,10 +119,9 @@ export const chainMembership = (chain: AgentChain): RouteHop[] => {
  * Filtering by each assistant's previous membership instead would silently keep
  * different Hub routes even after the user saves a shared order.
  *
- * A model a backend's own catalog would not accept is reached the way Model Hub
- * already reaches one — the assistant keeps its menu model and that model's chain
- * points at the shared hops. This is what makes Claude Code able to resolve to an
- * OpenAI model at all, and it is the same write for all three backends.
+ * Claude Code keeps its restricted menu model and maps that model's chain to the
+ * shared hops. Codex and OpenCode select the shared first hop as their menu model
+ * after its chain has been saved, so the visible Agent model matches the first call.
  */
 export const targetChanged = (shared: RouteHop[], target: SetupRouteTargetSnapshot): boolean =>
   !sameRouteDraft(shared, chainMembership(target.chain));
@@ -230,10 +229,12 @@ const discloseNames = (
 export async function hydrateSetupRoutes(
   reads: SetupRouteReadApi,
   supplies: readonly AgentSupply[],
+  enabledBackends?: ReadonlySet<AgentBackend>,
 ): Promise<SetupRouteHydration> {
   const listing = await reads.listVibeAgents({ cache: false });
   if (!listing.ok) throw new Error('onboarding.route.readFailed');
-  const designated = await readSetupTargets(listing.agents, reads, { requireReadable: true });
+  const designated = await readSetupTargets(listing.agents.filter((agent) =>
+    !enabledBackends || enabledBackends.has(agent.backend as AgentBackend)), reads, { requireReadable: true });
   const supplyByBackend = new Map(supplies.map((row) => [row.backend, row]));
   const grouped = new Map<string, { backend: AgentBackend; modelId: string; names: string[] }>();
   const missingModels: SetupRouteHydration['missingModels'] = [];
@@ -366,7 +367,9 @@ const adoptTargetModel = async (
   if (!catalog || catalog.some((model) => model.id === target.modelId)) return supply;
   const offered = offeredCandidates(await api.getAgentModelCandidates(target.backend));
   const candidate = offered.get(target.modelId);
-  if (!candidate?.native_protocol) throw new Error('onboarding.route.catalogFailed');
+  if (!candidate || (target.backend === 'opencode' && !candidate.native_protocol)) {
+    throw new Error('onboarding.route.catalogFailed');
+  }
   const chosen = chosenCandidate(candidate);
   const adopted = draftRowFor(chosen.candidate, [], catalog);
   return api.putAgentModels(target.backend, {
@@ -418,6 +421,22 @@ const writePreferredTarget = async (
     }
     return { ...saved, key };
   } catch (error) {
+    if (stage === 'modelSwitchFailed') {
+      try {
+        const chain = await api.getAgentChain(target.backend, preferred);
+        const agents = await Promise.all((target.designatedNames ?? target.agentNames).map((name) =>
+          api.getVibeAgent(name, { cache: false })));
+        if (routeChainMatchesAttempt(chain, {
+          backend: target.backend, modelId: preferred, submitted: desired,
+          manual_override: { hops: desired },
+        }) && agents.every((row) => row.ok && row.agent?.backend === target.backend
+          && row.agent.model === preferred)) {
+          return { key, kind: 'confirmed', chain };
+        }
+      } catch {
+        // The write outcome remains unknown; a later read can reconcile it.
+      }
+    }
     return { key, kind: 'failed', error: error instanceof Error && error.message.startsWith('onboarding.route.')
       ? error.message : `onboarding.route.${stage}` };
   }

@@ -11,7 +11,7 @@ import en from '../../i18n/en.json';
 
 const mock = vi.hoisted(() => ({ control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
   saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
-  readModelHubAgentCatalogForModelPicker: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
+  readModelHubAgentCatalogForModelPicker: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), updateVibeAgent: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
 },
   // The endpoints the second screen reads, and — through the one Agent-supply authority
   // the shell shares with it — the endpoints the entry gate judges. Only the endpoints:
@@ -1071,6 +1071,12 @@ describe('setup route editor on the registered journey', () => {
       saved[backend] = body.hops;
       return { chain: { ...chainOf(body.hops), backend, model_id: model } };
     });
+    mock.api.updateVibeAgent.mockImplementation(async (name: string, payload: { model: string }) => {
+      listing.agents = listing.agents.map((agent) => (agent as { name: string }).name === name
+        ? { ...agent as object, model: payload.model }
+        : agent);
+      return mock.api.getVibeAgent(name, { cache: false });
+    });
 
     await arriveAtProviders();
     fireEvent.click(primaryAction());
@@ -1080,8 +1086,9 @@ describe('setup route editor on the registered journey', () => {
     fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.moveDownNamed.replace('{{name}}', 'OpenAI · gpt-5') }));
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
     const reordered = [hops[1], hops[0]];
-    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: reordered }));
+    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-4.1', { hops: reordered }));
     await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: reordered }));
+    expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('codex', { model: 'gpt-4.1' });
     expect(saved.claude).toEqual(reordered);
     expect(saved.codex).toEqual(reordered);
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
