@@ -6410,7 +6410,7 @@ def web_push_status():
                 logger.debug("web push: ignoring invalid status subscription payload", exc_info=True)
         subscription_count = web_push_service.count_enabled(conn, user_key=user_key)
         current_subscription = (
-            web_push_service.get_enabled_by_endpoint(
+            web_push_service.get_by_endpoint(
                 conn,
                 endpoint=endpoint,
                 user_key=user_key,
@@ -6418,13 +6418,20 @@ def web_push_status():
             if isinstance(endpoint, str) and endpoint.strip()
             else None
         )
+        current_subscription_enabled = bool(current_subscription and current_subscription["enabled"])
+        current_subscription_repairable = bool(
+            current_subscription
+            and not current_subscription_enabled
+            and current_subscription.get("last_failure_at")
+        )
     return jsonify(
         {
             "ok": True,
             "configured": True,
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
-            "current_subscription_enabled": current_subscription is not None,
+            "current_subscription_enabled": current_subscription_enabled,
+            "current_subscription_repairable": current_subscription_repairable,
             "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
     )

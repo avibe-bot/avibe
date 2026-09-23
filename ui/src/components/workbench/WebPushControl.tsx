@@ -54,7 +54,7 @@ export const WebPushControl: React.FC = () => {
     if (
       existing
       && serverStatus
-      && !serverStatus.current_subscription_enabled
+      && serverStatus.current_subscription_repairable
       && typeof Notification !== 'undefined'
       && Notification.permission === 'granted'
     ) {

@@ -207,4 +207,76 @@ describe('push service worker notification launches', () => {
       previous_endpoints: ['https://push.example.test/sub/old'],
     });
   });
+
+  it('retries subscription sync once after an invalid CSRF token', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const requests: Array<{ input: string; init?: RequestInit }> = [];
+    const subscription = {
+      endpoint: 'https://push.example.test/sub/retry',
+      options: { applicationServerKey: new Uint8Array([1, 2, 3, 4]).buffer },
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/sub/retry',
+        keys: { p256dh: 'retry-key', auth: 'retry-auth' },
+      }),
+    };
+    let csrfRequests = 0;
+    let subscriptionPosts = 0;
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      caches: { open: vi.fn() },
+      clients: { matchAll: vi.fn(), openWindow: vi.fn() },
+      registration: { showNotification: vi.fn(), pushManager: { subscribe: vi.fn() } },
+      atob,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      requests.push({ input, init });
+      if (input === '/api/web-push/vapid-public-key') {
+        return Response.json({ public_key: 'AQIDBA' });
+      }
+      if (input === '/api/csrf-token') {
+        csrfRequests += 1;
+        return Response.json({ csrf_token: csrfRequests === 1 ? 'stale-token' : 'fresh-token' });
+      }
+      if (input === '/api/web-push/subscriptions') {
+        subscriptionPosts += 1;
+        if (subscriptionPosts === 1) {
+          return Response.json(
+            { ok: false, message: 'Forbidden: invalid csrf token' },
+            { status: 403 },
+          );
+        }
+      }
+      return Response.json({ ok: true });
+    });
+
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: {},
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+      Uint8Array,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('pushsubscriptionchange')?.({
+      newSubscription: subscription,
+      oldSubscription: { endpoint: 'https://push.example.test/sub/old' },
+      waitUntil: (promise: Promise<unknown>) => {
+        completion = promise;
+      },
+    });
+    await completion;
+
+    expect(csrfRequests).toBe(2);
+    expect(subscriptionPosts).toBe(2);
+    expect(new Headers(requests[2].init?.headers).get('X-Vibe-CSRF-Token')).toBe('stale-token');
+    expect(new Headers(requests[4].init?.headers).get('X-Vibe-CSRF-Token')).toBe('fresh-token');
+  });
 });

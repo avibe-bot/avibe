@@ -138,6 +138,7 @@ def upsert_subscription(
             "user_agent": user_agent,
             "device_label": device_label,
             "enabled": 1,
+            "last_failure_at": None,
             "failure_count": 0,
             "updated_at": now,
         },
@@ -210,7 +211,7 @@ def disable_subscription(conn: Connection, *, endpoint: str, user_key: str | Non
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     result = conn.execute(
-        stmt.values(enabled=0, updated_at=now)
+        stmt.values(enabled=0, last_failure_at=None, updated_at=now)
     )
     return bool(result.rowcount)
 
@@ -238,7 +239,7 @@ def disable_device_subscription(
     else:
         stmt = stmt.where(web_push_subscriptions.c.device_id == device_id)
     result = conn.execute(
-        stmt.values(enabled=0, updated_at=_utc_now_iso())
+        stmt.values(enabled=0, last_failure_at=None, updated_at=_utc_now_iso())
     )
     return bool(result.rowcount)
 
@@ -270,7 +271,7 @@ def has_enabled_user_key(conn: Connection, *, user_key: str) -> bool:
     return row is not None
 
 
-def get_enabled_by_endpoint(
+def get_by_endpoint(
     conn: Connection,
     *,
     endpoint: str,
@@ -282,12 +283,21 @@ def get_enabled_by_endpoint(
     stmt = (
         select(web_push_subscriptions)
         .where(web_push_subscriptions.c.endpoint == endpoint)
-        .where(web_push_subscriptions.c.enabled == 1)
     )
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     row = conn.execute(stmt).mappings().first()
     return _row_to_dict(row) if row else None
+
+
+def get_enabled_by_endpoint(
+    conn: Connection,
+    *,
+    endpoint: str,
+    user_key: str | None = None,
+) -> dict[str, Any] | None:
+    row = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+    return row if row and row["enabled"] else None
 
 
 def mark_send_success(conn: Connection, *, endpoint: str) -> None:

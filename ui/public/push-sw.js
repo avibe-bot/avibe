@@ -49,9 +49,18 @@ async function fetchCsrfToken() {
   return payload.csrf_token;
 }
 
-async function syncPushSubscription(subscription, previousEndpoints) {
-  const csrfToken = await fetchCsrfToken();
-  const response = await fetch('/api/web-push/subscriptions', {
+async function isInvalidCsrfResponse(response) {
+  if (response.status !== 403 || typeof response.json !== 'function') return false;
+  try {
+    const payload = await response.json();
+    return payload?.message === 'Forbidden: invalid csrf token';
+  } catch {
+    return false;
+  }
+}
+
+async function postPushSubscription(subscription, previousEndpoints, csrfToken) {
+  return fetch('/api/web-push/subscriptions', {
     method: 'POST',
     credentials: 'same-origin',
     headers: {
@@ -64,6 +73,18 @@ async function syncPushSubscription(subscription, previousEndpoints) {
       previous_endpoints: previousEndpoints,
     }),
   });
+}
+
+async function syncPushSubscription(subscription, previousEndpoints) {
+  let csrfToken = await fetchCsrfToken();
+  let response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
+  if (
+    !response.ok
+    && await isInvalidCsrfResponse(response)
+  ) {
+    csrfToken = await fetchCsrfToken();
+    response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
+  }
   if (!response.ok) throw new Error(`Push subscription sync failed (${response.status})`);
 }
 

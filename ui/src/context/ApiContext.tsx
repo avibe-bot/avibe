@@ -2607,6 +2607,7 @@ export type WebPushStatus = {
   public_key: string;
   subscription_count: number;
   current_subscription_enabled?: boolean;
+  current_subscription_repairable?: boolean;
   normal_delivery?: WebPushNormalDelivery;
 };
 

@@ -3333,6 +3333,7 @@ def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
     assert status_body["public_key"]
     assert status_body["subscription_count"] == 1
     assert status_body["current_subscription_enabled"] is True
+    assert status_body["current_subscription_repairable"] is False
 
     removed = client.delete(
         "/api/web-push/subscriptions",
@@ -3345,6 +3346,7 @@ def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
     status_after = client.post("/api/web-push/status", json={"endpoint": subscription["endpoint"]}, headers=headers)
     assert status_after.get_json()["subscription_count"] == 0
     assert status_after.get_json()["current_subscription_enabled"] is False
+    assert status_after.get_json()["current_subscription_repairable"] is False
 
 
 def test_web_push_status_sync_disables_previous_endpoint_for_same_device(monkeypatch, tmp_path):
@@ -3505,6 +3507,7 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     assert status.status_code == 200
     assert status.get_json()["subscription_count"] == 0
     assert status.get_json()["current_subscription_enabled"] is False
+    assert status.get_json()["current_subscription_repairable"] is True
     with engine.connect() as conn:
         assert web_push_service.get_enabled_by_endpoint(
             conn,

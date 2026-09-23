@@ -53,6 +53,36 @@ def test_subscription_upsert_and_disable(tmp_path):
         assert web_push_service.count_enabled(conn, user_key="local") == 0
 
 
+def test_explicit_disable_clears_delivery_failure_marker(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        row = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload(),
+            device_id="device-1",
+        )
+        web_push_service.mark_send_failure(conn, endpoint=row["endpoint"])
+
+        assert web_push_service.disable_device_subscription(
+            conn,
+            user_key="remote:user-a",
+            device_id="device-1",
+        ) is True
+
+        disabled = web_push_service.get_by_endpoint(
+            conn,
+            endpoint=row["endpoint"],
+            user_key="remote:user-a",
+        )
+        assert disabled is not None
+        assert disabled["enabled"] is False
+        assert disabled["last_failure_at"] is None
+
+
 def test_subscription_upsert_disables_previous_endpoint_for_same_device(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
