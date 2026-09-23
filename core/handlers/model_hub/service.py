@@ -4160,36 +4160,40 @@ class ModelHubService:
         hidden = self._hidden_retired_model_ids(agent)
         return [self._catalog_model_payload(model) for model in agent.models if model.id not in hidden]
 
-    def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
-        # A retired built-in stays persisted and routeable, so any session,
-        # channel, or Agent pin keeps working; it only leaves picker
-        # projections. A row the current snapshot revives, a manual route
-        # pins, or the backend currently requests stays visible.
-        backend = cast(BackendName, agent.backend)
+    def _withdrawn_builtin_model_ids(self, backend: BackendName) -> set[str]:
+        # Either catalog may withdraw a model; the remote one does so without a
+        # release. A stale remote cache schedules the controller-owned refresh,
+        # whose completion reconciles the snapshot, so a new tombstone reaches
+        # the picker without waiting for a restart. A retired id the current
+        # snapshot revives is not withdrawn.
         from vibe.backend_model_catalog import (
             load_bundled_catalog,
             load_cached_remote_catalog,
             retired_backend_model_ids,
         )
 
-        # Either catalog may withdraw a model; the remote one does so without a
-        # release. A remote revival is already in the current snapshot below.
-        # A stale remote cache schedules the controller-owned refresh, whose
-        # completion reconciles the snapshot, so a new tombstone reaches the
-        # picker without waiting for a restart.
         retired = retired_backend_model_ids(backend, load_bundled_catalog()) | retired_backend_model_ids(
             backend, load_cached_remote_catalog()
         )
         if not retired:
             return set()
-        current = {item["id"] for item in self._current_builtin_models(backend)}
-        current.add(self._requested_model(agent))
+        return retired - {item["id"] for item in self._current_builtin_models(backend)}
+
+    def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
+        # A retired built-in stays persisted and routeable, so any session,
+        # channel, or Agent pin keeps working; it only leaves picker
+        # projections. A row a manual route pins or the backend currently
+        # requests stays visible.
+        withdrawn = self._withdrawn_builtin_model_ids(cast(BackendName, agent.backend))
+        if not withdrawn:
+            return set()
+        requested = self._requested_model(agent)
         return {
             model.id
             for model in agent.models
             if model.origin == "builtin"
-            and model.id in retired
-            and model.id not in current
+            and model.id in withdrawn
+            and model.id != requested
             and normalized_model_hub_override(agent.routes.get(model.id)) is None
         }
 
@@ -4425,7 +4429,10 @@ class ModelHubService:
             )
 
         provider_ids: list[str] = []
-        hidden = self._hidden_retired_model_ids(agent)
+        # A source inventory (a native subscription lists the full fixed menu)
+        # never re-offers a withdrawn built-in, whether or not a row persists;
+        # a still-visible pinned row is already in the menu.
+        withdrawn = self._withdrawn_builtin_model_ids(agent_backend)
         source_by_id = {source.id: source for source in config.sources}
         for source_id in agent.sources.order:
             source = source_by_id.get(source_id)
@@ -4436,7 +4443,7 @@ class ModelHubService:
                     continue
                 candidate_id = model.id
                 if (
-                    candidate_id in hidden
+                    candidate_id in withdrawn
                     or candidate_id in menu_ids
                     or candidate_id in builtin_ids
                     or candidate_id in provider_ids

@@ -2972,6 +2972,32 @@ def test_a_native_source_cannot_reoffer_a_hidden_retired_builtin(tmp_path):
     assert "claude-opus-4-8" in providers
 
 
+def test_a_native_source_cannot_reoffer_a_removed_retired_builtin(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0002",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Native supplier",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4", provenance="manual")],
+        credential_ref="cred_native0002",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["claude"]
+    agent.sources.order = [source.id]
+    agent.models = [ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin")]
+    agent.removed_model_ids = ["claude-opus-4"]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+
+    providers = [row["id"] for row in service.agent_model_candidates("claude")["providers"]]
+
+    assert "claude-opus-4" not in providers
+
+
 def test_picker_reads_schedule_the_remote_catalog_refresh(monkeypatch, tmp_path):
     from vibe import backend_model_catalog
 
