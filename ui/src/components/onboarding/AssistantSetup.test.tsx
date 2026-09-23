@@ -143,6 +143,60 @@ describe('assistant installation presentation', () => {
     expect(mock.api.getBackendConnection.mock.calls.filter(([backend]) => backend === 'codex').length).toBeGreaterThanOrEqual(4);
     expect(mock.api.mutateConfig).not.toHaveBeenCalled();
   });
+  it('does not enable from a stale Hub read when reentry offered ordinary Install', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.enabled = false;
+    mock.api.detectCli.mockResolvedValue({ found: false, path: '' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    let reenter = false;
+    let clickedOrdinaryInstall = false;
+    const onActionChange = vi.fn(() => {
+      if (!reenter || clickedOrdinaryInstall) return;
+      const action = row('Claude Code').getByRole<HTMLButtonElement>('button', { name: 'Install' });
+      clickedOrdinaryInstall = true;
+      action.click();
+    });
+    const props = { data: saved, onNext: vi.fn(), onActionChange };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    await row('Claude Code').findByRole('button', { name: 'Install and enable' });
+    view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
+    reenter = true;
+    await act(async () => view.rerender(wrap(<AgentDetection {...props} active />, true)));
+    expect(clickedOrdinaryInstall).toBe(true);
+    expect(mock.api.installAgent).toHaveBeenCalledWith('claude');
+
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/claude', message: '' }));
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it('does not promise enablement when a missing assistant has conflicting Hub and Direct reads', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.enabled = false;
+    mock.api.detectCli.mockResolvedValue({ found: false, path: '' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    const listed = pending<[]>();
+    mock.models.listSources.mockReturnValue(listed.promise);
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: false, mode: 'direct' as const, menu_kind: 'fixed' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await waitFor(() => expect(mock.models.listSources).toHaveBeenCalled());
+    await act(async () => listed.resolve([]));
+
+    expect(row('Claude Code').queryByRole('button', { name: 'Install and enable' })).toBeNull();
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/claude', message: '' }));
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
   it('keeps fixed row order, independent installs and retry details', async () => {
     let finishClaude!: (value: unknown) => void;
     mock.api.installAgent.mockImplementation((name) => name === 'claude'

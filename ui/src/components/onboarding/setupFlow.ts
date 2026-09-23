@@ -1,11 +1,8 @@
 /**
  * C2 — the setup flow's interface contract.
  *
- * Proposed for `master` before the three-screen lanes fork, so a lane reads one shared
- * declaration instead of transcribing a shape out of a plan document. Everything here is
- * cross-lane by construction: the shell (L1) renders it, the providers screen (L2) and the
- * assistants screen (L3) implement against it. A deviation needs orchestrator sign-off
- * BEFORE the edit, not a reconciling commit afterwards.
+ * The shell, providers screen and assistants screen share this declaration. The shell owns
+ * navigation and provider selection; each assistant route remains owned by Model Hub.
  *
  * The binding prose that goes with these types — geometry and DOM hooks (C3), the entry
  * gate (C4), the stable dialog frame (C5) and the field-by-field data mapping (C6) — lives

@@ -228,6 +228,20 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // What the latest settled write still owes this screen, held until someone who can
   // answer for it reports it — see EnableReceipt.
   const enableReceipt = useRef<Partial<Record<RuntimeBackendId, EnableReceipt>>>({});
+  const confirmedConnectionMode = (backend: RuntimeBackendId) => {
+    const confirmed = connectionConfirmed[backend];
+    if (!active || !activeRef.current || connections[backend]?.ok !== true || connectionPending[backend]
+      || confirmed?.epoch !== activation.current || confirmed.token !== connectionTokens.current[backend]) return undefined;
+    return connections[backend]?.supply_mode ?? (!modelHubEnabled ? 'direct' : undefined);
+  };
+  const confirmedSupplyMode = (backend: RuntimeBackendId) => routeTargetReady()
+    ? routeRead.supplies.find((row) => row.backend === backend)?.mode
+    : undefined;
+  const installMode = (backend: RuntimeBackendId) => {
+    const connection = confirmedConnectionMode(backend);
+    const supply = confirmedSupplyMode(backend);
+    return connection && supply && connection !== supply ? undefined : connection;
+  };
   // One provider modal/reconciliation at a time; Configure and navigation stay
   // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
@@ -510,12 +524,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     }
   };
 
-  const installAgent = async (name: string) => {
+  const installAgent = async (name: string, promisedEnable = false) => {
     if (pendingInstalls.current.has(name) || (isPage && isAnyInstalling)) return;
     const backend = name as RuntimeBackendId;
     const installEnableIntent = enableIntent.current[backend];
-    const hubAtClick = connections[backend]?.ok === true && connections[backend]?.supply_mode === 'hub'
-      && !connectionPending[backend] && !connectionErrors[backend];
+    const hubAtClick = promisedEnable && installMode(backend) === 'hub';
     pendingInstalls.current.add(name);
 
     setInstallingAgents((prev) => ({ ...prev, [name]: true }));
@@ -878,16 +891,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const result = installResults[name];
           const error = detectionErrors[name] ? { message: detectionErrors[name] }
             : result && !result.ok && result.message ? result : undefined;
-          const connectionCurrent = active && activeRef.current && connections[name]?.ok === true
-            && !connectionPending[name] && connectionConfirmed[name]?.epoch === activation.current
-            && connectionConfirmed[name]?.token === connectionTokens.current[name];
-          const connectionMode = connectionCurrent
-            ? connections[name]?.supply_mode ?? (!modelHubEnabled ? 'direct' : undefined)
-            : undefined;
-          const supplyMode = routeTargetReady()
-            ? routeRead.supplies.find((row) => row.backend === name)?.mode
-            : undefined;
-          const mode = agent.status === 'missing' ? connectionMode
+          const connectionMode = confirmedConnectionMode(name);
+          const supplyMode = confirmedSupplyMode(name);
+          const mode = agent.status === 'missing' ? installMode(name)
             : connectionMode && supplyMode && connectionMode !== supplyMode ? undefined
               : connectionMode ?? supplyMode;
           const hubRoute = mode === 'hub';
@@ -902,7 +908,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           };
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
-            onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
+            onInstall={() => void installAgent(name, mode === 'hub')} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => {
               if (!mode) return;
               if (hubRoute) {
