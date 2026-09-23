@@ -400,12 +400,19 @@
   padding: 10px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
   color: inherit;
   font-size: 14px;
   text-align: left;
 }
-.onboarding-language-menu button:hover { background: var(--surface-2); }
+/* Row hover/selected colours belong to LanguageSwitcher's shared row classes, so
+   both trigger variants render the same states. The reset sits in the components
+   layer because this file is otherwise unlayered, and unlayered declarations beat
+   Tailwind's `utilities` layer whatever their specificity — which is what used to
+   override the shared row background here. Only the background moves; the padding
+   and font-size above stay unlayered so the round rows keep their own geometry. */
+@layer components {
+  .onboarding-language-menu button { background: transparent; }
+}
 
 /* `1 0 auto`: this box is never shorter than what it holds, so a composition taller
    than the window pushes the shell into its own scroll rather than being clipped above

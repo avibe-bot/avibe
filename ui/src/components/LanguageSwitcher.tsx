@@ -69,7 +69,7 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
           className={round
             ? 'onboarding-language-menu'
             : clsx(
-                'absolute z-50 min-w-[10rem] rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-xl',
+                'absolute z-50 min-w-[10rem] overflow-hidden rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-xl',
                 openUpward ? 'bottom-full left-0 mb-2' : 'top-full right-0 mt-2'
               )}
         >
@@ -85,8 +85,8 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
                 className={clsx(
                   'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors',
                   active
-                    ? 'text-foreground'
-                    : 'text-muted hover:bg-surface-2 hover:text-foreground'
+                    ? 'bg-mint-soft font-medium text-foreground hover:bg-mint/20'
+                    : 'text-muted hover:bg-accent/10 hover:text-foreground'
                 )}
               >
                 <span>{lang.label}</span>
