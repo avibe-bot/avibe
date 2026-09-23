@@ -2911,6 +2911,21 @@ def test_source_sync_waits_for_an_id_preserving_reload_to_apply(tmp_path: Path) 
         supervisor.stop()
 
 
+def test_source_sync_waits_for_a_reload_that_removes_every_model(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path, reload_delay=0.3)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        # No model is expected afterwards, so readiness is the removed
+        # model leaving the listing.
+        asyncio.run(adapter.sync_sources([_binding(credential_ref, model_ids=())]))
+        assert EngineClient(connection).list_model_ids() == frozenset()
+    finally:
+        supervisor.stop()
+
+
 def test_source_sync_never_restarts_a_live_engine_that_lost_the_reload_ack(tmp_path: Path) -> None:
     supervisor, store = _fixture_supervisor(tmp_path, drop_reload_ack=True)
     credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")

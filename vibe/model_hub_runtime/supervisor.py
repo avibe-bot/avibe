@@ -192,7 +192,11 @@ class EngineSupervisor:
         # CPA applies the written file asynchronously (debounced watcher). Its
         # model listing carrying this generation's display names is the first
         # observable point at which the new projection admits, including a
-        # save that leaves every routed ID unchanged.
+        # save that leaves every routed ID unchanged. A save that removes
+        # models waits for them to leave. With no API-key model before or
+        # after, the projection routes nothing either way, so there is nothing
+        # to confirm; CPA validated these exact bytes before acknowledging the
+        # PUT, and its watcher reloads the same file.
         deadline = time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
         while True:
             try:
