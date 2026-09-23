@@ -529,7 +529,9 @@ def test_remote_workbench_caller_without_matching_snapshot_fails_closed() -> Non
     assert caller_resource_user_context(context) == {}
 
 
-@pytest.mark.parametrize("trigger", ["scheduled", "watch"])
+@pytest.mark.parametrize(
+    "trigger", ["scheduled", "watch", "hook", "webhook", "agent_run", "callback"]
+)
 def test_harness_remote_editor_uses_persisted_snapshot_without_owner_fallback(trigger) -> None:
     from modules.im import MessageContext
 
@@ -574,7 +576,7 @@ def test_scheduled_missing_or_malformed_snapshot_never_becomes_local_owner(snaps
     assert caller_resource_user_context(context) == {}
 
 
-@pytest.mark.parametrize("trigger", ["scheduled", "watch"])
+@pytest.mark.parametrize("trigger", ["scheduled", "watch", "hook", "webhook"])
 def test_local_harness_turn_with_producer_metadata_stays_local(trigger) -> None:
     from modules.im import MessageContext
 
