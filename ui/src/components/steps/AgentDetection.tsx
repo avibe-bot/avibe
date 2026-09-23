@@ -214,6 +214,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     };
   };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
+  const [connectionConfirmed, setConnectionConfirmed] = useState<Partial<Record<RuntimeBackendId, { epoch: number; token: number }>>>({});
   const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
   const [pendingWrites, setPendingWrites] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
@@ -268,6 +269,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (!owns()) return;
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
+      setConnectionConfirmed((current) => ({ ...current, [name]: { epoch, token } }));
       setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
       // Spending the verdict takes all three: this read still owns the screen, the
       // caller is an operation that actually answers for it, and the verdict in hand
@@ -876,13 +878,21 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const result = installResults[name];
           const error = detectionErrors[name] ? { message: detectionErrors[name] }
             : result && !result.ok && result.message ? result : undefined;
-          const supplyMode = connections[name]?.supply_mode;
-          const confirmedHub = connections[name]?.ok === true && supplyMode === 'hub'
-            && !connectionPending[name] && !connectionErrors[name];
-          const hubRoute = (agent.status === 'missing' ? confirmedHub : supplyMode === 'hub')
-            || Boolean(!supplyMode && canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
+          const connectionCurrent = active && activeRef.current && connections[name]?.ok === true
+            && !connectionPending[name] && connectionConfirmed[name]?.epoch === activation.current
+            && connectionConfirmed[name]?.token === connectionTokens.current[name];
+          const connectionMode = connectionCurrent
+            ? connections[name]?.supply_mode ?? (!modelHubEnabled ? 'direct' : undefined)
+            : undefined;
+          const supplyMode = routeTargetReady()
+            ? routeRead.supplies.find((row) => row.backend === name)?.mode
+            : undefined;
+          const mode = agent.status === 'missing' ? connectionMode
+            : connectionMode && supplyMode && connectionMode !== supplyMode ? undefined
+              : connectionMode ?? supplyMode;
+          const hubRoute = mode === 'hub';
           const openRoute = () => {
-            if (!routeTargetReady()) return;
+            if (mode !== 'hub' || !routeTargetReady()) return;
             const supply = routeRead.supplies.find((row) => row.backend === name);
             const modelId = routeRead.models[name];
             if (supply?.mode === 'hub' && modelId) {
@@ -894,6 +904,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => {
+              if (!mode) return;
               if (hubRoute) {
                 if (canEditSetupRoute) { openRoute(); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
@@ -902,6 +913,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               setProviderModal({ backend: name, method: 'oauth' });
             }}
             onAddKey={() => {
+              if (!mode) return;
               if (hubRoute) {
                 if (canEditSetupRoute) { openRoute(); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
@@ -911,19 +923,20 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             }}
             connection={hubRoute
               ? 'hub'
-              : !connectionErrors[name] && connections[name]?.ready
+              : mode === 'direct' && !connectionErrors[name] && connections[name]?.ready
                 ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
                 : undefined}
-            hubManaged={confirmedHub || Boolean(agent.status === 'ok' && !supplyMode && canEditSetupRoute && modelHubEnabled)}
+            hubManaged={hubRoute}
             enabled={agent.enabled}
             route={routeViewFor(name)}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
-            routeError={hubRoute && routeRead.failed ? t('settings.models.routeDialog.fail.reconcileRead') : undefined}
+            routeError={canEditSetupRoute && modelHubEnabled && routeRead.failed
+              ? t('settings.models.routeDialog.fail.reconcileRead') : undefined}
             onRetryRoute={() => void readCardRoutes()}
-            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
-              || (hubRoute && canEditSetupRoute && !routeTargetReady())
+            configuringDisabled={!mode || syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
+              || (hubRoute && canEditSetupRoute && (!routeTargetReady() || supplyMode !== 'hub'))
               || (hubRoute
                 ? agent.status !== 'ok'
                 : !agent.enabled || agent.status !== 'ok')}
