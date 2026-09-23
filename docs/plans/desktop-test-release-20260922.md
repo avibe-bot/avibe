@@ -1156,10 +1156,8 @@ Three review findings, fixed in their own commits, plus one owner item.
   opens its rollback region before `start_service`, so an interrupt during the
   lock wait undoes a service it created. Consuming tests use real sleeping
   children with the failure injected at the pid write, the stdin write and the
-  reservation. **Known residual:** a signal delivered after `spawn_background`
-  returns but before `start_ui` captures the result in its `ProcessStartInfo`
-  still leaves that UI unnamed. Closing it means masking signals across the
-  hand-off, which is out of proportion to a window of a few instructions.
+  reservation. This head still returned the child before its caller captured
+  it, and closed the parent's handles after the region; H22 closes both gaps.
 - **F2 — the main window dropped every new browsing context.** `target="_blank"`
   links and `window.open(url)` did nothing, so the OAuth dialog's provider link
   could not be followed. The main window now answers each request with one
@@ -1223,6 +1221,51 @@ break this shell's stated invariant that no capability names a remote URL. The
 lane will not change that boundary on its own authority. Shipping the overlay
 without a drag region would leave an undraggable window, so the item was dropped
 from this head, as the owner allowed.
+
+## H22 — orchestrator hold on `f654f245b`
+
+Two more boundaries in F1's class, one Settings gap, and the title-bar ruling.
+
+- **F1, the parent's handles.** The spawn primitive closed its copies of the
+  child's stdin and log-sink handles in a `finally`, after the region that owns
+  the child. A close that raised therefore propagated with a running child the
+  caller never received. The closes now run inside the region, before the
+  hand-over; the failure path closes whatever is left quietly and re-raises the
+  original error. Tests fail each of the three closes with a real sleeping child.
+  Mutations: moving the closes back to `finally` fails all three; closing loudly
+  on the failure path fails the two secret-write tests.
+- **F1, the capture.** H21 accepted a window between `spawn_background`
+  returning and `start_ui` calling `start_info.capture(pid, reused=False)`: a
+  created UI that `cmd_start`'s rollback could not see. The service had the same
+  window between its reservation and `result(pid, reused=False)`. The primitive
+  now takes a `hand_over` callback and runs it inside the region, so nothing is
+  returned before it is captured. For the UI it writes the pid record, then
+  captures; for the service it registers the process, writes the reservation,
+  then captures. A failure or interrupt at any step kills and reaps the child.
+  A `withdraw` callback then removes the record, but only when the child was
+  reaped and the record still names it, so a child that could not be confirmed
+  dead stays findable by `vibe stop`. The existing `ProcessStartInfo` is the only
+  ownership state; reused and adopted paths are unchanged; no signal masking.
+  Tests inject a `KeyboardInterrupt` after the record or reservation and before
+  the capture, with real sleeping children, both at the primitive and through
+  `cmd_start`: no child survives, no record is left, no receipt is printed and
+  the status never reads `running`. A third `cmd_start` test interrupts after a
+  real UI was captured and proves rollback stops it through its record, before
+  the service. Mutations: capturing after the return fails the UI and service
+  tests at both layers; no `withdraw` fails four; withdrawing unconditionally
+  fails the confirmed-dead test; skipping the UI capture fails four, including
+  the real rollback; skipping the kill fails eleven.
+- **Settings at the Workbench hand-off.** The item's availability was
+  recomputed only on tray status refreshes, so after the shell navigated to the
+  Workbench it stayed disabled until the monitor's first tick. The main window's
+  page-load `Finished` handler now refreshes every native control through the
+  same `refresh_native_controls` rule, passing no status, so the status already
+  shown is kept and a bootstrap page still enables nothing. Mutations: dropping
+  the page-load refresh fails the boundary test; a page load that invents a
+  status, or ignores the one shown, fails the unit test.
+- **Title bar.** The orchestrator's ruling: this TEST release keeps the stock
+  native title bar, and no capability is widened. Removing it is a follow-up,
+  scoped independently of Check for Updates.
 
 ## Known-by-design ledger additions
 
