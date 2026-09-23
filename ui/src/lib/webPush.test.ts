@@ -41,7 +41,10 @@ describe('web push recovery', () => {
       },
     };
     const localStorage = new Map<string, string>();
-    const endpointCache = { put: vi.fn(async () => undefined) };
+    const endpointCache = {
+      match: vi.fn(async () => undefined),
+      put: vi.fn(async (_url: string, _response: Response) => undefined),
+    };
     vi.stubGlobal('window', {
       PushManager: class {},
       Notification: { requestPermission: vi.fn(async () => 'granted'), permission: 'granted' },
@@ -82,7 +85,11 @@ describe('web push recovery', () => {
       'https://avibe.local/__avibe/web-push-endpoint',
       expect.any(Response),
     );
-    expect(await endpointCache.put.mock.calls[0][1].json()).toEqual({
+    const endpointWrite = endpointCache.put.mock.calls.find(
+      ([url]) => url === 'https://avibe.local/__avibe/web-push-endpoint',
+    );
+    expect(endpointWrite).toBeDefined();
+    expect(await endpointWrite![1].json()).toEqual({
       endpoint: 'https://push.example.test/sub/new',
     });
   });
@@ -145,5 +152,40 @@ describe('web push recovery', () => {
     expect(await disableWebPush(api)).toBe(true);
     expect(subscription.unsubscribe).toHaveBeenCalledOnce();
     expect(api.unsubscribeWebPush).toHaveBeenCalledWith(subscription.endpoint, 'device-1');
+  });
+
+  it('recovers the same device and confirmed endpoint after a reload with localStorage blocked', async () => {
+    const entries = new Map<string, Response>();
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)?.clone()),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone());
+      }),
+    };
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce('device-1')
+      .mockReturnValue('unexpected-new-device');
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: () => { throw new Error('blocked'); },
+        setItem: () => { throw new Error('blocked'); },
+      },
+      caches: { open: vi.fn(async () => cache) },
+      crypto: { randomUUID },
+      location: { origin: 'https://avibe.local' },
+    });
+
+    vi.resetModules();
+    const firstPage = await import('./webPush');
+    expect(await firstPage.getWebPushDeviceId()).toBe('device-1');
+    await firstPage.rememberWebPushEndpoint('https://push.example.test/sub/old');
+
+    vi.resetModules();
+    const nextPage = await import('./webPush');
+    expect(await nextPage.getWebPushDeviceId()).toBe('device-1');
+    expect(await nextPage.getRememberedWebPushEndpoints()).toEqual([
+      'https://push.example.test/sub/old',
+    ]);
+    expect(randomUUID).toHaveBeenCalledOnce();
   });
 });

@@ -4534,7 +4534,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Logout remains authoritative when Push APIs are unavailable.
       }
       return postJson('/auth/logout', {
-        device_id: getWebPushDeviceId(),
+        device_id: await getWebPushDeviceId(),
         ...(endpoint ? { endpoint } : {}),
       });
     },

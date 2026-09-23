@@ -45,8 +45,8 @@ export const WebPushControl: React.FC = () => {
           ? {
               endpoint: existing.endpoint,
               subscription: existing.toJSON(),
-              device_id: getWebPushDeviceId(),
-              previous_endpoints: getRememberedWebPushEndpoints(),
+              device_id: await getWebPushDeviceId(),
+              previous_endpoints: await getRememberedWebPushEndpoints(),
             }
           : undefined,
       )
@@ -65,8 +65,8 @@ export const WebPushControl: React.FC = () => {
           const repairedStatus = await api.getWebPushStatus({
             endpoint: repaired.endpoint,
             subscription: repaired.toJSON(),
-            device_id: getWebPushDeviceId(),
-            previous_endpoints: getRememberedWebPushEndpoints(),
+            device_id: await getWebPushDeviceId(),
+            previous_endpoints: await getRememberedWebPushEndpoints(),
           });
           if (repairedStatus.current_subscription_enabled) {
             await rememberWebPushEndpoint(repaired.endpoint);

@@ -5,6 +5,7 @@ const WEB_PUSH_DEVICE_ID_KEY = 'vibe.webPush.deviceId';
 const WEB_PUSH_ENDPOINTS_KEY = 'vibe.webPush.endpoints';
 const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
 const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
+const WEB_PUSH_DEVICE_ENTRY_PATH = '/__avibe/web-push-device-id';
 
 export type WebPushSupportState =
   | { supported: true; standalone: boolean; requiresStandalone: boolean }
@@ -29,56 +30,79 @@ function arrayBuffersEqual(left: ArrayBuffer | null, right: ArrayBuffer): boolea
   return true;
 }
 
-export function getWebPushDeviceId(): string {
+async function readCachedPushValue(path: string, key: 'endpoint' | 'device_id'): Promise<string | null> {
+  if (!('caches' in window)) return null;
   try {
-    const existing = window.localStorage.getItem(WEB_PUSH_DEVICE_ID_KEY);
-    if (existing) return existing;
+    const cache = await window.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    const response = await cache.match(new URL(path, window.location.origin).href);
+    const payload = response ? await response.json() : null;
+    const value = payload?.[key];
+    return typeof value === 'string' && value ? value : null;
   } catch {
-    // Storage can be blocked in hardened browsers/WebViews; keep notification
-    // controls usable even if the id cannot persist across page loads.
+    return null;
   }
-  const generated =
-    window.crypto?.randomUUID?.() ??
-    `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  try {
-    window.localStorage.setItem(WEB_PUSH_DEVICE_ID_KEY, generated);
-  } catch {
-    // Best-effort persistence only.
-  }
-  return generated;
 }
 
-export function getRememberedWebPushEndpoints(): string[] {
+async function writeCachedPushValue(path: string, key: 'endpoint' | 'device_id', value: string): Promise<void> {
+  if (!('caches' in window)) return;
+  try {
+    const cache = await window.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    await cache.put(new URL(path, window.location.origin).href, new Response(JSON.stringify({ [key]: value }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+  } catch {
+    // localStorage remains available where Cache Storage is blocked.
+  }
+}
+
+let deviceIdPromise: Promise<string> | undefined;
+
+export function getWebPushDeviceId(): Promise<string> {
+  deviceIdPromise ??= (async () => {
+    let deviceId: string | null = null;
+    try {
+      deviceId = window.localStorage.getItem(WEB_PUSH_DEVICE_ID_KEY);
+    } catch {
+      // Hardened browsers can block localStorage while allowing Cache Storage.
+    }
+    deviceId ||= await readCachedPushValue(WEB_PUSH_DEVICE_ENTRY_PATH, 'device_id');
+    deviceId ||= window.crypto?.randomUUID?.()
+      ?? `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    try {
+      window.localStorage.setItem(WEB_PUSH_DEVICE_ID_KEY, deviceId);
+    } catch {
+      // Cache Storage or this page's in-memory identity remains available.
+    }
+    await writeCachedPushValue(WEB_PUSH_DEVICE_ENTRY_PATH, 'device_id', deviceId);
+    return deviceId;
+  })();
+  return deviceIdPromise;
+}
+
+export async function getRememberedWebPushEndpoints(): Promise<string[]> {
+  let localEndpoints: string[] = [];
   try {
     const raw = window.localStorage.getItem(WEB_PUSH_ENDPOINTS_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (Array.isArray(parsed)) {
-      return parsed.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0);
+      localEndpoints = parsed.filter((endpoint): endpoint is string => typeof endpoint === 'string' && endpoint.length > 0);
     }
   } catch {
-    // Best-effort cleanup hints only.
+    // Cache Storage remains available where localStorage is blocked.
   }
-  return [];
+  const cachedEndpoint = await readCachedPushValue(WEB_PUSH_ENDPOINT_ENTRY_PATH, 'endpoint');
+  return [...new Set([...(cachedEndpoint ? [cachedEndpoint] : []), ...localEndpoints])].slice(0, 8);
 }
 
 export async function rememberWebPushEndpoint(endpoint: string | undefined): Promise<void> {
   if (!endpoint) return;
-  const endpoints = [endpoint, ...getRememberedWebPushEndpoints().filter((candidate) => candidate !== endpoint)].slice(0, 8);
+  const endpoints = [endpoint, ...(await getRememberedWebPushEndpoints()).filter((candidate) => candidate !== endpoint)].slice(0, 8);
   try {
     window.localStorage.setItem(WEB_PUSH_ENDPOINTS_KEY, JSON.stringify(endpoints));
   } catch {
     // Best-effort persistence only.
   }
-  if (!('caches' in window)) return;
-  try {
-    const cache = await window.caches.open(WEB_PUSH_ENDPOINT_CACHE);
-    const entryUrl = new URL(WEB_PUSH_ENDPOINT_ENTRY_PATH, window.location.origin).href;
-    await cache.put(entryUrl, new Response(JSON.stringify({ endpoint }), {
-      headers: { 'content-type': 'application/json' },
-    }));
-  } catch {
-    // Local endpoint history still supports foreground recovery.
-  }
+  await writeCachedPushValue(WEB_PUSH_ENDPOINT_ENTRY_PATH, 'endpoint', endpoint);
 }
 
 export function getWebPushSupportState(): WebPushSupportState {
@@ -143,9 +167,9 @@ export async function enableWebPush(
   const endpoint = typeof json.endpoint === 'string' ? json.endpoint : undefined;
   const previousEndpoints = [
     ...(existing?.endpoint ? [existing.endpoint] : []),
-    ...getRememberedWebPushEndpoints(),
+    ...await getRememberedWebPushEndpoints(),
   ];
-  await api.subscribeWebPush(json, undefined, getWebPushDeviceId(), previousEndpoints);
+  await api.subscribeWebPush(json, undefined, await getWebPushDeviceId(), previousEndpoints);
   await rememberWebPushEndpoint(endpoint);
   return json;
 }
@@ -157,7 +181,7 @@ export async function disableWebPush(api: ApiContextType): Promise<boolean> {
     await subscription.unsubscribe();
   }
   if (endpoint) {
-    await api.unsubscribeWebPush(endpoint, getWebPushDeviceId());
+    await api.unsubscribeWebPush(endpoint, await getWebPushDeviceId());
     return true;
   }
   return false;
