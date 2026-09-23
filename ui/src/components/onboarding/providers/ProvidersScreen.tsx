@@ -515,7 +515,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // ── Write admission ─────────────────────────────────────────────────────
 
     // One rule for every control that can start a write, wherever it is drawn: the
-    // cards, the footer, the capsule and the dialogs all admit the same thing, so a
+    // cards, the footer and the dialogs all admit the same thing, so a
     // control that is drawn somewhere else cannot admit what the footer refuses.
     //
     // Four separate facts, and a write needs all of them. What the machine's HEALTH is

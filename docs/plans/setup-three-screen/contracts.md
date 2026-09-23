@@ -197,9 +197,8 @@ anchor without a layout shift.
 
 **Shared reservation.** `.onboarding-stage` remains the box both the story and the screens
 below it occupy, so the anchor's vertical position does not depend on what a screen draws.
-The import capsule lives in a reserved slot inside screen 2's stage: dismissing it leaves
-the slot, so the primary action cannot move (handoff §4, and the assertion #2065 already
-writes for the two-step flow).
+Screen 2's migration offer uses the shell's primary action and a controlled review dialog;
+dismissing an offer changes neither the stage nor the action anchor.
 
 **Snapshot hooks.** The handoff reads live DOM across screens, so these class names are a
 contract, not styling. L1's `setupHandoff.ts` queries them; L2 and L3 must render them.
@@ -355,12 +354,12 @@ of silently changing either the handoff or another owner.
 
 | Element | Producer → consumer and rule |
 | --- | --- |
-| scan and discovery | existing migration feature `modelsApi.scanMigration().items` → full `providerSelection.scan`; `isImportableKey` identifies entry-point keys only. Keep every row; reuse its group closure/blockers before the actionable capsule count; a blocked detected key remains visible with its reason but is not advertised as importable |
+| scan and discovery | existing migration feature `modelsApi.scanMigration().items` → full `providerSelection.scan`; `isImportableKey` identifies entry-point keys only. Keep every row; reuse its group closure/blockers before the primary-action count; a blocked detected key remains visible with its reason but is not advertised as importable |
 | candidate identity | `MigrationItem.id` is selection identity, never vendor alone. Use `providerLabel` / `providerVendorId` as `MigrationDialog.ItemRow` does. Optional vendor/name/mask may be absent: generic mark plus `masked_detail`, never infer vendor from backend or fabricate a mask. Show every `source_paths` locator; only when absent use `migration.source.<backend>`. `notes_key` is an explanation, not origin |
 | cards | slots 1–2 show detected/provider identities then existing sources, with OpenAI/Anthropic placeholders if needed; slot 3 is Add more. Vendor grouping is presentation only: multiple keys from one vendor retain separate IDs and may require whole backend selection |
 | selected and connected | selected means complete consent group selected; a blocked group is disabled with its reason. Added/connected treatment follows confirmed source IDs from `listSources` and status `active` / `standby`; `verification_pending` is disclosed as unverified, not rejected as unusable (the shipped resolver accepts standby). One vendor's healthy source does not prove every key/card connected or a runnable assistant |
-| counts | CTA count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. Capsule count = distinct key IDs in complete, unblocked, key-only groups, independent of selection. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
-| capsule | retain dismissal signature owner `modelHubMigrationDismiss` and the reserved slot. Existing `ImportKeysNotice` scans/owns a dialog internally: L2 must adapt it to the shared scan/selection owner before claiming consistency; it is not a drop-in consumer of C2 |
+| counts | Primary-action count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. There is no independent capsule count. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
+| migration offer | The primary action opens the controlled `MigrationDialog` for selected complete backend groups. `modelHubMigrationDismiss` persists declined `MigrationItem` identities; a newly discovered key remains visible for review, but its group is never automatically selected if another required item was declined. Only explicit consent to the complete group clears those identities. No `ImportKeysNotice` or reserved slot is mounted |
 | import / Detected tab | use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 delegates confirmation/apply/recovery to the existing migration feature; setup never applies from selection or normal navigation |
 | add — API key | shared `AddApiKeyDialog` form: one create carrying `save_unverified: true` (`apiKeySourceDraft.ts`), no observe or probe first — the credential is saved on the person's word and verified afterwards, so a provider that is slow or briefly down does not cost them the key they pasted. Preserve its existing unknown-write recovery exactly: only a server-named non-409 4xx settles the write (`apiKeyWriteSettled`), anything else reconciles against `client_nonce` through `reconcileUnknownWrite` rather than repeating the create. Read `SourceCreated.source` and placement tails (`added_to`, `adopted_by`); refresh sources and affected supplies before reporting ready, and a source that comes back `verification_pending` is shown as saved-but-unverified per the `selected and connected` row — never as a completed verification |
 | add — subscription | reuse `subscriptionOptions.ts` / `OAuthConnectDialog` / `OAuthFlowParts` for the offered product vendors, custody choice and flow ownership. Setup limits the shipped vendor list to OpenAI/Anthropic per handoff; there is no callable vendor-capability-list API in `ModelsApi`, and no such producer should be invented. `getOAuthStatus` / `submitOAuth` return `OAuthResult`; terminal create carries `created.source` and placement tails. Do not create the source a second time or equate terminal OAuth with assistant readiness |
@@ -386,11 +385,9 @@ setup's API-key-only requirement, an otherwise importable OAuth member also bloc
 for this entry point; show it and explain that the full migration is available in Settings.
 Never silently import OAuth or drop it from a batch.
 
-L2 makes the smallest controlled-state/copy adaptation of the existing dialog/grouping
-owner so discovery cards, capsule and Detected tab consume that same feature. Current
-`MigrationDialog` has only `open/onClose/onApplied/eligible` props and local `items` selection;
-the shared state/copy inputs and setup key-only whole-group constraint are future adaptation
-work, not already shipped props. Keep one grouping/confirmation/apply/recovery owner: no
+The controlled `MigrationDialog`, discovery cards and Detected tab consume the same scan
+and complete-group selection. Setup supplies the key-only eligibility and write admission;
+Settings keeps its broader migration scope. Keep one grouping/confirmation/apply/recovery owner: no
 independent item-ID selection engine, setup-specific migration coordinator or retry engine.
 Rescans invalidate old item IDs: preserve selection only for unchanged complete groups;
 changed membership/custody requires renewed review, and failed rescans disable apply rather
@@ -422,7 +419,7 @@ key cleanup, preservation of unrelated MCP/name settings, and retained custody f
 after exposure. Setup must not duplicate cleanup, custody writes, mode transition, rollback
 or retry machinery, and must not send a second mode PATCH after successful apply.
 
-Cards, capsule and Detected actions delegate to this feature's complete-group review. Keep
+Cards, the primary action and Detected actions delegate to this feature's complete-group review. Keep
 every required backend/file visible and show the exact consequence
 `迁移后，CLI的认证信息将完全交由模型网关管理`, with **Not now / Start migration**. Only the latter
 explicit confirmation invokes apply. New/incomplete takeover invokes server dependency ensure

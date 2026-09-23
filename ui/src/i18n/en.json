@@ -4792,6 +4792,7 @@
       "defaultModelWithBackups_one": "Default model · 1 backup",
       "defaultModelWithBackups_other": "Default model · {{count}} backups",
       "noteNoModels": "No usable model yet",
+      "ownershipChanged": "Connection changed. Refresh to continue",
       "noteModelUnset": "No model set yet; you can set one later in Model Hub"
     },
     "connection": {

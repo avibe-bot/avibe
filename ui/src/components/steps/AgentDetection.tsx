@@ -139,25 +139,30 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
   const [routeSelection, setRouteSelection] = useState<RouteChainSelection | null>(null);
   const [routeReconciliation, setRouteReconciliation] = useState({ pending: false, failed: false });
+  const committedRouteRefresh = useRef(false);
   const canEditSetupRoute = Boolean(onNavigate && agentReads);
   const [routeRead, setRouteRead] = useState<{
     done: boolean;
     failed: boolean;
     confirmed: { epoch: number; token: number } | null;
+    failure: { epoch: number; token: number } | null;
     chains: Partial<Record<RuntimeBackendId, AgentChain | null>>;
     models: Partial<Record<RuntimeBackendId, string | null>>;
     sources: Source[];
     supplies: AgentSupply[];
-  }>({ done: false, failed: false, confirmed: null, chains: {}, models: {}, sources: [], supplies: [] });
+  }>({ done: false, failed: false, confirmed: null, failure: null, chains: {}, models: {}, sources: [], supplies: [] });
   const routeReadToken = useRef(0);
   const routeTargetReady = () => active && activeRef.current && routeRead.done && !routeRead.failed
     && routeRead.confirmed?.epoch === activation.current
     && routeRead.confirmed?.token === routeReadToken.current;
+  const routeFailureCurrent = () => active && activeRef.current && routeRead.failed
+    && routeRead.failure?.epoch === activation.current
+    && routeRead.failure?.token === routeReadToken.current;
   const readCardRoutes = useCallback(async () => {
     if (!agentReads) return false;
     const token = ++routeReadToken.current;
     const epoch = activation.current;
-    setRouteRead((current) => ({ ...current, done: false, failed: false, confirmed: null }));
+    setRouteRead((current) => ({ ...current, done: false, failed: false, confirmed: null, failure: null }));
     try {
       const [supplyRead, listed, vibeAgents] = await Promise.all([
         agentReads.read(),
@@ -183,11 +188,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         }
       }));
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, chains, models, sources: listed, supplies });
+      setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, failure: null, chains, models, sources: listed, supplies });
       return true;
     } catch {
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead((current) => ({ ...current, done: true, failed: true, confirmed: null }));
+      setRouteRead((current) => ({ ...current, done: true, failed: true, confirmed: null, failure: { epoch, token } }));
       return false;
     }
   }, [agentReads, api]);
@@ -203,14 +208,15 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     return model?.display_name?.trim() || catalog?.display_name?.trim() || hop.model_id;
   };
   const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
-    const loading = Boolean(canEditSetupRoute && modelHubEnabled && !routeRead.failed && !routeTargetReady());
+    if (!canEditSetupRoute || !modelHubEnabled) return { kind: 'unavailable' };
+    if (!routeTargetReady()) return { kind: routeFailureCurrent() ? 'failed' : 'pending' };
+    if (!routeRead.models[backend]) return { kind: 'no-agent-model' };
     const chain = routeRead.chains[backend];
     const mine = chain?.chain[0] ?? null;
     return {
-      loading,
+      kind: 'route',
       model: mine ? modelLabel(mine) : null,
       backups: Math.max(0, (chain?.chain.length ?? 0) - 1),
-      noModel: routeTargetReady() && !routeRead.models[backend],
     };
   };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
@@ -306,6 +312,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
+  const refreshRouteOwnership = (name: RuntimeBackendId) => Promise.all([
+    readCardRoutes(), refreshConnection(name),
+  ]).then(([routeReady]) => routeReady);
   // Being read again is one event with one owner, however it arrives: the shell
   // activates this screen, or the route surface it sits on comes back. In the shell both
   // happen in the same commit, so two effects would mean two refreshes — and neither of
@@ -893,8 +902,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             : result && !result.ok && result.message ? result : undefined;
           const connectionMode = confirmedConnectionMode(name);
           const supplyMode = confirmedSupplyMode(name);
+          const ownershipConflict = !!connectionMode && !!supplyMode && connectionMode !== supplyMode;
           const mode = agent.status === 'missing' ? installMode(name)
-            : connectionMode && supplyMode && connectionMode !== supplyMode ? undefined
+            : ownershipConflict ? undefined
               : connectionMode ?? supplyMode;
           const hubRoute = mode === 'hub';
           const openRoute = () => {
@@ -938,9 +948,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
-            routeError={canEditSetupRoute && modelHubEnabled && routeRead.failed
-              ? t('settings.models.routeDialog.fail.reconcileRead') : undefined}
-            onRetryRoute={() => void readCardRoutes()}
+            routeError={canEditSetupRoute && modelHubEnabled && routeFailureCurrent()
+              ? t('settings.models.routeDialog.fail.reconcileRead')
+              : ownershipConflict ? t('onboarding.setup.ownershipChanged') : undefined}
+            onRetryRoute={() => void (ownershipConflict ? refreshRouteOwnership(name) : readCardRoutes())}
             configuringDisabled={!mode || syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
               || (hubRoute && canEditSetupRoute && (!routeTargetReady() || supplyMode !== 'hub'))
               || (hubRoute
@@ -985,17 +996,22 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       {providerDialog}
       {canEditSetupRoute && agentReads && (
         <RouteChainDialog selection={routeSelection} sources={routeRead.sources}
-          onClose={() => { setRouteSelection(null); void readCardRoutes(); }}
+          onClose={() => {
+            const backend = routeSelection?.agent.backend;
+            setRouteSelection(null);
+            if (backend && !committedRouteRefresh.current) void refreshRouteOwnership(backend);
+            committedRouteRefresh.current = false;
+          }}
           onCommitted={() => {
+            committedRouteRefresh.current = true;
             setRouteReconciliation({ pending: true, failed: false });
-            void Promise.all([
-              readCardRoutes(),
-              routeSelection ? refreshConnection(routeSelection.agent.backend) : Promise.resolve(),
-            ]).then(([ok]) => setRouteReconciliation({ pending: false, failed: !ok }));
+            if (routeSelection) void refreshRouteOwnership(routeSelection.agent.backend)
+              .then((ok) => setRouteReconciliation({ pending: false, failed: !ok }));
           }}
           commitReconciliation={{ ...routeReconciliation, retry: () => {
             setRouteReconciliation({ pending: true, failed: false });
-            void readCardRoutes().then((ok) => setRouteReconciliation({ pending: false, failed: !ok }));
+            if (routeSelection) void refreshRouteOwnership(routeSelection.agent.backend)
+              .then((ok) => setRouteReconciliation({ pending: false, failed: !ok }));
           } }}
           readAgents={async () => {
             const value = await agentReads.readValue();

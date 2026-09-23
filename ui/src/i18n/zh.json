@@ -4792,6 +4792,7 @@
       "defaultModelWithBackups_one": "默认模型 · 另有 {{count}} 个备选",
       "defaultModelWithBackups_other": "默认模型 · 另有 {{count}} 个备选",
       "noteNoModels": "还没有可用的模型",
+      "ownershipChanged": "连接状态已变化，请刷新后继续",
       "noteModelUnset": "尚未设置模型，可稍后在模型网关中设置"
     },
     "connection": {
