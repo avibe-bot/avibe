@@ -2921,6 +2921,25 @@ def test_compatibility_projections_hide_retired_builtins_unless_requested(tmp_pa
     assert [row["id"] for row in payload["catalog_models"]] == ["claude-opus-5", "claude-sonnet-4"]
 
 
+def test_a_remote_only_tombstone_hides_an_existing_builtin(monkeypatch, tmp_path):
+    from vibe import backend_model_catalog
+
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4-8", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "load_cached_remote_catalog",
+        lambda **_kwargs: {"backends": {"claude": {"models": [{"id": "claude-opus-4-8", "visibility": "hide"}]}}},
+    )
+
+    assert [row["id"] for row in service.backend_catalog_models("claude")] == ["claude-opus-5"]
+    assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-5", "claude-opus-4-8"]
+
+
 def test_a_snapshot_revived_retired_builtin_stays_in_the_picker(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.config.agents["claude"].models = [

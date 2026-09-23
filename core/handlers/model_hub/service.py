@@ -4166,9 +4166,17 @@ class ModelHubService:
         # projections. A row the current snapshot revives, a manual route
         # pins, or the backend currently requests stays visible.
         backend = cast(BackendName, agent.backend)
-        from vibe.backend_model_catalog import load_bundled_catalog, retired_backend_model_ids
+        from vibe.backend_model_catalog import (
+            load_bundled_catalog,
+            load_cached_remote_catalog,
+            retired_backend_model_ids,
+        )
 
-        retired = retired_backend_model_ids(backend, load_bundled_catalog())
+        # Either catalog may withdraw a model; the remote one does so without a
+        # release. A remote revival is already in the current snapshot below.
+        retired = retired_backend_model_ids(backend, load_bundled_catalog()) | retired_backend_model_ids(
+            backend, load_cached_remote_catalog(schedule_refresh=False)
+        )
         if not retired:
             return set()
         current = {item["id"] for item in self._current_builtin_models(backend)}
