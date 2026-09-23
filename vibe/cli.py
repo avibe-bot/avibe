@@ -13861,119 +13861,138 @@ def cmd_start(*, open_browser: bool | None = None):
         start_info=service_start,
     )
     service_reused = service_start.reused
-    if service_reused:
-        # The reused service still verifies proofs with the secret it was started
-        # with. Signing with a different one would only produce requests it
-        # rejects, so leave the surviving pair's own secret authoritative.
-        ui_memory_secret = None
-    else:
-        ui_memory_secret = memory_ui_secret
-        if live_ui_pid is not None:
-            # A surviving UI signs with the previous secret, which the service
-            # started just now cannot verify. Restart it so the pair shares one
-            # secret; remote access keeps running across the UI restart.
-            runtime.stop_ui(stop_remote_access=False)
-            live_ui_pid = None
-    bind_host = runtime.effective_ui_bind_host(config)
-    ui_pid = runtime.start_ui(
-        bind_host,
-        config.ui.setup_port,
-        memory_ui_secret=ui_memory_secret,
-        start_info=ui_start,
-    )
-    if ui_pid is None:
-        # No pid means start_ui found a stale UI it could not stop and refused
-        # to start a replacement that would only die on bind. Nothing below can
-        # complete without that pid: the status writes carry it and
-        # validate_start_receipt rejects a receipt missing it. Running on
-        # anyway ended the command in the receipt builder, after the service
-        # this command had just started was already up -- and a service with no
-        # receipt is adopted as `reused` next time, so the desktop shell never
-        # owns its stop again. Undo our own start instead; a service that was
-        # already running is not ours to stop, and this command has then
-        # changed nothing to undo.
-        if not service_reused:
-            # stop_service() logs the pid it could not stop, so a rollback that
-            # itself fails still leaves evidence; either way the start failed.
-            runtime.stop_service()
-        raise RuntimeError("Vibe UI could not be started because a stale UI process could not be stopped")
-    if service_reused and ui_pid != live_ui_pid:
-        logger.warning(
-            "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "
-            "Memory profile, search and clear stay unavailable until both processes restart together",
-            ui_pid,
-            service_pid,
-        )
-        if bool(getattr(getattr(config, "memory", None), "enabled", False)):
-            language = normalize_language(getattr(config, "language", None))
-            print(i18n_t("memory.cli.partialRestartWarning", language))
-            print("")
-    # The WAIT below is asked unconditionally. The predicate that used to guard
-    # it is the lock, which is taken before the database is migrated -- so it is
-    # already true of a process that has not finished starting and may never, and
-    # guarding with it skipped the wait in exactly the case the wait exists for.
-    # Nothing is paid for asking: a service that is up answers on the first probe.
+    # Everything from here to the receipt line is one region under one invariant:
+    # a service THIS command started must not survive a start that never printed
+    # a receipt. An unreceipted service is adopted as `reused` on the next
+    # attempt, so the desktop shell never owns its stop again -- and every
+    # failure in the region produces that same orphan, whichever line raised.
     #
-    # The provisional "starting" WRITE is guarded, and the difference is the
-    # point: `write_status` carries `started_at` forward only across consecutive
-    # `running` writes, so announcing a transition for a service this command did
-    # not start resets its recorded uptime to now and briefly shows a starting
-    # service to every status consumer. `vibe start` against a live instance is
-    # idempotent and must stay observably so.
-    if not service_reused:
-        runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
-    # The wait resolves the authoritative service.lock holder rather than waiting
-    # on the raw pid start_service handed back: under a delegated user scope that
-    # pid can be a launcher that never takes the lock, so wait_for_service_ready
-    # adopts and returns the real owner instead of stalling the full timeout.
-    resolved_pid = runtime.wait_for_service_ready(
-        service_pid,
-        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-    )
-    service_ready = resolved_pid is not None
-    if resolved_pid is not None:
-        service_pid = resolved_pid
-        service_start.capture(service_pid, reused=service_reused)
-    if service_ready:
-        runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
-    elif runtime.pid_alive(service_pid):
-        runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
-    else:
-        runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
-        raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
+    # The guard is regional on purpose. Undoing one named failure inside its own
+    # branch -- which is what the `ui_pid is None` refusal below used to do --
+    # leaves every other failure in the same region to be discovered one at a
+    # time, because the invariant belongs to the region, not to the branch a
+    # reviewer happened to name first.
+    #
+    # `BaseException`, not `Exception`: a Ctrl-C during the readiness wait, the
+    # longest thing in here, orphans the service exactly like a crash does.
+    # `SystemExit` is included deliberately -- nothing in the region exits on
+    # purpose, and an exit before the receipt is indistinguishable, to the next
+    # launch, from any other start that never finished. The bare `raise` keeps
+    # the original failure and its traceback unchanged.
+    try:
+        if service_reused:
+            # The reused service still verifies proofs with the secret it was started
+            # with. Signing with a different one would only produce requests it
+            # rejects, so leave the surviving pair's own secret authoritative.
+            ui_memory_secret = None
+        else:
+            ui_memory_secret = memory_ui_secret
+            if live_ui_pid is not None:
+                # A surviving UI signs with the previous secret, which the service
+                # started just now cannot verify. Restart it so the pair shares one
+                # secret; remote access keeps running across the UI restart.
+                runtime.stop_ui(stop_remote_access=False)
+                live_ui_pid = None
+        bind_host = runtime.effective_ui_bind_host(config)
+        ui_pid = runtime.start_ui(
+            bind_host,
+            config.ui.setup_port,
+            memory_ui_secret=ui_memory_secret,
+            start_info=ui_start,
+        )
+        if ui_pid is None:
+            # No pid means start_ui found a stale UI it could not stop and refused
+            # to start a replacement that would only die on bind. Nothing below can
+            # complete without that pid: the status writes carry it and
+            # validate_start_receipt rejects a receipt missing it. Fail here rather
+            # than further down in the receipt builder, and let the region's guard
+            # undo the start.
+            raise RuntimeError("Vibe UI could not be started because a stale UI process could not be stopped")
+        if service_reused and ui_pid != live_ui_pid:
+            logger.warning(
+                "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "
+                "Memory profile, search and clear stay unavailable until both processes restart together",
+                ui_pid,
+                service_pid,
+            )
+            if bool(getattr(getattr(config, "memory", None), "enabled", False)):
+                language = normalize_language(getattr(config, "language", None))
+                print(i18n_t("memory.cli.partialRestartWarning", language))
+                print("")
+        # The WAIT below is asked unconditionally. The predicate that used to guard
+        # it is the lock, which is taken before the database is migrated -- so it is
+        # already true of a process that has not finished starting and may never, and
+        # guarding with it skipped the wait in exactly the case the wait exists for.
+        # Nothing is paid for asking: a service that is up answers on the first probe.
+        #
+        # The provisional "starting" WRITE is guarded, and the difference is the
+        # point: `write_status` carries `started_at` forward only across consecutive
+        # `running` writes, so announcing a transition for a service this command did
+        # not start resets its recorded uptime to now and briefly shows a starting
+        # service to every status consumer. `vibe start` against a live instance is
+        # idempotent and must stay observably so.
+        if not service_reused:
+            runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
+        # The wait resolves the authoritative service.lock holder rather than waiting
+        # on the raw pid start_service handed back: under a delegated user scope that
+        # pid can be a launcher that never takes the lock, so wait_for_service_ready
+        # adopts and returns the real owner instead of stalling the full timeout.
+        resolved_pid = runtime.wait_for_service_ready(
+            service_pid,
+            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+        )
+        service_ready = resolved_pid is not None
+        if resolved_pid is not None:
+            service_pid = resolved_pid
+            service_start.capture(service_pid, reused=service_reused)
+        if service_ready:
+            runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
+        elif runtime.pid_alive(service_pid):
+            runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
+        else:
+            runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
+            raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
-    from vibe.desktop_runtime import start_receipt_line
+        from vibe.desktop_runtime import start_receipt_line
 
-    receipt_line = start_receipt_line(
-        {
-            "schema_version": 1,
-            "outcome": "reused" if service_reused else "started",
-            "service_pid": service_pid,
-            "ui_pid": ui_pid,
-            "service_create_unix_ms": service_start.create_unix_ms,
-            "ui_create_unix_ms": ui_start.create_unix_ms,
-        }
-    )
-    ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
+        receipt_line = start_receipt_line(
+            {
+                "schema_version": 1,
+                "outcome": "reused" if service_reused else "started",
+                "service_pid": service_pid,
+                "ui_pid": ui_pid,
+                "service_create_unix_ms": service_start.create_unix_ms,
+                "ui_create_unix_ms": ui_start.create_unix_ms,
+            }
+        )
+        ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
 
-    # Always print Web UI access instructions.
-    print("Web UI:")
-    print(f"  {ui_url}")
-    print("")
-    print("Want to open this Web UI from another device or a remote server?")
-    print("  Run: vibe remote")
-    print("  Avibe will guide you through creating a private avibe.bot URL.")
-    print("")
+        # Always print Web UI access instructions.
+        print("Web UI:")
+        print(f"  {ui_url}")
+        print("")
+        print("Want to open this Web UI from another device or a remote server?")
+        print("  Run: vibe remote")
+        print("  Avibe will guide you through creating a private avibe.bot URL.")
+        print("")
 
-    # If running over SSH, avoid trying to open a browser on the server.
-    should_open_browser = config.ui.open_browser if open_browser is None else open_browser
-    if should_open_browser and not _in_ssh_session():
-        opened = _open_browser(ui_url)
-        if not opened:
-            print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
-            print("")
+        # If running over SSH, avoid trying to open a browser on the server.
+        should_open_browser = config.ui.open_browser if open_browser is None else open_browser
+        if should_open_browser and not _in_ssh_session():
+            opened = _open_browser(ui_url)
+            if not opened:
+                print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
+                print("")
 
-    print(receipt_line, flush=True)
+        print(receipt_line, flush=True)
+    except BaseException:
+        if not service_reused:
+            # A service that was already running is not ours to stop, and against
+            # one this command has then changed nothing to undo. stop_service()
+            # logs any pid it could not stop, so a rollback that itself fails
+            # still leaves evidence; either way the start has failed.
+            runtime.stop_service()
+        raise
     return 0
 
 

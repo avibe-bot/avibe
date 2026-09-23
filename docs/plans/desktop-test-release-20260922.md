@@ -978,6 +978,54 @@ every other process-spawning test in that module, which reuses the existing
 `write_fake_runtime` harness instead of inventing a Windows equivalent for a
 mechanism that has no platform-specific branch.
 
+## H18 — the rollback belonged to the region, not to the branch
+
+Two reviewed heads, one root-cause class, which is what the review-loop circuit
+breaker exists to catch:
+
+| head | finding | shape |
+| --- | --- | --- |
+| `a09e74a2d` | roll back a newly started service when UI startup is **refused** | `start_ui` returns `None` |
+| `5f6f47cdc` | roll back the service when UI startup **raises** | `start_ui` throws |
+
+The invariant behind both is one sentence: *a service this command started must
+not survive a start that never printed a receipt.* An unreceipted service is
+adopted as `reused` on the next launch, so the desktop shell never acquires
+scoped stop authority and Stop Runtime silently stops working.
+
+The first fix encoded that invariant as a branch-local undo inside the single
+failure mode the reviewer had named. That is why a second finding was not bad
+luck: the invariant is a property of the whole pre-receipt region, and any region
+guarded one named branch at a time yields findings one at a time forever. The
+region runs from `start_service` returning through `print(receipt_line)`, and it
+contains a UI restart, a process spawn, three status writes, a readiness wait
+that can run to `SERVICE_SLOW_START_TIMEOUT_SECONDS`, the receipt builder and a
+browser launch — every one of which can fail into the same orphan.
+
+So the second fix does not add a second undo next to the first. One
+`try/except BaseException` spans the region, the `ui_pid is None` branch loses
+its local `stop_service()` and reaches the same mechanism by raising, and the
+bare `raise` leaves the original failure unchanged. Exactly one stop per failed
+start, none once the receipt is out, never against a reused service.
+
+`BaseException` rather than `Exception` is deliberate. `KeyboardInterrupt` is not
+an `Exception`, and the readiness wait is both the longest step in the region and
+the likeliest moment for a user to give up — an interrupted start orphans the
+service exactly like a crash does. `SystemExit` is included on the same logic:
+nothing in the region exits on purpose, and to the next launch an exit before the
+receipt is indistinguishable from any other start that never finished.
+
+Four mutations, each mapped to one requirement: restoring the old branch-local
+shape fails the three new region tests while still passing the two the first
+review earned; `except Exception` fails only the interrupt test; dropping the
+`not service_reused` scope fails both reused-service tests; and turning the guard
+into a `finally` fails the receipt-boundary test.
+
+**The lesson, generalised.** When a fix encodes an invariant, encode it for the
+region that owns the invariant, not for the branch the reviewer happened to name.
+A finding names an instance; the fix has to name the class, or the next instance
+is already written.
+
 ## Known-by-design ledger additions
 
 - **Deferred.** `query_endpoint` sets `stderr(Stdio::null())` and the shell keeps
