@@ -179,16 +179,23 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         chains: {}, models: {}, backendReads: {}, sources: listed, supplies });
       const backendPromises = ASSISTANT_ORDER.map(async (backend) => {
         try {
-          const details = await Promise.all(vibeAgents.agents.filter((row) =>
-            !row.archived && row.backend === backend)
-            .map(async (row) => {
-              const detail = await api.getVibeAgent(row.name, { cache: false });
-              if (!detail.ok || !detail.agent || detail.agent.name !== row.name) throw new Error('Agent detail unreadable');
-              return detail.agent;
-            }));
-          const candidates = details.filter((row) => row.backend === backend && !row.archived && isBuiltinAgent(row));
-          const selected = candidates.find((row) => row.name === backend)
-            ?? candidates.find((row) => row.name === 'default') ?? candidates[0];
+          const candidates = vibeAgents.agents.filter((row) => !row.archived && row.backend === backend)
+            .sort((left, right) => {
+              const rank = (name: string) => name === backend ? 0 : name === 'default' ? 1 : 2;
+              return rank(left.name) - rank(right.name)
+                || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+            });
+          let selected = null;
+          for (const candidate of candidates) {
+            const detail = await api.getVibeAgent(candidate.name, { cache: false });
+            if (!detail.ok || !detail.agent) throw new Error('Agent detail unreadable');
+            const current = detail.agent;
+            if (current.name === candidate.name && current.backend === backend
+              && !current.archived && isBuiltinAgent(current)) {
+              selected = current;
+              break;
+            }
+          }
           const model = selected?.model ?? null;
           const supply = supplies.find((row) => row.backend === backend);
           let chain: AgentChain | null = null;
@@ -226,9 +233,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const modelLabel = (hop: { source_id: string; model_id: string }): string => {
     const source = routeRead.sources.find((row) => row.id === hop.source_id);
     const model = source?.models?.find((row) => row.id === hop.model_id);
-    const catalog = routeRead.supplies.flatMap((supply) => supply.catalog_models ?? [])
-      .find((row) => row.id === hop.model_id);
-    return model?.display_name?.trim() || catalog?.display_name?.trim() || hop.model_id;
+    return model?.display_name?.trim() || hop.model_id;
   };
   const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
     if (!canEditSetupRoute || !modelHubEnabled) return { kind: 'unavailable' };

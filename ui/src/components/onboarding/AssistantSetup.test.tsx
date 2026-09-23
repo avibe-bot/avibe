@@ -832,6 +832,97 @@ describe('Hub route refresh', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy();
   });
 
+  it('stops after a confirmed backend-named target, ignoring unreadable custom Agents', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    const custom = { ...hubAgent(), id: 'custom', name: 'custom' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [custom, hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => {
+      if (name === 'custom') throw new Error('unreadable custom Agent');
+      return { ok: true, agent: hubAgent() };
+    });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    const action = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(mock.api.getVibeAgent.mock.calls.filter(([name]) => name === 'custom')).toHaveLength(0);
+    fireEvent.click(action);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('keeps an unreadable higher-priority target unknown instead of falling back', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    const fallback = { ...hubAgent(), id: 'fallback', name: 'default' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [fallback, hubAgent()], default_agent_name: 'default' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => {
+      if (name === 'claude') throw new Error('unreadable designated Agent');
+      return { ok: true, agent: fallback };
+    });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    await row('Claude Code').findByText(en.settings.models.routeDialog.fail.reconcileRead);
+    expect(mock.api.getVibeAgent.mock.calls.filter(([name]) => name === 'default')).toHaveLength(0);
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(mock.models.getAgentChains).not.toHaveBeenCalledWith('claude');
+  });
+
+  it('uses the next current builtin after an archived detail, in stable name order', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    const named = { ...hubAgent(), name: 'zeta', model: 'zeta-model' };
+    const earlier = { ...hubAgent(), name: 'alpha', model: 'alpha-model' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [named, earlier, hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true,
+      agent: name === 'claude' ? { ...hubAgent(), archived: true } : name === 'alpha' ? earlier : named }));
+    mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('model-a'), model_id: 'alpha-model' }]);
+    mock.models.getAgentChain.mockResolvedValue({ ...hubChain('model-a'), model_id: 'alpha-model' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    const action = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(mock.api.getVibeAgent.mock.calls.filter(([name]) => ['claude', 'alpha', 'zeta'].includes(name))
+      .map(([name]) => name)).toEqual(['claude', 'alpha']);
+    fireEvent.click(action);
+    expect(within(await screen.findByRole('dialog')).getByText('alpha-model · Route chain')).toBeTruthy();
+  });
+
+  it('does not borrow a menu label from another backend for an upstream hop', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('shared-id')]);
+    mock.models.listSources.mockResolvedValue([{ id: 'src_a', models: [] }]);
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
+      { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const,
+        catalog_models: [{ id: 'shared-id', display_name: 'Wrong menu label' }] },
+    ] }) };
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await row('Claude Code').findByText('shared-id');
+    expect(row('Claude Code').queryByText('Wrong menu label')).toBeNull();
+  });
+
   it('distinguishes a confirmed missing Agent model from a configured model with an empty chain', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.status = 'ok';
