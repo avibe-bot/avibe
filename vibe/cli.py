@@ -13862,10 +13862,12 @@ def cmd_start(*, open_browser: bool | None = None):
     )
     service_reused = service_start.reused
     # Everything from here to the receipt line is one region under one invariant:
-    # a service THIS command started must not survive a start that never printed
-    # a receipt. An unreceipted service is adopted as `reused` on the next
-    # attempt, so the desktop shell never owns its stop again -- and every
-    # failure in the region produces that same orphan, whichever line raised.
+    # nothing THIS invocation created may survive a start that never printed a
+    # receipt. Both processes count. An unreceipted service is adopted as
+    # `reused` on the next attempt, so the desktop shell never owns its stop
+    # again; an unreceipted UI keeps its pid file and its listener, which the
+    # next attempt then has to fight. Every failure in the region produces those
+    # orphans, whichever line raised.
     #
     # The guard is regional on purpose. Undoing one named failure inside its own
     # branch -- which is what the `ui_pid is None` refusal below used to do --
@@ -13986,6 +13988,29 @@ def cmd_start(*, open_browser: bool | None = None):
 
         print(receipt_line, flush=True)
     except BaseException:
+        # The invariant is that this invocation leaves running nothing it
+        # created -- not just the service. The region starts two processes, and
+        # a guard that undid one left the other exactly as orphaned: a UI this
+        # command spawned kept its pid file and its listener after the service
+        # beneath it was stopped.
+        #
+        # The set does not need a new mechanism to be known. `start_service` and
+        # `start_ui` already record what they did in their `ProcessStartInfo`:
+        # a process adopted from a previous launch comes back as `reused`, and a
+        # refusal that returned no pid captured nothing. So "what did this
+        # invocation create" is exactly `pid is not None and not reused`, and
+        # the undo runs in reverse order of creation -- the UI, then the service
+        # it was pointed at.
+        if ui_start.pid is not None and not ui_start.reused:
+            # `stop_remote_access=False`, the same distinction the stale-UI
+            # restart above makes, and for the same reason: `vibe start` never
+            # brings a tunnel up. `remote_access.start()` is reached only from
+            # the UI's explicit endpoint and from `vibe remote`; UI startup only
+            # starts monitors. Any tunnel alive here therefore predates this
+            # command, and tearing it down would destroy a remote URL this
+            # invocation did not create -- the one irreversible mistake
+            # available to a rollback.
+            runtime.stop_ui(stop_remote_access=False)
         if not service_reused:
             # A service that was already running is not ours to stop, and against
             # one this command has then changed nothing to undo. stop_service()

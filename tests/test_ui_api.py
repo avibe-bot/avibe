@@ -2216,6 +2216,84 @@ def test_install_agent_updates_existing_private_backend(monkeypatch, tmp_path, b
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_install_agent_never_upgrades_an_external_cli_for_a_missing_private_backend(
+    monkeypatch, tmp_path, backend
+):
+    """A deleted private backend must not hand the upgrade to the user's own CLI.
+
+    The configured path still names the backend this Runtime installed; only the
+    executable is gone. ``resolve_cli_path`` then falls back to the bare name on
+    PATH and finds whatever the user has installed themselves. Deciding
+    ownership from that result alone ran ``claude update`` / the Codex npm
+    upgrade / ``opencode upgrade`` against a binary this Runtime does not own --
+    the one thing an app-private backend promises never to touch -- and the
+    fail-closed guard further down was never reached, because something had
+    resolved.
+    """
+
+    missing = tmp_path / "backends" / backend / "releases" / "old" / backend
+    external = tmp_path / "usr" / "local" / "bin" / backend
+    config = SimpleNamespace(
+        agents=SimpleNamespace(**{backend: SimpleNamespace(cli_path=str(missing))})
+    )
+    managed: list[str] = []
+
+    def never_runs(*args, **kwargs):
+        raise AssertionError(f"the user's own {backend} was invoked: {args} {kwargs}")
+
+    monkeypatch.setattr(api, "load_config", lambda: config)
+    # Exactly what discovery does once the configured executable is gone.
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _value: str(external))
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda path: path == str(missing))
+    monkeypatch.setattr(api, "is_private_desktop_runtime_path", lambda _path: False)
+    monkeypatch.setattr(api, "_run_install_command", never_runs)
+    monkeypatch.setattr(api.subprocess, "run", never_runs)
+    monkeypatch.setattr(api.subprocess, "Popen", never_runs)
+    monkeypatch.setattr(
+        api,
+        "_run_desktop_backend_install",
+        lambda name, _truncate: managed.append(name) or {"ok": True, "path": "managed"},
+    )
+
+    result = api.install_agent(backend)
+
+    assert result["ok"] is True
+    assert managed == [backend], "the missing private backend was not reinstalled privately"
+
+
+def test_install_agent_blocks_a_missing_private_runtime_codex_without_reaching_the_external_one(
+    monkeypatch, tmp_path
+):
+    """Same hole, one branch over: the older Runtime's Codex tree.
+
+    Nothing installs it back here -- that Runtime is gone -- so the honest answer
+    names the path it refused, not the external binary discovery substituted.
+    """
+
+    runtime_root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
+    missing = runtime_root / "tools" / "bin" / "codex"
+    external = tmp_path / "usr" / "local" / "bin" / "codex"
+    config = SimpleNamespace(agents=SimpleNamespace(codex=SimpleNamespace(cli_path=str(missing))))
+
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(api, "load_config", lambda: config)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _value: str(external))
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda _path: False)
+    monkeypatch.setattr(api, "desktop_backend_toolchain", lambda: None)
+    monkeypatch.setattr(
+        api.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("a desktop-managed Codex must not self-update"),
+    )
+
+    result = api.install_agent("codex")
+
+    assert result["ok"] is False
+    assert result["code"] == "desktop_managed_backend"
+    assert result["path"] == str(missing)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 def test_backend_runtime_checks_updates_for_private_backend(monkeypatch, tmp_path, backend):
     managed = tmp_path / "backends" / backend / "releases" / "one" / backend
     config = SimpleNamespace(

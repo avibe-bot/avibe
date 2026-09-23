@@ -7288,10 +7288,31 @@ def install_agent(name: str) -> dict:
     # multiple install sources, so choose npm/brew/self-update by source.
     configured_path = _configured_agent_cli_path(name)
     existing_path = resolve_cli_path(configured_path)
-    if existing_path:
-        if is_desktop_backend_path(existing_path):
-            return _run_desktop_backend_install(name, _truncate_output)
-        if name == "codex" and is_private_desktop_runtime_path(existing_path):
+
+    def _owned_path(under_app_root) -> str | None:
+        """The app-private path this Runtime owns, configured or discovered.
+
+        The configured path has to be judged too, and on its own. It names the
+        backend this Runtime installed and it keeps naming it after the
+        executable is deleted -- at which point ``resolve_cli_path`` falls back
+        to finding the bare name on PATH and hands back the user's own
+        ``claude``/``codex``/``opencode``. Judging only that result would run the
+        external upgrade against a binary this Runtime does not own, mutating
+        user or system state, and would never reach the fail-closed guard below,
+        which is only entered when nothing resolved at all.
+        """
+
+        if under_app_root(configured_path):
+            return configured_path
+        if existing_path is not None and under_app_root(existing_path):
+            return existing_path
+        return None
+
+    if _owned_path(is_desktop_backend_path) is not None:
+        return _run_desktop_backend_install(name, _truncate_output)
+    if name == "codex":
+        private_runtime_path = _owned_path(is_private_desktop_runtime_path)
+        if private_runtime_path is not None:
             if desktop_backend_toolchain() is not None:
                 return _run_desktop_backend_install(name, _truncate_output)
             return {
@@ -7299,8 +7320,11 @@ def install_agent(name: str) -> dict:
                 "code": "desktop_managed_backend",
                 "message": backend_t("desktopRuntime.backendUpgrade", _configured_backend_language()),
                 "output": None,
-                "path": existing_path,
+                # The path we refused to update, not whatever discovery found in
+                # its place -- the message is about that backend.
+                "path": private_runtime_path,
             }
+    if existing_path:
         if name == "claude":
             cmd = [existing_path, "update"]
             command_env = None

@@ -85,6 +85,13 @@ pub struct InstalledPrivateRuntime {
     pub node: PathBuf,
     pub npm_cli: PathBuf,
     pub runtime_id: String,
+    /// True when `prepare()` found this tree already installed and valid.
+    ///
+    /// False means this launch paid to extract it. The distinction is invisible
+    /// to the user and decides how long the first Runtime call will take, so it
+    /// is the fact the bootstrap log exists to record: an install that reports
+    /// `extracted` on every launch is invalidating itself between launches.
+    pub reused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +122,10 @@ impl PrivateRuntimeBundle {
         for candidate in [&primary_dir, &repair_dir] {
             if path_present(candidate) {
                 if let Ok(runtime) = installed_runtime(candidate, &manifest) {
-                    return Ok(runtime);
+                    return Ok(InstalledPrivateRuntime {
+                        reused: true,
+                        ..runtime
+                    });
                 }
             }
         }
@@ -129,9 +139,19 @@ impl PrivateRuntimeBundle {
             repair_dir
         } else {
             // Both independently installed copies failed integrity validation.
-            // Never execute either one, and do not mutate a directory that a
-            // still-running daemon may have open.
-            return Err(PrivateRuntimeError::ArchiveVerification);
+            // Never execute either one — but refusing here is a dead end with no
+            // way out except deleting a directory by hand, and two copies is not
+            // a large enough margin to strand an install on.
+            //
+            // The reason the old code refused still holds: a daemon started from
+            // a copy that was valid at launch may have its files open, and a tree
+            // partially replaced underneath a running process is worse than the
+            // failure that got us here. Renaming is what satisfies both. It frees
+            // the name atomically without touching a single file the daemon
+            // holds, so the reinstall below lands on a name nothing can be
+            // reading, and the count of installed copies stays at two.
+            discard_install_path(&self.install_root, &primary_dir)?;
+            primary_dir
         };
 
         let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::SeqCst);
@@ -310,6 +330,28 @@ fn valid_relative_path(value: &str) -> bool {
 
 fn path_present(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
+}
+
+/// Moves an installed copy aside so its name can be reused.
+///
+/// Deleting in place is what this avoids. `remove_dir_all` on a tree a running
+/// Runtime is executing from succeeds on Unix and fails partway through on
+/// Windows, where a mapped executable cannot be unlinked — and a half-deleted
+/// tree under a live process is a worse state than the invalid one it replaced.
+/// A rename either moves the whole thing or moves none of it, and the open
+/// handles a daemon holds keep working across it.
+///
+/// The discarded copy is then removed on a best-effort basis: it is already
+/// unreachable by name, and `prune_superseded` sweeps whatever is left after
+/// the next successful launch.
+fn discard_install_path(install_root: &Path, path: &Path) -> Result<(), PrivateRuntimeError> {
+    let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    let discarded = install_root.join(format!(".discard-{}-{sequence}", std::process::id()));
+    // A machine that cannot even rename the directory reports what it reported
+    // before this became recoverable, rather than pretending it installed.
+    fs::rename(path, &discarded).map_err(|_| PrivateRuntimeError::ArchiveVerification)?;
+    let _ = fs::remove_dir_all(&discarded);
+    Ok(())
 }
 
 fn remove_install_path(path: &Path) -> Result<(), PrivateRuntimeError> {
@@ -539,6 +581,9 @@ fn installed_runtime(
         node: root.join(&manifest.node_entrypoint),
         npm_cli: root.join(&manifest.npm_entrypoint),
         runtime_id: manifest.archive_sha256.clone(),
+        // Validating a tree says nothing about who put it there. Only the reuse
+        // scan in `prepare()` knows it did not extract this one.
+        reused: false,
     })
 }
 
@@ -651,6 +696,11 @@ mod tests {
         let second = bundle.prepare().expect("existing install");
 
         assert_eq!(first.root, second.root);
+        // The distinction the bootstrap log is built to record. An install that
+        // keeps reporting `extracted` is invalidating itself between launches,
+        // and every launch then pays a cold tree's start-up cost.
+        assert!(!first.reused, "the first launch extracted this tree");
+        assert!(second.reused, "the second launch must not extract it again");
         assert!(first.root.ends_with(&manifest.archive_sha256[..16]));
         assert!(first.python.is_file());
         assert!(first.node.is_file());
@@ -818,20 +868,73 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// Both slots invalid used to be terminal: the user's only way out was
+    /// deleting a directory by hand. Nothing here relaxes verification — a
+    /// tampered tree is still never executed — but the recovery is a reinstall
+    /// from the verified archive rather than a refusal, and it repeats.
     #[test]
-    fn two_tampered_install_slots_fail_closed() {
+    fn two_tampered_install_slots_are_reinstalled_rather_than_stranded() {
         let root = scratch("installed-double-tamper");
-        write_bundle(&root, None);
-        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let manifest = write_bundle(&root, None);
+        let install_root = root.join("installs");
+        let version_dir = install_root.join(&manifest.runtime_version);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+
         let primary = bundle.prepare().expect("primary install");
         fs::write(&primary.python, b"tampered").expect("tamper primary");
         let repair = bundle.prepare().expect("repair install");
         fs::write(&repair.node, b"tampered").expect("tamper repair");
+        assert_ne!(primary.root, repair.root, "the two slots are distinct copies");
 
-        assert!(matches!(
-            bundle.prepare(),
-            Err(PrivateRuntimeError::ArchiveVerification)
-        ));
+        // Three rounds, because a single escape hatch that only works once is
+        // still a dead end for the second mutation.
+        for round in 0..3 {
+            let recovered = bundle.prepare().expect("both slots invalid still recovers");
+            assert!(!recovered.reused, "round {round} reused a tampered tree");
+            assert_eq!(
+                recovered.root, primary.root,
+                "the reinstall takes the freed primary name"
+            );
+            assert_eq!(
+                fs::read(&recovered.python).expect("reinstalled interpreter"),
+                b"runtime"
+            );
+            assert!(
+                bundle.prepare().expect("the recovered install is reusable").reused,
+                "round {round} could not reuse what it had just installed"
+            );
+
+            // Recovery must not grow the install by a copy per failure: the
+            // displaced tree is discarded, not accumulated.
+            let mut installed: Vec<String> = fs::read_dir(&version_dir)
+                .expect("version directory")
+                .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            installed.sort();
+            assert_eq!(
+                installed,
+                [
+                    manifest.archive_sha256[..16].to_owned(),
+                    format!("{}-repair", &manifest.archive_sha256[..16]),
+                ],
+                "round {round} left more than the two install slots"
+            );
+            assert_eq!(
+                fs::read_dir(&install_root)
+                    .expect("install root")
+                    .filter(|entry| {
+                        let name = entry.as_ref().expect("entry").file_name();
+                        name.to_string_lossy().starts_with(".discard-")
+                    })
+                    .count(),
+                0,
+                "round {round} left a discarded copy behind"
+            );
+
+            // Set up the next round from the state this one produced: the repair
+            // slot is still tampered, so only the primary has to be re-broken.
+            fs::write(&recovered.python, b"tampered").expect("tamper for the next round");
+        }
         fs::remove_dir_all(root).ok();
     }
 

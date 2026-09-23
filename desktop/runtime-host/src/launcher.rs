@@ -19,9 +19,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap_log::BootstrapLog;
 use crate::health::RuntimeReadiness;
 use crate::origin::LoopbackOrigin;
-use crate::private_runtime::PrivateRuntimeBundle;
+use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
 use crate::status::BootstrapNoticeCode;
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
@@ -76,6 +77,15 @@ const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 /// leaves room for slower hardware. The budget is only spent in full when the
 /// endpoint is genuinely broken, and that failure is already retryable.
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How much of the endpoint helper's stderr the bootstrap log keeps.
+const MAX_ENDPOINT_STDERR_BYTES: usize = 4 * 1024;
+
+/// How long the stderr reader is given to reach EOF once the query is over.
+///
+/// A grandchild that inherited the pipe can hold it open after the child is
+/// gone, and a diagnostic is worth waiting a moment for and nothing more.
+const ENDPOINT_STDERR_DRAIN: Duration = Duration::from_secs(2);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
 const START_RECEIPT_PREFIX: &[u8] = b"@avibe-start-receipt:";
 const MAX_START_OUTPUT_BYTES: usize = 65_536;
@@ -327,6 +337,9 @@ impl RuntimeLauncher for InstalledVibeLauncher {
             command: RuntimeCommand::installed(self.resolve_executable()?),
             expected_runtime_id: None,
             cleanup: None,
+            // A development shell drives an install it does not own and has no
+            // application data directory to write diagnostics into.
+            log: BootstrapLog::disabled(),
         }))
     }
 }
@@ -336,20 +349,25 @@ impl RuntimeLauncher for InstalledVibeLauncher {
 pub struct BundledVibeLauncher {
     bundle: PrivateRuntimeBundle,
     backend_root: PathBuf,
+    log: BootstrapLog,
 }
 
 impl BundledVibeLauncher {
-    pub fn new(bundle_dir: PathBuf, install_root: PathBuf, backend_root: PathBuf) -> Self {
+    pub fn new(bundle_dir: PathBuf, install_root: PathBuf, backend_root: PathBuf, log: BootstrapLog) -> Self {
         Self {
             bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
             backend_root,
+            log,
         }
     }
 }
 
 impl RuntimeLauncher for BundledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
-        let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+        let started = Instant::now();
+        let prepared = self.bundle.prepare();
+        record_runtime_prepare(&self.log, &prepared, started.elapsed());
+        let runtime = prepared.map_err(|_| LaunchError::RuntimeInstall)?;
         let runtime_id = runtime.runtime_id.clone();
         Ok(Arc::new(ResolvedVibeExecutable {
             command: RuntimeCommand::private(
@@ -363,6 +381,7 @@ impl RuntimeLauncher for BundledVibeLauncher {
             ),
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
+            log: self.log.clone(),
         }))
     }
 
@@ -415,11 +434,12 @@ struct ResolvedVibeExecutable {
     command: RuntimeCommand,
     expected_runtime_id: Option<String>,
     cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
+    log: BootstrapLog,
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
-        query_endpoint(&self.command)
+        query_endpoint(&self.command, &self.log)
     }
 
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
@@ -514,7 +534,20 @@ impl RuntimeCommand {
             executable: python,
             // Isolated mode excludes the user site and PYTHONPATH. The Avibe
             // wheel lives in this interpreter's own site-packages.
-            prefix_args: vec![OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")],
+            //
+            // `-B` is not redundant with the PYTHONDONTWRITEBYTECODE below, and
+            // removing it reintroduces a bug that cost two days: `-I` implies
+            // `-E`, so this interpreter ignores every PYTHON* variable — including
+            // that one. Without the flag the Runtime writes `.pyc` files into its
+            // own install tree, `verify_installed_tree` then finds a tree the
+            // manifest no longer describes, and `prepare()` re-extracts 358MB on
+            // every single launch until both install slots are invalid.
+            prefix_args: vec![
+                OsString::from("-I"),
+                OsString::from("-B"),
+                OsString::from("-m"),
+                OsString::from("vibe"),
+            ],
             environment: vec![
                 (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
@@ -526,6 +559,9 @@ impl RuntimeCommand {
                 (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
                 (OsString::from(DESKTOP_RUNTIME_ROOT_ENV), runtime_root.into_os_string()),
                 (OsString::from("AVIBE_DESKTOP_RUNTIME_ID"), OsString::from(runtime_id)),
+                // For descendants: child interpreters the Runtime starts do not
+                // all run under `-I`, and those do honour this. The `-B` above is
+                // what covers this process itself.
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
         }
@@ -546,14 +582,60 @@ struct EndpointDescriptor {
     origin: String,
 }
 
-fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchError> {
+/// One run of the endpoint helper, including everything a `LaunchError` cannot
+/// carry: how long it took, what it printed on stderr, and the exit status it
+/// actually had rather than the fact that it was not zero.
+struct EndpointAttempt {
+    result: Result<LoopbackOrigin, LaunchError>,
+    status: Option<std::process::ExitStatus>,
+    stderr: Option<Vec<u8>>,
+    elapsed: Duration,
+}
+
+fn query_endpoint(runtime: &RuntimeCommand, log: &BootstrapLog) -> Result<LoopbackOrigin, LaunchError> {
+    query_endpoint_within(runtime, log, ENDPOINT_TIMEOUT)
+}
+
+/// The timeout is a parameter so a test can drive the kill path in milliseconds
+/// instead of a minute. Production has exactly one caller and it passes
+/// `ENDPOINT_TIMEOUT`.
+fn query_endpoint_within(
+    runtime: &RuntimeCommand,
+    log: &BootstrapLog,
+    timeout: Duration,
+) -> Result<LoopbackOrigin, LaunchError> {
+    let started = Instant::now();
+    let mut status = None;
+    let mut stderr_reader = None;
+    let result = endpoint_descriptor(runtime, timeout, &mut status, &mut stderr_reader);
+    // Collected after the query returns, so a timeout that had to kill the child
+    // still reports what that child said before it was killed.
+    let stderr = stderr_reader.and_then(|reader| reader.recv_timeout(ENDPOINT_STDERR_DRAIN).ok());
+    let attempt = EndpointAttempt {
+        result,
+        status,
+        stderr,
+        elapsed: started.elapsed(),
+    };
+    record_endpoint_attempt(log, &attempt);
+    attempt.result
+}
+
+fn endpoint_descriptor(
+    runtime: &RuntimeCommand,
+    timeout: Duration,
+    status_slot: &mut Option<std::process::ExitStatus>,
+    stderr_slot: &mut Option<mpsc::Receiver<Vec<u8>>>,
+) -> Result<LoopbackOrigin, LaunchError> {
     let mut command = Command::new(&runtime.executable);
     runtime.apply(&mut command);
     command
         .args(ENDPOINT_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Discarding this is what left us with a notice code and nothing else
+        // when discovery failed on a machine we could not reach.
+        .stderr(Stdio::piped())
         .env(DESKTOP_SHELL_ENV, "1");
     #[cfg(windows)]
     {
@@ -563,6 +645,9 @@ fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchErro
         command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command.spawn().map_err(LaunchError::EndpointSpawn)?;
+    if let Some(stderr) = child.stderr.take() {
+        *stderr_slot = Some(spawn_stderr_tail(stderr));
+    }
     let stdout = child.stdout.take().ok_or(LaunchError::EndpointOutput)?;
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -574,7 +659,7 @@ fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchErro
         let _ = sender.send(result);
     });
 
-    let deadline = Instant::now() + ENDPOINT_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -589,6 +674,7 @@ fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchErro
             Err(error) => return Err(LaunchError::EndpointSpawn(error)),
         }
     };
+    *status_slot = Some(status);
     if !status.success() {
         return Err(LaunchError::EndpointExit);
     }
@@ -599,6 +685,97 @@ fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchErro
         .map_err(|_| LaunchError::EndpointTimeout)?
         .map_err(|_| LaunchError::EndpointOutput)?;
     parse_endpoint_descriptor(&bytes)
+}
+
+/// Drains the child's stderr on its own thread, keeping only the tail.
+///
+/// The pipe must be read while the child is running. A child that fills it and
+/// is never drained blocks on writing its own diagnostics, which would make
+/// this log the cause of the timeout it exists to explain. Keeping the tail
+/// rather than the head is deliberate: a Python traceback puts the cause last.
+fn spawn_stderr_tail(mut stderr: std::process::ChildStderr) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut tail: Vec<u8> = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    tail.extend_from_slice(&chunk[..read]);
+                    if tail.len() > MAX_ENDPOINT_STDERR_BYTES {
+                        tail.drain(..tail.len() - MAX_ENDPOINT_STDERR_BYTES);
+                    }
+                }
+            }
+        }
+        let _ = sender.send(tail);
+    });
+    receiver
+}
+
+/// The one place a failed discovery becomes something a person can read.
+fn record_endpoint_attempt(log: &BootstrapLog, attempt: &EndpointAttempt) {
+    let mut fields = vec![
+        ("outcome", endpoint_outcome(&attempt.result).to_owned()),
+        ("ms", attempt.elapsed.as_millis().to_string()),
+    ];
+    if let Some(status) = attempt.status {
+        fields.push((
+            "exit",
+            match status.code() {
+                Some(code) => code.to_string(),
+                // A signalled child has no code, and on Unix the signal is the
+                // whole story.
+                None => status.to_string(),
+            },
+        ));
+    }
+    if let Err(LaunchError::EndpointSpawn(error)) = &attempt.result {
+        fields.push(("error", error.to_string()));
+    }
+    if let Some(stderr) = attempt.stderr.as_ref().filter(|bytes| !bytes.is_empty()) {
+        fields.push(("stderr", String::from_utf8_lossy(stderr).into_owned()));
+    }
+    log.record("endpoint.query", &fields);
+}
+
+fn endpoint_outcome(result: &Result<LoopbackOrigin, LaunchError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(LaunchError::EndpointSpawn(_)) => "spawn_failed",
+        Err(LaunchError::EndpointTimeout) => "timeout",
+        Err(LaunchError::EndpointExit) => "exit_failed",
+        Err(LaunchError::EndpointOutput) => "unreadable_output",
+        Err(LaunchError::InvalidOrigin) => "invalid_origin",
+        Err(_) => "failed",
+    }
+}
+
+/// Records what `prepare()` did, which is the fact that separates a slow first
+/// launch from an install that silently re-extracts on every launch.
+fn record_runtime_prepare(
+    log: &BootstrapLog,
+    prepared: &Result<InstalledPrivateRuntime, PrivateRuntimeError>,
+    elapsed: Duration,
+) {
+    let (outcome, detail) = match prepared {
+        Ok(runtime) => (
+            if runtime.reused { "reused" } else { "extracted" },
+            ("root", runtime.root.display().to_string()),
+        ),
+        // The variant, with its inner I/O error: "could not be installed" alone
+        // does not distinguish a full disk from a permission denial.
+        Err(error) => ("failed", ("error", format!("{error:?}"))),
+    };
+    log.record(
+        "runtime.prepare",
+        &[
+            ("outcome", outcome.to_owned()),
+            ("ms", elapsed.as_millis().to_string()),
+            detail,
+        ],
+    );
 }
 
 fn parse_endpoint_descriptor(bytes: &[u8]) -> Result<LoopbackOrigin, LaunchError> {
@@ -1232,8 +1409,12 @@ mod tests {
         std::fs::write(install_root.join("corrupt"), b"not a valid Runtime").expect("broken private Runtime file");
         std::fs::write(backend_root.join("codex"), b"private backend").expect("private backend file");
         std::fs::write(user_state.join("config.json"), b"user state").expect("user state file");
-        let launcher =
-            BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root.clone());
+        let launcher = BundledVibeLauncher::new(
+            root.join("missing-bundle"),
+            install_root.clone(),
+            backend_root.clone(),
+            BootstrapLog::disabled(),
+        );
 
         assert!(launcher
             .remove_private_runtime(RuntimeRemovalState::Inactive)
@@ -1257,8 +1438,12 @@ mod tests {
         std::fs::create_dir_all(&backend_root).expect("private backend root");
         std::fs::write(install_root.join("active"), b"potentially active").expect("private Runtime file");
         std::fs::write(backend_root.join("active"), b"potentially active").expect("private backend file");
-        let launcher =
-            BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root.clone());
+        let launcher = BundledVibeLauncher::new(
+            root.join("missing-bundle"),
+            install_root.clone(),
+            backend_root.clone(),
+            BootstrapLog::disabled(),
+        );
 
         assert!(matches!(
             launcher.remove_private_runtime(RuntimeRemovalState::Unknown),
@@ -1284,8 +1469,12 @@ mod tests {
         std::fs::create_dir_all(&install_root).expect("private Runtime root");
         std::fs::write(install_root.join("runtime"), b"private Runtime").expect("private Runtime file");
         std::fs::write(&backend_root, b"not a directory").expect("unsafe backend root");
-        let launcher =
-            BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root.clone());
+        let launcher = BundledVibeLauncher::new(
+            root.join("missing-bundle"),
+            install_root.clone(),
+            backend_root.clone(),
+            BootstrapLog::disabled(),
+        );
 
         assert!(matches!(
             launcher.remove_private_runtime(RuntimeRemovalState::Inactive),
@@ -1311,7 +1500,12 @@ mod tests {
         std::fs::create_dir_all(&external).expect("external backend root");
         std::fs::write(external.join("preserve"), b"external backend").expect("external backend file");
         symlink(&external, &backend_root).expect("unsafe backend symlink");
-        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root);
+        let launcher = BundledVibeLauncher::new(
+            root.join("missing-bundle"),
+            install_root.clone(),
+            backend_root,
+            BootstrapLog::disabled(),
+        );
 
         assert!(matches!(
             launcher.remove_private_runtime(RuntimeRemovalState::Inactive),
@@ -1501,6 +1695,231 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Every `.pyc` file and `__pycache__` directory under a tree.
+    #[cfg(unix)]
+    fn tree_bytecode(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_owned()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name() == Some(OsStr::new("__pycache__")) {
+                        found.push(path);
+                    } else {
+                        pending.push(path);
+                    }
+                } else if path.extension() == Some(OsStr::new("pyc")) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// The bug that invalidated an install on every launch, and the one test
+    /// that could have caught it.
+    ///
+    /// `RuntimeCommand::private` asks for no bytecode twice: once by flag and
+    /// once by environment variable. Only the flag works — `-I` implies `-E`,
+    /// which makes the interpreter ignore every PYTHON* variable, including the
+    /// one set right beside it. Nothing about that is visible in the code; it is
+    /// only visible in what a real interpreter leaves on disk. So this runs the
+    /// real interpreter with the real prefix arguments and the real environment,
+    /// substituting only the module to import, and counts the files written.
+    #[cfg(unix)]
+    #[test]
+    fn the_private_interpreter_writes_no_bytecode_into_its_own_install_tree() {
+        let python = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+            .map(|entry| entry.join("python3"))
+            .find(|candidate| is_executable_file(candidate))
+            .expect("a python3 interpreter to run the private command against");
+        let dir = scratch_dir("no-bytecode");
+        let tree = dir.join("runtime");
+        let package = tree.join("avibe_bytecode_probe");
+        std::fs::create_dir_all(&package).expect("probe package directory");
+        std::fs::write(package.join("__init__.py"), "VALUE = 1\n").expect("probe package");
+        std::fs::write(package.join("module.py"), "from . import VALUE\n").expect("probe module");
+
+        let command = RuntimeCommand::private(
+            tree.clone(),
+            python,
+            tree.join("tools/bin/node"),
+            tree.join("tools/npm/bin/npm-cli.js"),
+            dir.join("backends"),
+            &"a".repeat(64),
+            env::var_os("PATH").as_deref(),
+        );
+        let mut process = Command::new(&command.executable);
+        for (name, value) in &command.environment {
+            process.env(name, value);
+        }
+        // Everything up to `-m vibe`, which is the part that cannot resolve here.
+        for argument in command.prefix_args.iter().take_while(|argument| *argument != "-m") {
+            process.arg(argument);
+        }
+        // `-I` also drops PYTHONPATH, so the probe package is put on the path
+        // the only way an isolated interpreter still accepts.
+        let status = process
+            .arg("-c")
+            .arg(format!(
+                "import sys; sys.path.insert(0, {:?}); import avibe_bytecode_probe.module",
+                tree.display().to_string()
+            ))
+            .status()
+            .expect("the private interpreter runs");
+        assert!(status.success(), "the probe import itself must succeed: {status}");
+
+        let bytecode = tree_bytecode(&tree);
+        assert!(
+            bytecode.is_empty(),
+            "the Runtime wrote bytecode into the tree `verify_installed_tree` checks: {bytecode:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The stderr this used to send to the null device is where the cause lives.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_endpoint_query_records_its_stderr_and_exit_status() {
+        let dir = scratch_dir("endpoint-stderr");
+        let executable = write_fake_runtime(
+            &dir,
+            "#!/bin/sh\nprintf '%s\\n' 'Traceback (most recent call last):' 'ModuleNotFoundError: vibe' >&2\nexit 3\n",
+        );
+        let log = BootstrapLog::at(dir.join("bootstrap.log"));
+
+        let failure = query_endpoint(&RuntimeCommand::installed(executable), &log);
+
+        assert!(matches!(failure, Err(LaunchError::EndpointExit)));
+        let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("the attempt is recorded");
+        assert_eq!(written.lines().count(), 1, "one attempt is one record: {written}");
+        assert!(written.contains("endpoint.query"), "{written}");
+        assert!(written.contains("outcome=\"exit_failed\""), "{written}");
+        assert!(written.contains("exit=\"3\""), "{written}");
+        assert!(
+            written.contains("ModuleNotFoundError: vibe"),
+            "the discarded stderr is the whole point: {written}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A timeout is the failure we could least explain, so it must not be the
+    /// one that records nothing: the child is killed, and what it said before
+    /// that is still collected.
+    #[cfg(unix)]
+    #[test]
+    fn an_endpoint_that_never_answers_records_the_timeout_rather_than_nothing() {
+        let dir = scratch_dir("endpoint-timeout");
+        // The fixture runs twice. The first run takes the `exit 0` branch and
+        // only leaves the flag behind; the second finds it and blocks forever,
+        // which is the child this test is about.
+        //
+        // The warm-up is not decoration. Measured under a full `cargo test`, the
+        // FIRST execution of a just-written executable takes ~4.8s to reach its
+        // own first line -- macOS evaluates a new binary before it runs -- while
+        // every later one takes ~10-25ms. Inside a sub-second deadline that cost
+        // lands on the wrong side of the kill, and the test then proves nothing
+        // while looking like a timing flake. Paying it through a run that exits
+        // on its own moves it outside the window by construction rather than by
+        // choosing a budget large enough to hide it.
+        //
+        // `exec` so the sleep replaces the shell: one process to kill, and the
+        // stderr pipe closes with it rather than being held open by a survivor.
+        // The message goes through the external `echo` because `exec` replaces
+        // the image without flushing whatever the shell still holds in its own
+        // stdio buffers.
+        let warmed = dir.join("warmed");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\n/bin/echo 'still importing' >&2\nif [ -e {flag} ]; then exec sleep 30; fi\n: > {flag}\nexit 0\n",
+                flag = warmed.display()
+            ),
+        );
+        let warm_up = Command::new(&executable)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("the fixture runs");
+        assert!(
+            warm_up.success() && warmed.exists(),
+            "the warm-up run must complete: {warm_up}"
+        );
+        let log = BootstrapLog::at(dir.join("bootstrap.log"));
+
+        let failure = query_endpoint_within(
+            &RuntimeCommand::installed(executable),
+            &log,
+            Duration::from_millis(1_500),
+        );
+
+        assert!(matches!(failure, Err(LaunchError::EndpointTimeout)));
+        let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("the attempt is recorded");
+        assert!(written.contains("outcome=\"timeout\""), "{written}");
+        assert!(
+            !written.contains(" exit="),
+            "a child that was killed has no exit status to report: {written}"
+        );
+        assert!(
+            written.contains("still importing"),
+            "output from before the kill is still worth having: {written}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reused against extracted is the line that settles whether an install is
+    /// quietly reinstalling itself on every launch.
+    #[test]
+    fn a_prepare_records_whether_it_reused_an_install_or_extracted_one() {
+        let dir = scratch_dir("prepare-record");
+        let log = BootstrapLog::at(dir.join("bootstrap.log"));
+        let installed = |reused: bool| InstalledPrivateRuntime {
+            root: PathBuf::from("/installs/3.1.1/20aa5822aa3595e1"),
+            python: PathBuf::from("/installs/3.1.1/20aa5822aa3595e1/python/bin/python3"),
+            node: PathBuf::from("/installs/3.1.1/20aa5822aa3595e1/tools/bin/node"),
+            npm_cli: PathBuf::from("/installs/3.1.1/20aa5822aa3595e1/tools/npm/bin/npm-cli.js"),
+            runtime_id: "a".repeat(64),
+            reused,
+        };
+
+        record_runtime_prepare(&log, &Ok(installed(true)), Duration::from_millis(5_123));
+        record_runtime_prepare(&log, &Ok(installed(false)), Duration::from_millis(41_000));
+        record_runtime_prepare(
+            &log,
+            &Err(PrivateRuntimeError::ArchiveVerification),
+            Duration::from_millis(12),
+        );
+
+        let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("the attempts are recorded");
+        let records: Vec<&str> = written.lines().collect();
+        assert_eq!(records.len(), 3, "{written}");
+        assert!(
+            records[0].contains("outcome=\"reused\"")
+                && records[0].contains("ms=\"5123\"")
+                // The install directory is named for the payload digest, which is
+                // what makes a user-sent log identify its own build.
+                && records[0].contains("20aa5822aa3595e1"),
+            "{}",
+            records[0]
+        );
+        assert!(records[1].contains("outcome=\"extracted\""), "{}", records[1]);
+        assert!(
+            records[2].contains("outcome=\"failed\"") && records[2].contains("ArchiveVerification"),
+            "{}",
+            records[2]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_superseded_runtime_is_stopped_through_the_cli_contract() {
@@ -1599,7 +2018,12 @@ mod tests {
         assert_eq!(command.executable, python);
         assert_eq!(
             command.prefix_args,
-            [OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")]
+            [
+                OsString::from("-I"),
+                OsString::from("-B"),
+                OsString::from("-m"),
+                OsString::from("vibe")
+            ]
         );
         let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
         let path_entries: Vec<_> =

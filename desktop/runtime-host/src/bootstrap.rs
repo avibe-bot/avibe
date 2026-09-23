@@ -1009,6 +1009,7 @@ mod tests {
                     root.join("missing-bundle"),
                     installs.clone(),
                     backends.clone(),
+                    crate::BootstrapLog::disabled(),
                 ))),
                 ..RecordingLauncher::default()
             });

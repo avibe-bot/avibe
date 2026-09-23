@@ -24,11 +24,11 @@ mod notifications;
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
 
-#[cfg(feature = "bundled-runtime")]
-use avibe_runtime_host::bundled_runtime_host;
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
 use avibe_runtime_host::default_runtime_host;
+#[cfg(feature = "bundled-runtime")]
+use avibe_runtime_host::{bundled_runtime_host, BootstrapLog, BOOTSTRAP_LOG_NAME};
 use avibe_runtime_host::{
     is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LaunchError,
     LoopbackOrigin, RuntimeHost, StatusSink,
@@ -1476,6 +1476,9 @@ pub fn run() {
                         app.path().resource_dir()?.join("runtime"),
                         app.path().app_local_data_dir()?.join("runtime"),
                         app.path().app_local_data_dir()?.join("backends"),
+                        // Beside the Runtime it describes, so a user asked for
+                        // "the log next to your Avibe runtime folder" finds it.
+                        BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME)),
                     )?
                 }
                 #[cfg(not(feature = "bundled-runtime"))]

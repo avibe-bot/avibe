@@ -1026,13 +1026,116 @@ region that owns the invariant, not for the branch the reviewer happened to name
 A finding names an instance; the fix has to name the class, or the next instance
 is already written.
 
+## H19 — rc12: the private Runtime invalidated its own install
+
+rc12 launched once, then paid a full 358MB re-extraction on every later launch,
+and after two launches refused to start at all.
+
+### Mechanism
+
+`RuntimeCommand::private` runs the interpreter with `-I`, and `-I` implies `-E`:
+every `PYTHON*` variable is ignored, including the `PYTHONDONTWRITEBYTECODE=1`
+the launcher sets. The interpreter therefore wrote `__pycache__/*.pyc` into its
+own install tree. `verify_installed_tree` checks that tree against the archive
+manifest, so the next launch saw extra files, judged the copy invalid and
+extracted a fresh one into the repair slot. That copy was then invalidated the
+same way, and with both slots invalid `prepare()` returned
+`ArchiveVerification`: a bricked install whose only exit was deleting a
+directory by hand.
+
+### The fix
+
+- **`-B` beside `-I`.** A flag cannot be dropped by `-E`, so the launcher now
+  passes `-I -B -m vibe`. The test runs the real interpreter prefix against a
+  scratch tree and asserts no bytecode appears in it. Cost, measured on the
+  endpoint command: 7.50s cold, 3.30s warm — inside H17's 60s budget. Shipping
+  precompiled bytecode would remove that cost, but it is a packaging change and
+  `desktop-package.yml` is frozen for this release.
+- **Two invalid copies recover instead of stranding.** The old refusal existed
+  because a daemon started from a copy that was valid at launch may still have
+  its files open. `discard_install_path` keeps that safety: it renames the
+  primary slot to `.discard-<pid>-<seq>` (atomic, and open handles survive it),
+  then deletes the renamed copy best-effort, so the reinstall lands on a name
+  nothing is reading. A tampered tree is still never executed. This is a
+  deliberate contract change: `two_tampered_install_slots_fail_closed` is
+  replaced by `two_tampered_install_slots_are_reinstalled_rather_than_stranded`,
+  which repeats the double-tamper three times and asserts that exactly two slots
+  and no discarded copies remain after each round.
+- **A bootstrap log.** This takes up the deferred `stderr(Stdio::null())` ledger
+  entry below. The shell appends to `bootstrap.log` in the application's local
+  data directory (`~/Library/Application Support/bot.avibe.desktop/bootstrap.log`
+  on macOS), capped at 64 KiB and trimmed at line boundaries from the front
+  through a sibling file and a rename. It records one `runtime.prepare` line
+  (`reused` / `extracted` / `failed`, duration, root or error) and one
+  `endpoint.query` line per attempt (outcome, duration, exit status, error, and
+  up to 4 KiB of stderr tail). `reused` exists for this line: an install that
+  reports `extracted` on every launch is the rc12 defect in one word. Writing the
+  log never changes an outcome — every I/O error in it is dropped.
+
+### A timing fact the timeout test had to learn
+
+The endpoint-timeout test passed alone and failed under the full `cargo test`
+run. Instrumented, the first execution of a just-written executable on macOS
+took ~4.85s to reach its first line under that load; later executions of the
+same file took 10–25ms, and the spawn call itself returned in ~1.6ms. The test
+now runs its fixture once before the measured call, so that one-time cost sits
+outside the deadline by construction rather than inside a wider margin. The
+fixture writes its stderr through `/bin/echo`, because `exec` would discard the
+shell's own unflushed buffer.
+
+## H20 — review of `5da131969`: three findings
+
+- **F1 — rollback undid the service but not the UI.** This is the third reviewed
+  head in H18's class, so the breaker applies and the fix names the invariant
+  rather than the branch: *this invocation leaves running nothing it created.*
+  Created means `pid is not None and not reused` in the `ProcessStartInfo` that
+  `start_service` and `start_ui` already fill in, so no new state is needed. The
+  region's `except BaseException` undoes in reverse order: the UI, then the
+  service. `stop_ui` is called with `stop_remote_access=False`, because
+  `vibe start` never brings a tunnel up — `remote_access.start()` is reached only
+  from the UI's explicit endpoint and from `vibe remote` — so any tunnel alive at
+  rollback predates the command, and stopping it would destroy a remote URL this
+  invocation did not create. Consumers: an interrupt before the receipt with a UI
+  this invocation started (both stopped, UI first, tunnel kept); the same failure
+  with an adopted UI and a reused service (neither stopped); a receipt-builder
+  failure (both stopped); the success path (neither stopped). Mutations: dropping
+  the `ui_start.reused` scope fails only the adopted-UI test; removing the UI
+  stop fails the interrupt and receipt-builder tests.
+- **F2 — a missing private backend could upgrade an external CLI.**
+  `resolve_cli_path` falls back to basename discovery on `PATH`, so when the
+  configured desktop-managed path was missing, ownership was judged on whatever
+  external binary discovery found, and the generic upgrade ran against it.
+  Ownership is now judged on the configured path first and the discovered one
+  second. A missing managed backend routes to `_run_desktop_backend_install`,
+  and a missing private-runtime `codex` with no toolchain returns
+  `desktop_managed_backend` naming the configured path. Tests put a real external
+  CLI on `PATH` behind tripwires on every process-spawning seam. Mutation:
+  judging ownership on the discovered path alone fails four cases.
+- **F3 — `*` as the setup host.** `*` is a word, not an address; `getaddrinfo`
+  rejects it. **Fixed here, pre-existing on `master`, not introduced by this
+  PR:** uvicorn's bind on `master` fails the same way for the same input. It is
+  now normalised once, in `_normalized_bind_host` (to `0.0.0.0`, next to the
+  existing `[::1]` → `::1` unbracketing), which every listener derives from, and
+  the separate `*` rule in `requires_desktop_loopback_listener` is gone.
+  `_is_wildcard_setup_host` is unchanged. A test binds the `*` spelling for real.
+  Mutation: removing the normalisation fails three tests, including a real
+  `gaierror`.
+
+Also fixed in this head: `test_start_ui_replaces_stale_live_pid_when_health_check_fails`
+stubbed `ui_server_healthy`, but adoption on this branch is decided by
+`_ui_server_compatible`, which probes the real listener. The test therefore
+adopted whatever answered on `127.0.0.1:5123` — on a developer machine, their own
+running UI — and failed. It fails the same way at `5da131969` without this
+round's changes, and passes on CI only because nothing listens there. It now
+stubs the seam that decides.
+
 ## Known-by-design ledger additions
 
-- **Deferred.** `query_endpoint` sets `stderr(Stdio::null())` and the shell keeps
-  no log file, so an endpoint that fails on a user machine yields zero
-  diagnostics — the reason H17 had to be reproduced offline before it could be
-  explained. Left alone deliberately this round; worth deciding separately,
-  because the fix is a logging surface rather than a constant.
+- **Taken up in H19.** `query_endpoint` sets `stderr(Stdio::null())` and the
+  shell keeps no log file, so an endpoint that fails on a user machine yields
+  zero diagnostics — the reason H17 had to be reproduced offline before it could
+  be explained. The bootstrap log now records the endpoint's stderr tail and
+  whether each launch reused or extracted its Runtime.
 - **Deferred.** `vibe start` logged *"Started UI pid=6116 but required health
   checks did not pass"* during the rc10 run at 05:51:35, yet the packaging
   probe's own readiness poll passed moments later and the start receipt reported

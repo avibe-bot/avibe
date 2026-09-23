@@ -56,6 +56,8 @@ READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE = json.loads(
         ("100.97.103.112", "http://127.0.0.1:5123", ("100.97.103.112", "127.0.0.1")),
         ("::1", "http://[::1]:5123", ("::1",)),
         ("::", "http://[::1]:5123", ("::",)),
+        ("*", "http://127.0.0.1:5123", ("0.0.0.0",)),
+        ("[::1]", "http://[::1]:5123", ("::1",)),
         ("fd7a:115c:a1e0::42", "http://[::1]:5123", ("fd7a:115c:a1e0::42", "::1")),
     ],
 )
@@ -218,8 +220,20 @@ def test_bind_ui_sockets_adds_same_port_loopback_for_specific_bind(monkeypatch):
     assert calls == [("100.97.103.112", 5123), ("127.0.0.1", 5123)]
 
 
-@pytest.mark.parametrize("bind_host", ["0.0.0.0", "127.0.0.1", "::", "::1", "*"])
-def test_bind_ui_sockets_does_not_duplicate_wildcard_or_loopback(bind_host, monkeypatch):
+@pytest.mark.parametrize(
+    ("bind_host", "expected_listener"),
+    [
+        ("0.0.0.0", "0.0.0.0"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("::", "::"),
+        ("::1", "::1"),
+        # The two spellings a person can configure that are not addresses: the
+        # listener they produce has to be one a socket can be given.
+        ("*", "0.0.0.0"),
+        ("[::1]", "::1"),
+    ],
+)
+def test_bind_ui_sockets_does_not_duplicate_wildcard_or_loopback(bind_host, expected_listener, monkeypatch):
     calls = []
 
     def fake_bind(host, port):
@@ -229,7 +243,23 @@ def test_bind_ui_sockets_does_not_duplicate_wildcard_or_loopback(bind_host, monk
     monkeypatch.setattr("vibe.ui_server._bind_ui_socket", fake_bind)
 
     assert len(_bind_ui_sockets(bind_host, 5123)) == 1
-    assert calls == [(bind_host, 5123)]
+    assert calls == [(expected_listener, 5123)]
+
+
+def test_bind_ui_sockets_binds_the_wildcard_spelling_for_real():
+    """A stubbed bind cannot tell an address from a word, which is how this hid.
+
+    ``getaddrinfo`` is what rejects ``*``, so only a real bind shows whether the
+    resolved listener host is one the kernel accepts. Port 0 keeps it ephemeral
+    and the socket is closed straight away -- it is never listened on.
+    """
+
+    sockets = _bind_ui_sockets("*", 0)
+    try:
+        assert len(sockets) == 1
+    finally:
+        for sock in sockets:
+            sock.close()
 
 
 def test_bind_ui_sockets_closes_primary_when_loopback_bind_fails(monkeypatch):

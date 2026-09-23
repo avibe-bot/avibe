@@ -182,9 +182,21 @@ def is_private_desktop_runtime_path(
 
 
 def _normalized_bind_host(bind_host: str | None) -> str:
+    """Turn a configured setup host into something a socket can actually bind.
+
+    ``ui.setup_host`` holds what a person typed, and two of those spellings are
+    not addresses: ``[::1]`` is a URL rendering and ``*`` is a word for "every
+    interface". ``getaddrinfo`` rejects both, so any listener built from them
+    fails at bind -- which is where ``*`` has always failed, uvicorn's own bind
+    on ``master`` included. Resolving them here keeps the knowledge in one place
+    instead of teaching each listener the spellings.
+    """
+
     host = (bind_host or "127.0.0.1").strip()
     if host.startswith("[") and host.endswith("]"):
-        return host[1:-1]
+        host = host[1:-1]
+    if host == "*":
+        return "0.0.0.0"
     return host
 
 
@@ -203,8 +215,6 @@ def requires_desktop_loopback_listener(bind_host: str | None) -> bool:
     """Whether a specific primary bind needs a second loopback listener."""
 
     host = _normalized_bind_host(bind_host)
-    if host == "*":
-        return False
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
@@ -228,7 +238,9 @@ def requires_desktop_loopback_listener(bind_host: str | None) -> bool:
 def ui_listener_hosts(bind_host: str | None) -> tuple[str, ...]:
     """Return the primary listener plus any desktop-only loopback listener."""
 
-    primary = "127.0.0.1" if bind_host is None else bind_host.strip()
+    # The same normalisation every other helper here already applies, so the
+    # host that gets bound and the host they reason about cannot disagree.
+    primary = _normalized_bind_host(bind_host)
     if requires_desktop_loopback_listener(primary):
         return primary, desktop_loopback_host(primary)
     return (primary,)
