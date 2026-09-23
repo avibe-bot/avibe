@@ -1183,6 +1183,31 @@ class CodexAgent(BaseAgent):
             self._turn_registry.clear_session(base_session_id)
             self._clear_thread_developer_instructions(base_session_id)
 
+    async def retire_unowned_session_transport(self, cwd: str) -> bool:
+        """Reclaim only the exact cwd generation after its last Session ends."""
+
+        async with self._transport_locks.setdefault(cwd, asyncio.Lock()):
+            transport = self._transports.get(cwd)
+            if transport is None or self._session_mgr.sessions_for_cwd(cwd):
+                return False
+
+            async def still_unowned() -> bool:
+                return (
+                    self._transports.get(cwd) is transport
+                    and not self._session_mgr.sessions_for_cwd(cwd)
+                    and not self._has_active_turns_for_cwd(cwd)
+                )
+
+            detached = await self._stop_and_detach_transport_generation(
+                cwd,
+                transport,
+                final_predicate=still_unowned,
+                require_process_exit=True,
+            )
+            if detached:
+                self._retire_model_hub_process_scope(cwd)
+            return detached
+
     async def refresh_auth_state(self) -> None:
         """Drop app-server runtime state so future turns pick up fresh auth."""
         if not hasattr(self, "_transport_last_activity"):

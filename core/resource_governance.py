@@ -468,10 +468,27 @@ class AgentResourceGovernor:
     def update_config(self, config: dict[str, Any] | None) -> None:
         updated = dict(config or {})
         if updated == self.config:
-            # Ordinary settings hot-reloads must not lose the group and event
-            # baseline still observing existing backend processes.
             return
+        old_group_name = str(self.config.get("agent_group_name") or DEFAULT_GROUP_NAME).strip() or DEFAULT_GROUP_NAME
+        new_group_name = str(updated.get("agent_group_name") or DEFAULT_GROUP_NAME).strip() or DEFAULT_GROUP_NAME
+        same_group = self._group is not None and old_group_name == new_group_name
         self.config = updated
+        if same_group:
+            # Settings do not change the identity of processes already in this
+            # cgroup. Keep their event baseline even when governance is disabled.
+            if self.mode != "disabled":
+                root = self.root or detect_cgroup_root()
+                if root is not None and self._base is not None:
+                    limits = derive_agent_limits(tenant_memory_limit_bytes(self._base, root), self.config)
+                    try:
+                        self._configure_group(self._group, limits)
+                    except OSError as exc:
+                        self._disabled_reason = str(exc)
+                        logger.warning("Agent resource governance reconfiguration failed: %s", exc)
+                    else:
+                        self._limits = limits
+                        self._disabled_reason = None
+            return
         self._base = None
         self._group = None
         self._limits = None
@@ -567,11 +584,11 @@ class AgentResourceGovernor:
             return False
 
     def _ensure_group(self, *, known_agent_pids: set[int] | None = None) -> Path | None:
-        if self._group is not None:
-            return self._group
         if self.mode == "disabled":
             self._disabled_reason = "disabled"
             return None
+        if self._group is not None:
+            return self._group
         root = self.root or detect_cgroup_root()
         if root is None:
             self._disabled_reason = "no-cgroup-v2"

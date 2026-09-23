@@ -131,7 +131,6 @@ class OpenCodeSessionManager:
         self._request_sessions: Dict[str, RequestSessionTuple] = {}
         self._agent_session_ids: Dict[str, str] = {}
         self._session_locks: Dict[str, asyncio.Lock] = {}
-        self._initialized_sessions: set[str] = set()
 
     def get_request_session(self, base_session_id: str) -> Optional[RequestSessionTuple]:
         return self._request_sessions.get(base_session_id)
@@ -152,6 +151,12 @@ class OpenCodeSessionManager:
     def pop_request_session(self, base_session_id: str) -> Optional[RequestSessionTuple]:
         self._agent_session_ids.pop(base_session_id, None)
         return self._request_sessions.pop(base_session_id, None)
+
+    def retire_request_session(self, base_session_id: str) -> None:
+        """Release disposable Session state after its native turn has settled."""
+
+        self.pop_request_session(base_session_id)
+        self._session_locks.pop(base_session_id, None)
 
     def set_agent_session_id(
         self,
@@ -329,14 +334,6 @@ class OpenCodeSessionManager:
                 reserved_id if use_backend_anchor and reserved_id else agent_session_id,
             )
         return agent_session_id
-
-    def mark_initialized(self, opencode_session_id: str) -> bool:
-        """Return True if this session was newly marked initialized."""
-
-        if opencode_session_id in self._initialized_sessions:
-            return False
-        self._initialized_sessions.add(opencode_session_id)
-        return True
 
     async def repair_message_order(
         self,

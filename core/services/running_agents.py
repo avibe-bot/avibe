@@ -673,6 +673,11 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         # row never disappears from the Running tab.
         session_mgr.clear(base_session_id)
         turn_registry.clear_session(base_session_id)
+        getattr(agent, "_session_locks", {}).pop(base_session_id, None)
+        getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
+        clear_thread_cache = getattr(agent, "_clear_thread_developer_instructions", None)
+        if callable(clear_thread_cache):
+            clear_thread_cache(base_session_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
         return {"ok": False, "error": "clear_failed", "detail": str(exc)}
@@ -680,22 +685,12 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     # that cwd, stop it too so the codex process is actually freed (otherwise it
     # lingers with zero sessions); if other sessions still use it, leave it up.
     process_killed = False
-    if cwd and transport is not None:
-        remaining: list = []
+    retire_idle = getattr(agent, "retire_unowned_session_transport", None)
+    if cwd and callable(retire_idle):
         try:
-            remaining = session_mgr.sessions_for_cwd(cwd)
+            process_killed = bool(await retire_idle(cwd))
         except Exception:  # noqa: BLE001
-            remaining = []
-        if not remaining:
-            try:
-                await transport.stop()
-                transports.pop(cwd, None)
-                last_activity = getattr(agent, "_transport_last_activity", None)
-                if isinstance(last_activity, dict):
-                    last_activity.pop(cwd, None)
-                process_killed = True
-            except Exception:  # noqa: BLE001
-                logger.debug("end: codex transport stop failed for %s", cwd, exc_info=True)
+            logger.debug("end: codex transport stop failed for %s", cwd, exc_info=True)
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.
@@ -731,9 +726,14 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
         task.cancel()
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
 
-    pop_req = getattr(session_mgr, "pop_request_session", None)
-    if callable(pop_req):
-        pop_req(base_session_id)
+    retire_req = getattr(session_mgr, "retire_request_session", None)
+    if callable(retire_req):
+        retire_req(base_session_id)
+    else:
+        pop_req = getattr(session_mgr, "pop_request_session", None)
+        if callable(pop_req):
+            pop_req(base_session_id)
+    getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
     list_all = getattr(session_mgr, "list_all", None)
     if not callable(list_all) or list_all():
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}

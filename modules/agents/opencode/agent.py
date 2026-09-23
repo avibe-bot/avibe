@@ -1427,7 +1427,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.base_session_id,
                 _target_agent_session_id(request),
             )
-            self._session_manager.mark_initialized(session_id)
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
                 await self._finish_prestart_cancellation(
@@ -1550,7 +1549,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         request.working_path,
                         request.session_key,
                     )
-                    self._session_manager.mark_initialized(session_id)
                     baseline_messages = await server.list_messages(
                         session_id=session_id,
                         directory=request.working_path,

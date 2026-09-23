@@ -499,12 +499,17 @@ class OpenCodeServerManager:
             if callable(retire) and not retire(False, True):
                 raise RuntimeError("OpenCode runtime retirement was refused")
             process = self._process
-            # A pid-file without a live child handle is not sufficient proof of
-            # ownership (PID reuse). Leave it for the external-process blocker.
             info = self._read_pid_file()
             recorded_pid = info.get("pid") if isinstance(info, dict) else None
             if process is None and isinstance(recorded_pid, int) and self._pid_exists(recorded_pid):
-                raise RuntimeError("OpenCode server ownership cannot be proven")
+                # An adopted server has no child handle. Require the same
+                # command/port proof used by adoption before terminating it.
+                if not self._pid_file_references_current_server(info):
+                    raise RuntimeError("OpenCode server ownership cannot be proven")
+                if not await finish_native_operation(
+                    asyncio.to_thread(self._terminate_pid_tree_sync, recorded_pid)
+                ) or self._pid_exists(recorded_pid):
+                    raise RuntimeError("OpenCode server did not exit")
             if process is not None and process.returncode is None:
                 if not await finish_native_operation(
                     asyncio.to_thread(self._terminate_pid_tree_sync, process.pid)

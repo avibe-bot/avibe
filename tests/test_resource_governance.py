@@ -108,6 +108,41 @@ def test_unchanged_governance_config_keeps_pressure_baseline_across_reload(
     assert governor.observe_resource_pressure().event_delta == 1
 
 
+def test_changed_limits_reconfigure_same_group_without_losing_pressure(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    group.mkdir(parents=True)
+    for name, value in (
+        ("cgroup.procs", ""),
+        ("cpu.weight", "50"),
+        ("pids.current", "1"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 0\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+    governor = AgentResourceGovernor(
+        {"mode": "enabled", "agent_cpu_weight": 50},
+        root=root,
+        base_cgroup=base,
+    )
+    governor._base = base
+    governor._group = group
+    baseline = governor.snapshot()
+    governor._event_baseline = baseline
+
+    governor.update_config({"mode": "enabled", "agent_cpu_weight": 100})
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    assert governor.group_path == group
+    assert governor._event_baseline is baseline
+    assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "100"
+    assert governor.observe_resource_pressure().event_delta == 1
+
+
 def test_governor_diagnoses_memory_limit_from_counter_delta(
     tmp_path: Path,
 ) -> None:
@@ -349,7 +384,8 @@ def test_governor_update_config_resets_cached_group(tmp_path: Path, monkeypatch:
 
     governor.update_config({"mode": "disabled"})
 
-    assert governor.group_path is None
+    # Existing members remain observable, but new processes are not adopted.
+    assert governor.group_path == group
     assert governor.apply_to_pid(4322, label="test") is False
 
 
