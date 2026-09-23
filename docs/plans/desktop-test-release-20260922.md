@@ -860,8 +860,89 @@ explicit rather than inherited, and propagation never touches it. Only children
 that hold inherited ACEs can be orphaned. The create path is therefore a
 regression guard, not a second instance of the defect.
 
+## H16 — `vibe stop` hung because the process scan shelled out per process
+
+`gh-v3.1.1rc10` got further on Windows than any candidate before it: the ACL fix
+held, the service took the lock, the readiness poll passed, and `vibe start`
+printed a valid receipt. Then `vibe stop` produced **not one byte on either
+stream and never returned**, and the packaging probe killed it at its 60s
+budget. `vibe_remote.log` has no shutdown entry, so the service was never asked
+to exit — the hang was inside the stop command, before it signalled anything.
+
+### Mechanism
+
+`cmd_stop` prints nothing before `runtime.stop_service()`, and `stop_service`
+calls `extra_service_process_pids()` unconditionally after resolving the lock
+owner. That runs `service_processes()`, which walks **every process on the
+machine**. Per process it did a liveness probe and then `_process_command_from_info`,
+which fell through to `get_process_command(pid)` whenever psutil could not read
+the command line — and `process_iter` fills a denied attribute with `None`,
+which on Windows is the ordinary outcome for most system processes.
+
+On Windows `get_process_command` spawns `powershell -NoProfile -Command
+Get-CimInstance Win32_Process ...` with **no timeout**, then retries with `pwsh`
+when the first returns nothing. Two process launches per unreadable process,
+several hundred processes, on the platform where a process launch is most
+expensive.
+
+The defect is not Windows-only, only Windows-visible. The same fallback runs
+`ps -p` once per process on macOS — the reproduction launched 64 of them for 64
+scanned processes — and escapes notice only because a fork is cheap there.
+Linux never reaches it, because `get_process_command` reads `/proc` first.
+
+Nothing else on the stop path can account for the 60s. `stop_pid` does call
+`get_process_command`, but every one of those calls sits on the POSIX branch:
+on Windows it returns through `_terminate_process_windows` first. The remaining
+Windows lookups are single-pid ones — owner resolution, UI identity — a handful
+of calls, not one per process.
+
+### The fix
+
+`_process_command_from_info` now answers from what `process_iter` already
+collected, or not at all. Nothing is lost. The scan is explicitly secondary to
+the service lock: it exists to find lock-less daemons left by older lifecycle
+bugs, and such a daemon is a process this install started, whose command line
+psutil can read. A process whose command line we cannot read is by construction
+not ours. The one case that could have made this wrong — a lock holder with an
+unreadable command line — was never findable this way either, because
+`service_lock_held_by` is only reached *after* the command filter passes; the
+authoritative owner comes from `resolve_service_owner_pid` and the lock.
+`_process_command_from_info` has exactly one caller, so the change cannot reach
+anything else.
+
+`_get_process_command_windows` keeps its shell, because naming one specific pid
+is what it is for, but now runs it under a 5s timeout per shell. The existing
+`except Exception: continue` already catches `TimeoutExpired` and moves on.
+
+Rejected: making that lookup try psutil before the shell. psutil returns a
+shlex-joined argv while the CIM query returns the raw Windows command line, and
+`_command_looks_like_service_entry` and `_tool_family_from_text` parse those
+strings — a quiet format change on an identity path, to save a little on calls
+that are now bounded anyway.
+
+### What the tests prove
+
+`tests/test_runtime_process_scan.py` asserts the mechanism, not a duration: over
+64 processes whose command line psutil cannot read, the scan must start **zero**
+external processes. A timing assertion alone would be flaky and silent about the
+cause; this one is red on every platform, so it keeps defending the invariant
+without a Windows runner. A second test requires the single-pid Windows lookup
+to pass a positive timeout. A third, Windows-only and read-only, runs the real
+scan against the real process table under a budget priced off that machine's own
+`process_iter` walk — `process_iter` never shells out, so the defect cannot
+inflate the measurement and buy itself room. It rides the existing
+`windows-control-ipc` job, which needs neither a packaged Runtime nor an
+installer, so this class never has to cost a release candidate again.
+
 ## Known-by-design ledger additions
 
+- **Deferred.** `vibe start` logged *"Started UI pid=6116 but required health
+  checks did not pass"* during the rc10 run at 05:51:35, yet the packaging
+  probe's own readiness poll passed moments later and the start receipt reported
+  `outcome=started`. The UI health wait is tighter than a cold Windows runner's
+  real startup, so the warning is noise on a start that in fact succeeded.
+  Recorded, not chased: widening that wait is a separate change with its own
+  evidence to gather.
 - **Deferred.** `clamp_window_frame` picks the single largest-overlap monitor and
   clamps unconditionally, so a saved frame that legitimately spans two adjacent
   displays is moved on restore. Window geometry only, off the packaging path, and
