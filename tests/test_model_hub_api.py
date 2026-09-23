@@ -2940,6 +2940,59 @@ def test_a_remote_only_tombstone_hides_an_existing_builtin(monkeypatch, tmp_path
     assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-5", "claude-opus-4-8"]
 
 
+def test_a_native_source_cannot_reoffer_a_hidden_retired_builtin(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Native supplier",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-opus-4", provenance="manual"),
+            ModelHubModelConfig(id="claude-opus-4-8", provenance="manual"),
+        ],
+        credential_ref="cred_native0001",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["claude"]
+    agent.sources.order = [source.id]
+    agent.models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+
+    providers = [row["id"] for row in service.agent_model_candidates("claude")["providers"]]
+
+    assert "claude-opus-4" not in providers
+    assert "claude-opus-4-8" in providers
+
+
+def test_picker_reads_schedule_the_remote_catalog_refresh(monkeypatch, tmp_path):
+    from vibe import backend_model_catalog
+
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+    calls = []
+
+    def cached(*, schedule_refresh=True, **_kwargs):
+        calls.append(schedule_refresh)
+        return {}
+
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", cached)
+
+    service.get_agent_sources("claude")
+
+    assert calls and all(calls)
+
+
 def test_a_snapshot_revived_retired_builtin_stays_in_the_picker(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.config.agents["claude"].models = [

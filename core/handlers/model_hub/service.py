@@ -4174,8 +4174,11 @@ class ModelHubService:
 
         # Either catalog may withdraw a model; the remote one does so without a
         # release. A remote revival is already in the current snapshot below.
+        # A stale remote cache schedules the controller-owned refresh, whose
+        # completion reconciles the snapshot, so a new tombstone reaches the
+        # picker without waiting for a restart.
         retired = retired_backend_model_ids(backend, load_bundled_catalog()) | retired_backend_model_ids(
-            backend, load_cached_remote_catalog(schedule_refresh=False)
+            backend, load_cached_remote_catalog()
         )
         if not retired:
             return set()
@@ -4422,6 +4425,7 @@ class ModelHubService:
             )
 
         provider_ids: list[str] = []
+        hidden = self._hidden_retired_model_ids(agent)
         source_by_id = {source.id: source for source in config.sources}
         for source_id in agent.sources.order:
             source = source_by_id.get(source_id)
@@ -4432,7 +4436,8 @@ class ModelHubService:
                     continue
                 candidate_id = model.id
                 if (
-                    candidate_id in menu_ids
+                    candidate_id in hidden
+                    or candidate_id in menu_ids
                     or candidate_id in builtin_ids
                     or candidate_id in provider_ids
                 ):
