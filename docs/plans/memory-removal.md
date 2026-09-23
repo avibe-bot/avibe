@@ -451,3 +451,21 @@ migration returns. Keep the historical guard release-only; it is not invoked
 by application startup or ordinary package installation. These branch tests do
 not run the scheduled workflow against live GitHub Releases; the branch and
 closed PR do not deploy either compatibility measure.
+
+### GitHub-only preview upgrades (owner decision, 2026-09-23)
+
+The supported pre-release-to-pre-release route is a manual `uv tool install
+--force` of the target `gh-v*` release's core wheel, without the old Memory
+extra or `--with avibe-memory`. Old pre-release `vibe upgrade` implementations
+that resolve a new Memory version from a package index are not this route; no
+index-hosted compatibility package is planned for them. User instructions live
+in `docs/UPGRADING.md`.
+
+A disposable macOS probe installed the published `gh-v3.0.15rc11` core and
+Memory wheels in test-owned uv tool, cache, config and home directories, then
+force-installed a `3.2.0rc1` core wheel built from this branch. The new tool
+had no `avibe-memory` distribution or importable module; core imports and
+`vibe --help` succeeded, and two legacy Memory data sentinels were unchanged.
+This is package replacement evidence, not a test of a published new Release or
+of stopping and restarting a live service. The one-off probe has not been
+committed as a repeatable test.
