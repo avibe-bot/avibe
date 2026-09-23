@@ -185,7 +185,11 @@ def upsert_background_rotated_subscription(
         user_key=user_key,
         payload=payload,
         user_agent=user_agent,
-        device_id=current.get("device_id") if current is not None else None,
+        device_id=(
+            current.get("device_id")
+            if current is not None
+            else previous.get("device_id")
+        ),
         previous_endpoints=previous_endpoints,
     )
 

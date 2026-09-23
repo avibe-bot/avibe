@@ -162,6 +162,7 @@ def test_background_rotation_requires_active_or_provider_failed_previous(tmp_pat
             conn,
             user_key="remote:user-a",
             payload=_payload("https://push.example.test/sub/previous"),
+            device_id="device-1",
         )
         current = _payload("https://push.example.test/sub/current")
 
@@ -173,6 +174,7 @@ def test_background_rotation_requires_active_or_provider_failed_previous(tmp_pat
         )
         assert accepted is not None
         assert accepted["endpoint"] == current["endpoint"]
+        assert accepted["device_id"] == "device-1"
 
         web_push_service.disable_subscription(
             conn,
@@ -198,6 +200,7 @@ def test_background_rotation_accepts_provider_failed_previous(tmp_path):
             conn,
             user_key="remote:user-a",
             payload=_payload("https://push.example.test/sub/previous"),
+            device_id="device-1",
         )
         web_push_service.mark_send_failure(
             conn,
@@ -214,6 +217,7 @@ def test_background_rotation_accepts_provider_failed_previous(tmp_path):
 
         assert accepted is not None
         assert accepted["endpoint"] == "https://push.example.test/sub/current"
+        assert accepted["device_id"] == "device-1"
 
 
 def test_attach_device_to_enabled_subscription_preserves_same_origin_legacy_rows(tmp_path):
