@@ -592,6 +592,7 @@ class AgentService:
             gate.runtime_started = True
             gate.activation_identity = activation_identity
             gate.liveness_probe = self._capture_backend_liveness(gate, context)
+            gate.exit_failure_probe = self._capture_backend_exit_failure(gate, context)
             self._start_runtime_liveness_monitor(runtime_key, gate, runtime_token)
             manager = getattr(self.controller, "session_turns", None)
             bind_native = getattr(manager, "on_native_start", None)
@@ -660,6 +661,25 @@ class AgentService:
                     exc_info=True,
                 )
         return lambda: self.backend_alive(context, use_captured=False)
+
+    @staticmethod
+    def _capture_backend_exit_failure(
+        gate: "_RuntimeTurnGate",
+        context: Any,
+    ) -> Callable[[], tuple[str, str] | None] | None:
+        capture = getattr(gate.agent, "capture_backend_exit_failure", None)
+        if callable(capture):
+            try:
+                probe = capture(context)
+                if callable(probe):
+                    return probe
+            except Exception:
+                logger.debug(
+                    "Failed to capture backend exit diagnosis for %s",
+                    gate.backend,
+                    exc_info=True,
+                )
+        return None
 
     @staticmethod
     def _probe_backend_liveness(
@@ -763,15 +783,39 @@ class AgentService:
                     if gate.request is not None
                     else terminal_turn_output()
                 )
-                await emit(
-                    context,
-                    "result",
-                    "",
-                    is_error=True,
-                    level="silent",
-                    output=output,
-                    terminal_error=self._backend_exit_terminal_error,
-                )
+                diagnosis = None
+                if gate.exit_failure_probe is not None:
+                    try:
+                        diagnosis = gate.exit_failure_probe()
+                    except Exception:
+                        logger.exception(
+                            "Backend exit diagnosis failed for backend=%s runtime=%s",
+                            gate.backend,
+                            runtime_key,
+                        )
+                if diagnosis is not None:
+                    from core.backend_failure import emit_backend_failure
+
+                    diagnostic, display_text = diagnosis
+                    await emit_backend_failure(
+                        self.controller,
+                        context,
+                        gate.backend,
+                        diagnostic,
+                        display_text=display_text,
+                        request=gate.request,
+                        output=output,
+                    )
+                else:
+                    await emit(
+                        context,
+                        "result",
+                        "",
+                        is_error=True,
+                        level="silent",
+                        output=output,
+                        terminal_error=self._backend_exit_terminal_error,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -883,6 +927,7 @@ class AgentService:
             context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
             context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = gate.token
             gate.liveness_probe = self._capture_backend_liveness(gate, context)
+            gate.exit_failure_probe = self._capture_backend_exit_failure(gate, context)
             self._start_runtime_liveness_monitor(runtime_key, gate, gate.token)
             context.platform_specific[AGENT_TURN_TOKEN] = gate.token
             manager = getattr(self.controller, "session_turns", None)
@@ -993,6 +1038,7 @@ class AgentService:
         gate.request = None
         gate.activation_identity = None
         gate.liveness_probe = None
+        gate.exit_failure_probe = None
         if liveness_task is not None and not liveness_task.done():
             try:
                 current = asyncio.current_task()
@@ -1244,5 +1290,6 @@ class _RuntimeTurnGate:
     request: AgentRequest | None = None
     activation_identity: RuntimeActivationIdentity | None = None
     liveness_probe: Callable[[], Optional[bool]] | None = None
+    exit_failure_probe: Callable[[], tuple[str, str] | None] | None = None
     cancel_tidy_task: asyncio.Task | None = None
     liveness_task: asyncio.Task | None = None

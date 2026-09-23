@@ -56,6 +56,23 @@ class AgentResourceFailure:
     event_delta: int | None = None
 
 
+def pids_failure_labels(failure: AgentResourceFailure) -> dict[str, str]:
+    """Preserve zero and distinguish unavailable cgroup counts in user copy."""
+
+    return {
+        "current": (
+            str(failure.pids_current)
+            if failure.pids_current is not None
+            else "unknown"
+        ),
+        "limit": (
+            str(failure.pids_max)
+            if failure.pids_max is not None
+            else "max"
+        ),
+    }
+
+
 def _read_text(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8").strip()

@@ -11,6 +11,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -18,6 +19,7 @@ from modules.agents.base import AGENT_RUNTIME_TURN_KEY
 from modules.agents.service import AgentService
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.codex.agent import CodexAgent
+from core.resource_governance import AgentResourceFailure
 from modules.im import MessageContext
 
 
@@ -127,6 +129,40 @@ class CodexBackendAliveTests(unittest.TestCase):
 
         self.assertIs(agent.backend_alive(context), True)
         self.assertIs(probe(), False)
+
+    def test_captured_exit_failure_uses_accepted_transport_after_replacement(self):
+        process = types.SimpleNamespace(returncode=None)
+        accepted = types.SimpleNamespace(is_alive=True, _process=process)
+        agent = self._agent(
+            cwd_for_session={"b1": "/repo"},
+            transports={"/repo": accepted},
+        )
+        agent.controller = types.SimpleNamespace(
+            config=types.SimpleNamespace(language="en")
+        )
+        diagnose = agent.capture_backend_exit_failure(self._ctx_base("b1"))
+        self.assertIsNotNone(diagnose)
+        process.returncode = 137
+        agent._transports["/repo"] = types.SimpleNamespace(
+            is_alive=True,
+            _process=types.SimpleNamespace(returncode=None),
+        )
+        pressure = AgentResourceFailure(
+            kind="pids",
+            message="shared cgroup limit event",
+            pids_current=0,
+            pids_max=4096,
+        )
+
+        with patch(
+            "modules.agents.codex.agent.observe_agent_resource_pressure",
+            return_value=pressure,
+        ) as observe:
+            diagnostic, visible = diagnose()
+
+        observe.assert_called_once_with(agent.controller)
+        self.assertIn("Resource diagnosis: shared cgroup limit event", diagnostic)
+        self.assertIn("(0/4096)", visible)
 
 
 class AgentServiceBackendAliveTests(unittest.TestCase):

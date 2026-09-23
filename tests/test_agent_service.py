@@ -1830,6 +1830,63 @@ def test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime() -> None:
     asyncio.run(_run())
 
 
+def test_agent_service_reports_captured_resource_failure_after_turn_acceptance() -> None:
+    async def _run() -> None:
+        controller = _Controller()
+        recovered = asyncio.Event()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+
+        class _AcceptedThenDeadAgent(_RuntimeAgent):
+            name = "codex"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.current = SimpleNamespace(alive=True)
+
+            async def handle_message(self, request) -> None:
+                service.mark_runtime_turn_started(request.context)
+
+            def capture_backend_liveness(self, _context):
+                accepted = self.current
+                return lambda: accepted.alive
+
+            def capture_backend_exit_failure(self, _context):
+                accepted = self.current
+                return lambda: (
+                    ("backend_runtime_exited_before_terminal\nResource diagnosis: pids", "❌ pids limit")
+                    if not accepted.alive
+                    else None
+                )
+
+        agent = _AcceptedThenDeadAgent()
+        service.register(agent)
+        service._liveness_probe_interval_seconds = 0.005
+        service._liveness_failure_grace_seconds = 0.005
+        emitted: list[tuple[str, str, object]] = []
+
+        async def _emit(context, message_type, text, **kwargs):
+            emitted.append((message_type, text, kwargs.get("terminal_error")))
+            if message_type == "result":
+                service.release_runtime_turn(context)
+                recovered.set()
+
+        controller.emit_agent_message = _emit
+        request = _request("long-running codex turn")
+        await service.handle_message("codex", request)
+        accepted = agent.current
+        agent.current = SimpleNamespace(alive=True)
+        accepted.alive = False
+
+        await asyncio.wait_for(recovered.wait(), timeout=0.5)
+        assert [message_type for message_type, _, _ in emitted] == ["notify", "result"]
+        assert emitted[0][1] == "❌ pids limit"
+        assert "Resource diagnosis: pids" in emitted[1][2]
+        assert not service._turn_gates["session:/repo"].lock.locked()
+
+    asyncio.run(_run())
+
+
 def test_agent_service_recovery_uses_the_accepted_backend_generation() -> None:
     """HFR-002: a replacement runtime cannot hide the accepted owner's death."""
 

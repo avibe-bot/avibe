@@ -47,6 +47,7 @@ from core.resource_governance import (
     AgentResourceFailure,
     observe_agent_resource_pressure,
     governor_from_controller,
+    pids_failure_labels,
 )
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
@@ -1015,7 +1016,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         )
         if failure.kind == "pids":
             return (
-                f" {i18n_t('error.agentPidsLimit', language, current=failure.pids_current or 'unknown', limit=failure.pids_max or 'max')}"
+                f" {i18n_t('error.agentPidsLimit', language, **pids_failure_labels(failure))}"
             )
         if failure.kind == "memory":
             return f" {i18n_t('error.agentMemoryLimit', language)}"

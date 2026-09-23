@@ -52,6 +52,7 @@ from core.system_prompt_injection import (
 from core.resource_governance import (
     observe_agent_resource_pressure,
     governor_from_controller,
+    pids_failure_labels,
 )
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
@@ -264,6 +265,44 @@ class CodexAgent(BaseAgent):
         if transport is None:
             return lambda: None
         return lambda: self._transport_alive(transport)
+
+    def capture_backend_exit_failure(
+        self,
+        context: Any,
+    ) -> Callable[[], tuple[str, str] | None] | None:
+        """Bind resource diagnosis to the app-server generation owning this turn."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        base_session_id = str(payload.get("turn_base_session_id") or "").strip()
+        cwd = self._session_mgr.get_cwd(base_session_id) if base_session_id else None
+        transport = self._transports.get(cwd) if cwd else None
+        if transport is None:
+            return None
+
+        def diagnose() -> tuple[str, str] | None:
+            failure = self._resource_failure_for_transport(transport)
+            if failure is None:
+                return None
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            if failure.kind == "pids":
+                visible = i18n_t(
+                    "error.agentPidsLimit",
+                    language,
+                    **pids_failure_labels(failure),
+                )
+            elif failure.kind == "memory":
+                visible = i18n_t("error.agentMemoryLimit", language)
+            else:
+                return None
+            return (
+                f"backend_runtime_exited_before_terminal\nResource diagnosis: {failure.message}",
+                f"❌ {visible}",
+            )
+
+        return diagnose
 
     def can_reuse_direct_connection_probe(self, cwd: str) -> bool:
         """Return whether a cached transport can test direct credentials."""
@@ -1397,7 +1436,7 @@ class CodexAgent(BaseAgent):
             if getattr(resource_failure, "kind", None) == "pids":
                 message = (
                     f"{message} "
-                    f"{i18n_t('error.agentPidsLimit', language, current=getattr(resource_failure, 'pids_current', 'unknown'), limit=getattr(resource_failure, 'pids_max', 'max'))}"
+                    f"{i18n_t('error.agentPidsLimit', language, **pids_failure_labels(resource_failure))}"
                 )
             elif getattr(resource_failure, "kind", None) == "memory":
                 message = f"{message} {i18n_t('error.agentMemoryLimit', language)}"

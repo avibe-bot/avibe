@@ -20,6 +20,7 @@ from core.message_output import (
 from core.native_dispatch_phase import mark_backend_dispatch_attempted, mark_prewrite_recovery_required
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
+from core.resource_governance import pids_failure_labels
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_work import RuntimeWorkLane
 from core.services.agent_steering import (
@@ -185,7 +186,7 @@ class ClaudeAgent(BaseAgent):
                 if getattr(resource_failure, "kind", None) == "pids":
                     message = (
                         f"{message} "
-                        f"{self._translate_error('error.agentPidsLimit', current=getattr(resource_failure, 'pids_current', 'unknown'), limit=getattr(resource_failure, 'pids_max', 'max'))}"
+                        f"{self._translate_error('error.agentPidsLimit', **pids_failure_labels(resource_failure))}"
                     )
                 elif getattr(resource_failure, "kind", None) == "memory":
                     message = f"{message} {self._translate_error('error.agentMemoryLimit')}"

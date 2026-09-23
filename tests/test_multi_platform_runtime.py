@@ -22,6 +22,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.processing_indicator import ProcessingIndicatorService
+from core.resource_governance import AgentResourceFailure
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import OpenCodeOverlay, launch_for_context
 from modules.agents.service import AgentService
@@ -93,6 +94,26 @@ def test_opencode_model_hub_overlay_failure_is_localized() -> None:
 
     assert "准备 Gateway 模式" in display
     assert "internal diagnostic" not in display
+
+
+def test_opencode_resource_failure_preserves_zero_pid_count() -> None:
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = type(
+        "Controller",
+        (),
+        {"config": type("Config", (), {"language": "en"})()},
+    )()
+    failure = AgentResourceFailure(
+        kind="pids",
+        message="shared cgroup limit event",
+        pids_current=0,
+        pids_max=4096,
+    )
+
+    suffix = agent._resource_failure_suffix(failure)
+
+    assert "(0/4096)" in suffix
+    assert "unknown" not in suffix
 
 
 def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running(

@@ -193,6 +193,14 @@ class BaseAgent(ABC):
 
         return lambda: self.backend_alive(context)
 
+    def capture_backend_exit_failure(
+        self,
+        context: Any,
+    ) -> Callable[[], tuple[str, str] | None] | None:
+        """Optionally bind a visible diagnosis to the accepted runtime generation."""
+
+        return None
+
     def mark_runtime_turn_started(
         self,
         context: Any,
