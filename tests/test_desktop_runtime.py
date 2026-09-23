@@ -304,6 +304,43 @@ def test_ui_health_urls_require_ready_identity_on_default_loopback_bind():
         "http://127.0.0.1:5123/health",
         "http://127.0.0.1:5123/ready",
     )
+    assert runtime._ui_health_urls("*", 5123) == (
+        "http://127.0.0.1:5123/health",
+        "http://127.0.0.1:5123/ready",
+    )
+
+
+def test_ui_server_readiness_reuses_wildcard_listener(monkeypatch):
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload=b""):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return self.payload
+
+    def fake_urlopen(url, timeout):
+        calls.append((url, timeout))
+        if url.endswith("/ready"):
+            return Response(json.dumps(READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE).encode("utf-8"))
+        return Response()
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+
+    assert runtime._ui_server_readiness("*", 5123) is True
+    assert calls == [
+        ("http://127.0.0.1:5123/health", 0.5),
+        ("http://127.0.0.1:5123/ready", 0.5),
+    ]
 
 
 def test_ui_server_health_fails_when_old_specific_bind_lacks_desktop_listener(monkeypatch):

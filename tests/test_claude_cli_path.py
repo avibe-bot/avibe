@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
@@ -196,6 +197,55 @@ def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp
     assert compat.codex.binary == str(binaries["codex"])
     assert compat.opencode is not None
     assert compat.opencode.binary == str(binaries["opencode"])
+
+
+def test_to_app_config_keeps_missing_private_backend_selectors_off_path(monkeypatch, tmp_path: Path) -> None:
+    from vibe.cli_paths import resolve_cli_path
+
+    private_root = tmp_path / "private-backends"
+    external_root = tmp_path / "external-bin"
+    external_root.mkdir()
+    suffix = ".exe" if os.name == "nt" else ""
+    selected = {}
+    for backend in ("claude", "codex", "opencode"):
+        name = backend + suffix
+        selected[backend] = private_root / backend / "releases" / "missing" / name
+        external = external_root / name
+        external.write_bytes(b"MZ\0\0" if os.name == "nt" else b"#!/bin/sh\n")
+        external.chmod(0o755)
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("AVIBE_DESKTOP_BACKENDS_ROOT", str(private_root))
+    monkeypatch.setenv("PATH", str(external_root))
+    monkeypatch.setattr(
+        "vibe.cli_paths._candidate_cli_paths",
+        lambda binary, **_kwargs: [Path(binary)] if Path(binary).is_absolute() else [],
+    )
+    v2 = V2Config(
+        mode="self_host",
+        version="2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd=str(tmp_path)),
+        agents=AgentsConfig(
+            claude=ClaudeConfig(cli_path=str(selected["claude"])),
+            codex=CodexConfig(cli_path=str(selected["codex"])),
+            opencode=OpenCodeConfig(cli_path=str(selected["opencode"])),
+        ),
+    )
+
+    compat = to_app_config(v2)
+
+    assert compat.claude.cli_path == str(selected["claude"])
+    assert compat.codex is not None and compat.codex.binary == str(selected["codex"])
+    assert compat.opencode is not None and compat.opencode.binary == str(selected["opencode"])
+    assert resolve_cli_path(str(tmp_path / "other" / ("claude" + suffix)), include_npm_global=False) == str(
+        external_root / ("claude" + suffix)
+    )
+
+    published = tmp_path / "published" / ("codex" + suffix)
+    monkeypatch.setattr("vibe.cli_paths.resolve_published_desktop_backend", lambda _backend: str(published))
+    assert resolve_cli_path(str(selected["codex"]), include_npm_global=False) == str(published)
 
 
 def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path: Path) -> None:

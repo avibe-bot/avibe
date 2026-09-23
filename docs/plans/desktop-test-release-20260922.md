@@ -1407,6 +1407,50 @@ orchestrator took the inventory and made the scope ruling below.
   `ui/src/components/settings/SettingsDependenciesPage.logic.ts`, its page, the
   page's two test files and this plan.
 
+## H25 — review of `c802848b`: two fixes and one false positive
+
+Codex review 5296978965 on `c802848b98417b51dfa8c3c4da4332ab99dcc6e9`
+raised three P2 findings. The orchestrator inspected the full inventory and
+approved a bounded resolver/probe fix; no identity or environment model change
+was needed. The older queued-dependency finding 4087030743 was already covered
+on that head by H24's global repair-action gate. Its active-ID-only status and
+spinner and the later Model Hub action were rechecked by the 16 focused UI
+tests; the thread was answered and resolved.
+
+- **4087472327, damaged private backend selector: fixed.** The shared CLI
+  resolver used to try a missing private absolute path, then discover the same
+  basename on PATH before consulting the desktop publication descriptor.
+  Runtime projection could silently select an external executable when an
+  app-private release disappeared. A missing path under the private backend
+  root now resolves only through the verified published descriptor, or stays
+  unresolved so the saved selector remains visible. Generic non-private
+  absolute paths keep basename discovery. A `to_app_config` consumer provides
+  same-name external executables for Claude, Codex and OpenCode and verifies
+  that none replaces a missing private selection; it also covers non-private
+  fallback and the private published-descriptor path.
+- **4087472342, wildcard UI health probe: fixed.** Binding already turns `*`
+  into `0.0.0.0`, but the first health URL still used the literal `*` and
+  returned before probing `/ready`. The health URL now uses the same bind-host
+  normalization, then probes loopback for wildcard binds. Direct URL coverage
+  and a `_ui_server_readiness` consumer verify both requests and successful
+  structured identity reuse.
+- **4087472352, Codex home: false positive, no production change.** The
+  validated private launch helper copies its caller-provided environment;
+  CodexAgent supplies `os.environ`, and CodexTransport passes that mapping as
+  the app-server subprocess environment. Custom `CODEX_HOME` is already kept.
+  `_safe_process_environment` filters separate npm installation and version
+  probe commands, not the private app-server launch. The publication consumer
+  now asserts `CODEX_HOME` reaches the launch environment while the installer
+  still excludes a fixture API key. The review thread was answered with the
+  exact call chain and resolved.
+
+This round does not change the TEST release implementation or native package
+workflow. Local validation: 309 focused Python tests passed across CLI path,
+desktop Runtime and private backend suites; changed-file Ruff and diff checks
+passed. The two focused Settings page test files passed 16/16, and UI build and
+lint passed without baseline drift. Exact-head CI, Codex review and publication
+remain separate gates.
+
 ## Known-by-design ledger additions
 
 - **Taken up in H19.** `query_endpoint` sets `stderr(Stdio::null())` and the

@@ -2148,7 +2148,9 @@ def _resolve_service_pid(
 
 
 def _ui_health_url(host: str, port: int) -> str:
-    health_host = (host or "127.0.0.1").strip()
+    from vibe.desktop_runtime import _normalized_bind_host
+
+    health_host = _normalized_bind_host(host)
     if health_host in {"0.0.0.0", ""}:
         health_host = "127.0.0.1"
     elif health_host in {"::", "::0"}:

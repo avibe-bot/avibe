@@ -105,6 +105,8 @@ def _fake_npm_install(
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 def test_install_publishes_verified_native_backend(monkeypatch, tmp_path, backend):
     env = _desktop_env(tmp_path)
+    env["CODEX_HOME"] = str(tmp_path / "custom-codex-home")
+    env["OPENAI_API_KEY"] = "fixture-key"
     calls: list[tuple[list[str], dict[str, str], Path]] = []
     monkeypatch.setattr(desktop_backends, "_run_command", _fake_npm_install(backend, calls=calls))
     monkeypatch.setattr(
@@ -140,6 +142,7 @@ def test_install_publishes_verified_native_backend(monkeypatch, tmp_path, backen
     assert install_env["NPM_CONFIG_USERCONFIG"].startswith(install_env["NPM_CONFIG_PREFIX"])
     assert "npm_config_prefix" not in install_env
     assert "NODE_OPTIONS" not in install_env
+    assert "OPENAI_API_KEY" not in install_env
     if backend == "codex":
         runtime_env = desktop_backends.desktop_backend_subprocess_environment(
             "codex",
@@ -147,6 +150,8 @@ def test_install_publishes_verified_native_backend(monkeypatch, tmp_path, backen
             env,
         )
         assert runtime_env is not None
+        assert runtime_env["CODEX_HOME"] == env["CODEX_HOME"]
+        assert runtime_env["OPENAI_API_KEY"] == env["OPENAI_API_KEY"]
         expected_helper_dir = Path(result.path).parent.parent / "codex-path"
         assert Path(runtime_env["PATH"].split(os.pathsep)[0]) == expected_helper_dir
 
