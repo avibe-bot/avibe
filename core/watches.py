@@ -1865,7 +1865,16 @@ class ManagedWatchService:
             return True
         if runtime.current_process_owns_service_instance():
             return True
-        logger.error("Managed watch service stopping because this process no longer owns the service lock")
+        # Says what was established, not what was inferred from it: the check
+        # re-opens the lock file and looks for a record naming this pid, so a
+        # false answer means either the lock went away or the record could not
+        # be read. Claiming a transition nobody observed sent three release
+        # candidates looking for a lock that was never lost.
+        logger.error(
+            "Managed watch service stopping: re-reading the service lock did not "
+            "confirm this process as its holder -- either the lock was released, "
+            "or its holder record could not be read"
+        )
         self._begin_stop()
         return False
 

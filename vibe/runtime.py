@@ -268,13 +268,48 @@ def _lock_file_pid(lock_file) -> int | None:
     return pid if isinstance(pid, int) and pid > 0 else None
 
 
+# The byte this file's lock lives on, on Windows only.
+#
+# Windows byte-range locks are mandatory and scoped to a HANDLE, not a process:
+# an exclusive lock denies every other handle -- including a second handle this
+# same process opens -- both read and write access to the locked range. This
+# lock file is also the record naming its holder, so locking the bytes the
+# record occupies hid that record for exactly as long as the lock meant
+# anything, and every reader below treats an unreadable record as "nobody holds
+# this". Locking past end-of-file is legal, costs no disk and does not extend
+# the file, so a byte out here still names this file while leaving every byte
+# anyone reads unlocked. It sits far beyond any record this writes.
+#
+# POSIX keeps its whole-file advisory ``flock``: it never denied a read, so it
+# has no defect to fix and an installed base that must keep excluding today's
+# releases.
+_WINDOWS_LOCK_BYTE_OFFSET = 1 << 30
+
+
+def _windows_lock_byte(lock_file, mode: int) -> None:
+    """Take or drop the Windows lock byte, leaving the handle where it was.
+
+    ``msvcrt.locking`` locks ``nbytes`` from the descriptor's CURRENT position,
+    so the offset has to be applied to the raw descriptor -- a text handle
+    cannot seek to an arbitrary byte. Restoring position 0 afterwards keeps the
+    buffered handle coherent for the record write and read that follow.
+    """
+
+    import msvcrt
+
+    os.lseek(lock_file.fileno(), _WINDOWS_LOCK_BYTE_OFFSET, os.SEEK_SET)
+    try:
+        msvcrt.locking(lock_file.fileno(), mode, 1)
+    finally:
+        lock_file.seek(0)
+
+
 def _try_lock_file(lock_file) -> bool:
     if os.name == "nt":
         import msvcrt
 
         try:
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            _windows_lock_byte(lock_file, msvcrt.LK_NBLCK)
             return True
         except OSError:
             return False
@@ -293,8 +328,7 @@ def _unlock_file(lock_file) -> None:
         import msvcrt
 
         try:
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            _windows_lock_byte(lock_file, msvcrt.LK_UNLCK)
         except OSError:
             logger.debug("Failed to unlock service instance lock", exc_info=True)
         return

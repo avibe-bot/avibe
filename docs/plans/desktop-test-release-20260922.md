@@ -673,6 +673,103 @@ same overlap shape for the migration lock, and the `_stop_for_lost_lease` log
 line claims the service "no longer owns" the lock, which asserts a transition
 nobody observed — it should say the ownership check failed.
 
+## H14 — fixing the Windows service-lock blackout, red first
+
+Windows was reopened by owner decision to fix H13. The evidence was built before
+the fix, as a test that fails on Windows and passes on POSIX, wired into the
+existing `windows-control-ipc` job in `.github/workflows/lint.yml` — one lock
+file and two handles, no packaged Runtime, no installer, no new workflow. That
+job runs `tests/test_service_lock_record.py`, whose cases go through the real
+`vibe.runtime` entry points rather than a synthetic `msvcrt` demonstration, so a
+red there is the product defect and not a restatement of the platform fact.
+
+### The premise, verified rather than assumed
+
+The fix is Windows-only, which is safe exactly to the extent that no Windows
+service can be running today. That was checked against the code rather than
+inferred from the rc8 log:
+
+- `main.py` acquires the service lock unconditionally at startup, so every
+  Windows service takes it.
+- `RuntimeWorkSupervisor`, the watch service and the scheduled-task service each
+  capture `service_instance_lock_attached_to_process()` at construction, which is
+  true in a real service, and then poll `current_process_owns_service_instance()`.
+- That call re-opens the lock file, so on Windows it reads the record through a
+  handle that is not the one holding the lock, gets `None`, and answers `False`.
+- `RuntimeWorkSupervisor` is constructed with
+  `on_lease_lost=lambda: self.request_shutdown("service lease lost")`, so the
+  first such answer shuts the whole service down.
+
+There is no branch that skips the lease check for a real service, and no path by
+which the record becomes readable while the lock is held. A Windows service
+therefore cannot stay up on any released version, which is why moving the locked
+byte cannot break a working installed base: on Windows there is none, and POSIX
+is not touched.
+
+### The fix
+
+`vibe/runtime.py` now locks `_WINDOWS_LOCK_BYTE_OFFSET = 1 << 30` instead of byte
+0, applied to the raw descriptor through `_windows_lock_byte` because a text
+handle cannot seek to an arbitrary byte, and restoring position 0 afterwards so
+the buffered handle stays coherent for the record write and read around it.
+Locking past end-of-file is legal on Windows, costs no disk and does not extend
+the file. The record itself is untouched: it stays a plain JSON document from
+byte 0, which is what keeps `read_service_instance_lock_record` and a human
+running `type service.lock` working. The alternative — keeping the lock on byte 0
+and starting the record at byte 1 — was rejected for exactly that reason and is
+pinned against by a test.
+
+The POSIX branch is unchanged, and a test asserts it: the advisory whole-file
+`flock` is taken with the descriptor at offset 0, so the platform that does have
+an installed base keeps excluding today's releases byte for byte.
+
+### `storage/lock.py::_try_lock` — reachable, different consequence, left alone
+
+The same overlap shape is there, and it is reachable on Windows, but the
+consequence is not the same and fixing it the same way would be a net loss:
+
+- The migration lock's exclusion works correctly on Windows today. A waiter's
+  `_try_lock` fails, which is the right answer, and it waits and retries. Only
+  `_recorded_holder` reads the locked byte, and it feeds one log line —
+  "held by pid unknown" instead of a pid. Its own docstring already says nothing
+  decides on that value.
+- Unlike the service lock, this path **works** on Windows, so it does have an
+  installed base. It is taken during startup before any lease check, and by plain
+  `vibe` CLI commands that never become a service.
+- Moving its byte would therefore create a real old-versus-new window in which two
+  processes both hold "the" migration lock and migrate the same SQLite database
+  concurrently. Trading a corrupt-database risk for a log line that already reads
+  as an honest "we do not know" is the wrong trade.
+
+Recorded here rather than fixed. The two other Windows `msvcrt` lock sites,
+`core/managed_runtime.py` and `core/show_runtime.py`, were checked and do not
+have the defect: they use the lock file purely as an exclusion token and identify
+it with `fstat`/`lstat`, never by reading its bytes.
+
+### The log lines that cost three release candidates
+
+`_stop_for_lost_lease` said the process "no longer owns the service lock", a
+transition nobody observed, and `core/watches.py` said the same thing in its own
+words. Both now say what was actually established — re-reading the lock did not
+confirm this process as its holder, either because the lock went away or because
+the record could not be read. The watch-service copy was corrected in the same
+round on the same reasoning that keeps `storage/lock.py` and its twin together:
+fixing one instance of a defect and leaving its duplicate is how the duplicate
+survives.
+
+### What the tests prove, and what they do not
+
+They prove that while the lock is held, its record is readable, the holder is
+named, the holder recognises itself through a second handle, a launcher can see
+the service it spawned, and the started phase is visible to a watcher — on
+Windows and POSIX alike. They prove the lock still excludes, and that POSIX still
+locks the whole file advisorily at offset 0.
+
+They do not prove that a Windows service now starts end to end: that needs the
+packaging probe, which is a separate decision. They do not cover a mixed-version
+Windows transition, because the premise above says there is nothing to transition
+from. They say nothing about the migration lock, deliberately.
+
 ## Known-by-design ledger additions
 
 - **Deferred.** `clamp_window_frame` picks the single largest-overlap monitor and
