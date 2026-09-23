@@ -70,7 +70,6 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   await page.screenshot({path:info.outputPath('route.png'),fullPage:true});
   await page.getByRole('button',{name:en.settings.models.routeDialog.save,exact:true}).click();
   await expect.poll(()=>saved[chosen]).toEqual(hops);
-  await page.locator('.model-hub-dialog-action').getByText(en.settings.models.routeDialog.impact.done,{exact:true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(card.getByText('GPT-5')).toBeVisible();
   expect(saved[chosen==='claude'?'codex':'claude']).toEqual([]);
