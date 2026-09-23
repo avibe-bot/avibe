@@ -532,3 +532,22 @@ here. It is tracked in issue #2132 with this evidence. The coverage added with
 the fix asserts both directions, so neither dropping the mask nor restoring it
 unguarded can pass: POSIX still refuses a group-accessible lease file, and the
 identical file acquires once `os.name` is not `posix`.
+
+## H10 — Known-by-design: runtime identity across lifecycle boundaries
+
+- **Deferred.** The Codex review at `4458203f1a` returned three P2 findings —
+  an unscoped handover stop in `launcher.rs`, monitored readiness collapsing a
+  changed `desktop_runtime_id` to `true` in `bootstrap.rs`, and an uninstall
+  recovery in `lib.rs` that can leave no monitor owner when its navigation
+  fails. All three are one cause: the desktop lifecycle re-derives which
+  Runtime it has authority over at every boundary instead of carrying one
+  verified identity through launch, probe, monitor, stop and removal. The same
+  class was patched per-boundary on roughly seven earlier heads of this PR, so
+  a bounded patch at a seventh boundary was explicitly rejected under the
+  review-loop circuit breaker in `AGENTS.md`; the fix is a coordinated
+  ownership change spanning the Rust shell, `runtime-host` and the Python
+  runtime. None of the three is on the packaging path, none risks data loss or
+  user-state corruption, and each requires a second desktop instance replacing
+  the Runtime mid-flight — a race a TEST prerelease installer does not need to
+  survive. They do block a master merge, which this PR is not authorized to do.
+  Tracked in issue 2135.
