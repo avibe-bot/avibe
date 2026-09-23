@@ -23,13 +23,25 @@ export const dependencyHasInstallAction = (
 export const dependencyIsStartupManaged = (dependency: Pick<DependencyItem, 'id'>): boolean =>
   STARTUP_MANAGED_DEPENDENCIES.has(dependency.id);
 
+/**
+ * The startup reconciler repairs this dependency during its pass, at the step
+ * now running or at a later one. While a pass is running, the manual
+ * install/update/repair action for such a dependency is withheld; which one is
+ * being installed at this moment is `dependencyIsStartupRepairing`.
+ */
+export const dependencyNeedsStartupRepair = (
+  dependency: Pick<DependencyItem, 'id' | 'installed' | 'status'>,
+): boolean =>
+  dependencyIsStartupManaged(dependency) &&
+  (!dependency.installed || dependency.status === 'upgrade_required' || dependency.status === 'error');
+
+/** Being repaired right now, for the status badge and spinner only. */
 export const dependencyIsStartupRepairing = (
   dependency: Pick<DependencyItem, 'id' | 'installed' | 'status'>,
   activeIds?: ReadonlySet<string>,
 ): boolean =>
-  dependencyIsStartupManaged(dependency) &&
-  (activeIds === undefined || activeIds.has(dependency.id)) &&
-  (!dependency.installed || dependency.status === 'upgrade_required' || dependency.status === 'error');
+  dependencyNeedsStartupRepair(dependency) &&
+  (activeIds === undefined || activeIds.has(dependency.id));
 
 export const dependenciesNeedAutomaticRefresh = (
   result: DependenciesResult,

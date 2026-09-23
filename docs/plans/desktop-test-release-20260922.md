@@ -1338,6 +1338,70 @@ Two more boundaries in F1's class, one Settings gap, and the title-bar ruling.
   No commit after `51784cc2b` changes these three files, and this candidate
   does not either.
 
+## H24 — review of `5c02720`: three findings, one fixed here
+
+Codex review 5296471145 on `5c02720dcbe86b2b25a08cccf4ee5f3334f8a17f` raised
+three P2 findings, none in code that commit changed. Two repeat a class already
+seen on an earlier reviewed head, so the lane stopped patching and the
+orchestrator took the inventory and made the scope ruling below.
+
+- **4087030728, OAuth `about:blank`: accepted, no change.** Same surface as
+  4081302902 on `bb0c8de75`, which produced F2. The finding restates F2's first
+  accepted UX limitation. The shell denies the `about:blank` preopen because it
+  cannot safely create a relay webview, so the dialog falls back to its visible
+  provider link. That link opens in the system browser, and the rest of the
+  journey is unchanged. The thread was answered with that contract and resolved,
+  not claimed as fixed.
+- **4087030743, queued startup dependencies: fixed here.** Same predicate as
+  4071875523 on `d65847228`. One level down, `dependencyIsStartupRepairing`
+  answered two questions:
+  - "Is this being installed right now?" This drives the status badge, the
+    spinner and the button label.
+  - "May the user start an install now?" This drives the button's enablement.
+
+  The earlier fix narrowed the predicate to the active step, which the first
+  question needed, and that also narrowed the second. So while askill installed,
+  a later missing Model Hub engine stayed actionable, and the reconciler could
+  reach it with a manual job already holding its lock. The backend locks already
+  stop two installers writing at once, so the cost was an `already_running`
+  result on one side, not corrupted state.
+  - **Fix.** A separate `dependencyNeedsStartupRepair` decides the action: the
+    dependency is startup-managed and missing, `upgrade_required` or `error`.
+    While `reconciling` is true, every such dependency's install, update or
+    repair button is disabled, whether or not it is the active step.
+    `dependencyIsStartupRepairing` keeps its active-ID filter and now drives only
+    the badge, the spinner and the label. Ready dependencies stay actionable.
+  - **Deliberate over-block.** A dependency the reconciler skips this pass, such
+    as Show Runtime without Node or tmux under `VIBE_INSTALL_SKIP_TMUX`, is also
+    withheld until the pass ends. The page keeps polling while `reconciling` is
+    true, so the action comes back when the pass does.
+  - **Tests.** A page test renders a pass with askill active, a missing Model Hub
+    engine and a ready avault. It asserts:
+    - only askill shows installing and a spinner;
+    - Model Hub reads missing, its button is disabled, and clicking it installs
+      nothing;
+    - avault's Reinstall stays enabled;
+    - once the pass ends, both install buttons are enabled.
+
+    A pure test covers the new predicate.
+  - **Mutations.** Each fails at least one test: disabling only the active step;
+    drawing the spinner or the label from the pending set; dropping `error` from
+    the repair states; withholding regardless of `reconciling`.
+  - **Not changed.** Backend locks, API semantics and every other part of the
+    UI.
+- **4087030754, superseded private backend releases: deferred to #2131.**
+  Confirmed. Each successful install publishes to `releases/<uuid>`, and nothing
+  removes a release once `current.json` moves past it. So every Reinstall or
+  backend upgrade keeps another complete npm tree. Safe reclamation needs to
+  know whether a running process still uses an old release: Windows keeps open
+  handles, and Node loads files from its tree lazily. That is the same
+  cross-language in-use contract #2131 needs for the uninstall fence. Deleting
+  by age, or by `current.json` alone, could break a running agent, so no cleanup
+  heuristic is added. The ledger entry below records the residual.
+- **Scope.** This commit touches only
+  `ui/src/components/settings/SettingsDependenciesPage.logic.ts`, its page, the
+  page's two test files and this plan.
+
 ## Known-by-design ledger additions
 
 - **Taken up in H19.** `query_endpoint` sets `stderr(Stdio::null())` and the
@@ -1360,6 +1424,14 @@ Two more boundaries in F1's class, one Settings gap, and the title-bar ruling.
   reaches the error branch, so a failing desktop-managed backend reads as
   healthy in the popover text. The error badge and Reinstall action still render,
   so the failure stays visible while the wording is wrong. Tracked in issue 2140.
+- **Deferred.** Private backend releases are never reclaimed. Every successful
+  install or reinstall publishes under a fresh `releases/<uuid>` and moves
+  `current.json` to it. No path removes the release it replaced. So repeated
+  Reinstall or backend upgrades each keep a complete npm package tree in the
+  app-private data directory. The directory grows only on those installs. No
+  reclamation is safe within this PR: an old release may still be in use by a
+  running process, and deciding that needs the cross-language in-use contract
+  the uninstall fence also needs. Tracked in issue 2131.
 - **Fixed here.** This PR gave `runtime.start_ui` a `None` return for a stale UI
   it could not stop, and left `cmd_start` unaware of it: the command ran on to a
   receipt `validate_start_receipt` rejects, so the service it had just started

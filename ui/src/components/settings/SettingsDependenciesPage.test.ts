@@ -3,6 +3,7 @@ import {
   dependencyHasInstallAction,
   dependencyIsStartupManaged,
   dependencyIsStartupRepairing,
+  dependencyNeedsStartupRepair,
   dependenciesNeedAutomaticRefresh,
 } from './SettingsDependenciesPage.logic';
 
@@ -80,6 +81,17 @@ describe('startup dependency refresh', () => {
         deps: [{ ...dependency('avault', true), status: 'upgrade_required' }],
       }, true),
     ).toBe(true);
+  });
+
+  it('keeps a later step pending even though only the running step is active', () => {
+    const active = new Set(['askill']);
+    const later = dependency('model-hub-engine', false);
+    expect(dependencyIsStartupRepairing(later, active)).toBe(false);
+    expect(dependencyNeedsStartupRepair(later)).toBe(true);
+    expect(dependencyNeedsStartupRepair({ id: 'avault', installed: true, status: 'upgrade_required' })).toBe(true);
+    expect(dependencyNeedsStartupRepair({ id: 'tmux', installed: true, status: 'error' })).toBe(true);
+    expect(dependencyNeedsStartupRepair(dependency('avault', true))).toBe(false);
+    expect(dependencyNeedsStartupRepair(dependency('node', false))).toBe(false);
   });
 
   it('limits startup repair status to dependencies currently active in the backend', () => {

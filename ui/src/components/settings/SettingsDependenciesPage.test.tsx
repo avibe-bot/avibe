@@ -140,6 +140,39 @@ describe('SettingsDependenciesPage Model Hub engine', () => {
   });
 });
 
+describe('SettingsDependenciesPage startup reconciliation', () => {
+  it('withholds a later step while another step installs, and releases it when the pass ends', async () => {
+    const deps = [
+      dependency({ id: 'askill', installed: false, status: 'missing', action_class: 'repairable', version: null }),
+      dependency({ id: 'model-hub-engine', installed: false, status: 'missing', action_class: 'repairable', version: null }),
+      dependency({ id: 'avault' }),
+    ];
+    stubDependencies({ ok: true, reconciling: true, reconciling_dependencies: ['askill'], deps });
+    renderPage();
+
+    const running = await screen.findByRole('button', { name: 'settings.dependencies.installing' });
+    const later = screen.getByRole('button', { name: 'settings.dependencies.install' }) as HTMLButtonElement;
+    const ready = screen.getByRole('button', { name: 'settings.dependencies.reinstall' }) as HTMLButtonElement;
+    expect((running as HTMLButtonElement).disabled).toBe(true);
+    expect(later.disabled).toBe(true);
+    expect(ready.disabled).toBe(false);
+    // Only the running step reads as installing; the later one is still missing.
+    expect(running.querySelector('.animate-spin')).not.toBeNull();
+    expect(later.querySelector('.animate-spin')).toBeNull();
+    expect(screen.getAllByText('settings.dependencies.installing')).toHaveLength(2);
+    expect(screen.getByText('settings.dependencies.statusMissing')).toBeTruthy();
+    await userEvent.click(later);
+    expect(api.installDependency).not.toHaveBeenCalled();
+
+    stubDependencies({ ok: true, reconciling: false, reconciling_dependencies: [], deps });
+    await userEvent.click(screen.getByRole('button', { name: 'settings.dependencies.recheckAll' }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'settings.dependencies.install' })).toHaveLength(2));
+    for (const button of screen.getAllByRole('button', { name: 'settings.dependencies.install' })) {
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    }
+  });
+});
+
 describe('SettingsDependenciesPage independent checks', () => {
   it('shows completed checks and permits their actions while another check waits', async () => {
     stubDependencies({ ok: true, deps: [dependency({ id: 'avault' })] });

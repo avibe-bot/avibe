@@ -27,6 +27,7 @@ import { useToast } from '@/context/ToastContext';
 import {
   dependencyIsStartupRepairing,
   dependencyHasInstallAction,
+  dependencyNeedsStartupRepair,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
@@ -198,6 +199,7 @@ export const SettingsDependenciesPage: React.FC = () => {
             }
             const installing = busy === d.id;
             const startupInstalling = Boolean(check.reconciling) && dependencyIsStartupRepairing(d, check.reconcilingDependencies);
+            const startupRepairPending = Boolean(check.reconciling) && dependencyNeedsStartupRepair(d);
             const showAction = dependencyHasInstallAction(d);
             const repairBlockedBySidecar = false;
             const dependencyOperationBusy = busy !== null || check.checking || check.error !== null;
@@ -242,7 +244,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                       <Button
                         variant={d.installed ? 'secondary' : 'brand'}
                         size="xs"
-                        disabled={dependencyOperationBusy || repairBlockedBySidecar || startupInstalling}
+                        disabled={dependencyOperationBusy || repairBlockedBySidecar || startupRepairPending}
                         onClick={() => void install(d, id)}
                       >
                         {installing || startupInstalling ? (
