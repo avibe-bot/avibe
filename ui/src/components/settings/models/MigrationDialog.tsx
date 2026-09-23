@@ -433,13 +433,7 @@ export const MigrationDialog: React.FC<{
         ) : (
           <div className="flex flex-col gap-4">
             {scope === 'setup' && (
-              <div className="flex flex-col gap-2">
-                {/* What migration does to the authentication it replaces is the one thing
-                    a person needs before pressing Start, so it is read here rather than
-                    behind a control they would have to know to open. */}
-                <p className="text-[12px] leading-relaxed text-muted">{t('onboarding.import.helpBody')}</p>
-                <p className="text-[12px] leading-relaxed text-muted">{t('onboarding.import.scopeNote')}</p>
-              </div>
+              <p className="text-[12px] leading-relaxed text-muted">{t('onboarding.import.scopeNote')}</p>
             )}
             {grouped.map((group) => (
               <div key={group.backend} className="flex flex-col gap-2">

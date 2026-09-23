@@ -452,7 +452,7 @@ describe('ProvidersScreen — the stage', () => {
     await settled();
 
     await waitFor(() => expect(cardFor('anthropic').dataset.state).toBe('connected'));
-    expect(within(cardFor('anthropic')).getByText('Subscription · max@example.com · Imported')).toBeTruthy();
+    expect(within(cardFor('anthropic')).getByText('Subscription · max@example.com · In Model Hub')).toBeTruthy();
     expect(within(cardFor('anthropic')).queryByText(/Add a .* API Key/)).toBeNull();
   });
 
@@ -464,7 +464,7 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(cardFor('openai').dataset.state).toBe('connected'));
     // No account either: the line is the kind, then the word that says it is already
     // supplying models — no stray separator where the account would have been.
-    expect(within(cardFor('openai')).getByText('API key · Imported')).toBeTruthy();
+    expect(within(cardFor('openai')).getByText('API key · In Model Hub')).toBeTruthy();
   });
 
   it('says a source was written even when the read that would show it fails', async () => {

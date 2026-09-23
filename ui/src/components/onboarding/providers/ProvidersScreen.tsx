@@ -687,9 +687,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               : 'onboarding.providers.summarySelected',
             { count: summary.count, names: formatNames(summary.names, t('onboarding.providers.summaryNameSeparator')) },
           ),
-          // What a consented-but-not-yet-taken-over credential is about to do, which
-          // is the half of the sentence that answers 「what happens to my key」.
-          ...(summary.kind === 'selected' ? [t('onboarding.providers.summarySelectedNote')] : []),
         ].join(' · ');
 
     // ── The way on when nothing is connected ────────────────────────────────
