@@ -295,13 +295,6 @@
   text-align: center;
   transition: border-color 150ms, box-shadow 150ms;
 }
-/* Running — including degraded but routable — is the state the diagram is drawn in.
-   The reference states it on the edge, not in the fill: the hub keeps the surface
-   every other card on the stage wears and wears the story's active halo instead. */
-.setup-gateway[data-state='running'] {
-  border-color: var(--ob-active-border);
-  box-shadow: var(--ob-active-shadow);
-}
 /* The one place the band's fixed height gives way, because what replaces the tagline
    is two sentences and a way out of them. The wires re-measure on the stage's resize,
    so the diagram follows the card rather than detaching from it. */
