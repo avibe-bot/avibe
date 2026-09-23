@@ -67,7 +67,6 @@ def test_package_release_workflows_pin_scm_version_to_release_tag() -> None:
         assert "python scripts/release_package_version.py" in workflow
         assert "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" in workflow
         assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" in workflow
-        assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" in workflow
 
 
 @pytest.mark.parametrize("tag", [

@@ -410,3 +410,27 @@ export async function systemFavorites(): Promise<Favorite[]> {
   const data = await parse<{ ok: true; favorites: Favorite[] }>(await apiFetch('/api/browse/favorites'));
   return data.favorites || [];
 }
+
+// Persisted runtime and scope cwd settings historically accepted relative paths. Resolve those
+// legacy values through the compatibility browse endpoint before handing them to the stricter
+// Files API, whose paths are intentionally absolute.
+export async function resolveDirectoryPath(path: string): Promise<string> {
+  const res = await apiFetch('/api/browse', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const raw = await res.text();
+  let data: { ok?: boolean; path?: string; error?: string } | undefined;
+  if (raw) {
+    try {
+      data = JSON.parse(raw) as typeof data;
+    } catch {
+      data = undefined;
+    }
+  }
+  if (!res.ok || !data?.ok || !data.path) {
+    throw new FilesApiError('invalid_path', data?.error || 'The configured directory could not be resolved.');
+  }
+  return data.path;
+}

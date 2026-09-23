@@ -14,7 +14,6 @@ from vibe import restart_supervisor
 from vibe import runtime
 
 
-
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
@@ -31,7 +30,6 @@ def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=T
         service_stopped,
         0.03,
     )
-
 
 
 def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_path):
@@ -145,7 +143,6 @@ def test_candidate_supervisor_drops_source_pythonpath(monkeypatch, tmp_path):
     assert "PYTHONHOME" not in calls["kwargs"]["env"]
 
 
-
 def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -169,49 +166,6 @@ def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tm
     restart_supervisor.schedule_restart(delay_seconds=2, vibe_path="/bin/vibe", trigger="upgrade", prepare_show_runtime=True)
 
     assert "--prepare-show-runtime" in calls["command"]
-
-
-def test_schedule_restart_passes_memory_ui_secret_only_through_stdin(monkeypatch, tmp_path):
-    from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    paths.ensure_data_dirs()
-    calls = {}
-    secret = "test-memory-ui-secret"
-
-    monkeypatch.setattr(
-        restart_supervisor,
-        "get_restart_invocation_command",
-        lambda vibe_path=None: ["/bin/vibe", "restart"],
-    )
-    monkeypatch.setattr(
-        restart_supervisor,
-        "get_restart_environment",
-        lambda vibe_path=None: {"PATH": "/bin"},
-    )
-    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
-
-    def fake_popen(command, **kwargs):
-        calls["kwargs"] = kwargs
-        return SimpleNamespace(pid=45678, stdin=io.BytesIO())
-
-    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
-
-    restart_supervisor.schedule_restart(
-        delay_seconds=0,
-        vibe_path="/bin/vibe",
-        trigger="web-ui",
-        scope="service",
-        memory_ui_secret=secret,
-    )
-
-    assert calls["kwargs"]["stdin"] is restart_supervisor.subprocess.PIPE
-    assert calls["kwargs"]["env"] == {
-        "PATH": "/bin",
-        MEMORY_UI_SECRET_STDIN_ENV: "1",
-    }
-    assert secret not in calls["kwargs"]["env"].values()
 
 
 def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch, tmp_path):
@@ -261,48 +215,41 @@ def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch
     }
 
 
-def test_entry_point_accepts_and_ignores_retired_rollback_argv(monkeypatch):
+@pytest.mark.parametrize("memory_version", [[], ["--rollback-memory-version", "3.0.14"]])
+def test_entry_point_ignores_retired_scheduler_argv(monkeypatch, tmp_path, memory_version, capsys):
+    """Retain the IPC shape accepted by released v3.1.0, not its old behavior."""
     from vibe import cli
 
     ran = {}
+    old_python = tmp_path / "old-python"
+    old_main = tmp_path / "old-main.py"
+    old_python.write_bytes(b"must not execute or modify")
+    old_main.write_bytes(b"must not execute or modify")
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
     monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: ran.update(kwargs) or 0)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "vibe",
-            "__restart-supervisor",
-            "--job-id",
-            "legacy-upgrade",
-            "--trigger",
-            "upgrade",
-            "--rollback-to",
-            "3.0.14",
-            "--rollback-package",
-            "avibe-os",
-            "--rollback-memory-package",
-            "--rollback-memory-version",
-            "3.0.14",
-            "--rollback-python",
-            "/opt/avibe/bin/python",
-            "--rollback-main",
-            "/opt/avibe/vibe/service_main.py",
+            "vibe", "__restart-supervisor", "--job-id", "legacy-upgrade",
+            "--trigger", "upgrade", "--rollback-to", "3.0.14",
+            "--rollback-package", "avibe-os", "--rollback-memory-package",
+            *memory_version, "--rollback-python", str(old_python),
+            "--rollback-main", str(old_main),
         ],
     )
-
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
-
     assert exit_info.value.code == 0
     assert ran == {
-        "job_id": "legacy-upgrade",
-        "delay_seconds": 0.0,
-        "vibe_path": None,
-        "trigger": "upgrade",
-        "scope": "all",
-        "prepare_show_runtime": False,
+        "job_id": "legacy-upgrade", "delay_seconds": 0.0, "vibe_path": None,
+        "trigger": "upgrade", "scope": "all", "prepare_show_runtime": False,
     }
+    assert old_python.read_bytes() == old_main.read_bytes() == b"must not execute or modify"
+    with pytest.raises(SystemExit) as help_exit:
+        restart_supervisor.main(["--help"])
+    assert help_exit.value.code == 0
+    assert "rollback" not in capsys.readouterr().out
 
 
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
@@ -758,7 +705,6 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     assert calls[2][:3] == ("start_service", False, 0)
     assert calls[3] == ("bind_host", config)
     assert calls[4][:4] == ("start_ui", "0.0.0.0", 5123, False)
-    assert calls[2][3]["memory_ui_secret"] == calls[4][4]["memory_ui_secret"]
     assert "launcher" not in calls[2][3]
     assert "launcher" not in calls[4][4]
 

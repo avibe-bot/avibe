@@ -18,7 +18,6 @@ import { AgentsPage } from './components/workbench/AgentsPage';
 import { SkillsPage } from './components/workbench/SkillsPage';
 import { HarnessPage } from './components/workbench/HarnessPage';
 import { VaultsPage } from './components/workbench/VaultsPage';
-import { SettingsMemoryPage } from './components/settings/SettingsMemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { ChannelList } from './components/steps/ChannelList';
@@ -102,7 +101,11 @@ import {
   shouldRestorePwaLaunch,
   writeLastPwaPath,
 } from './lib/pwaRouteMemory';
-import { takePendingWebPushLaunchPath } from './lib/webPushLaunch';
+import {
+    createWebPushLaunchNavigation,
+    takePendingWebPushLaunchPath,
+    takeResumedWebPushLaunchPath,
+} from './lib/webPushLaunch';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -252,16 +255,24 @@ const WebPushNotificationNavigator = () => {
 
     useEffect(() => {
         if (!('serviceWorker' in navigator)) return;
+        const launchNavigation = createWebPushLaunchNavigation(takeResumedWebPushLaunchPath, navigate);
 
         const onMessage = (event: MessageEvent) => {
             const data = event.data;
             if (!data || typeof data !== 'object' || data.type !== 'vibe.notification-click') return;
             const path = notificationClickPath(data.url);
-            if (path) navigate(path);
+            if (path) {
+                launchNavigation.notificationClick(path);
+            }
         };
 
+        const unsubscribeResume = onPageReactivated(() => launchNavigation.reactivated());
         navigator.serviceWorker.addEventListener('message', onMessage);
-        return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+        return () => {
+            launchNavigation.dispose();
+            unsubscribeResume();
+            navigator.serviceWorker.removeEventListener('message', onMessage);
+        };
     }, [navigate]);
 
     return null;
@@ -635,9 +646,9 @@ const PwaRouteMemory = () => {
       iosStandalone,
       locationKey: location.key,
       location,
-      pendingNotificationPath: iosStandalone
-        ? takePendingWebPushLaunchPath()
-        : Promise.resolve<string | null>(null),
+      // Consume a launch handoff even when the browser honored openWindow's
+      // exact route, so it cannot redirect a later resume.
+      pendingNotificationPath: takePendingWebPushLaunchPath(),
     };
   });
   const [launchRestorePath, setLaunchRestorePath] = useState<string | null | undefined>(
@@ -715,7 +726,6 @@ const settingsRoute = () => (
       }
     />
     <Route path="dependencies" element={<SettingsDependenciesPage />} />
-    <Route path="memory" element={<SettingsMemoryPage />} />
     <Route path="replies" element={<SettingsMessagingPage />} />
     <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
     <Route path="diagnostics/logs" element={<SettingsLogsPage />} />

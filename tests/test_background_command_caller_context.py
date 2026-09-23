@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV, CALLER_CONTEXT_ENV_NAMES
+from core.caller_context import CALLER_CONTEXT_ENV_NAMES
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import ManagedWatch, ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore
 from storage import vault_service
@@ -36,10 +36,10 @@ def _probe_command() -> list[str]:
 import json, os, sys
 from types import SimpleNamespace
 sys.path.insert(0, {root!r})
-from core.caller_context import CALLER_CONTEXT_ENV_NAMES, AVIBE_CALLER_SESSION_PROOF_ENV
+from core.caller_context import CALLER_CONTEXT_ENV_NAMES
 from vibe.cli import _vault_cli_delivery_context
 requester, delivery, session = _vault_cli_delivery_context(SimpleNamespace(), mode="run")
-keys = CALLER_CONTEXT_ENV_NAMES | {{AVIBE_CALLER_SESSION_PROOF_ENV,
+keys = CALLER_CONTEXT_ENV_NAMES | {{
     "AVIBE_WATCH_ID", "AVIBE_WATCH_LAST_DELIVERY", "COMMAND_CONFIG_PROBE"}}
 print(json.dumps({{"requester": requester, "delivery": delivery, "session": session,
     "context": {{key: os.environ[key] for key in keys if key in os.environ}},
@@ -54,7 +54,6 @@ def _contaminate_parent(monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_unrelated")
     monkeypatch.setenv("AVIBE_CALLER_REMOTE", "1")
     monkeypatch.setenv("AVIBE_CALLER_RESOURCE_CONTEXT", '{"sub":"wrong-owner"}')
-    monkeypatch.setenv(AVIBE_CALLER_SESSION_PROOF_ENV, "stale-proof")
 
 
 def _watch(tmp_path, *, session_id, shell=False, metadata=None):
@@ -168,4 +167,3 @@ def test_hfr_486_watch_carries_definition_authority_not_service_authority(tmp_pa
     assert child["session"] == session_id
     assert child["context"]["AVIBE_CALLER_REMOTE"] == "1"
     assert json.loads(child["context"]["AVIBE_CALLER_RESOURCE_CONTEXT"]) == snapshot
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in child["context"]

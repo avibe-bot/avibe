@@ -49,4 +49,46 @@ describe("model hub projection focus", () => {
     expect(group?.dataset.agentGroupHead).toBe("claude");
     root.remove();
   });
+
+  it("preserves the current focus when a background projection installs", () => {
+    const root = document.createElement("main");
+    root.innerHTML = [
+      '<button data-destination="current">Current</button>',
+      '<button data-route-backend="claude" data-route-model="model">Model</button>',
+    ].join("");
+    document.body.append(root);
+    const current = root.querySelector<HTMLElement>('[data-destination="current"]')!;
+    current.focus();
+
+    const focused = focusModelHubProjection({
+      root,
+      activeTarget: null,
+      backend: "claude",
+      modelId: "model",
+      preserveCurrentFocus: true,
+    });
+
+    expect(focused).toBe(current);
+    expect(document.activeElement).toBe(current);
+    root.remove();
+  });
+
+  it("focuses the opener inside a remounted nonfocusable model row", () => {
+    const root = document.createElement("main");
+    root.innerHTML = [
+      '<button data-destination="first">First control</button>',
+      '<div data-route-backend="claude" data-route-model="模型">',
+      '<button data-opener>Open route</button></div>',
+    ].join("");
+    document.body.append(root);
+    const focused = focusModelHubProjection({
+      root,
+      activeTarget: document.createElement("button"),
+      backend: "claude",
+      modelId: "模型",
+    });
+    expect(focused).toBe(root.querySelector("[data-opener]"));
+    expect(document.activeElement).toBe(focused);
+    root.remove();
+  });
 });

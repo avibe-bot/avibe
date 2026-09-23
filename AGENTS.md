@@ -186,15 +186,9 @@ Persisted-shape rule:
 - a schema change must load older releases' files via migration or safe
   degradation (a broken optional-feature section disables that feature and
   warns; startup never fails), with load fixtures covering the released shapes
-- Memory package upgrades are forward-only: success follows the ordinary restart
-  path, while install, upgrade, or restart failures are structured terminal
-  results and do not prevent a later explicit attempt. Do not add automatic
-  package rollback, rollback plans, lifecycle reservations, quarantine, Gate 5
-  verification, or recovery bootstrap.
-- Memory Runtime manifest/hash/fetch/verify and backup safeguards protect
-  published artifact availability. They are not installed-package rollback
-  machinery; existing backup creation and manual restore primitives remain
-  manual recovery tools.
+- Optional feature artifacts removed from the product must not be reintroduced through
+  compatibility shims; preserve released data through ordinary schema migration
+  and safe degradation where required.
 
 Source-of-truth rule:
 

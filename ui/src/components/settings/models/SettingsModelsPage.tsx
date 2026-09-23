@@ -18,7 +18,7 @@ import { GatewayModule } from './GatewayModule';
 import { MigrationDialog } from './MigrationDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
-import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
+import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport, type SuspendedRouteAttempt } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
@@ -74,6 +74,11 @@ import type { UsageWindowOption } from './usageProjection';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
+type RouteTarget = {
+  agent: AgentSupply;
+  modelId: string;
+  opener: HTMLElement | null;
+};
 // Frame 13's rows, derived from the one subscription-vendor vocabulary rather
 // than restated here. `subscriptionOptions.ts` owns which vendors are offered and
 // what custody each has, so this menu cannot drift out of the same order the
@@ -395,9 +400,18 @@ export const SettingsModelsPage: React.FC = () => {
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [catalogFocus, setCatalogFocus] = React.useState<CatalogFocus | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
-  const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
+  const [routeTarget, setRouteTarget] = React.useState<RouteTarget | null>(null);
+  const pendingRouteOpenersRef = React.useRef(new Map<RouteReport, HTMLElement | null>());
+  const suspendedRouteOpenersRef = React.useRef(new WeakMap<SuspendedRouteAttempt, HTMLElement | null>());
+  const sourcesRetryRef = React.useRef<HTMLButtonElement>(null);
+  const supplyRetryRef = React.useRef<HTMLButtonElement>(null);
+  const routeCommitStatusRef = React.useRef<RouteProjectionStatus | null>(null);
   const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
-  const [routeCommitBackend, setRouteCommitBackend] = React.useState<AgentBackend | null>(null);
+  const routeCommitBackends = React.useMemo(
+    () => new Set([...pendingRouteOpenersRef.current.keys()].map((report) => report.chain.backend)),
+    // Status changes notify us when a report is queued or settled.
+    [routeCommitStatus],
+  );
   const [suspendedRouteAttempts, setSuspendedRouteAttempts] = React.useState(
     emptySuspendedRouteAttempts,
   );
@@ -539,7 +553,7 @@ export const SettingsModelsPage: React.FC = () => {
     const suspendedBackends = new Set(suspendedRouteAttempts.keys());
     const probeAgents = hubAgents.filter((agent) =>
       !suspendedBackends.has(agent.backend)
-      && agent.backend !== routeCommitBackend);
+      && !routeCommitBackends.has(agent.backend));
     const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
     chainReadAuthority.invalidateExcept((key) => activeBackends.has(chainKeyBackend(key)));
     setChainsRead((previous) => readyRegion(Object.fromEntries(
@@ -551,7 +565,7 @@ export const SettingsModelsPage: React.FC = () => {
       })).filter(([key]) => activeBackends.has(chainKeyBackend(key))),
     )));
     for (const agent of probeAgents) void refreshAgentChains(agent);
-  }, [chainReadAuthority, refreshAgentChains, routeCommitBackend, suspendedRouteAttempts]);
+  }, [chainReadAuthority, refreshAgentChains, routeCommitBackends, suspendedRouteAttempts]);
 
   React.useEffect(() => {
     const freshSupply = foldRegionRead<AgentSupply[], AgentSupply[] | null>(supplyRead, {
@@ -932,7 +946,16 @@ export const SettingsModelsPage: React.FC = () => {
   const landingLoading = sourcesRead.kind === 'loading'
     && supplyRead.kind === 'loading'
     && runtimeRead.kind === 'loading';
-  const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
+  // A newer region observation (including a Source entity echo) does not settle
+  // a retained M6 failure. Compose its Retry into the receiving view without
+  // changing the actual read authority or discarding newly observed data.
+  const sourcesDisplayRead = routeCommitStatus?.failed.has('sources')
+    ? failRegionRead(sourcesRead)
+    : sourcesRead;
+  const supplyDisplayRead = routeCommitStatus?.failed.has('agents')
+    ? failRegionRead(supplyRead)
+    : supplyRead;
+  const directEmpty = modelsSurfaceKindFromReads(supplyDisplayRead, sourcesDisplayRead) === 'direct_empty';
   const installedAgents = agents.filter((agent) => agent.cli_present);
   const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
@@ -961,7 +984,7 @@ export const SettingsModelsPage: React.FC = () => {
       void startRuntime();
     }
   };
-  const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyRead, {
+  const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyDisplayRead, {
     loading: () => loadingRegion(),
     ready: () => readyRegion(installedAgents),
     unread: (retryable) => unreadRegion(retryable),
@@ -1023,13 +1046,37 @@ export const SettingsModelsPage: React.FC = () => {
     read: chains[modelChainKey(routeTarget.agent.backend, routeTarget.modelId)],
     available: supplyRead.kind !== 'ready' || currentRouteAgent !== null,
   } : null;
-  const focusRouteDestination = React.useCallback((target: NonNullable<typeof routeTarget>) => {
+  const focusRouteDestination = React.useCallback((
+    target: RouteTarget,
+    preserveCurrentFocus = false,
+  ) => {
     requestAnimationFrame(() => {
       focusModelHubProjection({
         root: pageRef.current,
         activeTarget: target.opener,
         backend: target.agent.backend,
         modelId: target.modelId,
+        preserveCurrentFocus,
+      });
+    });
+  }, []);
+  const refocusPendingRouteDestination = React.useCallback(() => {
+    const report = routeCommitStatusRef.current?.report;
+    if (!report || !pendingRouteOpenersRef.current.has(report)) return;
+    const opener = pendingRouteOpenersRef.current.get(report) ?? null;
+    requestAnimationFrame(() => {
+      // Another commit can be inferred between installation and this frame.
+      // Its focus identity wins, even while its collection reads are queued.
+      const latestReport = routeCommitStatusRef.current?.report ?? report;
+      const latestOpener = pendingRouteOpenersRef.current.has(latestReport)
+        ? pendingRouteOpenersRef.current.get(latestReport) ?? null
+        : latestReport === report ? opener : null;
+      focusModelHubProjection({
+        root: pageRef.current,
+        activeTarget: latestOpener,
+        backend: latestReport.chain.backend,
+        modelId: latestReport.chain.model_id,
+        preserveCurrentFocus: true,
       });
     });
   }, []);
@@ -1049,18 +1096,24 @@ export const SettingsModelsPage: React.FC = () => {
     if (result.kind === 'stale') throw new Error('route_agents_read_superseded');
     return {
       value: result.value,
-      install: () => setSupplyRead(readyRegion(result.value)),
+      install: () => {
+        setSupplyRead(readyRegion(result.value));
+        refocusPendingRouteDestination();
+      },
     };
-  }, [agentCollectionReads]);
+  }, [agentCollectionReads, refocusPendingRouteDestination]);
   const readRouteSources = React.useCallback(async (): Promise<RouteCollectionObservation<Source[]>> => {
     const snapshot = sourceEntityAuthority.beginSnapshot();
     const result = await sourceCollectionReads.read();
     if (result.kind === 'stale') throw new Error('route_sources_read_superseded');
     return {
       value: result.value,
-      install: () => sourceEntityAuthority.settleSnapshot(snapshot, result.value),
+      install: () => {
+        sourceEntityAuthority.settleSnapshot(snapshot, result.value);
+        refocusPendingRouteDestination();
+      },
     };
-  }, [sourceCollectionReads, sourceEntityAuthority]);
+  }, [refocusPendingRouteDestination, sourceCollectionReads, sourceEntityAuthority]);
   const routeProjectionReconciler = React.useMemo(() => createRouteProjectionReconciler({
     readAgents: readRouteAgents,
     readSources: readRouteSources,
@@ -1068,9 +1121,36 @@ export const SettingsModelsPage: React.FC = () => {
       if (member === 'agents') setSupplyRead(failRegionRead);
       else setSourcesRead(failRegionRead);
     },
-    onStatus: setRouteCommitStatus,
-  }), [readRouteAgents, readRouteSources]);
-  const routeCommitted = React.useCallback((result: RouteReport) => {
+    onStatus: (status) => {
+      // Every pending transition removes Retry admission, including an inferred
+      // commit arriving while the user has focused an older failed read's Retry.
+      if (status.pending && (
+        document.activeElement === sourcesRetryRef.current
+        || document.activeElement === supplyRetryRef.current
+      )) {
+        focusModelHubProjection({
+          root: pageRef.current,
+          activeTarget: pendingRouteOpenersRef.current.get(status.report) ?? null,
+          backend: status.report.chain.backend,
+          modelId: status.report.chain.model_id,
+        });
+      }
+      routeCommitStatusRef.current = status;
+      setRouteCommitStatus(status);
+      if (!status.pending) {
+        refocusPendingRouteDestination();
+        if (status.failed.size === 0) {
+          for (const report of status.reports) pendingRouteOpenersRef.current.delete(report);
+        }
+      }
+    },
+  }), [readRouteAgents, readRouteSources, refocusPendingRouteDestination]);
+  React.useEffect(() => () => routeProjectionReconciler.invalidate(), [routeProjectionReconciler]);
+  const routeCommitted = React.useCallback((
+    result: RouteReport,
+    opener: HTMLElement | null,
+  ) => {
+    pendingRouteOpenersRef.current.set(result, opener);
     chainReadAuthority.invalidate([modelChainKey(result.chain.backend, result.chain.model_id)]);
     routeObserved(result.chain);
     setSuspendedRouteAttempts((attempts) =>
@@ -1079,18 +1159,14 @@ export const SettingsModelsPage: React.FC = () => {
     suspendedHubFrontiersRef.current.delete(result.chain.backend);
     suspendedSourceBaselinesRef.current.delete(result.chain.backend);
     suspendedChainBaselinesRef.current.delete(result.chain.backend);
-    setRouteCommitBackend(result.chain.backend);
-    routeProjectionReconciler.start(result.chain.backend);
-  }, [chainReadAuthority, routeObserved, routeProjectionReconciler]);
-  React.useEffect(() => {
-    if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
-      setRouteCommitBackend(null);
-    }
-  }, [routeCommitStatus]);
+    routeProjectionReconciler.start(result);
+    showToast(t('common.saved'), 'success');
+  }, [chainReadAuthority, routeObserved, routeProjectionReconciler, showToast, t]);
   const retryRouteCommit = React.useCallback(() => {
-    if (routeCommitStatus?.pending || !routeCommitStatus?.failed.size) return;
+    const status = routeCommitStatusRef.current;
+    if (status?.pending || !status?.failed.size) return;
     routeProjectionReconciler.retry();
-  }, [routeCommitStatus, routeProjectionReconciler]);
+  }, [routeProjectionReconciler]);
   const routeCommitReconciliation = React.useMemo<RouteCommitReconciliation | null>(() => routeCommitStatus ? ({
     pending: routeCommitStatus.pending,
     failed: routeCommitStatus.failed.size > 0,
@@ -1161,7 +1237,10 @@ export const SettingsModelsPage: React.FC = () => {
         degraded: () => null,
       });
       if (observed && routeChainMatchesAttempt(observed, held)) {
-        routeCommitted({ chain: observed, removed_hops: null, interrupted: null });
+        routeCommitted(
+          { chain: observed, removed_hops: null, interrupted: null },
+          suspendedRouteOpenersRef.current.get(held) ?? null,
+        );
       }
     }
   }, [chainsRead, routeCommitted, suspendedRouteAttempts]);
@@ -1334,7 +1413,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesDisplayRead} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}
@@ -1428,7 +1507,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
+                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1523,7 +1602,7 @@ export const SettingsModelsPage: React.FC = () => {
           setCatalogFocus({ modelId: routeTarget.modelId, action });
           setMenuBackend(routeTarget.agent.backend);
         }}
-        onCommitted={routeCommitted}
+        onCommitted={(result) => routeCommitted(result, routeTarget?.opener ?? null)}
         commitReconciliation={routeCommitReconciliation}
         onObserved={routeObserved}
         readAgents={readRouteAgents}
@@ -1531,6 +1610,9 @@ export const SettingsModelsPage: React.FC = () => {
         onDirectMode={(attempt, observedAgent) => {
           const landingBackend = attempt?.backend ?? routeTarget?.agent.backend;
           if (landingBackend) {
+            if (attempt && routeTarget) {
+              suspendedRouteOpenersRef.current.set(attempt, routeTarget.opener);
+            }
             suspendedSourceBaselinesRef.current.set(landingBackend, sourcesRead);
             setSuspendedRouteAttempts((attempts) =>
               attempt

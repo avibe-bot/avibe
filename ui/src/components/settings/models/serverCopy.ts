@@ -144,7 +144,6 @@ const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, TranslationKey>> = {
   'modelHub.errors.backend_model_in_route': 'settings.models.gateway.catalog.saveRouted',
   'modelHub.errors.candidate_suppliers_changed': 'settings.models.gateway.catalog.saveSuppliersChanged',
   'modelHub.errors.backend_model_conflict': 'settings.models.gateway.catalog.saveConflict',
-  'modelHub.errors.backend_model_id_prefix': 'settings.models.gateway.catalog.saveIdPrefix',
   'modelHub.errors.backend_model_id_invalid': 'settings.models.gateway.catalog.saveIdInvalid',
   'modelHub.errors.backend_model_duplicate': 'settings.models.gateway.catalog.saveDuplicate',
   'modelHub.errors.backend_model_locked': 'settings.models.gateway.catalog.saveLocked',

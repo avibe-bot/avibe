@@ -97,6 +97,42 @@ def test_retention_help_ignores_oversized_configured_window(monkeypatch, tmp_pat
     assert cli._configured_trace_retention_days("en") == 30
 
 
+@pytest.mark.parametrize(
+    ("language", "resume_hint", "replacement_hint"),
+    [
+        (
+            "en",
+            "Without a key, the CLI resumes a recoverable local pairing",
+            "To replace an uncertain pending attempt",
+        ),
+        (
+            "zh",
+            "不提供密钥时，命令会继续本机可恢复的配对",
+            "要替换结果不确定的待处理配对",
+        ),
+    ],
+)
+def test_remote_pair_help_localizes_recovery_guidance(
+    monkeypatch, tmp_path, capsys, language, resume_hint, replacement_hint,
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"language": language}), encoding="utf-8")
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["remote", "pair", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert resume_hint in output
+    assert replacement_hint in output
+    assert "vibe remote pair --backend-url https://avibe.bot" in output
+    if language == "zh":
+        assert "Without a key, the CLI resumes" not in output
+
+
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):
     _make_fake_uv_tool(tmp_path, revisions=["20260606_0018"])
     db_path = tmp_path / "state" / "vibe.sqlite"
@@ -812,7 +848,6 @@ def _no_live_runtime_processes(monkeypatch):
     """Keep cmd_start's process-reuse probes off the developer's real state."""
 
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
 
 
 def test_cmd_start_ensures_services_without_stopping(monkeypatch):
@@ -841,9 +876,84 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     service_call = next(call for call in calls if call[0] == "start_service")
     ui_call = next(call for call in calls if call[0] == "start_ui")
     assert service_call[1]["wait_for_ready"] is False
-    assert service_call[1]["memory_ui_secret"] == ui_call[3]["memory_ui_secret"]
     assert ui_call[1:3] == ("127.0.0.1", 5123)
     assert not any(call == "stop" for call in calls)
+
+
+@pytest.mark.parametrize("reused_service", [False, True])
+@pytest.mark.parametrize("ui_state", ["healthy", "absent", "stale"])
+def test_cmd_start_reuses_independent_ui_or_recovers_only_unhealthy_ui(monkeypatch, ui_state, reused_service):
+    paths.ensure_data_dirs()
+    pid_path = paths.get_runtime_ui_pid_path()
+    if ui_state != "absent":
+        pid_path.write_text("111")
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+    stopped, spawned = [], []
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: 222 if reused_service else None)
+    monkeypatch.setattr(runtime, "start_service", lambda **kwargs: 222)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {111, 222})
+    monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: pid == 111)
+    monkeypatch.setattr(runtime, "ui_server_healthy", lambda *args: ui_state == "healthy")
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda *args: True)
+    monkeypatch.setattr(runtime, "current_service_launcher", lambda: SimpleNamespace(python="test-owned-python"))
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid: stopped.append(pid) or True)
+
+    def spawn(command, path, *args, **kwargs):
+        spawned.append(command)
+        path.write_text("333")
+        return 333
+
+    def no_full_stop(*args, **kwargs):
+        raise AssertionError("service start must not stop UI or remote access")
+
+    monkeypatch.setattr(runtime, "spawn_background", spawn)
+    monkeypatch.setattr(runtime, "stop_ui", no_full_stop)
+    monkeypatch.setattr("vibe.remote_access.stop", no_full_stop)
+    assert cli.cmd_start() == 0
+    expected_ui = 111 if ui_state == "healthy" else 333
+    assert int(pid_path.read_text()) == expected_ui
+    assert len(spawned) == (0 if ui_state == "healthy" else 1)
+    assert stopped == ([111] if ui_state == "stale" else [])
+    assert runtime.read_status()["ui_pid"] == expected_ui
+    assert runtime.read_status()["state"] == "running"
+
+
+@pytest.mark.parametrize("ui_pid", [None, 111])
+@pytest.mark.parametrize("service_fails", [False, True])
+def test_service_repair_preserves_independent_ui_status_and_never_touches_process(monkeypatch, ui_pid, service_fails):
+    paths.ensure_data_dirs()
+    if ui_pid:
+        paths.get_runtime_ui_pid_path().write_text(str(ui_pid))
+    runtime.write_status("error", "service failed", None, ui_pid)
+    def start_service(**kwargs):
+        if service_fails:
+            raise RuntimeError("service startup failed")
+        return 222
+
+    monkeypatch.setattr(runtime, "start_service", start_service)
+    monkeypatch.setattr(runtime, "resolve_service_state", lambda: SimpleNamespace(
+        state="error", detail="service startup failed", service_pid=None,
+    ))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("service-only repair must not manipulate UI/remote processes")
+
+    for name in ("start_ui", "stop_ui", "stop_pid", "spawn_background"):
+        monkeypatch.setattr(runtime, name, forbidden)
+    monkeypatch.setattr("vibe.remote_access.stop", forbidden)
+    result = cli._start_service_after_repair("service", "ok", "failed", stopped_pids=[])
+    assert result["status"] == ("failed" if service_fails else "repaired")
+    assert runtime.read_status()["service_pid"] == (None if service_fails else 222)
+    assert runtime.read_status()["state"] == ("error" if service_fails else "running")
+    assert runtime.read_status()["ui_pid"] == ui_pid
+    if ui_pid:
+        assert paths.get_runtime_ui_pid_path().read_text() == str(ui_pid)
 
 
 def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
@@ -873,7 +983,6 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     service_index = next(i for i, call in enumerate(calls) if call[0] == "start_service")
     ui_index = next(i for i, call in enumerate(calls) if call[0] == "start_ui")
     assert service_index < ui_index
-    assert calls[service_index][1]["memory_ui_secret"] == calls[ui_index][3]["memory_ui_secret"]
     assert ("runtime_status", ("starting", "waiting for service process", 1234, 5678)) in calls
     assert ("runtime_status", ("starting", "service process is still starting", 1234, 5678)) in calls
 
@@ -907,7 +1016,6 @@ def test_cmd_start_against_a_live_service_neither_resets_its_uptime_nor_skips_th
     # The live pair: `start_service` hands back the pid that already holds the
     # lock, which is what makes this a reuse rather than a start.
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
@@ -949,135 +1057,17 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     assert ("error", "service process exited before startup completed", 1234, 5678) in statuses
 
 
-def _memory_start_config(*, memory_enabled: bool = True, language: str = "en") -> SimpleNamespace:
-    return SimpleNamespace(
-        has_configured_platform_credentials=lambda: True,
-        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
-        memory=SimpleNamespace(enabled=memory_enabled),
-        language=language,
-    )
-
-
-def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(monkeypatch):
-    calls = []
-    config = _memory_start_config()
-
-    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
-    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
-    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
-    monkeypatch.setattr(
-        cli.runtime,
-        "stop_ui",
-        lambda **kwargs: calls.append(("stop_ui", kwargs)) or True,
-    )
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(
-        cli.runtime,
-        "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
-    )
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
-
-    assert cli.cmd_start() == 0
-
-    kinds = [call[0] for call in calls]
-    assert kinds == ["start_service", "stop_ui", "start_ui"]
-    assert calls[1][1] == {"stop_remote_access": False}
-    service_secret = calls[0][1]["memory_ui_secret"]
-    assert service_secret
-    assert calls[2][1]["memory_ui_secret"] == service_secret
-
-
-@pytest.mark.parametrize(
-    ("language", "expected_warning"),
-    [
-        ("en", "Memory Settings content is unavailable"),
-        ("zh", "记忆设置内容暂不可用"),
-    ],
-)
-def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
-    monkeypatch,
-    capsys,
-    language,
-    expected_warning,
-):
-    calls = []
-    config = _memory_start_config(language=language)
-
-    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
-    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
-    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
-    monkeypatch.setattr(
-        cli.runtime,
-        "stop_ui",
-        lambda **kwargs: calls.append(("stop_ui", kwargs)) or True,
-    )
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(
-        cli.runtime,
-        "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
-    )
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
-
-    assert cli.cmd_start() == 0
-
-    assert [call[0] for call in calls] == ["start_service", "start_ui"]
-    assert calls[1][1]["memory_ui_secret"] is None
-    output = capsys.readouterr().out
-    assert expected_warning in output
-    assert "vibe stop" in output
-
-
-def test_cmd_start_keeps_a_reused_pair_untouched(monkeypatch, capsys):
-    calls = []
-    config = _memory_start_config()
-
-    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
-    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
-    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
-    monkeypatch.setattr(
-        cli.runtime,
-        "stop_ui",
-        lambda **kwargs: calls.append(("stop_ui", kwargs)) or True,
-    )
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(
-        cli.runtime,
-        "start_ui",
-        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 5678,
-    )
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
-
-    assert cli.cmd_start() == 0
-
-    assert [call[0] for call in calls] == ["start_service", "start_ui"]
-    assert calls[1][1]["memory_ui_secret"] is None
-    assert "Memory Settings content is unavailable" not in capsys.readouterr().out
-
-
-def test_live_ui_server_pid_reads_only_a_verified_ui_process(monkeypatch, tmp_path):
+def test_ui_pid_probe_accepts_only_a_verified_ui_process(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     cli.paths.get_runtime_ui_pid_path().parent.mkdir(parents=True, exist_ok=True)
     cli.paths.get_runtime_ui_pid_path().write_text("4321\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: True)
-    assert cli._live_ui_server_pid() == 4321
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(cli.runtime, "_pid_matches_ui_server", lambda pid: True)
+    assert cli.runtime.ui_pid_file_points_to_running_ui() is True
 
-    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
-    assert cli._live_ui_server_pid() is None
+    monkeypatch.setattr(cli.runtime, "_pid_matches_ui_server", lambda pid: False)
+    assert cli.runtime.ui_pid_file_points_to_running_ui() is False
 
 
 def test_service_lifecycle_doctor_warns_when_pidfile_missing_but_lock_owner_exists(monkeypatch, tmp_path):
@@ -1229,12 +1219,11 @@ def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch
 def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
     """Wire _start_service_after_repair onto fakes and record what each side got."""
 
-    calls = {"service_secret": [], "ui_secret": [], "stopped_ui": 0}
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: live_ui_pid)
+    calls = {"started_service": [], "started_ui": [], "stopped_ui": 0}
     monkeypatch.setattr(
         cli.runtime,
         "start_service",
-        lambda *, memory_ui_secret=None, **kwargs: calls["service_secret"].append(memory_ui_secret) or 4321,
+        lambda *args, **kwargs: calls["started_service"].append((args, kwargs)) or 4321,
     )
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": live_ui_pid})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args, **kwargs: None)
@@ -1252,23 +1241,9 @@ def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
     monkeypatch.setattr(
         cli.runtime,
         "start_ui",
-        lambda host, port, *, memory_ui_secret=None, **kwargs: calls["ui_secret"].append(memory_ui_secret) or 8765,
+        lambda *args, **kwargs: calls["started_ui"].append((args, kwargs)) or 5432,
     )
     return calls
-
-
-def test_repair_restarts_surviving_ui_with_the_new_service_secret(monkeypatch):
-    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
-
-    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
-
-    assert result["status"] == "repaired"
-    # A bare CLI holds no process secret, so the replacement service must be
-    # given a freshly minted one and the surviving UI restarted onto the same
-    # value -- otherwise the pair verifies and signs with different secrets.
-    assert calls["stopped_ui"] == 1
-    assert calls["service_secret"] == calls["ui_secret"]
-    assert calls["service_secret"][0]
 
 
 def test_repair_leaves_the_ui_alone_when_none_is_running(monkeypatch):
@@ -1278,10 +1253,10 @@ def test_repair_leaves_the_ui_alone_when_none_is_running(monkeypatch):
 
     assert result["status"] == "repaired"
     assert calls["stopped_ui"] == 0
-    assert calls["ui_secret"] == []
+    assert calls["started_ui"] == []
 
 
-def test_repair_still_reports_success_when_the_ui_restart_fails(monkeypatch):
+def test_repair_does_not_attempt_an_unrelated_ui_restart(monkeypatch):
     calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
     monkeypatch.setattr(
         cli.runtime,
@@ -1291,10 +1266,10 @@ def test_repair_still_reports_success_when_the_ui_restart_fails(monkeypatch):
 
     result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
 
-    # The service repair itself succeeded; a UI that cannot be realigned is
-    # logged, not escalated into a failed repair.
+    # A UI launcher failure is irrelevant: service repair never invokes it.
     assert result["status"] == "repaired"
-    assert calls["service_secret"][0]
+    assert calls["started_service"]
+    assert calls["stopped_ui"] == 0
 
 
 def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatch):
@@ -1338,7 +1313,6 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
@@ -1365,7 +1339,6 @@ def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(mon
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
@@ -1776,26 +1749,6 @@ def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     assert result["results"][0]["status"] == "planned"
 
 
-def test_memory_runtime_doctor_repair_dry_run_does_not_reach_controller(monkeypatch):
-    monkeypatch.setattr(
-        "vibe.internal_client.memory_install_runtime_sync",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("dry-run must not reach the controller")
-        ),
-    )
-
-    result = cli._repair_doctor_targets(["memory-runtime"], dry_run=True)
-
-    assert result["ok"] is True
-    assert result["results"] == [
-        {
-            "target": "memory-runtime",
-            "status": "planned",
-            "message": result["results"][0]["message"],
-        }
-    ]
-
-
 def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monkeypatch):
     status = {
         "provider": "manifest-cache",
@@ -1920,104 +1873,6 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
-
-
-@pytest.mark.parametrize(
-    (
-        "dependency_status",
-        "installed",
-        "required",
-        "reason",
-        "expected_severity",
-        "expected_repair",
-    ),
-    [
-        pytest.param("ready", True, False, None, "pass", False, id="ready"),
-        pytest.param(
-            "missing",
-            False,
-            False,
-            "memory_runtime_missing",
-            "warn",
-            True,
-            id="optional-missing",
-        ),
-        pytest.param(
-            "error",
-            False,
-            False,
-            "memory_runtime_install_failed",
-            "warn",
-            True,
-            id="optional-error",
-        ),
-        pytest.param(
-            "error",
-            False,
-            True,
-            "memory_runtime_install_failed",
-            "fail",
-            True,
-            id="required-error",
-        ),
-        pytest.param(
-            "unsupported",
-            False,
-            True,
-            "memory_runtime_unsupported",
-            "fail",
-            False,
-            id="required-unsupported",
-        ),
-    ],
-)
-def test_managed_dependencies_doctor_reports_memory_runtime_states(
-    monkeypatch,
-    dependency_status,
-    installed,
-    required,
-    reason,
-    expected_severity,
-    expected_repair,
-):
-    """MEMORY-RUNTIME-001: Doctor projects the disk-truthful runtime contract."""
-
-    monkeypatch.setattr(
-        cli.api,
-        "dependencies_status",
-        lambda **_kwargs: {
-            "deps": [
-                {
-                    "id": "memory-runtime",
-                    "required": required,
-                    "installed": installed,
-                    "status": dependency_status,
-                    "reason": reason,
-                },
-                {
-                    "id": "git-runtime",
-                    "required": False,
-                    "installed": True,
-                    "status": "ready",
-                },
-            ]
-        },
-    )
-
-    items = cli._managed_dependencies_doctor_items(deep=True)
-
-    runtime_item = next(
-        item
-        for item in items
-        if item.get("code") == f"dependencies.memory-runtime.{dependency_status}"
-    )
-    assert runtime_item["status"] == expected_severity
-    assert runtime_item["dependency_status"] == dependency_status
-    assert runtime_item.get("dependency_reason") == reason
-    assert runtime_item["dependency_required"] is required
-    assert (runtime_item.get("repair") or {}).get("target") == (
-        "memory-runtime" if expected_repair else None
-    )
 
 
 def test_managed_dependencies_doctor_probes_model_hub_engine_archive(monkeypatch):
@@ -2327,87 +2182,6 @@ def test_repair_managed_dependency_preserves_structured_download_error():
 
     assert result["status"] == "failed"
     assert result["download_error"] == error
-
-
-def test_memory_runtime_doctor_repair_uses_controller_ipc(monkeypatch):
-    calls = []
-
-    def install_runtime():
-        calls.append(True)
-        return {"status_code": 200, "body": {"ok": True}}
-
-    monkeypatch.setattr(
-        "vibe.internal_client.memory_install_runtime_sync",
-        install_runtime,
-    )
-
-    result = cli._repair_memory_runtime()
-
-    assert calls == [True]
-    assert result["target"] == "memory-runtime"
-    assert result["status"] == "repaired"
-
-
-def test_memory_runtime_doctor_repair_preserves_controller_failure(monkeypatch):
-    download_error = {"kind": "timeout", "attempts": 2}
-    monkeypatch.setattr(
-        "vibe.internal_client.memory_install_runtime_sync",
-        lambda: {
-            "status_code": 200,
-            "body": {
-                "ok": False,
-                "reason": "memory_runtime_install_failed",
-                "download_error": download_error,
-            },
-        },
-    )
-
-    result = cli._repair_memory_runtime()
-
-    assert result["status"] == "failed"
-    assert result["reason"] == "memory_runtime_install_failed"
-    assert result["download_error"] == download_error
-
-
-@pytest.mark.parametrize(
-    "reason",
-    [
-        "memory_runtime_preparation_import_timeout",
-        "memory_runtime_preparation_import_failed",
-        "memory_runtime_preparation_scrubber_timeout",
-        "memory_runtime_preparation_scrubber_failed",
-        "memory_runtime_preparation_sync_contract_failed",
-        "memory_runtime_preparation_failed",
-    ],
-)
-@pytest.mark.parametrize("language", ["en", "zh"])
-def test_doctor_localizes_bounded_memory_runtime_preparation_reasons(reason, language):
-    projected = cli._doctor_memory_reason(reason, language)
-
-    assert projected != reason
-    assert projected != "unknown error"
-
-
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [
-        (
-            "en",
-            "Memory is running. Turn it off in Settings > Memory before repairing the runtime.",
-        ),
-        (
-            "zh",
-            "记忆功能正在运行。请先在「设置 > 记忆」中关闭记忆，再修复运行时。",
-        ),
-    ],
-)
-def test_doctor_localizes_stopped_memory_repair_prerequisite(language, expected):
-    projected = cli._doctor_memory_reason(
-        "memory_runtime_install_requires_stopped_memory",
-        language,
-    )
-
-    assert projected == expected
 
 
 def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monkeypatch):
@@ -2891,250 +2665,6 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
 
 
-@pytest.mark.parametrize("consumer", ["memory", "model-hub", "tmux"])
-def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
-    monkeypatch,
-    capsys,
-    tmp_path,
-    consumer,
-):
-    if consumer == "memory":
-        from avibe_memory.artifact import MemoryArtifactManager
-
-        manager = MemoryArtifactManager(
-            runtime_dir=tmp_path / "memory-runtime",
-            provider_root=tmp_path / "memory-provider",
-            offline=True,
-        )
-    elif consumer == "model-hub":
-        from vibe.model_hub_runtime.installer import EngineRuntimeManager
-
-        manager = EngineRuntimeManager(
-            runtime_dir=tmp_path / "model-hub-runtime",
-            offline=True,
-        )
-    else:
-        from core.tmux_runtime import TmuxRuntimeManager
-
-        manager = TmuxRuntimeManager(
-            runtime_dir=tmp_path / "tmux-runtime",
-            offline=True,
-        )
-
-    from core.managed_runtime import runtime_platform_tag
-
-    versions_dir = manager.runtime_dir / "versions"
-    current_install = versions_dir / "current"
-    stale_install = versions_dir / "stale"
-    current_install.mkdir(parents=True)
-    stale_install.mkdir()
-    manifest_sha = "a" * 64
-    current_archive_sha = "b" * 64
-    stale_archive_sha = "c" * 64
-    binary_sha = hashlib.sha256(b"fixture").hexdigest()
-    for install_dir, version, archive_sha in (
-        (current_install, "current", current_archive_sha),
-        (stale_install, "stale", stale_archive_sha),
-    ):
-        binary = install_dir / manager.spec.default_bin_path
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        binary.write_text("fixture", encoding="utf-8")
-        binary.chmod(0o755)
-        (install_dir / manager.spec.metadata_filename).write_text(
-            json.dumps(
-                {
-                    "provider": "manifest",
-                    "runtime_id": manager.spec.runtime_id,
-                    "runtime_version": version,
-                    "platform": runtime_platform_tag(),
-                    "manifest_sha256": manifest_sha,
-                    "manifest_source": "package:tests/runtime-manifest.json",
-                    "archive_name": f"fixture-{version}.tar.gz",
-                    "archive_sha256": archive_sha,
-                    "binary_sha256": binary_sha,
-                    "bin_path": manager.spec.default_bin_path,
-                }
-            ),
-            encoding="utf-8",
-        )
-    (manager.runtime_dir / "current.json").write_text(
-        json.dumps(
-            {
-                "provider": "manifest",
-                "runtime_id": manager.spec.runtime_id,
-                "runtime_version": "current",
-                "platform": runtime_platform_tag(),
-                "install_dir": str(current_install),
-                "manifest_sha256": manifest_sha,
-                "archive_sha256": current_archive_sha,
-                "bin_path": manager.spec.default_bin_path,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class FakeShowRuntimeManager:
-        def clean(self, *, keep_previous=1, dry_run=False):
-            return {
-                "ok": True,
-                "removed": [],
-                "archives": {"removed_count": 0, "candidate_count": 0},
-            }
-
-    def clean_consumer(*, keep_previous, dry_run):
-        assert keep_previous == 0
-        return manager.clean(keep_previous=keep_previous, dry_run=dry_run)
-
-    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
-    monkeypatch.setattr(
-        cli,
-        "_managed_runtime_cleaners",
-        lambda: ((manager.spec.runtime_id, clean_consumer),),
-    )
-    parser = cli.build_parser()
-
-    preview_args = parser.parse_args(
-        ["runtime", "clean", "--keep-previous", "0", "--dry-run", "--json"]
-    )
-    assert cli.cmd_runtime(preview_args) == 0
-    preview = json.loads(capsys.readouterr().out)
-    assert str(stale_install) in preview[manager.spec.runtime_id]["removed"]
-    assert current_install.is_dir()
-    assert stale_install.is_dir()
-
-    real_args = parser.parse_args(
-        ["runtime", "clean", "--keep-previous", "0", "--json"]
-    )
-    assert cli.cmd_runtime(real_args) == 0
-    cleaned = json.loads(capsys.readouterr().out)
-    assert str(stale_install) in cleaned[manager.spec.runtime_id]["removed"]
-    assert current_install.is_dir()
-    assert not stale_install.exists()
-
-
-def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
-    from core import tmux_runtime
-    from avibe_memory import artifact as memory_artifact
-    from vibe.model_hub_runtime import installer as model_hub_installer
-
-    calls = []
-
-    def clean_git(*, keep_previous, dry_run):
-        calls.append(("git", keep_previous, dry_run))
-        return {"ok": True, "removed": []}
-
-    class FakeManager:
-        def __init__(self, runtime_id):
-            self.runtime_id = runtime_id
-
-        def clean(self, *, keep_previous, dry_run):
-            calls.append((self.runtime_id, keep_previous, dry_run))
-            return {"ok": True, "removed": []}
-
-    monkeypatch.setattr(cli, "_clean_git_runtime", clean_git)
-    monkeypatch.setattr(
-        memory_artifact,
-        "get_memory_artifact_manager",
-        lambda: FakeManager("memory-runtime"),
-    )
-    monkeypatch.setattr(
-        model_hub_installer,
-        "EngineRuntimeManager",
-        lambda: FakeManager("model_hub_engine"),
-    )
-    monkeypatch.setattr(
-        tmux_runtime,
-        "get_tmux_runtime_manager",
-        lambda: FakeManager("tmux"),
-    )
-
-    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
-
-    assert list(results) == [
-        "git",
-        "memory-runtime",
-        "model_hub_engine",
-        "tmux",
-    ]
-    assert calls == [
-        ("git", 2, True),
-        ("memory-runtime", 2, True),
-        ("model_hub_engine", 2, True),
-        ("tmux", 2, True),
-    ]
-
-
-def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
-    from core import tmux_runtime
-    from vibe.model_hub_runtime import installer as model_hub_installer
-
-    calls = []
-    original_import = builtins.__import__
-
-    def core_only_import(name, *args, **kwargs):
-        if name == "avibe_memory.artifact":
-            raise ModuleNotFoundError(name, name="avibe_memory")
-        return original_import(name, *args, **kwargs)
-
-    class FakeManager:
-        def __init__(self, runtime_id):
-            self.runtime_id = runtime_id
-
-        def clean(self, *, keep_previous, dry_run):
-            calls.append((self.runtime_id, keep_previous, dry_run))
-            return {"ok": True, "removed": []}
-
-    monkeypatch.setattr(builtins, "__import__", core_only_import)
-    monkeypatch.setattr(
-        cli,
-        "_clean_git_runtime",
-        lambda **kwargs: calls.append(("git", kwargs["keep_previous"], kwargs["dry_run"]))
-        or {"ok": True, "removed": []},
-    )
-    monkeypatch.setattr(
-        model_hub_installer,
-        "EngineRuntimeManager",
-        lambda: FakeManager("model_hub_engine"),
-    )
-    monkeypatch.setattr(
-        tmux_runtime,
-        "get_tmux_runtime_manager",
-        lambda: FakeManager("tmux"),
-    )
-
-    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
-
-    assert results["memory-runtime"] == {
-        "ok": True,
-        "removed": [],
-        "skipped": True,
-        "reason": "memory_implementation_unavailable",
-    }
-    assert results["git"]["ok"] is True
-    assert results["model_hub_engine"]["ok"] is True
-    assert results["tmux"]["ok"] is True
-    assert calls == [
-        ("git", 2, True),
-        ("model_hub_engine", 2, True),
-        ("tmux", 2, True),
-    ]
-
-
-def test_runtime_clean_reports_broken_memory_implementation_import(monkeypatch):
-    original_import = builtins.__import__
-
-    def broken_memory_import(name, *args, **kwargs):
-        if name == "avibe_memory.artifact":
-            raise ModuleNotFoundError("missing companion dependency", name="memory_dependency")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", broken_memory_import)
-    cleaners = dict(cli._managed_runtime_cleaners())
-
-    with pytest.raises(ModuleNotFoundError, match="missing companion dependency"):
-        cleaners["memory-runtime"](keep_previous=2, dry_run=True)
-
-
 def test_runtime_clean_returns_nonzero_and_reports_git_exception_reason(monkeypatch, capsys):
     from core import git_runtime
 
@@ -3264,101 +2794,12 @@ def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monke
     assert captured.err == ""
 
 
-def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch, capsys):
-    class FakeShowRuntimeManager:
-        def clean(self, *, keep_previous=1, dry_run=False):
-            return {"ok": True, "removed": ["show-old"], "archives": {"removed_count": 0}}
-
-    def cleaner(count):
-        return lambda **_kwargs: {"ok": True, "removed": [f"old-{index}" for index in range(count)]}
-
-    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
-    monkeypatch.setattr(
-        cli,
-        "_managed_runtime_cleaners",
-        lambda: (
-            ("git", cleaner(1)),
-            ("memory-runtime", cleaner(2)),
-            ("model_hub_engine", cleaner(3)),
-            ("tmux", cleaner(4)),
-        ),
-    )
-    args = cli.build_parser().parse_args(["runtime", "clean"])
-
-    assert cli.cmd_runtime(args) == 0
-    captured = capsys.readouterr()
-    assert "Removed 1 Git Runtime cache item(s)." in captured.out
-    assert "Removed 2 Memory Runtime cache item(s)." in captured.out
-    assert "Removed 3 Model Hub Runtime cache item(s)." in captured.out
-    assert "Removed 4 tmux Runtime cache item(s)." in captured.out
-    assert captured.err == ""
-
-
-def test_runtime_clean_previews_shared_consumer_archive_candidates(monkeypatch, capsys):
-    class FakeShowRuntimeManager:
-        def clean(self, *, keep_previous=1, dry_run=False):
-            return {"ok": True, "removed": [], "archives": {"candidate_count": 0}}
-
-    def clean_memory(**_kwargs):
-        return {
-            "ok": True,
-            "removed": [],
-            "archives": {
-                "candidate_count": 2,
-                "candidate_bytes": 2048,
-            },
-        }
-
-    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
-    monkeypatch.setattr(
-        cli,
-        "_managed_runtime_cleaners",
-        lambda: (("memory-runtime", clean_memory),),
-    )
-    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
-
-    assert cli.cmd_runtime(args) == 0
-    captured = capsys.readouterr()
-    assert "Would remove 2 downloaded Memory Runtime archive(s) (2.0 KiB)." in captured.out
-    assert captured.err == ""
-
-
-def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(monkeypatch, capsys):
-    class FakeShowRuntimeManager:
-        def clean(self, *, keep_previous=1, dry_run=False):
-            return {"ok": True, "removed": [], "archives": {"removed_count": 0}}
-
-    def clean_memory(**_kwargs):
-        return {
-            "ok": True,
-            "removed": [],
-            "archives": {
-                "outcome": "skipped",
-                "skipped_reason": "archive_inspection_failed",
-            },
-        }
-
-    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
-    monkeypatch.setattr(
-        cli,
-        "_managed_runtime_cleaners",
-        lambda: (("memory-runtime", clean_memory),),
-    )
-    args = cli.build_parser().parse_args(["runtime", "clean"])
-
-    assert cli.cmd_runtime(args) == 1
-    captured = capsys.readouterr()
-    assert "Memory Runtime cleanup failed (archive_inspection_failed)" in captured.err
-    assert "archive_inspection_failed" in captured.err
-    assert "downloaded Memory Runtime archive" not in captured.out
-
-
 @pytest.mark.parametrize("help_args", [("runtime", "--help"), ("runtime", "clean", "--help")])
 @pytest.mark.parametrize(
     ("language", "consumer_scope", "failure_contract"),
     [
-        ("en", "Show, Git, Memory, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
-        ("zh", "Show、Git、Memory、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
+        ("en", "Show, Git, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
     ],
 )
 def test_runtime_clean_help_names_consumers_and_failure_exit(
@@ -3380,6 +2821,7 @@ def test_runtime_clean_help_names_consumers_and_failure_exit(
     output = capsys.readouterr().out
     assert cli.i18n_t("runtime.clean.commandHelp", language) in output
     assert consumer_scope in output
+    assert "Memory" not in output
     assert failure_contract in output
 
 
@@ -3490,87 +2932,6 @@ def test_restart_parser_accepts_delay_seconds():
 
     assert args.command == "restart"
     assert args.delay_seconds == 60
-
-
-def test_doctor_parser_accepts_repair_target_and_dry_run():
-    parser = cli.build_parser()
-    args = parser.parse_args(["doctor", "repair", "duplicate-service-processes", "--dry-run"])
-
-    assert args.command == "doctor"
-    assert args.doctor_action == "repair"
-    assert args.doctor_repair_targets == ["duplicate-service-processes"]
-    assert args.dry_run is True
-
-
-def test_doctor_parser_accepts_show_runtime_repair_target():
-    parser = cli.build_parser()
-    args = parser.parse_args(["doctor", "repair", "show-runtime", "--yes"])
-
-    assert args.doctor_repair_targets == ["show-runtime"]
-
-
-def test_doctor_parser_accepts_managed_dependency_repair_targets():
-    parser = cli.build_parser()
-
-    for target in ("askill", "avault", "git-runtime", "memory-runtime", "tmux"):
-        args = parser.parse_args(["doctor", "repair", target, "--yes"])
-        assert args.doctor_repair_targets == [target]
-    assert args.yes is True
-
-
-def test_doctor_parser_accepts_fast_and_deep_modes():
-    parser = cli.build_parser()
-
-    default_args = parser.parse_args(["doctor"])
-    fast_args = parser.parse_args(["doctor", "--fast"])
-    deep_args = parser.parse_args(["doctor", "--deep"])
-
-    assert default_args.doctor_deep is False
-    assert fast_args.doctor_deep is False
-    assert deep_args.doctor_deep is True
-
-
-def test_cmd_doctor_passes_default_fast_mode_to_diagnostics(monkeypatch, capsys):
-    parser = cli.build_parser()
-    args = parser.parse_args(["doctor"])
-    calls = []
-
-    monkeypatch.setattr(
-        cli,
-        "_doctor",
-        lambda *, deep=True: calls.append(deep)
-        or {"mode": "fast", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
-    )
-
-    assert cli.cmd_doctor(args) == 0
-    assert calls == [False]
-    capsys.readouterr()
-
-
-def test_cmd_doctor_passes_deep_mode_to_diagnostics(monkeypatch, capsys):
-    parser = cli.build_parser()
-    args = parser.parse_args(["doctor", "--deep"])
-    calls = []
-
-    monkeypatch.setattr(
-        cli,
-        "_doctor",
-        lambda *, deep=False: calls.append(deep)
-        or {"mode": "deep", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
-    )
-
-    assert cli.cmd_doctor(args) == 0
-    assert calls == [True]
-    capsys.readouterr()
-
-
-def test_doctor_bare_dry_run_does_not_request_repair():
-    parser = cli.build_parser()
-    args = parser.parse_args(["doctor", "--dry-run"])
-
-    assert args.command == "doctor"
-    assert args.doctor_action is None
-    assert cli._doctor_repair_requested(args) is False
 
 
 def test_start_parser_accepts_start_command():
@@ -4033,3 +3394,328 @@ def test_shutdown_intent_rejects_stale_payload(tmp_path, monkeypatch):
     )
 
     assert runtime.consume_shutdown_intent(12345, signal.SIGTERM) is None
+
+
+@pytest.mark.parametrize("consumer", ["model-hub", "tmux"])
+def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
+    monkeypatch,
+    capsys,
+    tmp_path,
+    consumer,
+):
+    if consumer == "model-hub":
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        manager = EngineRuntimeManager(
+            runtime_dir=tmp_path / "model-hub-runtime",
+            offline=True,
+        )
+    else:
+        from core.tmux_runtime import TmuxRuntimeManager
+
+        manager = TmuxRuntimeManager(
+            runtime_dir=tmp_path / "tmux-runtime",
+            offline=True,
+        )
+
+    from core.managed_runtime import runtime_platform_tag
+
+    versions_dir = manager.runtime_dir / "versions"
+    current_install = versions_dir / "current"
+    stale_install = versions_dir / "stale"
+    current_install.mkdir(parents=True)
+    stale_install.mkdir()
+    manifest_sha = "a" * 64
+    current_archive_sha = "b" * 64
+    stale_archive_sha = "c" * 64
+    binary_sha = hashlib.sha256(b"fixture").hexdigest()
+    for install_dir, version, archive_sha in (
+        (current_install, "current", current_archive_sha),
+        (stale_install, "stale", stale_archive_sha),
+    ):
+        binary = install_dir / manager.spec.default_bin_path
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("fixture", encoding="utf-8")
+        binary.chmod(0o755)
+        (install_dir / manager.spec.metadata_filename).write_text(
+            json.dumps(
+                {
+                    "provider": "manifest",
+                    "runtime_id": manager.spec.runtime_id,
+                    "runtime_version": version,
+                    "platform": runtime_platform_tag(),
+                    "manifest_sha256": manifest_sha,
+                    "manifest_source": "package:tests/runtime-manifest.json",
+                    "archive_name": f"fixture-{version}.tar.gz",
+                    "archive_sha256": archive_sha,
+                    "binary_sha256": binary_sha,
+                    "bin_path": manager.spec.default_bin_path,
+                }
+            ),
+            encoding="utf-8",
+        )
+    (manager.runtime_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest",
+                "runtime_id": manager.spec.runtime_id,
+                "runtime_version": "current",
+                "platform": runtime_platform_tag(),
+                "install_dir": str(current_install),
+                "manifest_sha256": manifest_sha,
+                "archive_sha256": current_archive_sha,
+                "bin_path": manager.spec.default_bin_path,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {"removed_count": 0, "candidate_count": 0},
+            }
+
+    def clean_consumer(*, keep_previous, dry_run):
+        assert keep_previous == 0
+        return manager.clean(keep_previous=keep_previous, dry_run=dry_run)
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: ((manager.spec.runtime_id, clean_consumer),),
+    )
+    parser = cli.build_parser()
+
+    preview_args = parser.parse_args(
+        ["runtime", "clean", "--keep-previous", "0", "--dry-run", "--json"]
+    )
+    assert cli.cmd_runtime(preview_args) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert str(stale_install) in preview[manager.spec.runtime_id]["removed"]
+    assert current_install.is_dir()
+    assert stale_install.is_dir()
+
+    real_args = parser.parse_args(
+        ["runtime", "clean", "--keep-previous", "0", "--json"]
+    )
+    assert cli.cmd_runtime(real_args) == 0
+    cleaned = json.loads(capsys.readouterr().out)
+    assert str(stale_install) in cleaned[manager.spec.runtime_id]["removed"]
+    assert current_install.is_dir()
+    assert not stale_install.exists()
+
+
+def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
+    from core import tmux_runtime
+    from vibe.model_hub_runtime import installer as model_hub_installer
+
+    calls = []
+
+    def clean_git(*, keep_previous, dry_run):
+        calls.append(("git", keep_previous, dry_run))
+        return {"ok": True, "removed": []}
+
+    class FakeManager:
+        def __init__(self, runtime_id):
+            self.runtime_id = runtime_id
+
+        def clean(self, *, keep_previous, dry_run):
+            calls.append((self.runtime_id, keep_previous, dry_run))
+            return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(cli, "_clean_git_runtime", clean_git)
+    monkeypatch.setattr(
+        model_hub_installer,
+        "EngineRuntimeManager",
+        lambda: FakeManager("model_hub_engine"),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
+
+    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
+
+    assert list(results) == [
+        "git",
+        "model_hub_engine",
+        "tmux",
+    ]
+    assert calls == [
+        ("git", 2, True),
+        ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
+    ]
+
+
+def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": ["show-old"], "archives": {"removed_count": 0}}
+
+    def cleaner(count):
+        return lambda **_kwargs: {"ok": True, "removed": [f"old-{index}" for index in range(count)]}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (
+            ("git", cleaner(1)),
+            ("model_hub_engine", cleaner(3)),
+            ("tmux", cleaner(4)),
+        ),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Removed 1 Git Runtime cache item(s)." in captured.out
+    assert "Removed 3 Model Hub Runtime cache item(s)." in captured.out
+    assert "Removed 4 tmux Runtime cache item(s)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_previews_shared_consumer_archive_candidates(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"candidate_count": 0}}
+
+    def clean_model_hub(**_kwargs):
+        return {
+            "ok": True,
+            "removed": [],
+            "archives": {
+                "candidate_count": 2,
+                "candidate_bytes": 2048,
+            },
+        }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (("model_hub_engine", clean_model_hub),),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Would remove 2 downloaded Model Hub Runtime archive(s) (2.0 KiB)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"removed_count": 0}}
+
+    def clean_model_hub(**_kwargs):
+        return {
+            "ok": True,
+            "removed": [],
+            "archives": {
+                "outcome": "skipped",
+                "skipped_reason": "archive_inspection_failed",
+            },
+        }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (("model_hub_engine", clean_model_hub),),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "Model Hub Runtime cleanup failed (archive_inspection_failed)" in captured.err
+    assert "archive_inspection_failed" in captured.err
+    assert "downloaded Model Hub Runtime archive" not in captured.out
+
+
+def test_doctor_parser_accepts_repair_target_and_dry_run():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "repair", "duplicate-service-processes", "--dry-run"])
+
+    assert args.command == "doctor"
+    assert args.doctor_action == "repair"
+    assert args.doctor_repair_targets == ["duplicate-service-processes"]
+    assert args.dry_run is True
+
+
+def test_doctor_parser_accepts_show_runtime_repair_target():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "repair", "show-runtime", "--yes"])
+
+    assert args.doctor_repair_targets == ["show-runtime"]
+
+
+def test_doctor_parser_accepts_managed_dependency_repair_targets():
+    parser = cli.build_parser()
+
+    for target in ("askill", "avault", "git-runtime", "tmux"):
+        args = parser.parse_args(["doctor", "repair", target, "--yes"])
+        assert args.doctor_repair_targets == [target]
+    assert args.yes is True
+
+
+def test_doctor_parser_accepts_fast_and_deep_modes():
+    parser = cli.build_parser()
+
+    default_args = parser.parse_args(["doctor"])
+    fast_args = parser.parse_args(["doctor", "--fast"])
+    deep_args = parser.parse_args(["doctor", "--deep"])
+
+    assert default_args.doctor_deep is False
+    assert fast_args.doctor_deep is False
+    assert deep_args.doctor_deep is True
+
+
+def test_cmd_doctor_passes_default_fast_mode_to_diagnostics(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor"])
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *, deep=True: calls.append(deep)
+        or {"mode": "fast", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
+    )
+
+    assert cli.cmd_doctor(args) == 0
+    assert calls == [False]
+    capsys.readouterr()
+
+
+def test_cmd_doctor_passes_deep_mode_to_diagnostics(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "--deep"])
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "_doctor",
+        lambda *, deep=False: calls.append(deep)
+        or {"mode": "deep", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
+    )
+
+    assert cli.cmd_doctor(args) == 0
+    assert calls == [True]
+    capsys.readouterr()
+
+
+def test_doctor_bare_dry_run_does_not_request_repair():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "--dry-run"])
+
+    assert args.command == "doctor"
+    assert args.doctor_action is None
+    assert cli._doctor_repair_requested(args) is False

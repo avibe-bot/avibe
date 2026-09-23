@@ -320,7 +320,6 @@ def test_sct_062_command_fire_replaces_service_caller_with_definition_binding(
     tmp_path: Path, monkeypatch, bound_session
 ) -> None:
     """SCT-062: real claimed Run -> supervisor -> Vault CLI context."""
-    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV
     from storage.agent_session_rows import create_agent_session_row
     from storage.db import create_sqlite_engine
 
@@ -343,9 +342,9 @@ def test_sct_062_command_fire_replaces_service_caller_with_definition_binding(
 import json, os, sys
 from types import SimpleNamespace
 sys.path.insert(0, {root!r})
-from core.caller_context import CALLER_CONTEXT_ENV_NAMES, AVIBE_CALLER_SESSION_PROOF_ENV
+from core.caller_context import CALLER_CONTEXT_ENV_NAMES
 from vibe.cli import _vault_cli_delivery_context
-keys = CALLER_CONTEXT_ENV_NAMES | {{AVIBE_CALLER_SESSION_PROOF_ENV}}
+keys = CALLER_CONTEXT_ENV_NAMES
 print(json.dumps({{"context": {{key: os.environ[key] for key in keys if key in os.environ}},
     "vault": _vault_cli_delivery_context(SimpleNamespace(), mode="run")}}))
 """
@@ -359,7 +358,7 @@ print(json.dumps({{"context": {{key: os.environ[key] for key in keys if key in o
             "created_by": {"caller": {"session_id": "ses_original_creator"}},
         },
     )
-    for key in (*_CALLER_ENV_VARS, AVIBE_CALLER_SESSION_PROOF_ENV):
+    for key in _CALLER_ENV_VARS:
         monkeypatch.setenv(key, "stale-service-caller")
     calls = []
     run = _fire(_service(tmp_path, calls), task)

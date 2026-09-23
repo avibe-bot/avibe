@@ -12,6 +12,80 @@ from modules.im.multi import MultiIMClient
 from modules.settings_manager import MultiSettingsManager
 
 
+def test_initial_module_wiring_matches_hot_registration_and_authorizes_discord(monkeypatch):
+    import builtins
+    from importlib import import_module
+    from config.platform_registry import im_platform_descriptors
+    from config.v2_compat import ClaudeCompatConfig
+    from config.v2_settings import ChannelSettings
+    import core.controller as module
+
+    descriptors = list(im_platform_descriptors())
+    clients = {}
+    # Allocate actual adapters without starting SDKs, connecting or obtaining
+    # tokens. Their dependency setters and Discord authorization run unchanged.
+    for descriptor in descriptors:
+        cls = getattr(import_module(descriptor.client_module), descriptor.client_class)
+        client = cls.__new__(cls)
+        BaseIMClient.__init__(client, descriptor.get_config_class()())
+        client.settings_manager = None
+        client._controller = None
+        clients[descriptor.id] = client
+    config = _config(list(clients), primary="discord")
+    config.claude = ClaudeCompatConfig(False, "default", ".")
+    for platform, client in clients.items():
+        setattr(config, platform, client.config)
+    monkeypatch.setattr(module.IMFactory, "create_clients", lambda _config: clients)
+    original_import = builtins.__import__
+
+    def no_feature_import(name, *args, **kwargs):
+        assert not name.startswith(("core.memory", "avibe_memory", "vibe.memory"))
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_feature_import)
+    controller = Controller.__new__(Controller)
+    controller.config = config
+    controller.enabled_platforms = list(clients)
+    controller._init_modules()
+    assert "avibe" in controller.im_clients
+    assert not hasattr(controller.im_clients["avibe"], "settings_manager")
+    assert not hasattr(controller, "memory_runtime")
+
+    replacements = {}
+    for platform, client in clients.items():
+        manager = controller.platform_settings_managers[platform]
+        assert client.settings_manager is manager
+        assert client.sessions is manager.sessions
+        assert client._controller is controller
+        assert platform in controller.agent_router.platform_routes
+        assert manager.require_mention_default() == bool(getattr(client.config, "require_mention", False))
+        replacement = type(client).__new__(type(client))
+        BaseIMClient.__init__(replacement, client.config)
+        replacement.settings_manager = None
+        replacement._controller = None
+        controller._register_client_runtime(platform, replacement)
+        assert replacement.settings_manager is manager
+        assert replacement.sessions is manager.sessions
+        assert replacement._controller is controller
+        replacements[platform] = replacement
+
+    manager = controller.platform_settings_managers["discord"]
+    manager.store.set_channels_for_platform("discord", {
+        "allowed": ChannelSettings(enabled=True), "denied": ChannelSettings(enabled=False),
+    })
+    manager.store.save()
+    discord = clients["discord"]
+    assert asyncio.run(discord._is_authorized_channel("allowed")) is True
+    assert asyncio.run(discord._is_authorized_channel("denied")) is False
+    assert asyncio.run(discord._is_authorized_channel("unknown")) is False
+
+    replacement = replacements["discord"]
+    assert replacement._controller is controller
+    assert replacement.settings_manager is manager
+    assert asyncio.run(replacement._is_authorized_channel("allowed")) is True
+    assert asyncio.run(replacement._is_authorized_channel("denied")) is False
+
+
 @dataclass
 class _StubConfig(BaseIMConfig):
     name: str = ""

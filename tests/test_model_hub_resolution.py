@@ -483,6 +483,51 @@ def test_runtime_fallback_uses_selected_hops_exact_model_id():
     assert resolution.supply_status == "degraded"
 
 
+def test_claude_hub_route_preserves_bare_xai_model_id():
+    source = _source("src_xai0001", ("grok-4.7",), vendor="xai")
+    config = _config([source], model="grok-4.7")
+    config.agents["claude"].routes["grok-4.7"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "grok-4.7"),)
+    )
+
+    resolution = resolve_model_hub_turn(config, "claude", "grok-4.7")
+
+    assert resolution.source is source
+    assert resolution.target_model == "grok-4.7"
+
+
+def test_claude_hub_invocation_sends_bare_xai_model_id(tmp_path):
+    source = _source("src_xai0002", ("grok-4.7",), vendor="xai")
+    config = _config([source], model="grok-4.7")
+    config.agents["claude"].routes["grok-4.7"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "grok-4.7"),)
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="grok-4.7",
+            source_id=source.id,
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="grok-4.7",
+            request=ModelHubRequest({}, protocol="anthropic"),
+        )
+    )
+
+    assert resolved.source_id == source.id
+    assert adapter.invocations == [(source.id, "grok-4.7")]
+
+
 def test_supply_is_degraded_when_a_later_exact_hop_is_blocked():
     first = _source("src_route020", ("requested",))
     second = _source("src_route021", ("requested",), status="cooldown")

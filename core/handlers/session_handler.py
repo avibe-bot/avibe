@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
@@ -47,7 +46,6 @@ from core.managed_skills import (
     managed_skill_environment,
     managed_skill_project_base,
 )
-from core.memory_cli_access import configure_memory_cli_access
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -1779,17 +1777,10 @@ class SessionHandler(BaseHandler):
             session_anchor=session_anchor,
         )
 
-        # Resolve admission once: it associates or clears this turn's Memory CLI
-        # session scope as a side effect, so a second call per turn would repeat
-        # that write.
-        configure_memory_cli_access(self.controller, context)
-
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
             agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
-            memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
-            profile_enabled=bool(getattr(getattr(self.config, "memory", None), "profile_enabled", True)),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),

@@ -252,7 +252,6 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         "/api/terminal",
     )
     assert _VIEWER_HTTP_NAMESPACES == (
-        "/api/memory",
         "/api/web-push",
     )
 
@@ -301,12 +300,6 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         assert http_authorization_policy(method, path).minimum_role == "editor", path
 
     viewer_examples = (
-        ("GET", "/api/memory/settings"),
-        ("PATCH", "/api/memory/settings"),
-        ("POST", "/api/memory/runtime/wake"),
-        ("POST", "/api/memory/repair"),
-        ("POST", "/api/memory/delete-data"),
-        ("POST", "/api/memory/future-capability"),
         ("POST", "/api/sessions/session-1/mark-read"),
         ("DELETE", "/api/terminal/term-1"),
         ("GET", "/api/web-push/status"),
