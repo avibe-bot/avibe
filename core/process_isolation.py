@@ -817,9 +817,10 @@ def reap_orphaned_process_tree(
     return "unconfirmed"
 
 
-# Slack for a process born just before the recorded launch time: clocks and
-# create_time (which drifts on macOS) are compared at second granularity.
-_MARKER_BIRTH_SLACK_SECONDS = 5.0
+# How much earlier than the marker an unreadable process must appear to be born
+# before it is dismissed. Generous, because create_time can drift on macOS; it
+# only ever decides about processes whose marker cannot be read at all.
+_MARKER_BIRTH_SLACK_SECONDS = 60.0
 
 
 def _processes_carrying_marker(
@@ -833,9 +834,11 @@ def _processes_carrying_marker(
     absent would forget a tree that may still be running. Only processes whose every
     uid is this user's could have inherited the marker, so a setuid process (macOS
     ``login``) or another user's process is skipped rather than blocking the scan.
-    Likewise, with ``born_after`` (the marker's creation time) a process born
-    earlier cannot have inherited it, so an older unreadable process (a
-    non-dumpable daemon on Linux) is skipped rather than blocking every scan.
+    The marker stays the authority for every readable process. Only when an
+    environment cannot be read does ``born_after`` (the marker's creation time)
+    decide: a process born well before it cannot have inherited the marker, so an
+    older unreadable process (a non-dumpable daemon on Linux) does not block every
+    scan.
     """
 
     own_pid = os.getpid()
@@ -845,10 +848,6 @@ def _processes_carrying_marker(
     for process in psutil.process_iter(["uids", "username", "create_time"]):
         if process.pid == own_pid:
             continue
-        if born_after is not None:
-            create_time = process.info.get("create_time")
-            if isinstance(create_time, (int, float)) and create_time < born_after - _MARKER_BIRTH_SLACK_SECONDS:
-                continue
         if own_uid is not None:
             uids = process.info.get("uids")
             if uids is None or {uids.real, uids.effective, uids.saved} != {own_uid}:
@@ -861,6 +860,8 @@ def _processes_carrying_marker(
             # Exited: nothing left running to reap.
             continue
         except (psutil.Error, OSError):
+            if _born_before_marker(process, born_after):
+                continue
             return None
         try:
             fingerprint = fingerprint_process_marker(marker) if isinstance(marker, str) and marker else None
@@ -869,6 +870,15 @@ def _processes_carrying_marker(
         if fingerprint is not None and hmac.compare_digest(fingerprint, worker_fingerprint):
             found.append(process)
     return found
+
+
+def _born_before_marker(process: psutil.Process, born_after: float | None) -> bool:
+    create_time = process.info.get("create_time")
+    return (
+        born_after is not None
+        and isinstance(create_time, (int, float))
+        and create_time < born_after - _MARKER_BIRTH_SLACK_SECONDS
+    )
 
 
 def reap_marked_processes(

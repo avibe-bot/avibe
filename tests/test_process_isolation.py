@@ -31,6 +31,7 @@ from core.process_isolation import (
     process_identity_recycled,
     process_identity_subprocess_env,
     probe_process_liveness,
+    _processes_carrying_marker,
     reap_marked_processes,
     reap_orphaned_process_tree,
     signal_process_tree,
@@ -540,6 +541,24 @@ def test_reap_marked_processes_finds_a_tree_by_marker_alone() -> None:
         child.wait(timeout=5)
 
 
+def test_marker_scan_trusts_a_readable_marker_over_a_drifted_birth_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    # macOS create_time can drift, so a readable marker is never dismissed by age.
+    own_uid = os.getuid()
+    marker = new_process_identity_marker()
+    engine = SimpleNamespace(
+        pid=4242,
+        info={
+            "uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid),
+            "username": "me",
+            "create_time": 1000.0,
+        },
+        environ=lambda: {PROCESS_IDENTITY_ENV: marker},
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([engine]))
+
+    assert _processes_carrying_marker(fingerprint_process_marker(marker), born_after=5000.0) == [engine]
+
+
 def test_reap_marked_processes_is_unconfirmed_when_a_process_cannot_be_inspected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -580,7 +599,7 @@ def test_reap_marked_processes_is_unconfirmed_when_a_process_cannot_be_inspected
             logging.getLogger(__name__),
             "test process",
             worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
-            born_after=1002.0,
+            born_after=1050.0,
         )
         == "unconfirmed"
     )
