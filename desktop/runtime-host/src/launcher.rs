@@ -59,7 +59,23 @@ pub const DESKTOP_BACKENDS_ROOT_ENV: &str = "AVIBE_DESKTOP_BACKENDS_ROOT";
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
 const STOP_ARGS: [&str; 1] = ["stop"];
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
-const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the shell waits for the Runtime to name its own address.
+///
+/// Sized for a *cold* first launch, not a warm one. The bundle has just been
+/// extracted, so nothing in the runtime tree has been paged in or evaluated by
+/// the system yet, and the interpreter pays for all of it on this first call.
+/// Measured on an M-series Mac with the exact environment `RuntimeCommand::private`
+/// builds: 15.8s and 18.4s on two independent cold extractions, 20.0s for the
+/// x86_64 build under Rosetta, against 2.3-4.1s once the binaries are warm. A 10s
+/// budget was therefore sized for the second launch and cut off the first one,
+/// which reached the user as `runtime_discovery_failed` on every fresh install.
+///
+/// This is the last step on the cold path that still held a warm number --
+/// readiness already allows 120s (`DEFAULT_READY_TIMEOUT`). Staying under that
+/// keeps discovery from dominating the launch, while 3x the worst measurement
+/// leaves room for slower hardware. The budget is only spent in full when the
+/// endpoint is genuinely broken, and that failure is already retryable.
+const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
 const START_RECEIPT_PREFIX: &[u8] = b"@avibe-start-receipt:";
 const MAX_START_OUTPUT_BYTES: usize = 65_536;
@@ -1441,6 +1457,47 @@ mod tests {
             wait_for_file(&recording).lines().collect::<Vec<_>>(),
             ["desktop", "endpoint", "--json", "shell=1"],
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Longer than the 10s budget that cut off cold first launches, short enough
+    /// that the desktop-shell job barely notices. The number only has to sit
+    /// between the old budget and the new one; the assertion is that a slow
+    /// endpoint is waited for, not that it answers at any particular moment.
+    #[cfg(unix)]
+    const SLOW_ENDPOINT_SECONDS: u64 = 12;
+
+    /// A first launch extracts the runtime tree and then immediately asks it for
+    /// its address, so the interpreter pays for a whole cold tree on that one
+    /// call -- measured at 15.8s to 20.0s, against 2.3s once warm. The old budget
+    /// killed the child at 10s and the user met `runtime_discovery_failed` on
+    /// every fresh install, while a second launch worked and hid it from us.
+    ///
+    /// This drives the real `query_endpoint` deadline with a command that genuinely
+    /// outlives the old budget, so it fails on the constant rather than on a value
+    /// read back from it.
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_cold_endpoint_is_waited_for_rather_than_killed() {
+        let dir = scratch_dir("endpoint-cold-start");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\nsleep {}\nprintf '%s\\n' '{{\"schema_version\":1,\"origin\":\"http://127.0.0.1:6123\"}}'\n",
+                SLOW_ENDPOINT_SECONDS
+            ),
+        );
+        let launcher = InstalledVibeLauncher {
+            candidates: vec![executable],
+        };
+
+        let endpoint = launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .endpoint()
+            .expect("an endpoint slower than the old budget still answers");
+
+        assert_eq!(endpoint.as_str(), "http://127.0.0.1:6123");
         std::fs::remove_dir_all(&dir).ok();
     }
 

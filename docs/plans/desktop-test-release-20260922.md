@@ -934,8 +934,57 @@ inflate the measurement and buy itself room. It rides the existing
 `windows-control-ipc` job, which needs neither a packaged Runtime nor an
 installer, so this class never has to cost a release candidate again.
 
+## H17 — the endpoint budget was sized for a warm launch
+
+rc11 installed on macOS and met the bootstrap error screen —
+`runtime_discovery_failed`. Not Gatekeeper, not the config, not the descriptor:
+`query_endpoint` gave `<private python> -I -m vibe desktop endpoint --json` 10s,
+and a genuinely first launch cannot answer that fast.
+
+Measured on an M-series Mac with the exact environment `RuntimeCommand::private`
+builds:
+
+| condition | wall time |
+| --- | --- |
+| cold — fresh extraction, fresh HOME | 15.81s |
+| cold — fresh extraction, fresh HOME (independent repeat) | 18.36s |
+| cold — x86_64 runtime under Rosetta | 19.99s |
+| warm binaries, fresh HOME (config creation only) | 4.12s |
+| warm binaries, warm HOME | 2.31s / 2.73s |
+| warm binaries with `com.apple.quarantine` applied recursively | 3.26s, exit 0 |
+
+The command is correct and always succeeds; it just could not finish inside 10s
+the one time it mattered. `PrivateRuntimeBundle::prepare()` has only just
+extracted the runtime tree, so nothing in it has been paged in or evaluated yet
+and the interpreter pays for all of it on this one call. That cost is paid
+**once per installed runtime version** — the second launch is warm and works,
+which is exactly why our own DMG verification never caught it. Quarantine is not
+a factor: these are ad-hoc/linker-signed binaries spawned directly rather than
+through LaunchServices.
+
+The asymmetry is what makes it a defect rather than a tuning question. Readiness
+already budgets 120s (`DEFAULT_READY_TIMEOUT`, matching
+`SERVICE_SLOW_START_TIMEOUT_SECONDS`); the endpoint query was the last step on
+the cold path still holding a number sized for a warm one. Raised to 60s: 3x the
+worst measurement for slower hardware, still well under readiness so discovery
+cannot dominate a launch. The budget is only spent in full when the endpoint is
+genuinely broken, and that failure is already retryable — so no adaptive tier,
+no first-run flag, no persisted state.
+
+The test drives the real `query_endpoint` deadline with a fake runtime that
+sleeps past the old budget and then prints a valid descriptor, so it fails on the
+constant rather than on a value read back from it. It is `#[cfg(unix)]`, like
+every other process-spawning test in that module, which reuses the existing
+`write_fake_runtime` harness instead of inventing a Windows equivalent for a
+mechanism that has no platform-specific branch.
+
 ## Known-by-design ledger additions
 
+- **Deferred.** `query_endpoint` sets `stderr(Stdio::null())` and the shell keeps
+  no log file, so an endpoint that fails on a user machine yields zero
+  diagnostics — the reason H17 had to be reproduced offline before it could be
+  explained. Left alone deliberately this round; worth deciding separately,
+  because the fix is a logging surface rather than a constant.
 - **Deferred.** `vibe start` logged *"Started UI pid=6116 but required health
   checks did not pass"* during the rc10 run at 05:51:35, yet the packaging
   probe's own readiness poll passed moments later and the start receipt reported
