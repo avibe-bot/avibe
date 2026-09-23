@@ -43,7 +43,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2.93",
+    "claude-agent-sdk>=0.2.158",
     "anyio>=4.0.0",
     "APScheduler>=3.10.4",
     "slack-sdk>=3.26.0",
