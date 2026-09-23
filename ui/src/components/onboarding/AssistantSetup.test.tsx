@@ -91,6 +91,58 @@ describe('assistant installation presentation', () => {
       expect.arrayContaining([expect.objectContaining({ kind: 'set', path: ['agents', 'codex', 'enabled'], value: true })]),
     ));
   });
+  it('does not enable a Direct assistant after the ordinary Install action', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.codex.enabled = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'direct',
+    }));
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
+    expect(row('Codex').getByRole('switch').getAttribute('aria-checked')).toBe('false');
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it.each(['unknown', 'failed'] as const)('does not promise Hub enablement when the mode read is %s', async (outcome) => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.codex.enabled = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend) => {
+      if (backend === 'codex' && outcome === 'failed') throw new Error('unreadable');
+      return { ok: true, backend, installed: false, enabled: false, auth: 'none',
+        application: 'applied', ready: false, entry_eligible: false,
+        supply_mode: backend === 'codex' ? undefined : 'direct' };
+    });
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    expect(row('Codex').queryByRole('button', { name: 'Install and enable' })).toBeNull();
+    fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it('does not auto-enable if a Hub install changes to Direct before it finishes', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.codex.enabled = false;
+    let mode: 'hub' | 'direct' = 'hub';
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false,
+      supply_mode: backend === 'codex' ? mode : 'direct',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    fireEvent.click(await row('Codex').findByRole('button', { name: 'Install and enable' }));
+    mode = 'direct';
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
+    expect(mock.api.getBackendConnection.mock.calls.filter(([backend]) => backend === 'codex').length).toBeGreaterThanOrEqual(4);
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
   it('keeps fixed row order, independent installs and retry details', async () => {
     let finishClaude!: (value: unknown) => void;
     mock.api.installAgent.mockImplementation((name) => name === 'claude'
@@ -133,9 +185,10 @@ describe('assistant installation presentation', () => {
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true, backend, installed: false, enabled: backend === 'claude' ? enabled : true,
       auth: 'none', application: 'applied', ready: false, entry_eligible: false,
+      supply_mode: 'hub',
     }));
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
-    fireEvent.click(row('Claude Code').getByRole('button', { name: en.onboarding.setup.installAndEnable }));
+    fireEvent.click(await row('Claude Code').findByRole('button', { name: en.onboarding.setup.installAndEnable }));
     const toggle = row('Claude Code').getByRole('switch');
     fireEvent.click(toggle);
     fireEvent.click(toggle);

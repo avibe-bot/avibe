@@ -510,7 +510,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
 
   const installAgent = async (name: string) => {
     if (pendingInstalls.current.has(name) || (isPage && isAnyInstalling)) return;
-    const installEnableIntent = enableIntent.current[name as RuntimeBackendId];
+    const backend = name as RuntimeBackendId;
+    const installEnableIntent = enableIntent.current[backend];
+    const hubAtClick = connections[backend]?.ok === true && connections[backend]?.supply_mode === 'hub'
+      && !connectionPending[backend] && !connectionErrors[backend];
     pendingInstalls.current.add(name);
 
     setInstallingAgents((prev) => ({ ...prev, [name]: true }));
@@ -534,8 +537,16 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           }));
         }
         await detect(name, installedPath || agents[name]?.cli_path || name);
-        if (!isPage && modelHubEnabled && !agents[name]?.enabled
-          && enableIntent.current[name as RuntimeBackendId] === installEnableIntent) toggle(name, true);
+        if (!isPage && hubAtClick && !agents[name]?.enabled
+          && enableIntent.current[backend] === installEnableIntent) {
+          try {
+            const current = await api.getBackendConnection(backend);
+            if (current.ok && current.supply_mode === 'hub' && !current.enabled
+              && enableIntent.current[backend] === installEnableIntent) toggle(name, true);
+          } catch {
+            // The connection refresh below reports an unreadable post-install state.
+          }
+        }
         await agentReads?.refresh();
       }
     } catch (e) {
@@ -866,7 +877,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const error = detectionErrors[name] ? { message: detectionErrors[name] }
             : result && !result.ok && result.message ? result : undefined;
           const supplyMode = connections[name]?.supply_mode;
-          const hubRoute = supplyMode === 'hub'
+          const confirmedHub = connections[name]?.ok === true && supplyMode === 'hub'
+            && !connectionPending[name] && !connectionErrors[name];
+          const hubRoute = (agent.status === 'missing' ? confirmedHub : supplyMode === 'hub')
             || Boolean(!supplyMode && canEditSetupRoute && modelHubEnabled && agent.status === 'ok');
           const openRoute = () => {
             if (!routeTargetReady()) return;
@@ -901,7 +914,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               : !connectionErrors[name] && connections[name]?.ready
                 ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
                 : undefined}
-            hubManaged={supplyMode === 'hub' || Boolean(!supplyMode && canEditSetupRoute && modelHubEnabled)}
+            hubManaged={confirmedHub || Boolean(agent.status === 'ok' && !supplyMode && canEditSetupRoute && modelHubEnabled)}
             enabled={agent.enabled}
             route={routeViewFor(name)}
             connectionPending={connectionPending[name]}
