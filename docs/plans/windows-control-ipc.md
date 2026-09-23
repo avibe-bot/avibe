@@ -39,10 +39,14 @@ endpoint. Existing POSIX callers do not read the Windows descriptor.
 The Controller pre-binds an `AF_INET` listener to `127.0.0.1:0`, calls
 `listen`, and then publishes:
 
-`%AVIBE_HOME%\runtime\control-ipc.json`
+`%AVIBE_HOME%\runtime\control-ipc\endpoint.json`
 
 `AVIBE_HOME` retains its existing meaning. The default therefore lives below
 the current user's Avibe home, not a machine-wide temporary directory.
+
+The descriptor sits in its own `control-ipc` directory rather than the runtime
+root because the Controller hardens the containing directory, not only the
+file. That hardening is only safe where every entry belongs to control IPC.
 
 The UTF-8 JSON descriptor has exactly this version-1 shape:
 
@@ -179,9 +183,10 @@ Windows startup is ordered:
 4. enable exclusive-address semantics where Windows supports them;
 5. bind to `127.0.0.1:0`, call `listen`, and set non-blocking mode;
 6. read the assigned port from `getsockname`;
-7. write and `fsync` a user-only temporary descriptor in the runtime directory;
+7. write and `fsync` a user-only temporary descriptor in the control IPC
+   directory;
 8. while holding the descriptor lock, atomically replace
-   `control-ipc.json`;
+   `endpoint.json`;
 9. hand the already-bound listener to uvicorn.
 
 The stable descriptor never contains an unbound or requested port. Bind

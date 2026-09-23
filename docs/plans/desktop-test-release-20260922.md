@@ -770,6 +770,96 @@ packaging probe, which is a separate decision. They do not cover a mixed-version
 Windows transition, because the premise above says there is nothing to transition
 from. They say nothing about the migration lock, deliberately.
 
+## H15 — control IPC hardening orphaned the runtime directory
+
+`gh-v3.1.1rc9` failed on `desktop-packages / x86_64-pc-windows-msvc` in "Build
+verified private Runtime". The whole private runtime tree went unreadable to the
+process tree that created it: the service lock, both captured stdio logs and the
+model-hub tree, the last of these with an explicit `[WinError 5]`. `release` was
+skipped, so no rc9 release object exists.
+
+### Mechanism
+
+`core/control_ipc.py` hardens the directory containing the endpoint descriptor,
+and that directory was the runtime directory itself — `write_descriptor_atomic`
+passed `target.parent` to `_ensure_private_directory(..., allow_repair=True)`,
+where `target` was `get_runtime_dir() / "control-ipc.json"`.
+
+`SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION` propagates.
+The DACL it applies carries no inheritable ACE, so the propagation strips the
+inherited ACEs from every child that already exists. Children created purely by
+inheritance hold no explicit ACE of their own and are left with an effectively
+empty DACL — unreadable even to their owner's later `open()`.
+
+The discriminating observation is what stayed readable. `runtime/status.json`
+survived and was the newest file in the directory, because `write_json` goes
+through `write_atomic`, which creates a fresh `mkstemp` file and `os.replace`s
+it: a child created *after* the stamp takes the creating token's default DACL
+rather than parent inheritance. `logs/vibe_remote.log` survived because it is in
+a different directory. Timing agrees: uvicorn started at 04:40:55,077 and the
+first `PermissionError` landed at 04:40:55,097.
+
+This never fired before `03662baa7`, which taught the owner check to accept an
+elevated token's default owner. Until then the check raised before reaching
+`SetNamedSecurityInfoW`. The fix was correct; it made a latent defect reachable.
+
+### The boundary decision, and why the inheritance flags are not the fix
+
+The obvious repair is `(A;OICI;FA;;;{sid})` so children inherit the grant. It was
+rejected. Control IPC's legitimate concern is one descriptor and one lock;
+making its ACEs inheritable would hand it the ACL of the entire runtime tree
+recursively — logs, model-hub, and every model file the Runtime ever downloads —
+stripped to user and SYSTEM. It also carries a Windows-only hazard:
+`_acl_signature` compares raw ACE bytes including the flags byte, and
+`_validate_security_descriptor` demands an exact match, so putting `OICI` in the
+shared SDDL risks failing validation on the files created with it, which would
+break service startup on Windows only.
+
+The descriptor moved to `runtime/control-ipc/endpoint.json` instead. The stamped
+directory now contains only objects control IPC created, each with its own
+explicit protected security descriptor, so stripping inherited ACEs from them is
+a no-op. The lock follows automatically: `_descriptor_lock` derives it with
+`descriptor_path.with_name(...)`, and the only `_ensure_private_directory` calls
+take that same parent.
+
+**The non-inheritable ACE is now correct by construction, not merely tolerated.**
+Nothing inside that directory relies on inheriting anything, so adding `OI`/`CI`
+would fix nothing and would only push control IPC's policy onto files it does not
+own. Both `config/paths.py` and the SDDL itself carry that note, because the next
+reader would otherwise "repair" it.
+
+Cost of the move was one path expression. No Rust, TypeScript, workflow or
+manifest computes that path, and there is no persisted-shape risk:
+`core/control_ipc.py` is not an ancestor of master and appears in no `v*` tag,
+only `gh-v3.1.1rc5`..`rc9`, this PR's own pre-releases. The descriptor is also
+ephemeral state rewritten at every service start. On POSIX nothing changes at
+all: `write_descriptor_atomic` is reached only from `WindowsLoopbackHost.publish`.
+
+### The test, and the assertion that would have passed on the defect
+
+The reproduction asserts that a file which exists **before** the securing call is
+still readable **after** it. The natural phrasing — "a file created inside the
+secured directory is readable by the process that created it" — describes the one
+case that still works today, and would have gone green on broken code. That is
+the same failure mode as asserting on the SDDL string, one level subtler.
+
+Both tests reach the endpoint through
+`paths.get_runtime_control_ipc_endpoint_path()` rather than a literal path, so
+they state the required behaviour rather than the chosen remedy and would have
+held against either candidate fix. They ride the existing `windows-control-ipc`
+job, which already runs `tests/test_control_ipc.py`, so no workflow change was
+needed.
+
+The red run settled a fact neither the lane nor the orchestrator had
+established. At `7981a1c9e`, job `107054477281` reported **1 failed, 31 passed**:
+the pre-existing-sibling case died on `lock.open("a+")` with `[Errno 13]` —
+the same call and errno that killed rc9 — while the create-path case **passed**.
+So a child of a directory created by `CreateDirectoryW` with a protected,
+non-inheritable descriptor takes the creating token's *default* DACL, which is
+explicit rather than inherited, and propagation never touches it. Only children
+that hold inherited ACEs can be orphaned. The create path is therefore a
+regression guard, not a second instance of the defect.
+
 ## Known-by-design ledger additions
 
 - **Deferred.** `clamp_window_frame` picks the single largest-overlap monitor and

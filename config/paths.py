@@ -191,7 +191,14 @@ def get_runtime_doctor_path() -> Path:
 
 
 def get_runtime_control_ipc_endpoint_path() -> Path:
-    return get_runtime_dir() / "control-ipc.json"
+    # The Controller hardens the directory holding this descriptor, not just the
+    # file, so that nobody with write access to the directory can swap the
+    # endpoint out from under it. That hardening is only safe over a directory
+    # whose every entry control_ipc created itself, which is why the descriptor
+    # and its lock live one level down instead of in the runtime root. Stamping
+    # the runtime root orphaned the service lock, the captured stdio logs and
+    # the model-hub tree, and that is how gh-v3.1.1rc9 died on Windows.
+    return get_runtime_dir() / "control-ipc" / "endpoint.json"
 
 
 def get_config_path() -> Path:

@@ -642,6 +642,13 @@ class _WindowsSecurity:
         # which is BUILTIN\Administrators for an elevated token rather than the
         # token user. Both SIDs therefore name "an object this process made".
         self.current_owner_sid = self._read_current_owner_sid()
+        # The ACEs carry no inheritance flags on purpose. Every object this
+        # module secures -- the endpoint directory, the descriptor and the lock
+        # -- is created here with this descriptor applied explicitly, so nothing
+        # depends on inheriting it. Adding OI/CI would not fix anything and
+        # would push this policy onto files control IPC does not own; the
+        # directory boundary in paths.get_runtime_control_ipc_endpoint_path is
+        # what keeps that set closed.
         self.sddl = f"O:{self.current_user_sid}D:P(A;;FA;;;{self.current_user_sid})(A;;FA;;;SY)"
 
     def _configure_functions(self) -> None:
