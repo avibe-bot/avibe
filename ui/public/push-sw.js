@@ -18,6 +18,67 @@ function syncAppBadge(count) {
 const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
 const WEB_PUSH_LAUNCH_ENTRY_PATH = '/__avibe/web-push-launch';
 
+function urlBase64ToUint8Array(value) {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = self.atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+async function fetchCsrfToken() {
+  const response = await fetch('/api/csrf-token', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`CSRF token request failed (${response.status})`);
+  const payload = await response.json();
+  if (typeof payload?.csrf_token !== 'string' || !payload.csrf_token) {
+    throw new Error('CSRF token missing from response');
+  }
+  return payload.csrf_token;
+}
+
+async function syncPushSubscription(subscription, previousEndpoints) {
+  const csrfToken = await fetchCsrfToken();
+  const response = await fetch('/api/web-push/subscriptions', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Vibe-CSRF-Token': csrfToken,
+    },
+    body: JSON.stringify({
+      subscription: subscription.toJSON(),
+      previous_endpoints: previousEndpoints,
+    }),
+  });
+  if (!response.ok) throw new Error(`Push subscription sync failed (${response.status})`);
+}
+
+async function replacementSubscription(event) {
+  if (event.newSubscription) return event.newSubscription;
+
+  let applicationServerKey = event.oldSubscription?.options?.applicationServerKey;
+  if (!applicationServerKey) {
+    const response = await fetch('/api/web-push/vapid-public-key', {
+      credentials: 'same-origin',
+    });
+    if (!response.ok) throw new Error(`VAPID key request failed (${response.status})`);
+    const payload = await response.json();
+    if (typeof payload?.public_key !== 'string' || !payload.public_key) {
+      throw new Error('VAPID public key missing from response');
+    }
+    applicationServerKey = urlBase64ToUint8Array(payload.public_key);
+  }
+
+  return self.registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey,
+  });
+}
+
 // iOS may honor an installed PWA's manifest start URL instead of the path passed
 // to openWindow(). Leave a short-lived launch handoff in Cache Storage so the
 // app shell can still prefer the tapped notification over its remembered page.
@@ -32,6 +93,17 @@ function rememberPendingNotificationLaunch(url) {
     .then((cache) => cache.put(entryUrl, response))
     .catch(() => {});
 }
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    replacementSubscription(event).then((subscription) =>
+      syncPushSubscription(
+        subscription,
+        event.oldSubscription?.endpoint ? [event.oldSubscription.endpoint] : [],
+      ),
+    ).catch(() => undefined),
+  );
+});
 
 self.addEventListener('push', (event) => {
   let payload = {};

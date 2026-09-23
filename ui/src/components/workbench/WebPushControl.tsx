@@ -51,6 +51,33 @@ export const WebPushControl: React.FC = () => {
           : undefined,
       )
       .catch(() => null);
+    if (
+      existing
+      && serverStatus
+      && !serverStatus.current_subscription_enabled
+      && typeof Notification !== 'undefined'
+      && Notification.permission === 'granted'
+    ) {
+      try {
+        await enableWebPush(api, { forceResubscribe: true });
+        const repaired = await getExistingWebPushSubscription();
+        if (repaired) {
+          const repairedStatus = await api.getWebPushStatus({
+            endpoint: repaired.endpoint,
+            subscription: repaired.toJSON(),
+            device_id: getWebPushDeviceId(),
+            previous_endpoints: getRememberedWebPushEndpoints(),
+          });
+          if (repairedStatus.current_subscription_enabled) {
+            rememberWebPushEndpoint(repaired.endpoint);
+            setStatus('enabled');
+            return;
+          }
+        }
+      } catch {
+        // Keep the control recoverable; the user can still retry manually.
+      }
+    }
     if (existing && serverStatus?.current_subscription_enabled) {
       rememberWebPushEndpoint(existing.endpoint);
     }

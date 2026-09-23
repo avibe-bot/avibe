@@ -50,4 +50,77 @@ describe('push service worker notification launches', () => {
       url: '/chat/session-3',
     });
   });
+
+  it('syncs a replacement subscription and retires the old endpoint', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const requests: Array<{ input: string; init?: RequestInit }> = [];
+    const newSubscription = {
+      endpoint: 'https://push.example.test/sub/new',
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/sub/new',
+        keys: { p256dh: 'new-key', auth: 'new-auth' },
+      }),
+    };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      caches: { open: vi.fn() },
+      clients: { matchAll: vi.fn(), openWindow: vi.fn() },
+      registration: { showNotification: vi.fn(), pushManager: { subscribe: vi.fn() } },
+      atob,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      requests.push({ input, init });
+      if (input === '/api/csrf-token') {
+        return { ok: true, json: async () => ({ csrf_token: 'csrf-token' }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: {},
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+      Uint8Array,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('pushsubscriptionchange')?.({
+      newSubscription,
+      oldSubscription: { endpoint: 'https://push.example.test/sub/old' },
+      waitUntil: (promise: Promise<unknown>) => {
+        completion = promise;
+      },
+    });
+    await completion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requests[0].input).toBe('/api/csrf-token');
+    expect(requests[1]).toMatchObject({
+      input: '/api/web-push/subscriptions',
+      init: {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'X-Vibe-CSRF-Token': 'csrf-token',
+        },
+      },
+    });
+    expect(JSON.parse(String(requests[1].init?.body))).toEqual({
+      subscription: {
+        endpoint: 'https://push.example.test/sub/new',
+        keys: { p256dh: 'new-key', auth: 'new-auth' },
+      },
+      previous_endpoints: ['https://push.example.test/sub/old'],
+    });
+  });
 });

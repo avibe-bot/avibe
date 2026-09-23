@@ -88,7 +88,14 @@ export async function getExistingWebPushSubscription(): Promise<PushSubscription
   return registration?.pushManager.getSubscription() ?? null;
 }
 
-export async function enableWebPush(api: ApiContextType): Promise<PushSubscriptionJSON> {
+export type EnableWebPushOptions = {
+  forceResubscribe?: boolean;
+};
+
+export async function enableWebPush(
+  api: ApiContextType,
+  options: EnableWebPushOptions = {},
+): Promise<PushSubscriptionJSON> {
   const support = getWebPushSupportState();
   if (!support.supported) {
     throw new Error(support.reason);
@@ -101,7 +108,11 @@ export async function enableWebPush(api: ApiContextType): Promise<PushSubscripti
   const registration = await navigator.serviceWorker.register('/push-sw.js');
   const serverKey = urlBase64ToArrayBuffer((await api.getWebPushVapidPublicKey()).public_key);
   const existing = await registration.pushManager.getSubscription();
-  if (existing && !arrayBuffersEqual(existing.options.applicationServerKey, serverKey)) {
+  if (
+    existing
+    && (options.forceResubscribe
+      || !arrayBuffersEqual(existing.options.applicationServerKey, serverKey))
+  ) {
     await existing.unsubscribe();
   }
   const current = await registration.pushManager.getSubscription();
@@ -114,7 +125,11 @@ export async function enableWebPush(api: ApiContextType): Promise<PushSubscripti
 
   const json = subscription.toJSON();
   const endpoint = typeof json.endpoint === 'string' ? json.endpoint : undefined;
-  await api.subscribeWebPush(json, undefined, getWebPushDeviceId(), getRememberedWebPushEndpoints());
+  const previousEndpoints = [
+    ...(existing?.endpoint ? [existing.endpoint] : []),
+    ...getRememberedWebPushEndpoints(),
+  ];
+  await api.subscribeWebPush(json, undefined, getWebPushDeviceId(), previousEndpoints);
   rememberWebPushEndpoint(endpoint);
   return json;
 }
