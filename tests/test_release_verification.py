@@ -24,6 +24,17 @@ WORKFLOWS = (
 )
 
 
+def test_historical_guard_is_release_only_and_verifies_inert_bridge_shape():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text())
+    assert workflow.get("on", workflow.get(True))["schedule"]
+    assert workflow["permissions"]["contents"] == "write"
+    text = (ROOT / ".github/workflows/memory-runtime-release-guard.yml").read_text()
+    assert "verified inert compatibility bridge" in text
+    assert "has no self-pinned historical Runtime manifest" in text
+    assert "gh release upload" in text and "All asset names exist" in text
+    assert "memory-runtime-release-backup-" in text
+
+
 @pytest.mark.parametrize(
     ("annotation", "existing_body", "silent"),
     [

@@ -392,7 +392,7 @@ reopening/merging the closed PR, or restarting a local service.
    `avibe-memory` wheel. Test any additional supported historical updater tags
    against their tagged code rather than treating every earlier version alike.
 
-2. **Historical asset availability (not yet authorized for implementation).** Keep the published old Memory Runtime
+2. **Historical asset availability (owner-approved for implementation, 2026-09-23 11:45 Asia/Shanghai).** Keep the published old Memory Runtime
    URLs valid independently of the removed product. Retain a scheduled,
    release-only guard for historical self-pinned manifests, ideally using the
    original verifier from an immutable repository commit rather than packaging
@@ -404,9 +404,10 @@ reopening/merging the closed PR, or restarting a local service.
    Exercise manifest discovery, hash rejection, backup and missing-asset
    recovery with mocked GitHub and test-owned files. Merely retaining a workflow
    in this unmerged branch does not run it; the current default-branch guard
-   continues until a future change lands on that branch.
+   continues until a future change lands on that branch. This branch carries
+   the release-only guard for owner review; it does not run on this closed PR.
 
-The approved exception in item 1 contains only release compatibility artifacts.
+The approved exceptions contain only release compatibility artifacts.
 Implementation evidence (owner-approved item 1): `scripts/build_retired_companion.py`
 creates a deterministic `avibe_memory-<version>-py3-none-any.whl` containing only
 valid METADATA, WHEEL and RECORD. It has no modules, dependencies, entry points,
@@ -427,8 +428,22 @@ importable Memory modules, and both `~/.avibe/memory` and
 `~/.vibe_remote/memory` sentinels retained bytes, inode and symlink identity.
 This is isolated artifact evidence only; no release was published or modified.
 
+The historical guard was restored from immutable commit
+`4b964fef223862c2cf7d5cec852ac0d3aa64e323` as release tooling plus its scheduled
+workflow. It validates exact published tag/manifest/provenance/platform/archive
+hashes and binary contents, retrieves only missing assets from a manifest-hash
+backup, and refuses overwrite when names already exist. Resolver output visibly
+lists exclusions: old core wheels with missing or malformed manifests are
+excluded, while a new `avibe-memory` wheel is ignored only after its exact
+three-file dist-info shape, version and dependency/extra emptiness are verified.
+No Runtime manifest fallback is allowed for malformed historical wheels. Guard
+tests cover foreign tags, content tampering, pinned URLs, backup output identity
+and repeat fetch byte preservation. This guard remains separate from application
+packaging, startup, dependencies and Memory data.
+
 No Memory configuration, CLI, UI, sidecar, capture/recall, package import or data
 migration returns. Before declaring it complete, verify the old tagged updater
 can fetch the wheel at its exact URL and complete an isolated upgrade, that new
 installs do not acquire the distribution, and that neither legacy user-data
-path is written. Keep the second item pending until separately decided.
+path is written. Keep the historical guard release-only and never execute it in
+local application startup or ordinary package installation.
