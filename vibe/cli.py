@@ -1852,23 +1852,7 @@ def _remote_examples_text() -> str:
 
 
 def _remote_pair_examples_text() -> str:
-    return dedent(
-        """\
-        Guidance:
-          This is the direct pairing command for users who already have a pairing key.
-          For the guided setup flow, run `vibe remote`.
-          Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.
-          To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.
-          Pairing saves the remote-access config and then starts the managed tunnel automatically.
-          The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.
-
-        Examples:
-          vibe remote
-          vibe remote pair vrp_abc123
-          vibe remote pair --device-name "Mac Studio"
-          vibe remote pair --backend-url https://avibe.bot
-        """
-    )
+    return i18n_t("remote_access.cli.pairHelpEpilog", _configured_cli_language())
 
 
 def _show_examples_text() -> str:

@@ -1058,6 +1058,7 @@
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
     },
     "cli": {
+      "pairHelpEpilog": "Guidance:\n  This is the direct pairing command for users who already have a pairing key.\n  For the guided setup flow, run `vibe remote`.\n  Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.\n  To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.\n  Pairing saves the remote-access config and then starts the managed tunnel automatically.\n  The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.\n\nExamples:\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
       "localWriteUnavailableTitle": "Remote access setup stopped before contacting Avibe Cloud.",
       "localWriteUnavailableBody": "The local config cannot durably accept a pairing, so no pairing key was consumed.",
       "saveFailedAfterRedeemTitle": "The pairing was redeemed cloud-side but could not be saved locally.",

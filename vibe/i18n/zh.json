@@ -1058,6 +1058,7 @@
       "invalid_oauth_nonce_body": "本次登录未能通过验证,为保护你的账户已中止。请重新登录以继续。"
     },
     "cli": {
+      "pairHelpEpilog": "使用说明：\n  已有配对密钥时，可直接使用此命令。\n  如需引导式设置，请运行 `vibe remote`。\n  不提供密钥时，命令会继续本机可恢复的配对；没有待处理操作时会提示输入密钥。\n  要替换结果不确定的待处理配对，请明确提供新密钥和原本使用的后端地址。\n  配对会保存远程访问配置，然后自动启动托管隧道。\n  配对密钥只能使用一次；若配对失败，请在 Avibe Cloud 控制台获取新密钥。\n\n示例：\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
       "localWriteUnavailableTitle": "远程访问设置已在联系 Avibe Cloud 前停止。",
       "localWriteUnavailableBody": "本地配置无法可靠保存配对信息，因此没有消耗配对密钥。",
       "saveFailedAfterRedeemTitle": "云端已完成配对，但本地保存失败。",
