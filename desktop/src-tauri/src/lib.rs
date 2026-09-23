@@ -387,6 +387,29 @@ fn open_workbench_settings(app: &AppHandle) {
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
+    refresh_native_controls(app, Some(state));
+}
+
+/// The Runtime status the native controls show next. `None` keeps the status
+/// already shown: a page load says what the window shows, not whether the
+/// Runtime is healthy. With nothing shown yet there is nothing to keep, and the
+/// first status refresh sets every control.
+fn next_tray_state(
+    requested: Option<TrayRuntimeState>,
+    shown: Option<&TrayRuntimeState>,
+    activity: u8,
+) -> Option<TrayRuntimeState> {
+    let state = requested.or_else(|| shown.cloned())?;
+    Some(if activity == ACTIVITY_STOP {
+        TrayRuntimeState::Stopping
+    } else {
+        state
+    })
+}
+
+/// Brings every native control in line with the shell's current activity and
+/// window, so availability is decided in one place whoever asks.
+fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(menus) = handle.try_state::<NativeMenus>() else {
@@ -394,15 +417,13 @@ fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
         };
         let shell = handle.state::<Shell>();
         let activity = shell.activity.load(Ordering::SeqCst);
-        let state = if activity == ACTIVITY_STOP {
-            TrayRuntimeState::Stopping
-        } else {
-            state
-        };
         let owned = stop_is_available(shell.host.has_owned_runtime(), activity);
         let workbench_origin = shell.active_origin.lock().is_ok_and(|origin| origin.is_some());
         let settings = settings_is_available(activity, workbench_origin);
         let mut displayed = menus.displayed.lock().expect("native tray state lock");
+        let Some(state) = next_tray_state(requested, displayed.as_ref().map(|(shown, _, _)| shown), activity) else {
+            return;
+        };
         if displayed.as_ref() == Some(&(state.clone(), owned, settings)) {
             return;
         }
@@ -1489,6 +1510,10 @@ pub fn run() {
                 .on_page_load(|webview, payload| {
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
                         apply_pending_deep_link(webview.app_handle());
+                        // Settings become available the moment a Workbench is on
+                        // screen, not at the monitor's first tick. The shared
+                        // rule still decides, so a bootstrap page enables nothing.
+                        refresh_native_controls(webview.app_handle(), None);
                     }
                 })
                 .on_navigation(|webview, url| {
@@ -1605,6 +1630,27 @@ mod tests {
             assert_eq!(settings_is_available(activity, true), activity == ACTIVITY_MONITOR);
         }
         assert!(avibe_runtime_host::deep_link::parse_deep_link(SETTINGS_DEEP_LINK).is_some());
+    }
+
+    #[test]
+    fn a_control_refresh_without_a_status_keeps_the_status_already_shown() {
+        let unreachable = TrayRuntimeState::Unreachable;
+        // A page load must not turn an unreachable Runtime back into a serving one.
+        assert_eq!(
+            next_tray_state(None, Some(&unreachable), ACTIVITY_MONITOR),
+            Some(TrayRuntimeState::Unreachable)
+        );
+        assert_eq!(next_tray_state(None, None, ACTIVITY_MONITOR), None);
+        assert_eq!(
+            next_tray_state(Some(TrayRuntimeState::Starting), Some(&unreachable), ACTIVITY_BOOTSTRAP),
+            Some(TrayRuntimeState::Starting)
+        );
+        for requested in [None, Some(TrayRuntimeState::Starting)] {
+            assert_eq!(
+                next_tray_state(requested, Some(&unreachable), ACTIVITY_STOP),
+                Some(TrayRuntimeState::Stopping)
+            );
+        }
     }
 
     #[test]

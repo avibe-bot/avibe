@@ -799,10 +799,27 @@ fn settings_open_through_the_deep_link_path_only_while_a_workbench_is_shown() {
         tray.contains("submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)")
     );
     assert!(source.contains("SETTINGS_MENU_ID => open_workbench_settings(app),"));
-    // The item's enabled state and the handler share one rule.
-    let refresh = body("refresh_runtime_tray");
+    // The item's enabled state and the handler share one rule, read live.
+    assert!(body("refresh_runtime_tray").contains("refresh_native_controls(app, Some(state));"));
+    let refresh = body("refresh_native_controls");
+    assert!(refresh.contains("let activity = shell.activity.load(Ordering::SeqCst);"));
     assert!(refresh.contains("let settings = settings_is_available(activity, workbench_origin);"));
     assert!(refresh.contains("menus.settings.set_enabled(settings)?;"));
+    // The item is created disabled, so it must be re-evaluated the moment a
+    // Workbench finishes loading rather than at the monitor's first tick.
+    let page_load = source
+        .split(".on_page_load(|webview, payload| {")
+        .nth(1)
+        .expect("the shell observes main-window page loads")
+        .split(".on_navigation(")
+        .next()
+        .expect("page-load hook body");
+    assert!(page_load
+        .contains("webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished"));
+    assert!(
+        page_load.contains("refresh_native_controls(webview.app_handle(), None);"),
+        "a finished Workbench load must refresh the native controls"
+    );
     let handler = body("open_workbench_settings");
     let gate = handler
         .find("if !settings_is_available(")
