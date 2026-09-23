@@ -52,6 +52,16 @@ export const CitationBadge: React.FC<{ citation: CitationSource; className?: str
   // A source whose search returned no title is attributed by its domain, which
   // is the one thing every citation has.
   const title = citation.title?.trim() || citation.label;
+  // The title is whatever the search result said about itself; the domain is
+  // where the link actually goes. A screen reader hears both, so the
+  // destination is never something only the hover preview shows.
+  const accessibleName = title === citation.label
+    ? t('chat.citation.badge', { index: citation.index, source: title })
+    : t('chat.citation.badgeWithDomain', {
+        index: citation.index,
+        source: title,
+        domain: citation.label,
+      });
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -60,7 +70,7 @@ export const CitationBadge: React.FC<{ citation: CitationSource; className?: str
           href={citation.url}
           target="_blank"
           rel="noopener noreferrer nofollow"
-          aria-label={t('chat.citation.badge', { index: citation.index, source: title })}
+          aria-label={accessibleName}
           data-citation-index={citation.index}
           onPointerDown={(event) => { pointerType.current = event.pointerType; }}
           // Only a mouse hovers; a tap reports pointerType 'touch' and is left to

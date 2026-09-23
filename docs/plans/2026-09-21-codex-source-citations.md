@@ -97,7 +97,11 @@ blob with no way to reach the page the answer is based on.
   page. A marker written into a destination, a title, a reference identifier or
   an angle autolink's address is worse than that — those characters are what
   makes the unit reach somewhere, and splicing a link through them sends it to
-  an address nobody wrote. So the parser decides, on the offset-preserving
+  an address nobody wrote. Raw HTML — an inline tag and its attributes, a
+  comment, a processing instruction, a declaration, CDATA, an HTML block — is
+  handed through without a link read out of it, so a marker there is not
+  registered either: numbering it would spend an index on a badge nobody sees.
+  Text between two tags is ordinary prose and still resolves. So the parser decides, on the offset-preserving
   CommonMark units `markdown_link_units` already reports: a marker standing
   where a reader is shown something (a visible inline-link label, an explicit
   full-reference label, an image's alt text) is eligible, and its attribution
@@ -448,7 +452,10 @@ blob with no way to reach the page the answer is based on.
   canonicalizer and the real renderer.
 - **Surface rules.** The badge is the link itself — hover or focus reveals the
   preview, the first touch reveals instead of navigating, `Enter` opens the
-  page, and external links keep `noopener noreferrer nofollow`. Only an
+  page, and external links keep `noopener noreferrer nofollow`. Its accessible
+  name carries the domain the link opens beside the source's self-reported
+  title (`Source 1: OpenAI docs (developers.openai.com)`), so the destination
+  is never shown only in the hover preview. Only an
   agent-authored reply may draw a badge; a user bubble or a non-interactive
   preview renders the plain domain link.
 

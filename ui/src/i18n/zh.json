@@ -4198,6 +4198,7 @@
     },
     "citation": {
       "badge": "来源 {{index}}：{{source}}",
+      "badgeWithDomain": "来源 {{index}}：{{source}}（{{domain}}）",
       "open": "打开来源页面"
     },
     "annotation": {

@@ -444,10 +444,13 @@ describe('Markdown source citations', () => {
     expect(badge.textContent).toBe('1');
     expect(badge.getAttribute('href')).toBe(GUIDE);
     // Safe external-link behavior, and the full attribution on the accessible
-    // name — so the preview panel is an affordance, not the only carrier.
+    // name — the source's own title and the domain the link opens — so the
+    // preview panel is an affordance, not the only carrier.
     expect(badge.getAttribute('target')).toBe('_blank');
     expect(badge.getAttribute('rel')).toBe('noopener noreferrer nofollow');
-    expect(badge.getAttribute('aria-label')).toBe('Source 1: Web search — OpenAI API');
+    expect(badge.getAttribute('aria-label')).toBe(
+      'Source 1: Web search — OpenAI API (developers.openai.com)',
+    );
     expect(container.textContent).toBe('Documented. 1');
   });
 

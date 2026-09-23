@@ -122,8 +122,11 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
     );
     badges.forEach((anchor, at) => {
       const source = row.web_citations.find((entry) => entry.url === expected[at].url);
+      const title = source?.title?.trim() || source?.label;
       expect(anchor.getAttribute('aria-label')).toBe(
-        `Source ${source?.index}: ${source?.title || source?.label}`,
+        title === source?.label
+          ? `Source ${source?.index}: ${title}`
+          : `Source ${source?.index}: ${title} (${source?.label})`,
       );
     });
   });

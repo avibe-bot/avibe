@@ -33,6 +33,7 @@ from markdown_it.rules_inline.autolink import AUTOLINK_RE, EMAIL_RE
 from markdown_it.rules_inline.autolink import autolink as _commonmark_autolink
 from markdown_it.rules_inline.backticks import backtick as _commonmark_backtick
 from markdown_it.rules_inline.entity import entity as _commonmark_entity
+from markdown_it.rules_inline.html_inline import html_inline as _commonmark_html_inline
 from markdown_it.rules_inline.image import image as _commonmark_image
 from markdown_it.rules_inline.link import link as _commonmark_link
 from markdown_it.rules_inline.state_inline import StateInline
@@ -51,6 +52,7 @@ _FILE_LINK_CAPTURES_KEY = "avibe_file_link_captures"
 _LINK_CAPTURES_KEY = "avibe_link_captures"
 _UNIT_CAPTURES_KEY = "avibe_unit_captures"
 _DEFINITION_LINES_KEY = "avibe_definition_lines"
+_RAW_HTML_CAPTURES_KEY = "avibe_raw_html_captures"
 
 
 def _track_inline_code(state: StateInline, silent: bool) -> bool:
@@ -286,6 +288,21 @@ def _capture_markdown_unit(rule, *, is_image: bool = False, is_autolink: bool = 
     return capture
 
 
+def _capture_raw_html(state: StateInline, silent: bool) -> bool:
+    """Run the CommonMark inline HTML rule and record the span it accepted.
+
+    A tag, comment, processing instruction, declaration or CDATA section is
+    handed to the renderer as raw HTML, not as Markdown: nothing inside it is
+    ever shown to a reader as a link. Text *between* two tags is ordinary
+    inline content and is not part of the span.
+    """
+    start = state.pos
+    matched = _commonmark_html_inline(state, silent)
+    if matched and not silent:
+        state.env.setdefault(_RAW_HTML_CAPTURES_KEY, []).append((start, state.pos))
+    return matched
+
+
 def _capture_reference_definition(rule):
     """Wrap the CommonMark reference rule and record the lines it swallowed.
 
@@ -324,6 +341,7 @@ _UNIT_MARKDOWN.inline.ruler.at(
 _UNIT_MARKDOWN.inline.ruler.at(
     "autolink", _capture_markdown_unit(_commonmark_autolink, is_autolink=True)
 )
+_UNIT_MARKDOWN.inline.ruler.at("html_inline", _capture_raw_html)
 
 # Definitions are a block-level fact, and the identifiers they file are what
 # lets the inline pass tell a reference link from bracketed prose.
@@ -1236,15 +1254,20 @@ def _map_unit_capture(
     return MarkdownUnit(*located)
 
 
-def _markdown_units(text: str) -> Tuple[List[MarkdownUnit], List[Tuple[int, int]]]:
-    """Every link/image unit CommonMark accepts, plus its definition lines.
+def _markdown_units(
+    text: str,
+) -> Tuple[List[MarkdownUnit], List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """Every link/image unit CommonMark accepts, its definition lines, raw HTML.
 
     The units come back sorted outermost-first at each offset, so the first one
     that contains a given span is the one a sibling has to be written after.
+    The raw HTML spans are the inline tags and the HTML blocks the parser hands
+    through verbatim; neither is Markdown a reader is shown.
     """
     if not text or ("[" not in text and "<" not in text):
-        return [], []
-    _code_ranges, inline_ranges, _blocking = _markdown_block_ranges(text)
+        return [], [], []
+    code_ranges, inline_ranges, blocking = _markdown_block_ranges(text)
+    raw_html = [span for span in blocking if span not in code_ranges]
     block_env: dict = {}
     _UNIT_BLOCK_MARKDOWN.parse(text, block_env)
     references = block_env.get("references") or {}
@@ -1268,15 +1291,19 @@ def _markdown_units(text: str) -> Tuple[List[MarkdownUnit], List[Tuple[int, int]
         inline_env: dict = {"references": references}
         _UNIT_MARKDOWN.inline.parse(content, _UNIT_MARKDOWN, inline_env, [])
         captures = inline_env.get(_UNIT_CAPTURES_KEY)
-        if not captures:
+        html_captures = inline_env.get(_RAW_HTML_CAPTURES_KEY)
+        if not captures and not html_captures:
             continue
         offsets = _inline_source_offsets(text, source_start, source_end, content)
-        for capture in captures:
+        for html_start, html_end in html_captures or ():
+            if html_start in offsets and html_end - 1 in offsets:
+                raw_html.append((offsets[html_start], offsets[html_end - 1] + 1))
+        for capture in captures or ():
             mapped = _map_unit_capture(capture, offsets)
             if mapped is not None:
                 units.append(mapped)
     units.sort(key=lambda unit: (unit.start, -unit.end))
-    return units, definitions
+    return units, definitions, raw_html
 
 
 def markdown_link_units(text: str) -> List[MarkdownUnit]:
@@ -1344,11 +1371,12 @@ def _markdown_data_ranges(
     text: str, transparent: Optional["re.Pattern[str]"] = None
 ) -> List[Tuple[int, int]]:
     """The source spans CommonMark reads but never shows anyone."""
-    units, definitions = _markdown_units(text)
+    units, definitions, raw_html = _markdown_units(text)
     ranges = [
         (unit.data_start, unit.data_end) for unit in units if unit.data_start >= 0
     ]
     ranges.extend(definitions)
+    ranges.extend(raw_html)
     if transparent is not None and transparent.search(text):
         ranges.extend(_reference_identifier_ranges(text, units, transparent))
     return _merged_ranges(ranges)
@@ -1585,7 +1613,9 @@ def mask_citation_slots(
     text to nobody: it is part of an address, and a link written into it would
     silently send the reader somewhere else. The same is true of a title, of the
     identifier that names a link reference definition, of the definition itself,
-    and of an autolink's address, which is its own label.
+    of an autolink's address, which is its own label, and of raw HTML - a
+    comment, a tag's attributes, an HTML block - which the renderer passes
+    through without reading a link out of it.
 
     So the two halves compose: code and hidden blocks from the existing mask,
     then the slots the parser reads without showing. Both preserve every source

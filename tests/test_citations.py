@@ -749,6 +749,56 @@ class TestCodeAndIncompleteMarkers:
         assert "[developers.openai.com]" in text
         assert [c["ref_id"] for c in citations] == ["turn0view0"]
 
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "Hi <!-- {m} --> then",
+            'a <span title="{m}">shown</span>',
+            "a <x y='{m}'> b",
+            "a <?php {m} ?> b",
+            "a <![CDATA[ {m} ]]> b",
+            "a <!DOCTYPE {m}> b",
+            "<!--\n{m}\n-->\n",
+            '<div title="{m}">\n\nafter',
+            "<div>\n{m}\n</div>\n\n",
+        ],
+        ids=[
+            "inline-comment",
+            "inline-attribute",
+            "single-quoted-attribute",
+            "processing-instruction",
+            "cdata",
+            "declaration",
+            "comment-block",
+            "html-block-attribute",
+            "html-block-body",
+        ],
+    )
+    def test_a_marker_inside_raw_html_is_untouched(self, template):
+        """The renderer passes raw HTML through without reading a link from it.
+
+        A source numbered there would be a badge nobody sees, and the next
+        visible citation would start the transcript at 2.
+        """
+        raw = template.format(m=marker("turn0view0")) + f" later{marker('turn0view1')}"
+
+        text, citations = resolve(raw)
+
+        assert template.format(m=marker("turn0view0")) in text
+        assert [(c["index"], c["ref_id"]) for c in citations] == [(1, "turn0view1")]
+
+    @pytest.mark.parametrize(
+        "template",
+        ["a <b>{m}</b> end", "a <x {m}> b"],
+        ids=["between-two-tags", "not-a-tag"],
+    )
+    def test_a_marker_the_reader_is_shown_beside_html_still_resolves(self, template):
+        raw = template.format(m=marker("turn0view0"))
+
+        _text, citations = resolve(raw)
+
+        assert [c["ref_id"] for c in citations] == ["turn0view0"]
+
     def test_prose_around_a_code_example_still_resolves(self):
         raw = f"See{marker('turn0view0')}\n\n```\n{marker('turn0view0')}\n```\n\nAnd{marker('turn0view1')}"
 
