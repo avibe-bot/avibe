@@ -2394,7 +2394,7 @@ def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Pat
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
         patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
-        patch("vibe.cli.SettingsStore.get_instance", return_value=fake_store),
+        patch("core.services.settings.get_settings_store", return_value=fake_store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -2929,7 +2929,7 @@ def test_hook_send_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Pa
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
         patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(request_root)),
-        patch("vibe.cli.SettingsStore.get_instance", return_value=fake_store),
+        patch("core.services.settings.get_settings_store", return_value=fake_store),
     ):
         result = cli.cmd_hook_send(args)
 

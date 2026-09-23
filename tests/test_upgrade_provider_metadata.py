@@ -13,7 +13,8 @@ def installed_records(tmp_path, monkeypatch):
     """Discover only test-owned dist-info, without importing installed code.
 
     The retired companion is metadata-only: its RECORD points at the manifest,
-    but it has no top_level.txt and therefore is not discovered as a provider.
+    but it has no top_level.txt. Python versions differ on whether its RECORD
+    alone makes it a discovered provider.
     """
     discover = metadata.distributions
     monkeypatch.setattr(metadata, "distributions", lambda: discover(path=[str(tmp_path)]))
@@ -54,9 +55,8 @@ def test_retained_companion_does_not_force_core_reinstall(installed_records, com
     add(core, "3.2.0")
     directory = add(companion, "3.1.0", companion=True)
     before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in directory.iterdir()}
-    # The real retired companion is metadata-only: its RECORD points at the
-    # manifest, but it has no importable top-level package declaration.
-    assert set(metadata.packages_distributions()["vibe"]) == {core}
+    # Discovery of the companion's RECORD varies across Python versions; the
+    # shared provider boundary must filter it in either case.
     assert upgrade._distributions_providing_this_package() == [core]
     assert upgrade._providers_recording_a_published_release() == [(core, "3.2.0")]
     assert upgrade._providers_describing_running_code() == [core]
