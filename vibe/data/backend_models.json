@@ -40,7 +40,7 @@
         {"id": "gpt-5.5", "label": "GPT-5.5", "priority": 12, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.4", "label": "GPT-5.4", "priority": 16, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4-Mini", "priority": 23, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
-        {"id": "gpt-5.2", "label": "GPT-5.2", "priority": 29, "reasoning_efforts": ["low", "medium", "high", "xhigh"]}
+        {"id": "gpt-5.2", "visibility": "hide"}
       ]
     }
   }

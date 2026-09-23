@@ -2808,7 +2808,7 @@ def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tm
     assert "gpt-5.3-codex-spark" in result["models"]
     assert "gpt-5.1-codex-mini" in result["models"]
     assert "gpt-5.1" not in result["models"]
-    assert "gpt-5.2" in result["models"]
+    assert "gpt-5.2" not in result["models"]
     assert result["models"].count("gpt-5.4") == 1
 
 
@@ -2842,8 +2842,8 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
     ]
     assert "custom-codex-model" not in result["models"]
     assert "legacy-codex" not in result["models"]
-    assert "gpt-5.1-codex-max" in result["models"]
-    assert "gpt-5.1-codex-mini" in result["models"]
+    assert "gpt-5.3-codex-spark" in result["models"]
+    assert "gpt-5.1-codex-max" not in result["models"]
 
 
 def test_codex_models_includes_static_reasoning(monkeypatch, tmp_path):
@@ -2854,7 +2854,7 @@ def test_codex_models_includes_static_reasoning(monkeypatch, tmp_path):
     expected = ["__default__", "minimal", "low", "medium", "high", "xhigh"]
     # static set, surfaced under the default "" key and per-model
     assert [o["value"] for o in result["reasoning_options"][""]] == expected
-    assert [o["value"] for o in result["reasoning_options"]["gpt-5.1-codex-max"]] == expected
+    assert [o["value"] for o in result["reasoning_options"]["gpt-5.3-codex-spark"]] == expected
 
 
 def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch):

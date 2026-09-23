@@ -921,7 +921,7 @@ def test_remote_hidden_tombstone_overrides_stale_local_visible(monkeypatch, tmp_
 def test_gpt_6_sol_and_luna_follow_astra_in_the_bundled_catalog():
     codex = {
         entry["id"]: entry
-        for entry in backend_model_catalog.backend_model_entries(
+        for entry in backend_model_catalog.visible_backend_model_entries(
             "codex", backend_model_catalog.load_bundled_catalog()
         )
     }
@@ -1642,3 +1642,57 @@ def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
     assert first["generation"] != second["generation"]
     assert first["models"][0]["id"] == "gpt-file-generation-one"
     assert second["models"][0]["id"] == "gpt-file-generation-two"
+
+
+RETIRED_CODEX_MODELS = (
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.4-nano",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1",
+    "gpt-5",
+)
+
+
+def test_codex_retirements_outrank_stale_remote_and_local_caches(monkeypatch, tmp_path):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "models_cache.json").write_text(
+        json.dumps({"models": [{"slug": "gpt-5.2", "visibility": "list"}, {"slug": "gpt-5.4", "visibility": "list"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    stale_remote = {"backends": {"codex": {"models": [{"id": "gpt-5.2"}, {"id": "gpt-6-sol"}]}}}
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **_kwargs: stale_remote)
+
+    models = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
+
+    assert {"gpt-6-sol", "gpt-5.4", "gpt-5.3-codex-spark"} <= set(models)
+    # Bundled and stale remote catalogs listed only gpt-5.2; the other ids came
+    # solely from the legacy list, so dropping it removes them everywhere.
+    assert not set(models) & set(RETIRED_CODEX_MODELS)
+
+
+def test_an_explicitly_listed_remote_row_can_revive_a_retired_codex_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    remote = {"backends": {"codex": {"models": [{"id": "gpt-5.2", "visibility": "list"}]}}}
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **_kwargs: remote)
+
+    models = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
+
+    assert "gpt-5.2" in models
+
+
+def test_retired_codex_models_stay_in_the_fixed_menu_for_released_configs():
+    from config.v2_config import model_hub_fixed_menu_ids
+
+    # Only gpt-5.2 ever shipped in the bundled menu; the legacy-only ids are
+    # dropped outright, so the fixed menu gains no never-released rows.
+    fixed_menu = set(model_hub_fixed_menu_ids("codex"))
+
+    assert set(RETIRED_CODEX_MODELS) & fixed_menu == {"gpt-5.2"}
+    assert backend_model_catalog.retired_backend_model_ids(
+        "codex", backend_model_catalog.load_bundled_catalog()
+    ) == {"gpt-5.2"}
