@@ -878,7 +878,6 @@ const NON_KEY_LITERALS = [
   'modelHub.errors.backend_model_conflict',
   'modelHub.errors.backend_model_duplicate',
   'modelHub.errors.backend_model_id_invalid',
-  'modelHub.errors.backend_model_id_prefix',
   'modelHub.errors.backend_model_in_route',
   'modelHub.errors.backend_model_locked',
   'modelHub.errors.candidate_suppliers_changed',

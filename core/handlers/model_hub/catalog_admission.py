@@ -16,18 +16,15 @@ def backend_model_admission_error(
     model_id: object,
     *,
     claude_builtin_ids: Iterable[str] = (),
-) -> Literal["backend_model_id_invalid", "backend_model_id_prefix"] | None:
+) -> Literal["backend_model_id_invalid"] | None:
     """Return the request-boundary error for one generated model identity."""
 
     canonical = canonical_model_id(model_id)
     if canonical is None or canonical != model_id:
         return "backend_model_id_invalid"
-    if (
-        backend == "claude"
-        and canonical not in set(claude_builtin_ids)
-        and not canonical.startswith(("claude-", "anthropic-"))
-    ):
-        return "backend_model_id_prefix"
+    # Backend model IDs are routing identities, not vendor labels. In
+    # particular, Claude Code may explicitly launch a Hub model such as
+    # ``grok-4.7`` and the Gateway must preserve that exact spelling.
     return None
 
 

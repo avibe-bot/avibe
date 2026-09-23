@@ -2584,7 +2584,7 @@ def test_candidate_protocol_projection_is_total_only_for_opencode(tmp_path):
                 )
 
 
-def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_path):
+def test_candidates_exclude_only_noncanonical_ids(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     invalid_claude_id = "not-a-claude-family"
     unencodable = "claude-invalid\ud800"
@@ -2622,7 +2622,7 @@ def test_candidates_exclude_ids_the_backend_write_would_reject(monkeypatch, tmp_
     candidates = service.agent_model_candidates("claude")
 
     ids = {item["id"] for group in candidates.values() for item in group}
-    assert invalid_claude_id not in ids
+    assert invalid_claude_id in ids
     assert unencodable not in ids
 
 
@@ -3239,7 +3239,7 @@ def test_model_producers_emit_admissible_backend_payloads(
     assert parsed == ModelHubBackendModelConfig.from_payload(parsed.to_payload())
 
 
-def test_claude_reconcile_excludes_non_claude_cli_override(monkeypatch, tmp_path):
+def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     monkeypatch.setattr(
         service,
@@ -3258,7 +3258,7 @@ def test_claude_reconcile_excludes_non_claude_cli_override(monkeypatch, tmp_path
     asyncio.run(service.reconcile_builtin_models(("claude",)))
 
     model_ids = {model.id for model in store.config.agents["claude"].models}
-    assert "deepseek-v3.2" not in model_ids
+    assert "deepseek-v3.2" in model_ids
     assert "claude-sonnet-9" in model_ids
 
 
@@ -3876,22 +3876,21 @@ def test_backend_catalog_restores_a_removed_claude_builtin_alias(
     assert model_id not in store.config.agents["claude"].removed_model_ids
 
 
-def test_backend_catalog_still_rejects_an_unknown_unprefixed_claude_id(tmp_path):
+def test_backend_catalog_saves_an_unknown_unprefixed_claude_id(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     unknown = {
         **baseline[1],
-        "id": "deepseek-v4",
+        "id": "grok-4.7",
         "origin": "manual",
     }
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(service.set_agent_models("claude", baseline, [*baseline, unknown]))
+    result = asyncio.run(service.set_agent_models("claude", baseline, [*baseline, unknown]))
 
-    assert raised.value.code == "backend_model_id_prefix"
+    assert any(model["id"] == "grok-4.7" for model in result["agent"]["catalog_models"])
 
 
-def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline(
+def test_backend_catalog_accepts_a_new_unprefixed_claude_id_in_baseline(
     tmp_path,
 ):
     service, _store, _adapter = _service(tmp_path)
@@ -3902,16 +3901,15 @@ def test_backend_catalog_rejects_a_new_unprefixed_claude_id_forged_into_baseline
         "origin": "manual",
     }
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(
-            service.set_agent_models(
-                "claude",
-                [*baseline, forged],
-                [*baseline, forged],
-            )
+    result = asyncio.run(
+        service.set_agent_models(
+            "claude",
+            baseline,
+            [*baseline, forged],
         )
+    )
 
-    assert raised.value.code == "backend_model_id_prefix"
+    assert any(model["id"] == "deepseek-v4" for model in result["agent"]["catalog_models"])
 
 
 def test_backend_catalog_saves_claude_models_without_native_default(tmp_path):
@@ -3935,7 +3933,7 @@ def test_backend_catalog_rejects_claude_native_default_selection(tmp_path):
     assert raised.value.code == "backend_model_id_invalid"
 
 
-def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):
+def test_backend_catalog_accepts_a_new_unprefixed_claude_id(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
     invalid = {
@@ -3944,10 +3942,9 @@ def test_backend_catalog_reports_claude_discovery_prefix_requirement(tmp_path):
         "origin": "manual",
     }
 
-    with pytest.raises(ModelHubError) as raised:
-        asyncio.run(service.set_agent_models("claude", baseline, [*baseline, invalid]))
+    result = asyncio.run(service.set_agent_models("claude", baseline, [*baseline, invalid]))
 
-    assert raised.value.code == "backend_model_id_prefix"
+    assert any(model["id"] == "deepseek-v4" for model in result["agent"]["catalog_models"])
 
 
 def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
