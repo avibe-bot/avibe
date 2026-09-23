@@ -357,3 +357,78 @@ release, deployment, installed-service restart, or branch/worktree deletion.
 Do not use `git clean`, remove untracked user artifacts, touch `$HOME`, restart
 the local `vibe` service, or modify files outside this repository. The checkout
 contains pre-existing uncommitted files; preserve unrelated changes.
+
+### Historical release compatibility (2026-09-23)
+
+PR #2120 was closed without merging. Its review, CI and repository branch remain
+available for local testing. On 2026-09-23 the owner approved item 1, the inert
+old-updater bridge, as a narrow exception to removing Memory release artifacts.
+Item 2, historical release asset availability, is still a separate pending
+decision. Neither decision authorizes publishing, modifying an existing release,
+reopening/merging the closed PR, or restarting a local service.
+
+1. **Old-client upgrade bridge (owner-approved for implementation).** Released updaters with Memory enabled or the
+   companion installed preflight a same-version `avibe_memory-<version>-py3-none-any.whl`
+   at the target GitHub Release URL before changing core. Since already installed
+   clients cannot learn a new upgrade rule until an upgrade succeeds, a
+   core-only future release breaks their automatic path. For each release that
+   old clients might target, stage a **metadata-only** `avibe-memory` compatibility
+   wheel at that exact URL, with no importable modules, entry points, runtime
+   manifest, scripts, post-install hooks or Avibe Memory dependencies. Publish
+   and make it downloadable before the release becomes visible as an upgrade
+   target. New `avibe-os` installations neither depend on nor install it; the
+   legacy explicit companion request replaces the old installed package while
+   the new core ignores obsolete config and never touches user Memory data.
+   A single prior transition release is insufficient because old clients may
+   skip it and upgrade directly to any later advertised version. Keep shipping
+   the inert wheel until the project explicitly ends support for old automatic
+   updaters. Verify the exact released old-updater preflight and both uv/pip
+   upgrade paths against a disposable GitHub Release/installer fixture; assert
+   the resulting environment has no importable Memory feature and a sentinel
+   under each old data path remains byte-identical. Separately prove ordinary
+   fresh installs include only core and the current wheel/sdist stay feature-free.
+   Scope this claim to the updater versions that actually contain companion
+   preflight: `v3.1.0` does; the checked `v3.0.14` updater does not require an
+   `avibe-memory` wheel. Test any additional supported historical updater tags
+   against their tagged code rather than treating every earlier version alike.
+
+2. **Historical asset availability (not yet authorized for implementation).** Keep the published old Memory Runtime
+   URLs valid independently of the removed product. Retain a scheduled,
+   release-only guard for historical self-pinned manifests, ideally using the
+   original verifier from an immutable repository commit rather than packaging
+   Memory verifier code with the new application. Restrict its scope to already
+   published legacy manifests; verify tag, manifest hash, archive hashes and
+   backup bytes before restoring only missing assets. Never overwrite an
+   existing asset or rebuild/activate Memory runtime. Preserve the existing
+   backup artifact identity so nonexpired historical backups remain usable.
+   Exercise manifest discovery, hash rejection, backup and missing-asset
+   recovery with mocked GitHub and test-owned files. Merely retaining a workflow
+   in this unmerged branch does not run it; the current default-branch guard
+   continues until a future change lands on that branch.
+
+The approved exception in item 1 contains only release compatibility artifacts.
+Implementation evidence (owner-approved item 1): `scripts/build_retired_companion.py`
+creates a deterministic `avibe_memory-<version>-py3-none-any.whl` containing only
+valid METADATA, WHEEL and RECORD. It has no modules, dependencies, entry points,
+scripts, manifest or importable package. `publish.yml` and `release_ai.yml`
+checkout and run the builder before asset upload; immutable existing bytes are
+verified and bridge upload is included in the package matrix before publication.
+`tests/test_retired_companion.py` and the release upload matrix tests cover both
+official and `gh-v` tags, metadata/RECORD hashes, overwrite refusal and runtime
+then package ordering. **101 tests passed** in the focused archive/workflow run;
+Ruff and diff-check passed.
+
+The disposable Debian probe `tests/e2e/test_retired_updater_bridge.py` passed
+with the actual released v3.1.0 core/companion wheels and locally built target
+core/bridge assets: four cases (pip/uv × installed/enabled) used the tagged old
+planner and real pip/uv download/install path against a test HTTPS GitHub fixture.
+Each matching target bridge URL was fetched, the resulting environment had no
+importable Memory modules, and both `~/.avibe/memory` and
+`~/.vibe_remote/memory` sentinels retained bytes, inode and symlink identity.
+This is isolated artifact evidence only; no release was published or modified.
+
+No Memory configuration, CLI, UI, sidecar, capture/recall, package import or data
+migration returns. Before declaring it complete, verify the old tagged updater
+can fetch the wheel at its exact URL and complete an isolated upgrade, that new
+installs do not acquire the distribution, and that neither legacy user-data
+path is written. Keep the second item pending until separately decided.

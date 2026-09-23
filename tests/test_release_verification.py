@@ -219,7 +219,8 @@ def test_preview_upload_validates_all_existing_bytes_before_runtime_then_package
     dist = tmp_path / "dist"
     dist.mkdir()
     names = ["vibe-show-runtime-node-linux-arm64.tgz", "show-runtime-manifest.json",
-             "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz"]
+             "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz",
+             "avibe_memory-1.0.0-py3-none-any.whl"]
     for name in names:
         (dist / name).write_bytes(b"immutable asset")
     binaries = tmp_path / "bin"
@@ -306,7 +307,7 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
 @pytest.mark.parametrize(
     "state",
     ["empty", "identical", "partial", "core-mismatch", "core-sdist-mismatch",
-     "runtime-mismatch", "missing-wheel", "empty-sdist", "read-failure"],
+     "runtime-mismatch", "bridge-mismatch", "missing-bridge", "missing-wheel", "empty-sdist", "read-failure"],
 )
 def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_name, state):
     workspace = tmp_path / "release source 中文"
@@ -324,6 +325,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     if workflow_name == "publish.yml":
         # Preserve the optional legacy package upload path too.
         packages["vibe_remote-3.0.14-py3-none-any.whl"] = b"legacy shim"
+    packages["avibe_memory-3.1.0-py3-none-any.whl"] = b"inert bridge"
     runtimes = {
         **{f"vibe-show-runtime-node-{platform}.tgz": platform.encode()
            for platform in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64")},
@@ -337,16 +339,20 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     if state not in {"empty", "identical"}:
         existing = {name: all_assets[name] for name in (
             "avibe_os-3.1.0-py3-none-any.whl", "avibe_os-3.1.0.tar.gz", "show-runtime-manifest.json",
+            "avibe_memory-3.1.0-py3-none-any.whl",
         )}
     mismatch = {
         "core-mismatch": "avibe_os-3.1.0-py3-none-any.whl",
         "core-sdist-mismatch": "avibe_os-3.1.0.tar.gz",
         "runtime-mismatch": "show-runtime-manifest.json",
+        "bridge-mismatch": "avibe_memory-3.1.0-py3-none-any.whl",
     }.get(state)
     if mismatch:
         existing[mismatch] = b"already published different bytes"
     if state == "missing-wheel":
         (dist / "avibe_os-3.1.0-py3-none-any.whl").unlink()
+    if state == "missing-bridge":
+        (dist / "avibe_memory-3.1.0-py3-none-any.whl").unlink()
     if state == "empty-sdist":
         (dist / "avibe_os-3.1.0.tar.gz").write_bytes(b"")
 

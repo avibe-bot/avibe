@@ -179,6 +179,8 @@ jobs:
           sparse-checkout: |
             scripts/github_release.py
             scripts/show_runtime_manifest_asset.py
+            scripts/build_retired_companion.py
+            scripts/release_package_version.py
             tests/test_distribution_artifacts.py
           sparse-checkout-cone-mode: false
 
@@ -294,6 +296,13 @@ jobs:
                   )
           PY
 
+      - name: Build and verify inert old-updater bridge
+        env:
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG"
+          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG" --verify
+
       - name: Verify built distribution contracts
         run: |
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
@@ -344,6 +353,7 @@ jobs:
           package_to_upload=()
           package_paths=(
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
+            dist/avibe_memory-*-py3-none-any.whl
           )
           # The existing v3.0.x shim remains part of those releases only.
           for path in dist/vibe_remote-*.whl dist/vibe_remote-*.tar.gz; do

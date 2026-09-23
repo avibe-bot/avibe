@@ -126,6 +126,8 @@ jobs:
           path: release-automation
           sparse-checkout: |
             scripts/show_runtime_manifest_asset.py
+            scripts/build_retired_companion.py
+            scripts/release_package_version.py
             tests/test_distribution_artifacts.py
           sparse-checkout-cone-mode: false
 
@@ -200,6 +202,13 @@ jobs:
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
           AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
             pytest release-automation/tests/test_distribution_artifacts.py -v
+
+      - name: Build and verify inert old-updater bridge
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG"
+          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG" --verify
 
       - name: Add Show Runtime release assets
         shell: bash
@@ -593,6 +602,7 @@ jobs:
             dist/vibe-show-runtime-node-*.tgz
             dist/show-runtime-manifest.json
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
+            dist/avibe_memory-*-py3-none-any.whl
           )
           # Packages and runtimes share the same immutable publication boundary.
           # Validate every existing byte before uploading even a missing asset.
