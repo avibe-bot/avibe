@@ -35,12 +35,25 @@ fn config() -> Value {
 /// Source with its test module removed, so a test's own vocabulary cannot
 /// satisfy a check about the shipping code.
 fn shipping_source(relative: &str) -> String {
-    let path = crate_dir().join(relative);
-    let source = read_to_string(&path);
+    shipping_text(&read_to_string(&crate_dir().join(relative)))
+}
+
+/// Line endings are normalized to LF first. A Windows checkout has CRLF, and
+/// every check here must read the same text on every platform.
+fn shipping_text(source: &str) -> String {
+    let source = source.replace("\r\n", "\n");
     match source.find("#[cfg(test)]") {
         Some(offset) => source[..offset].to_owned(),
         None => source,
     }
+}
+
+#[test]
+fn source_checks_read_a_windows_checkout_as_the_same_text() {
+    let checkout = read_to_string(&crate_dir().join("src/lib.rs")).replace("\r\n", "\n");
+    let windows = checkout.replace('\n', "\r\n");
+    assert_eq!(shipping_text(&windows), shipping_text(&checkout));
+    assert!(!shipping_source("src/lib.rs").contains('\r'));
 }
 
 #[test]
