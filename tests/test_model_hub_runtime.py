@@ -6323,6 +6323,31 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
     assert detail.startswith("模型不可用") and detail.endswith("…")
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("refresh failed: token=abc123opaque", "refresh failed: token=[redacted]"),
+        ("bad secret: xyz", "bad secret: [redacted]"),
+        ('client_secret="two words" rejected', "client_secret=[redacted] rejected"),
+        ("session_key=s1, password='p w'", "session_key=[redacted], password=[redacted]"),
+        ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
+    ],
+)
+def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
+    assert client_module._bounded_upstream_detail(message) == expected
+
+
+def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() -> None:
+    detail = client_module._bounded_upstream_detail(
+        "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
+    )
+
+    assert detail is not None
+    for mention in ("@everyone", "@ops_lead", "<@123>", "<@&456>", "<!here>", "<#C1>"):
+        assert mention not in detail
+    assert detail.replace("\u200b", "") == "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
+
+
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
     payload = json.dumps(
         {

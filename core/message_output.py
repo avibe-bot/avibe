@@ -7,6 +7,7 @@ dispatcher fallback preserves older callers that still use terminal ``result``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
@@ -119,6 +120,34 @@ class MessageOutput:
             or "session"
         ).strip()
         return f"agent-output:{backend or 'unknown'}:{lineage}:{key}"
+
+
+# Mention neutralizers for text Avibe republishes into a channel on someone else's
+# behalf (a Harness prompt echo, an upstream provider's error message). Quoting does
+# not stop a renderer from resolving a broadcast, a username, or an id mention, and
+# the Discord adapter sends without ``allowed_mentions``, so an echoed ``@everyone``
+# would really ping the channel. A zero-width space after the sigil keeps the text
+# readable while leaving nothing for any renderer to resolve. Deliberately
+# platform-agnostic: every adapter renders the same body, so ``@`` before a word
+# character covers the Slack/Discord broadcasts AND a bare Telegram ``@username``
+# (which ``TelegramFormatter.render`` HTML-escapes without defusing), and a new
+# adapter inherits the guard instead of needing its own.
+_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
+_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
+_MENTION_BREAK = "\u200b"
+
+
+def neutralize_mentions(text: str) -> str:
+    """Make every mention in *text* inert without changing how it reads.
+
+    Covers every ``@`` sigil — the broadcast words (``@everyone`` / ``@here`` /
+    ``@channel``) and a bare ``@username``, which Telegram resolves into a real
+    notification — plus the bracketed id forms both Slack (``<@U…>``, ``<!here>``,
+    ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
+    """
+
+    neutralized = _MENTION_SIGIL_PATTERN.sub("@" + _MENTION_BREAK, text or "")
+    return _ID_MENTION_PATTERN.sub("<" + _MENTION_BREAK, neutralized)
 
 
 def output_for_message(message_type: str, output: MessageOutput | None) -> MessageOutput:

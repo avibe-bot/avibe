@@ -113,6 +113,23 @@ def redact_credential_material(value: str) -> str:
     return redacted
 
 
+# Any value an upstream message labels as secret-like (``token=…``,
+# ``client_secret: "…"``, ``password=…``), whatever its shape. Only applied to
+# free text Avibe republishes; ``contains_credential_material`` keeps the narrower
+# shape-based patterns so benign labels such as ``max token: 4096`` in a model
+# name are not rejected.
+_LABELED_SECRET_PATTERN = re.compile(
+    r"(?i)\b((?:[a-z0-9]+[_-])*(?:token|secret|password|passwd|pwd|key|credential|"
+    r"cookie|session|signature))(\s*[:=]\s*)(?!\[redacted\])(\"[^\"]*\"|'[^']*'|[^\s,;&)\]}]+)"
+)
+
+
+def redact_untrusted_text(value: str) -> str:
+    """Redact credential shapes and every labeled secret value from free text."""
+
+    return _LABELED_SECRET_PATTERN.sub(r"\1\2[redacted]", redact_credential_material(value))
+
+
 def contains_credential_material(value: object) -> bool:
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return any(pattern.search(rendered) for pattern in _CREDENTIAL_PATTERNS)

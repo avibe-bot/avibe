@@ -29,13 +29,14 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
-from core.handlers.model_hub.events import redact_credential_material
+from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
     JSONScope,
     project_json_reader,
 )
+from core.message_output import neutralize_mentions
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
@@ -1661,7 +1662,7 @@ def _bounded_upstream_detail(message: str) -> str | None:
     text = " ".join(message.split())
     if not text:
         return None
-    text = redact_credential_material(text)
+    text = neutralize_mentions(redact_untrusted_text(text))
     if len(text) > _UPSTREAM_DETAIL_CHARS:
         text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
     return text
