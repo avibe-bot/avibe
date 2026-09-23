@@ -101,6 +101,15 @@ class ClaudeSessionNotFoundError(RuntimeError):
         )
 
 
+class ClaudeInputNotSentError(RuntimeError):
+    """A local admission failure with definitive evidence of no native write."""
+
+    def __init__(self, reason: str, message_key: str):
+        self.reason = reason
+        self.message_key = message_key
+        super().__init__(reason)
+
+
 class _ClaudeReceiverCleanupRequired(RuntimeError):
     """Signal that a dead generation must be retried after receiver cleanup."""
 
@@ -2724,6 +2733,14 @@ class SessionHandler(BaseHandler):
         error_msg = str(error)
 
         # Check for specific error types
+        if isinstance(error, ClaudeInputNotSentError):
+            # This input never reached Claude. Keep existing background work,
+            # persisted mappings and any replacement client intact.
+            await self._get_im_client(context).send_message(
+                context,
+                self._get_formatter(context).format_error(self._t(error.message_key)),
+            )
+            return False
         if isinstance(error, ClaudeSessionNotFoundError):
             logger.warning(
                 "Claude session %s not found for current working directory %s; keeping persisted mapping unchanged",

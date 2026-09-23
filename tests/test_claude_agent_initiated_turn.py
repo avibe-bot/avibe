@@ -59,6 +59,7 @@ class ResultMessage:
     duration_ms = 1
     duration_api_ms = 1
     session_id = "claude-native-session"
+    origin = {"kind": "human"}
 
     def __init__(self, *, num_turns: int = 1):
         self.num_turns = num_turns
@@ -135,7 +136,9 @@ def _task_notification_then_result_client():
         def receive_messages(self):
             async def _iterate():
                 yield TaskNotificationMessage()
-                yield ResultMessage()
+                result = ResultMessage()
+                result.origin = {"kind": "task-notification"}
+                yield result
 
             return _iterate()
 
@@ -2922,7 +2925,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             composite_key=composite_key,
         )
 
-        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(agent.emit_result_message.await_count, 2)
         agent._maybe_backfill_session_title.assert_called_once_with(
             pending_request,
             "claude-native-session",
@@ -3095,7 +3098,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(set(output_ids)), 2)
 
-    async def test_task_completed_inside_its_origin_turn_remains_attached(self):
+    async def test_task_completion_is_detached_from_human_result(self):
         agent, service = _build_agent()
         composite_key = "session-current:/tmp/work"
         gate = service._get_turn_gate(composite_key)
@@ -3109,7 +3112,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "turn_token": "current-turn",
             }
         )
-        agent._pending_requests[composite_key] = [SimpleNamespace(context=user_context)]
+        pending_request = SimpleNamespace(context=user_context)
+        agent._pending_requests[composite_key] = [pending_request]
         receiver_context = SimpleNamespace(
             user_id="U1",
             channel_id="C1",
@@ -3131,11 +3135,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             composite_key=composite_key,
         )
 
-        output = agent.emit_result_message.await_args.kwargs["request"].output
-        self.assertFalse(output.detached)
-        self.assertTrue(output.completes_turn)
-        self.assertTrue(output.completes_run)
-        self.assertEqual(output.activity_id, "task-690")
+        self.assertEqual(agent.emit_result_message.await_count, 2)
+        human_call, detached_call = agent.emit_result_message.await_args_list
+        self.assertIs(human_call.kwargs["request"], pending_request)
+        self.assertNotIn("output", human_call.kwargs)
+        detached_output = detached_call.kwargs["output"]
+        self.assertTrue(detached_output.detached)
+        self.assertFalse(detached_output.completes_turn)
+        self.assertEqual(detached_output.activity_id, "task-690")
         self.assertFalse(agent._has_pending_requests(composite_key))
 
     async def test_non_actionable_fallback_does_not_open_agent_initiated_turn(self):

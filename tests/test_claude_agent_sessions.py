@@ -24,6 +24,20 @@ from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock, UserMessage
 
 
+async def _query_text(query):
+    """Read the explicit-provenance streaming prompt passed to the Claude SDK."""
+
+    if hasattr(query, "__aiter__"):
+        frames = [frame async for frame in query]
+        assert len(frames) == 1
+        frame = frames[0]
+        return (
+            frame["message"]["content"],
+            frame["origin"],
+        )
+    return query, None
+
+
 async def test_skill_catalog_is_offered_once_per_accepted_claude_client(monkeypatch):
     controller = _StubController()
     client = SimpleNamespace(query=AsyncMock(), _vibe_pending_skill_catalog={"entries": []})
@@ -275,17 +289,20 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         second = asyncio.create_task(service.handle_message("claude", _request("second")))
         await asyncio.sleep(0.05)
 
-        self.assertEqual(
-            queries,
-            [("first", runtime_key)],
-            "the second prompt must not be written into the same Claude runtime before the first result",
-        )
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(await _query_text(queries[0][0]), ("first", {"kind": "human"}))
+        self.assertEqual(queries[0][1], runtime_key)
 
         release_result.set()
         await asyncio.wait_for(first, timeout=3)
         await asyncio.wait_for(second, timeout=3)
 
-        self.assertEqual(queries, [("first", runtime_key), ("second", runtime_key)])
+        self.assertEqual(len(queries), 2)
+        second_prompt, second_origin = await _query_text(queries[1][0])
+        self.assertEqual(
+            (second_prompt, second_origin, queries[1][1]),
+            ("second", {"kind": "human"}, runtime_key),
+        )
 
     async def test_cancelled_waiter_does_not_leak_runtime_session_lock(self):
         controller = _StubController()
@@ -370,7 +387,16 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         third = asyncio.create_task(service.handle_message("claude", _request("third")))
         await asyncio.wait_for(third, timeout=3)
 
-        self.assertEqual(queries, [("first", runtime_key), ("third", runtime_key)])
+        self.assertEqual(
+            [
+                (await _query_text(message), session_id)
+                for message, session_id in queries
+            ],
+            [
+                (("first", {"kind": "human"}), runtime_key),
+                (("third", {"kind": "human"}), runtime_key),
+            ],
+        )
         self.assertNotIn(runtime_key, agent._pending_requests)
 
     async def test_handle_message_receiver_eof_without_result_settles_current_turn(self):
@@ -446,7 +472,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         if receiver_task is not None:
             await asyncio.wait_for(receiver_task, timeout=1)
 
-        self.assertEqual(queries, [("first", runtime_key)])
+        self.assertEqual(
+            [
+                (await _query_text(message), session_id)
+                for message, session_id in queries
+            ],
+            [(("first", {"kind": "human"}), runtime_key)],
+        )
         self.assertEqual(mark_active_calls, [runtime_key])
         self.assertIn(runtime_key, mark_idle_calls)
         controller.emit_agent_message.assert_awaited_once_with(
@@ -1957,9 +1989,11 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.session_handler.get_or_create_claude_session.assert_awaited_once()
         self.assertEqual(mark_active_calls, [runtime_key])
-        client.query.assert_awaited_once_with(
-            "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<U1>]\nhello", session_id=runtime_key,
-        )
+        self.assertEqual(client.query.await_count, 1)
+        prompt, origin = await _query_text(client.query.await_args.args[0])
+        self.assertEqual(prompt, "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<U1>]\nhello")
+        self.assertEqual(origin, {"kind": "human"})
+        self.assertEqual(client.query.await_args.kwargs, {"session_id": runtime_key})
         self.assertEqual(request.message, "hello")
         self.assertIn(runtime_key, agent._pending_requests)
         self.assertIn(runtime_key, agent._pending_reactions)

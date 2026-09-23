@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
-from core.handlers.session_handler import ClaudeSessionNotFoundError
+from core.handlers.session_handler import ClaudeInputNotSentError, ClaudeSessionNotFoundError
 from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -108,6 +108,7 @@ class ClaudeAgent(BaseAgent):
         self._detached_unsolicited_text: dict[str, str] = {}
         self._activity_flush_tasks: dict[str, asyncio.Task] = {}
         self._activity_settle_events: dict[str, asyncio.Event] = {}
+        self._buffered_assistant_messages: dict[str, list[tuple[object, int | None]]] = {}
         self._foreground_tool_use_ids: dict[str, set[str]] = {}
         self._turns_with_foreground_tools: set[str] = set()
         self._detached_foreground_tool_use_ids: dict[str, set[str]] = {}
@@ -144,6 +145,8 @@ class ClaudeAgent(BaseAgent):
 
     def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
         """Return the durable notify text for Claude terminal errors."""
+        if isinstance(error, ClaudeInputNotSentError):
+            return f"❌ {self._translate_error(error.message_key)}"
         if isinstance(error, ClaudeSessionNotFoundError):
             detail = self._translate_error(
                 "error.claudeSessionNotFound",
@@ -160,6 +163,77 @@ class ClaudeAgent(BaseAgent):
             reason = self._translate_error(reason_key, **reason_values)
             return f"❌ {self._translate_error('error.claudeProcessTerminated', reason=reason)}"
         return f"❌ Claude error: {error}"
+
+    @staticmethod
+    async def _human_query_messages(message: str, session_id: str):
+        """Yield an SDK streaming user message with explicit human provenance."""
+
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": message},
+            "parent_tool_use_id": None,
+            "session_id": session_id,
+            "origin": {"kind": "human"},
+        }
+
+    def _assert_current_client_for_write(self, composite_key: str, client) -> None:
+        """Reject a retired Claude generation before marking a native write."""
+
+        registered = self.claude_sessions.get(composite_key)
+        if registered is not None and registered is not client:
+            raise ClaudeInputNotSentError(
+                "claude_runtime_changed_before_write",
+                "error.claudeInputRuntimeChanged",
+            )
+        if getattr(client, "_vibe_runtime_activation_retired", False) is True:
+            raise ClaudeInputNotSentError(
+                "claude_runtime_changed_before_write",
+                "error.claudeInputRuntimeChanged",
+            )
+        if composite_key in self._steering_closing_keys():
+            raise ClaudeInputNotSentError(
+                "claude_runtime_changed_before_write",
+                "error.claudeInputRuntimeChanged",
+            )
+        identity = self._client_activation_identity(client)
+        registry = getattr(getattr(self.controller, "agent_service", None), "activation_registry", None)
+        if identity is not None and registry is not None and not registry.is_current(identity):
+            raise ClaudeInputNotSentError(
+                "claude_runtime_changed_before_write",
+                "error.claudeInputRuntimeChanged",
+            )
+
+    async def _write_human_query(
+        self,
+        client,
+        composite_key: str,
+        message: str,
+        context: MessageContext,
+    ) -> None:
+        """Write one human query under the exact runtime-generation fence."""
+
+        generation_lock = getattr(
+            self.session_handler,
+            "_claude_runtime_generation_lock",
+            None,
+        )
+
+        async def _write() -> None:
+            self._assert_current_client_for_write(composite_key, client)
+            # The write is now admitted against the exact client generation. If
+            # transport.write fails after this point, delivery is attempted or
+            # ambiguous and must follow the normal recovery path.
+            mark_backend_dispatch_attempted(context)
+            await client.query(
+                self._human_query_messages(message, composite_key),
+                session_id=composite_key,
+            )
+
+        if callable(generation_lock):
+            async with generation_lock(composite_key):
+                await _write()
+            return
+        await _write()
 
     async def handle_message(self, request: AgentRequest) -> None:
         context = request.context
@@ -190,13 +264,6 @@ class ClaudeAgent(BaseAgent):
             if callable(mark_session_active):
                 mark_session_active(runtime_session_key)
 
-            # Claude does not expose a reliable query/result correlation id. If a
-            # native background Activity can still speak, serialize this accepted
-            # Inbox item until that output is delivered. The Session remains full
-            # duplex while this backend avoids attributing a background Result to
-            # the new user Turn.
-            await self._wait_for_activity_output(runtime_session_key)
-
             # Queue reaction BEFORE sending query to avoid race condition where
             # a fast result arrives before the reaction is queued
             if request.ack_reaction_message_id and request.ack_reaction_emoji:
@@ -216,9 +283,13 @@ class ClaudeAgent(BaseAgent):
                 kind="primary",
             )
 
-            mark_backend_dispatch_attempted(request.context)
             try:
-                await client.query(message, session_id=runtime_session_key)
+                await self._write_human_query(
+                    client,
+                    runtime_session_key,
+                    message,
+                    request.context,
+                )
             except (Exception, asyncio.CancelledError):
                 self._remove_native_input_receipt(runtime_session_key, input_receipt)
                 raise
@@ -265,8 +336,11 @@ class ClaudeAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
             missing_session = isinstance(e, ClaudeSessionNotFoundError)
+            input_not_sent = isinstance(e, ClaudeInputNotSentError)
             if missing_session:
                 mark_prewrite_recovery_required(context, "native_session_not_found")
+            elif input_not_sent:
+                mark_prewrite_recovery_required(context, e.reason)
             diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
             # Classify BEFORE recording: ``record_model_hub_native_failure``
             # turns the pending native/hub attempt into a failed one, so a
@@ -275,7 +349,7 @@ class ClaudeAgent(BaseAgent):
             intentional_teardown = self._teardown_is_intentional(
                 runtime_session_key, e, client=client
             )
-            if not intentional_teardown:
+            if not intentional_teardown and not input_not_sent:
                 await self.record_model_hub_native_failure(context, diagnostic)
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
@@ -287,7 +361,7 @@ class ClaudeAgent(BaseAgent):
                 # A typed local resume failure takes precedence over incidental
                 # auth words in the working path or captured process diagnostic.
                 handled = False
-                if not missing_session:
+                if not missing_session and not input_not_sent:
                     handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                         context,
                         "claude",
@@ -779,6 +853,7 @@ class ClaudeAgent(BaseAgent):
 
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
+        self._buffered_assistant_messages.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
         self._turns_with_foreground_tools.discard(composite_key)
         self._clear_detached_foreground_tool_state(composite_key)
@@ -1170,7 +1245,20 @@ class ClaudeAgent(BaseAgent):
             )
             try:
                 try:
-                    await client.query(message, session_id=composite_key)
+                    await self._write_human_query(
+                        client,
+                        composite_key,
+                        message,
+                        target.agent_request.context,
+                    )
+                except ClaudeInputNotSentError as exc:
+                    self._remove_native_input_receipt(composite_key, input_receipt)
+                    return steer_result(
+                        SteerOutcome.REFUSED,
+                        reason="runtime_generation_changed",
+                        backend=self.name,
+                        diagnostic=exc.reason,
+                    )
                 except (asyncio.TimeoutError, TimeoutError) as exc:
                     input_receipt.state = "unknown"
                     self._advance_steering_generation(composite_key)
@@ -1560,6 +1648,23 @@ class ClaudeAgent(BaseAgent):
                     # the one user-facing system exception: it belongs to the
                     # replacement run and must use that run's turn.
                     output_mode = None
+                    result_owner = "agent"
+                    if message_type == "result":
+                        result_owner = self._result_owner(composite_key, message)
+                    if (
+                        message_type == "assistant"
+                        and self._should_buffer_assistant_message(composite_key)
+                    ):
+                        self._buffered_assistant_messages.setdefault(
+                            composite_key,
+                            [],
+                        ).append((message, terminal_steering_generation))
+                        logger.debug(
+                            "Buffered Claude Assistant frame until terminal provenance "
+                            "is known for %s",
+                            composite_key,
+                        )
+                        continue
                     if message_type in ("assistant", "result") or model_refusal_fallback_notice is not None:
                         output_mode = await self._maybe_begin_agent_initiated_turn(
                             context,
@@ -1568,6 +1673,7 @@ class ClaudeAgent(BaseAgent):
                             working_path,
                             session_key,
                             message_type=message_type,
+                            result_owner=result_owner,
                             receiver_activation_identity=receiver_activation_identity,
                         )
 
@@ -1630,39 +1736,15 @@ class ClaudeAgent(BaseAgent):
                             if assistant_text:
                                 self._detached_assistant_text[composite_key] = assistant_text
                             continue
-                        async with self._steering_lock(composite_key):
-                            if composite_key in self._steering_closing_keys():
-                                logger.info(
-                                    "Ignoring Claude assistant output during teardown for %s",
-                                    composite_key,
-                                )
-                                continue
-                            diagnostic = self._terminal_backend_failure(message, assistant_text)
-                            if (
-                                diagnostic is not None
-                                and self._terminal_claim_superseded(
-                                    composite_key,
-                                    terminal_steering_generation,
-                                )
-                            ):
-                                self._discard_completed_primary_input_receipts(
-                                    composite_key
-                                )
-                                self._suppressed_synthetic_results.add(composite_key)
-                                self._suppressed_synthetic_error_text[composite_key] = diagnostic
-                                logger.info(
-                                    "Ignoring Claude terminal assistant failure superseded by steering for %s",
-                                    composite_key,
-                                )
-                                continue
-                            if diagnostic is not None:
-                                self._clear_native_input_receipts(composite_key)
-                            failure_disposition = await self._handle_assistant_terminal_failure(
-                                context,
-                                composite_key,
-                                message,
-                                assistant_text,
-                            )
+                        failure_disposition = await self._process_assistant_terminal_frame(
+                            context,
+                            composite_key,
+                            message,
+                            assistant_text,
+                            terminal_steering_generation=terminal_steering_generation,
+                        )
+                        if failure_disposition in {"teardown", "superseded"}:
+                            continue
                         if failure_disposition == "auth":
                             return
                         if failure_disposition:
@@ -1788,6 +1870,14 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     if message_type == "result":
+                        if await self._flush_buffered_assistant_messages(
+                            composite_key,
+                            context,
+                            owner=result_owner,
+                            terminal_steering_generation=terminal_steering_generation,
+                        ):
+                            self._clear_result_phase_state(composite_key)
+                            return
                         raw_result_text = getattr(message, "result", None)
                         result_text = raw_result_text
                         detached_activities = self._detached_activity_outputs.pop(
@@ -2468,6 +2558,50 @@ class ClaudeAgent(BaseAgent):
         self._suppressed_synthetic_error_text[composite_key] = diagnostic
         return "failure"
 
+    async def _process_assistant_terminal_frame(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        message,
+        text: str,
+        *,
+        terminal_steering_generation: int,
+    ) -> str | None:
+        """Apply one Assistant failure through the shared steering decision path."""
+
+        async with self._steering_lock(composite_key):
+            if composite_key in self._steering_closing_keys():
+                logger.info(
+                    "Ignoring Claude assistant output during teardown for %s",
+                    composite_key,
+                )
+                return "teardown"
+
+            diagnostic = self._terminal_backend_failure(message, text)
+            if (
+                diagnostic is not None
+                and self._terminal_claim_superseded(
+                    composite_key,
+                    terminal_steering_generation,
+                )
+            ):
+                self._discard_completed_primary_input_receipts(composite_key)
+                self._suppressed_synthetic_results.add(composite_key)
+                self._suppressed_synthetic_error_text[composite_key] = diagnostic
+                logger.info(
+                    "Ignoring Claude terminal assistant failure superseded by steering for %s",
+                    composite_key,
+                )
+                return "superseded"
+            if diagnostic is not None:
+                self._clear_native_input_receipts(composite_key)
+            return await self._handle_assistant_terminal_failure(
+                context,
+                composite_key,
+                message,
+                text,
+            )
+
     async def _handle_terminal_failure_result(
         self,
         context: MessageContext,
@@ -2972,11 +3106,157 @@ class ClaudeAgent(BaseAgent):
             return "<silent>Claude turn completed without assistant text.</silent>"
         return str(sdk_result or "")
 
+    @staticmethod
+    def _result_origin_kind(message) -> str | None:
+        origin = getattr(message, "origin", None)
+        if isinstance(origin, dict):
+            kind = origin.get("kind")
+        else:
+            kind = getattr(origin, "kind", None)
+        normalized = str(kind or "").strip().lower()
+        return normalized or None
+
+    def _has_competing_activity(self, composite_key: str) -> bool:
+        if (
+            composite_key in self._detached_activity_outputs
+            or composite_key in self._detached_unsolicited_outputs
+        ):
+            return True
+        registry = self._activity_registry()
+        return bool(
+            registry is not None
+            and (
+                registry.has_active(self.name, composite_key)
+                or registry.has_completed_output(self.name, composite_key)
+            )
+        )
+
+    def _should_buffer_assistant_message(self, composite_key: str) -> bool:
+        """Hold an origin-less Assistant frame while Activity ownership is open."""
+
+        if (
+            composite_key in self._detached_activity_outputs
+            or composite_key in self._detached_unsolicited_outputs
+        ):
+            return False
+        return self._has_competing_activity(composite_key)
+
+    def _result_owner(self, composite_key: str, message) -> str:
+        """Classify a terminal frame before it can claim shared state."""
+
+        origin_kind = self._result_origin_kind(message)
+        if origin_kind == "human":
+            return "human"
+        if origin_kind:
+            return "detached"
+        if self._pending_requests.get(composite_key):
+            return "detached" if self._has_competing_activity(composite_key) else "human"
+        return "agent"
+
+    async def _flush_buffered_assistant_messages(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        *,
+        owner: str,
+        terminal_steering_generation: int,
+    ) -> bool:
+        """Replay ambiguous Assistant frames after terminal provenance is known."""
+
+        messages = self._buffered_assistant_messages.pop(composite_key, None)
+        if not messages:
+            return False
+
+        detached = owner == "detached"
+        formatter = self._get_formatter(context)
+        for message, frame_steering_generation in messages:
+            assistant_text = self._extract_text_blocks(message, context)
+            context_tokens = self._extract_context_tokens(message)
+            if context_tokens:
+                self.controller.note_session_tokens(context, total=context_tokens)
+            toolcalls = []
+            for block in getattr(message, "content", []) or []:
+                if not isinstance(block, ToolUseBlock):
+                    continue
+                self._track_tool_activity_mode(
+                    composite_key,
+                    block,
+                    detached=detached,
+                )
+                if formatter is not None:
+                    toolcalls.append(
+                        (
+                            formatter.format_toolcall(
+                                block.name,
+                                block.input,
+                                get_relative_path=lambda path: self.get_relative_path(path, context),
+                            ),
+                            formatter.format_toolcall_label(
+                                block.name,
+                                block.input,
+                                get_relative_path=lambda path: self.get_relative_path(path, context),
+                            ),
+                        )
+                    )
+
+            if detached:
+                if assistant_text:
+                    if composite_key in self._detached_activity_outputs:
+                        self._detached_assistant_text[composite_key] = assistant_text
+                    else:
+                        self._detached_unsolicited_text[composite_key] = assistant_text
+                continue
+
+            failure_disposition = await self._process_assistant_terminal_frame(
+                context,
+                composite_key,
+                message,
+                assistant_text,
+                terminal_steering_generation=(
+                    frame_steering_generation
+                    if frame_steering_generation is not None
+                    else terminal_steering_generation
+                ),
+            )
+            if failure_disposition in {"teardown", "superseded", "auth", "failure"}:
+                if failure_disposition == "auth":
+                    return True
+                continue
+            if assistant_text:
+                self._last_assistant_text[composite_key] = assistant_text
+            pending = self._pending_requests.get(composite_key) or []
+            self._adopt_pending_turn_token(
+                context,
+                pending[0] if pending else None,
+            )
+            previous = self._pending_assistant_message.pop(composite_key, None)
+            if previous:
+                await self.controller.emit_agent_message(
+                    context,
+                    "assistant",
+                    previous,
+                    parse_mode="markdown",
+                )
+            for toolcall_text, toolcall_label in toolcalls:
+                await self.controller.emit_agent_message(
+                    context,
+                    "toolcall",
+                    toolcall_text,
+                    parse_mode="markdown",
+                    status_label=toolcall_label,
+                )
+            if formatter is not None and assistant_text:
+                self._pending_assistant_message[composite_key] = (
+                    formatter.format_assistant_message([assistant_text])
+                )
+        return False
+
     def _clear_result_phase_state(self, composite_key: str) -> None:
         """Retire response-local evidence before Claude consumes another input."""
 
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
+        self._buffered_assistant_messages.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
         self._turns_with_foreground_tools.discard(composite_key)
 
@@ -3649,6 +3929,7 @@ class ClaudeAgent(BaseAgent):
                     )
                     self._last_assistant_text.pop(composite_key, None)
                     self._pending_assistant_message.pop(composite_key, None)
+                    self._buffered_assistant_messages.pop(composite_key, None)
                     self._mark_session_idle_if_no_pending_requests(composite_key)
                     self._signal_activity_output_settled(composite_key)
                 continue
@@ -3744,6 +4025,7 @@ class ClaudeAgent(BaseAgent):
         session_key: str,
         *,
         message_type: str | None = None,
+        result_owner: str = "agent",
         receiver_activation_identity: RuntimeActivationIdentity | None = None,
     ) -> str | None:
         """Open a turn for UNSOLICITED backend output (no Avibe query behind it).
@@ -3777,6 +4059,24 @@ class ClaudeAgent(BaseAgent):
         if composite_key in self._suppressed_synthetic_results:
             return None
         pending = self._pending_requests.get(composite_key) or []
+        if message_type == "result" and result_owner == "human":
+            if pending:
+                # Explicit human provenance protects this result from any
+                # completed Activity waiting on the same runtime.
+                return None
+            self._detached_unsolicited_outputs.add(composite_key)
+            return "detached"
+        if message_type == "result" and result_owner == "detached":
+            completed_activities = (
+                registry.claim_completed_output_batch(self.name, composite_key)
+                if registry is not None
+                else []
+            )
+            if completed_activities:
+                self._detached_activity_outputs[composite_key] = completed_activities
+                return "activity"
+            self._detached_unsolicited_outputs.add(composite_key)
+            return "detached"
         if pending:
             pending_request = pending[0]
             retained = self._request_activities(pending_request)

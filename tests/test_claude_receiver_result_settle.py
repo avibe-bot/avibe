@@ -32,6 +32,7 @@ class _ResultMessage:
     subtype = "success"
     result = "done"
     duration_ms = 1
+    origin = {"kind": "human"}
 
 
 class _AssistantFailureMessage:
@@ -43,6 +44,15 @@ class _AssistantFailureMessage:
 class SystemMessage:
     subtype = "init"
     data = {"subtype": "init"}
+
+
+async def _query_text(query):
+    if hasattr(query, "__aiter__"):
+        frames = [frame async for frame in query]
+        assert len(frames) == 1
+        frame = frames[0]
+        return frame["message"]["content"], frame["origin"]
+    return query, None
 
 
 def _one_result_client():
@@ -337,7 +347,11 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         receipt = await steer_task
         await asyncio.sleep(0)
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
-        self.assertEqual(client.query_call, ("补充：`exact`", composite_key))
+        prompt, origin = await _query_text(client.query_call[0])
+        self.assertEqual(
+            (prompt, origin, client.query_call[1]),
+            ("补充：`exact`", {"kind": "human"}, composite_key),
+        )
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
         agent.emit_result_message.assert_not_awaited()
 

@@ -116,7 +116,11 @@ class _ClaudeClient:
         self.queries = [("primary", "runtime-key")]
         self._transport = SimpleNamespace(end_input=AsyncMock())
 
-    async def query(self, text: str, *, session_id: str) -> None:
+    async def query(self, text, *, session_id: str) -> None:
+        if hasattr(text, "__aiter__"):
+            frames = [frame async for frame in text]
+            assert len(frames) == 1
+            text = frames[0]["message"]["content"]
         self.queries.append((text, session_id))
         if self.error is not None:
             raise self.error
@@ -940,7 +944,11 @@ async def test_shared_boundary_finishes_native_reconciliation_before_propagating
     release_query = asyncio.Event()
 
     class _BlockingClaudeClient(_ClaudeClient):
-        async def query(self, text: str, *, session_id: str) -> None:
+        async def query(self, text, *, session_id: str) -> None:
+            if hasattr(text, "__aiter__"):
+                frames = [frame async for frame in text]
+                assert len(frames) == 1
+                text = frames[0]["message"]["content"]
             self.queries.append((text, session_id))
             query_started.set()
             await release_query.wait()
