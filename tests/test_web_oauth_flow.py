@@ -1830,7 +1830,7 @@ def test_test_web_auth_claude_runs_in_runtime_cwd(
     probe.assert_awaited_once_with(
         binary="/usr/bin/echo",
         cwd=str(runtime_cwd),
-        model="claude-opus-5",
+        model="claude-opus-5-5",
         on_diagnostic=ANY,
     )
     assert runtime_cwd.is_dir()
