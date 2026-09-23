@@ -65,7 +65,7 @@ def test_explicit_disable_clears_delivery_failure_marker(tmp_path):
             payload=_payload(),
             device_id="device-1",
         )
-        web_push_service.mark_send_failure(conn, endpoint=row["endpoint"])
+        web_push_service.mark_send_failure(conn, endpoint=row["endpoint"], disable=True)
 
         assert web_push_service.disable_device_subscription(
             conn,
@@ -252,7 +252,7 @@ def test_attach_device_to_enabled_subscription_disables_client_known_previous_en
         assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 2
 
 
-def test_attach_device_to_enabled_subscription_cleans_previous_endpoint_when_current_unknown(tmp_path):
+def test_attach_device_to_enabled_subscription_recovers_unknown_rotated_endpoint(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -262,6 +262,7 @@ def test_attach_device_to_enabled_subscription_cleans_previous_endpoint_when_cur
             conn,
             user_key="remote:user-a",
             payload=_payload("https://push.example.test/sub/previous"),
+            device_id="device-1",
         )
 
         synced = web_push_service.attach_device_to_enabled_subscription(
@@ -269,6 +270,81 @@ def test_attach_device_to_enabled_subscription_cleans_previous_endpoint_when_cur
             user_key="remote:user-a",
             payload=_payload("https://push.example.test/sub/current"),
             device_id="device-1",
+            previous_endpoints=[previous["endpoint"]],
+        )
+
+        assert synced is not None
+        assert synced["endpoint"] == "https://push.example.test/sub/current"
+        assert synced["device_id"] == "device-1"
+        assert web_push_service.get_enabled_by_endpoint(
+            conn,
+            endpoint=previous["endpoint"],
+            user_key="remote:user-a",
+        ) is None
+        assert web_push_service.get_enabled_by_endpoint(
+            conn,
+            endpoint=synced["endpoint"],
+            user_key="remote:user-a",
+        ) is not None
+        assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 1
+
+
+def test_attach_device_to_enabled_subscription_recovers_after_provider_disabled_previous(
+    tmp_path,
+):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/previous"),
+            device_id="device-1",
+        )
+        web_push_service.mark_send_failure(
+            conn,
+            endpoint=previous["endpoint"],
+            disable=True,
+        )
+
+        synced = web_push_service.attach_device_to_enabled_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/current"),
+            device_id="device-1",
+            previous_endpoints=[previous["endpoint"]],
+        )
+
+        assert synced is not None
+        assert synced["endpoint"] == "https://push.example.test/sub/current"
+        assert web_push_service.get_enabled_by_endpoint(
+            conn,
+            endpoint=synced["endpoint"],
+            user_key="remote:user-a",
+        ) is not None
+        assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 1
+
+
+def test_attach_device_to_enabled_subscription_does_not_cross_devices(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/previous"),
+            device_id="device-1",
+        )
+
+        synced = web_push_service.attach_device_to_enabled_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/current"),
+            device_id="device-2",
             previous_endpoints=[previous["endpoint"]],
         )
 

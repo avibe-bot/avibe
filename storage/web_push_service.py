@@ -165,6 +165,24 @@ def attach_device_to_enabled_subscription(
     if not device_id:
         return get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
     now = _utc_now_iso()
+    previous_candidates = _normalize_previous_endpoints(previous_endpoints, endpoint)
+    recoverable_previous = None
+    if previous_candidates:
+        previous_rows = conn.execute(
+            select(web_push_subscriptions)
+            .where(web_push_subscriptions.c.user_key == user_key)
+            .where(web_push_subscriptions.c.endpoint.in_(previous_candidates))
+            .where(
+                (web_push_subscriptions.c.enabled == 1)
+                | web_push_subscriptions.c.last_failure_at.is_not(None)
+            )
+        ).mappings().all()
+        for previous_row in previous_rows:
+            previous_device_id = previous_row["device_id"]
+            if previous_device_id is not None and previous_device_id != device_id:
+                continue
+            recoverable_previous = previous_row
+            break
     _disable_previous_endpoints(
         conn,
         user_key=user_key,
@@ -174,6 +192,19 @@ def attach_device_to_enabled_subscription(
     )
     existing = get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
     if existing is None:
+        if (
+            get_by_endpoint(conn, endpoint=endpoint, user_key=user_key) is None
+            and recoverable_previous is not None
+        ):
+            return upsert_subscription(
+                conn,
+                user_key=user_key,
+                payload=payload,
+                user_agent=user_agent,
+                device_label=device_label,
+                device_id=device_id,
+                previous_endpoints=previous_endpoints,
+            )
         return None
     conn.execute(
         web_push_subscriptions.update()
@@ -232,7 +263,6 @@ def disable_device_subscription(
     stmt = (
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
-        .where(web_push_subscriptions.c.enabled == 1)
     )
     if endpoint:
         stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
