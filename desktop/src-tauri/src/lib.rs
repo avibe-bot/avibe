@@ -654,22 +654,64 @@ fn stop_runtime(app: AppHandle, quit: bool) {
 }
 
 fn toggle_start_at_login(app: &AppHandle) {
-    let manager = app.autolaunch();
-    let result = manager
+    let requested = app
+        .autolaunch()
         .is_enabled()
-        .and_then(|enabled| if enabled { manager.disable() } else { manager.enable() });
-    let observed = manager.is_enabled();
-    if let Some(menus) = app.try_state::<NativeMenus>() {
-        let _ = menus.login.set_checked(observed.as_ref().copied().unwrap_or(false));
+        .map(|enabled| !enabled)
+        .map_err(|error| error.to_string());
+    set_start_at_login(app, requested);
+}
+
+/// Writes Start at Login under the policy below. The menu toggle and an
+/// uninstall putting back the registration it cleared both come here; the
+/// uninstall's own disable does not, because its failure already fails that
+/// uninstall closed. Returns whether the requested state now holds.
+fn set_start_at_login(app: &AppHandle, requested: Result<bool, String>) -> bool {
+    let manager = app.autolaunch();
+    settle_start_at_login(
+        requested,
+        |enabled| {
+            let written = if enabled { manager.enable() } else { manager.disable() };
+            written.map_err(|error| error.to_string())
+        },
+        || manager.is_enabled().map_err(|error| error.to_string()),
+        |checked| {
+            if let Some(menus) = app.try_state::<NativeMenus>() {
+                let _ = menus.login.set_checked(checked);
+            }
+        },
+        || {
+            let catalog = native_tray_catalog();
+            app.dialog()
+                .message(catalog.login_failure)
+                .title(catalog.failure_title)
+                .kind(MessageDialogKind::Error)
+                .show(|_| {});
+        },
+    )
+}
+
+/// Start at Login's terminal policy. The requested state is written once and
+/// read back, and the checkbox is drawn from what was read, so the menu shows
+/// the registration the OS actually holds. A failed write, a failed read, or a
+/// read that disagrees with the request is reported with the one login failure
+/// message. Nothing is retried: the checkbox already shows what the OS holds,
+/// so the user can act on it.
+fn settle_start_at_login(
+    requested: Result<bool, String>,
+    write: impl FnOnce(bool) -> Result<(), String>,
+    observe: impl FnOnce() -> Result<bool, String>,
+    render: impl FnOnce(bool),
+    report_failure: impl FnOnce(),
+) -> bool {
+    let written = requested.and_then(|enabled| write(enabled).map(|()| enabled));
+    let observed = observe();
+    render(observed.as_ref().copied().unwrap_or(false));
+    let settled = matches!((&written, &observed), (Ok(requested), Ok(observed)) if requested == observed);
+    if !settled {
+        report_failure();
     }
-    if result.is_err() || observed.is_err() {
-        let catalog = native_tray_catalog();
-        app.dialog()
-            .message(catalog.login_failure)
-            .title(catalog.failure_title)
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-    }
+    settled
 }
 
 #[derive(Default)]
@@ -1359,14 +1401,18 @@ fn report_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>, cata
 /// caller reports it — rather than a silently stale entry. Clearing it is also
 /// undone when the removal it authorized does not happen: the application is
 /// still installed, so it must keep launching the way the user configured it.
+/// That restore goes through Start at Login's one write policy; when it fails,
+/// the outcome says so and both failures are reported, never an uninstall that
+/// quietly finished with the registration gone.
 #[cfg(feature = "bundled-runtime")]
 async fn remove_runtime_after_login_cleanup<Removal>(
     login_enabled: Result<bool, String>,
     disable_login: impl FnOnce() -> Result<(), String>,
     remove_runtime: impl FnOnce() -> Removal,
-    restore_login: impl FnOnce(),
+    restore_login: impl FnOnce() -> bool,
     report_failure: impl FnOnce(),
-) where
+) -> UninstallOutcome
+where
     Removal: std::future::Future<Output = bool>,
 {
     let cleared = match login_enabled {
@@ -1376,15 +1422,30 @@ async fn remove_runtime_after_login_cleanup<Removal>(
     };
     let Ok(cleared) = cleared else {
         report_failure();
-        return;
+        return UninstallOutcome::Kept;
     };
     if remove_runtime().await {
-        return;
+        return UninstallOutcome::Removed;
     }
-    if cleared {
-        restore_login();
-    }
+    let outcome = if cleared && !restore_login() {
+        UninstallOutcome::KeptWithoutLogin
+    } else {
+        UninstallOutcome::Kept
+    };
     report_failure();
+    outcome
+}
+
+/// How a confirmed uninstall ended. Only `Removed` reached the success dialog
+/// and the shell exit; the other two left the installation in place and
+/// reported the failure.
+#[cfg(feature = "bundled-runtime")]
+#[derive(Debug, PartialEq, Eq)]
+enum UninstallOutcome {
+    Removed,
+    Kept,
+    /// The login registration this uninstall cleared could not be put back.
+    KeptWithoutLogin,
 }
 
 #[cfg(feature = "bundled-runtime")]
@@ -1452,9 +1513,7 @@ fn request_private_runtime_removal(app: AppHandle) {
                             Ok(false) | Err(_) => false,
                         }
                     },
-                    || {
-                        let _ = restore_app.autolaunch().enable();
-                    },
+                    || set_start_at_login(&restore_app, Ok(true)),
                     || report_runtime_removal_failure(&failure_app, activity, &catalog),
                 )
                 .await;
@@ -1948,27 +2007,33 @@ mod tests {
     /// for the whole success branch the shell wires into it — stopping
     /// notifications, deleting the private Runtime, the success dialog and the
     /// shell exit — so a run without it is a run that reported failure and left
-    /// the installation intact.
+    /// the installation intact. `RestoreLogin`, `RenderLogin` and
+    /// `ReportLoginFailure` are the restore's write, checkbox and login failure
+    /// message, produced by the real `settle_start_at_login` policy.
     #[cfg(feature = "bundled-runtime")]
     #[derive(Debug, PartialEq, Eq)]
     enum UninstallEffect {
         DisableLogin,
         RemoveRuntime,
         RestoreLogin,
+        RenderLogin(bool),
+        ReportLoginFailure,
         ReportFailure,
     }
 
+    /// A confirmed uninstall whose restore, when it runs, writes `restore_write`
+    /// and then reads `restore_observed` back.
     #[cfg(feature = "bundled-runtime")]
-    fn uninstall_effects(
+    fn uninstall_run(
         login_enabled: Result<bool, String>,
         disable_login: Result<(), String>,
         removed: bool,
-    ) -> Vec<UninstallEffect> {
+        restore_write: Result<(), String>,
+        restore_observed: Result<bool, String>,
+    ) -> (UninstallOutcome, Vec<UninstallEffect>) {
         let effects = std::cell::RefCell::new(Vec::new());
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(remove_runtime_after_login_cleanup(
+        let outcome = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(
+            remove_runtime_after_login_cleanup(
                 login_enabled,
                 || {
                     effects.borrow_mut().push(UninstallEffect::DisableLogin);
@@ -1978,18 +2043,44 @@ mod tests {
                     effects.borrow_mut().push(UninstallEffect::RemoveRuntime);
                     removed
                 },
-                || effects.borrow_mut().push(UninstallEffect::RestoreLogin),
+                || {
+                    settle_start_at_login(
+                        Ok(true),
+                        |enabled| {
+                            assert!(enabled, "a restore only ever puts the registration back");
+                            effects.borrow_mut().push(UninstallEffect::RestoreLogin);
+                            restore_write
+                        },
+                        || restore_observed,
+                        |checked| effects.borrow_mut().push(UninstallEffect::RenderLogin(checked)),
+                        || effects.borrow_mut().push(UninstallEffect::ReportLoginFailure),
+                    )
+                },
                 || effects.borrow_mut().push(UninstallEffect::ReportFailure),
-            ));
-        effects.into_inner()
+            ),
+        );
+        (outcome, effects.into_inner())
+    }
+
+    /// The same uninstall with a restore that succeeds.
+    #[cfg(feature = "bundled-runtime")]
+    fn uninstall_effects(
+        login_enabled: Result<bool, String>,
+        disable_login: Result<(), String>,
+        removed: bool,
+    ) -> Vec<UninstallEffect> {
+        uninstall_run(login_enabled, disable_login, removed, Ok(()), Ok(true)).1
     }
 
     #[cfg(feature = "bundled-runtime")]
     #[test]
     fn uninstall_clears_an_enabled_login_item_before_removing_the_private_runtime() {
         assert_eq!(
-            uninstall_effects(Ok(true), Ok(()), true),
-            vec![UninstallEffect::DisableLogin, UninstallEffect::RemoveRuntime],
+            uninstall_run(Ok(true), Ok(()), true, Ok(()), Ok(true)),
+            (
+                UninstallOutcome::Removed,
+                vec![UninstallEffect::DisableLogin, UninstallEffect::RemoveRuntime],
+            ),
         );
     }
 
@@ -2014,14 +2105,50 @@ mod tests {
         // The application is still installed, so the login registration this
         // uninstall cleared has to come back before the failure is reported.
         assert_eq!(
-            uninstall_effects(Ok(true), Ok(()), false),
-            vec![
-                UninstallEffect::DisableLogin,
-                UninstallEffect::RemoveRuntime,
-                UninstallEffect::RestoreLogin,
-                UninstallEffect::ReportFailure,
-            ],
+            uninstall_run(Ok(true), Ok(()), false, Ok(()), Ok(true)),
+            (
+                UninstallOutcome::Kept,
+                vec![
+                    UninstallEffect::DisableLogin,
+                    UninstallEffect::RemoveRuntime,
+                    UninstallEffect::RestoreLogin,
+                    UninstallEffect::RenderLogin(true),
+                    UninstallEffect::ReportFailure,
+                ],
+            ),
         );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_reports_a_login_item_it_could_not_restore() {
+        // Clearing succeeded, the removal did not happen, and putting the
+        // registration back failed too. The checkbox shows what the OS now
+        // holds, the login failure is reported, the uninstall failure is still
+        // reported, and nothing reaches the success dialog or the exit.
+        let lost = vec![
+            UninstallEffect::DisableLogin,
+            UninstallEffect::RemoveRuntime,
+            UninstallEffect::RestoreLogin,
+            UninstallEffect::RenderLogin(false),
+            UninstallEffect::ReportLoginFailure,
+            UninstallEffect::ReportFailure,
+        ];
+        assert_eq!(
+            uninstall_run(Ok(true), Ok(()), false, Err("enable failed".to_owned()), Ok(false)),
+            (UninstallOutcome::KeptWithoutLogin, lost),
+        );
+        // A write that claims success but reads back disabled is the same loss.
+        assert_eq!(
+            uninstall_run(Ok(true), Ok(()), false, Ok(()), Ok(false)).0,
+            UninstallOutcome::KeptWithoutLogin,
+        );
+        // So is a write whose result cannot be read back; the checkbox then
+        // falls back to unchecked.
+        let (outcome, effects) = uninstall_run(Ok(true), Ok(()), false, Ok(()), Err("state unavailable".to_owned()));
+        assert_eq!(outcome, UninstallOutcome::KeptWithoutLogin);
+        assert!(effects.contains(&UninstallEffect::RenderLogin(false)));
+        assert!(effects.ends_with(&[UninstallEffect::ReportLoginFailure, UninstallEffect::ReportFailure]));
     }
 
     #[cfg(feature = "bundled-runtime")]
@@ -2039,6 +2166,92 @@ mod tests {
         assert_eq!(
             uninstall_effects(Err("state unavailable".to_owned()), Ok(()), true),
             vec![UninstallEffect::ReportFailure],
+        );
+        assert_eq!(
+            uninstall_run(Ok(true), Err("disable failed".to_owned()), true, Ok(()), Ok(true)).0,
+            UninstallOutcome::Kept,
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum LoginEffect {
+        Write(bool),
+        Render(bool),
+        ReportFailure,
+    }
+
+    fn settle_login(
+        requested: Result<bool, String>,
+        write: Result<(), String>,
+        observed: Result<bool, String>,
+    ) -> (bool, Vec<LoginEffect>) {
+        let effects = std::cell::RefCell::new(Vec::new());
+        let settled = settle_start_at_login(
+            requested,
+            |enabled| {
+                effects.borrow_mut().push(LoginEffect::Write(enabled));
+                write
+            },
+            || observed,
+            |checked| effects.borrow_mut().push(LoginEffect::Render(checked)),
+            || effects.borrow_mut().push(LoginEffect::ReportFailure),
+        );
+        (settled, effects.into_inner())
+    }
+
+    #[test]
+    fn start_at_login_writes_once_and_draws_the_state_it_reads_back() {
+        for enabled in [true, false] {
+            assert_eq!(
+                settle_login(Ok(enabled), Ok(()), Ok(enabled)),
+                (true, vec![LoginEffect::Write(enabled), LoginEffect::Render(enabled)]),
+            );
+        }
+    }
+
+    #[test]
+    fn start_at_login_reports_every_unsettled_write_once_without_retrying() {
+        // The write failed: the checkbox shows the registration that remains.
+        assert_eq!(
+            settle_login(Ok(true), Err("enable failed".to_owned()), Ok(false)),
+            (
+                false,
+                vec![
+                    LoginEffect::Write(true),
+                    LoginEffect::Render(false),
+                    LoginEffect::ReportFailure,
+                ],
+            ),
+        );
+        // The write claimed success but the OS reads back the other state.
+        assert_eq!(
+            settle_login(Ok(false), Ok(()), Ok(true)),
+            (
+                false,
+                vec![
+                    LoginEffect::Write(false),
+                    LoginEffect::Render(true),
+                    LoginEffect::ReportFailure,
+                ],
+            ),
+        );
+        // The state cannot be read back, so the checkbox falls back to unchecked.
+        assert_eq!(
+            settle_login(Ok(true), Ok(()), Err("state unavailable".to_owned())),
+            (
+                false,
+                vec![
+                    LoginEffect::Write(true),
+                    LoginEffect::Render(false),
+                    LoginEffect::ReportFailure,
+                ],
+            ),
+        );
+        // The toggle could not learn what to request: nothing is written, and
+        // the checkbox is still redrawn from a fresh read.
+        assert_eq!(
+            settle_login(Err("state unavailable".to_owned()), Ok(()), Ok(true)),
+            (false, vec![LoginEffect::Render(true), LoginEffect::ReportFailure]),
         );
     }
 

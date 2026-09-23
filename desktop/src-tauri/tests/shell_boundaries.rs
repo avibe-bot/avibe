@@ -846,6 +846,45 @@ fn settings_open_through_the_deep_link_path_only_while_a_workbench_is_shown() {
 }
 
 #[test]
+fn start_at_login_is_restored_through_the_toggle_write_policy() {
+    let source = shipping_source("src/lib.rs");
+    let body = |name: &str| -> String {
+        source
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name} exists"))
+            .split("\n}\n")
+            .next()
+            .expect("function body")
+            .to_owned()
+    };
+    // The menu toggle and the uninstall's restore reach one adapter, which
+    // hands the write, the read-back, the checkbox and the failure message to
+    // the policy the unit tests exercise.
+    assert!(body("toggle_start_at_login").contains("set_start_at_login(app, requested);"));
+    assert!(body("request_private_runtime_removal").contains("|| set_start_at_login(&restore_app, Ok(true)),"));
+    let adapter = body("set_start_at_login");
+    for required in [
+        "settle_start_at_login(",
+        "manager.enable()",
+        "manager.is_enabled()",
+        "menus.login.set_checked(checked)",
+        ".message(catalog.login_failure)",
+    ] {
+        assert!(
+            adapter.contains(required),
+            "the Start at Login adapter must keep {required:?}"
+        );
+    }
+    // The policy takes its write as `FnOnce` and the adapter runs it once, so a
+    // failure is reported, never retried. Nothing else enables the registration
+    // or draws its checkbox, so no caller can discard a write's result again.
+    assert_eq!(source.matches("settle_start_at_login(").count(), 2);
+    assert_eq!(source.matches(".enable()").count(), 1);
+    assert_eq!(source.matches("login.set_checked(").count(), 1);
+}
+
+#[test]
 fn explicit_stop_does_not_schedule_automatic_recovery() {
     let source = shipping_source("src/lib.rs");
     let stop = source

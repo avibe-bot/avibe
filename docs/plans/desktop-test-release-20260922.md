@@ -1267,6 +1267,77 @@ Two more boundaries in F1's class, one Settings gap, and the title-bar ruling.
   native title bar, and no capability is widened. Removing it is a follow-up,
   scoped independently of Check for Updates.
 
+## H23 — Start at Login terminal policy on `1f869b519`
+
+- **Windows checkout.** `1f869b519` makes `shell_boundaries.rs` normalize CRLF
+  to LF once, in `shipping_text`, before any source assertion. A Windows
+  checkout had failed a multi-line check. Test-only; a CRLF copy of `lib.rs`
+  must read as the same shipping text.
+- **The finding.** Codex P2 4086509105 found the uninstall's restore closure
+  discarding the result of `enable()`. When the disable succeeds, the removal
+  fails and the re-enable also fails, Start at Login stays off with nothing
+  reported, and the menu can show a stale check.
+- **Circuit breaker.** This was the third head in one root-cause class:
+  compensation for a failed multi-step operation is incomplete (reviewed heads
+  `d65847228`, `b85261e41` and `1f869b519`). The orchestrator diagnosed the
+  class and ruled that the chain ends in a terminal policy, not a deeper
+  compensation.
+- **The ruling.** Every Start at Login write that must settle the menu goes
+  through one policy, `settle_start_at_login`:
+  1. write the requested state once;
+  2. read it back;
+  3. draw the checkbox from what was read, even on error;
+  4. report a failed write, a failed read, or a read that disagrees with the
+     request using the existing `login_failure` message.
+
+  The write is an `FnOnce`, so nothing is retried and nothing is persisted.
+- **Where the policy is used.** The menu toggle and the uninstall's restore
+  both reach it through `set_start_at_login`. The restore callback now returns
+  whether the registration came back. A failed restore ends as
+  `UninstallOutcome::KeptWithoutLogin`: the login failure is reported, the
+  existing runtime-removal failure is still reported, and neither the success
+  dialog nor the exit runs.
+- **Not covered by the policy.** The pre-removal disable stays outside it. Its
+  failure already fails the uninstall closed, with the existing report, before
+  the Runtime is touched.
+- **Tightening.** Counting a disagreeing read as unsettled narrows the toggle.
+  Before, it reported only errors; now a write that claims success but reads
+  back the other state is reported too.
+- **Tests.** Unit tests drive the policy directly, and the uninstall tests
+  drive the restore through it. A new case: disable succeeds, removal fails,
+  restore is attempted and fails. That run draws the observed state, reports
+  both failures and never reaches `Removed`. A boundary test pins the one
+  adapter, one call to the policy, one `.enable()` and one checkbox write.
+- **Mutations.** Each mutation below fails at least one test:
+  - ignoring the restore's result;
+  - dropping the failure report;
+  - counting only errors as unsettled;
+  - skipping the redraw on error;
+  - restoring outside the helper;
+  - retrying in the adapter.
+- **Scope.** No new command, capability, dependency or copy. No UI or title-bar
+  change. This commit touches only `desktop/src-tauri/src/lib.rs`,
+  `desktop/src-tauri/tests/shell_boundaries.rs` and this plan.
+- **Correction to the release-file freeze.** Earlier sections, from H4 on, say
+  the release implementation files are byte-identical to
+  `13082a8501ce5d1e771f56395a72fc062859cf8b`, apart from the two
+  `release_ai.yml` checkout pins. Each claim held at the head it named. As a
+  cumulative statement it has not held since `51784cc2b`, the merge of master
+  `fb460f2bf` (#2120, Memory removal).
+- **Where the release files stand.** Object hashes against `13082a850`:
+  - Unchanged: `desktop/README.md`, `docs/desktop-test-installation.md`,
+    `scripts/desktop_release.py` and `.github/workflows/desktop-package.yml`.
+  - Changed: `.github/workflows/release_ai.yml`,
+    `tests/test_desktop_release.py` and `tests/test_release_verification.py`.
+
+  Every change beyond the pins comes from master and entered only through that
+  merge: #2120's own removal of the Memory runtime job and its verifier tests,
+  and the merge's conflict resolution adapting this branch's release tests to
+  that removal. The resolution dropped the Memory assets and `needs` entries,
+  and added a focused source-SHA assertion in place of a check #2120 removed.
+  No commit after `51784cc2b` changes these three files, and this candidate
+  does not either.
+
 ## Known-by-design ledger additions
 
 - **Taken up in H19.** `query_endpoint` sets `stderr(Stdio::null())` and the
