@@ -2908,6 +2908,39 @@ def test_builtin_reconcile_drops_retired_builtins_unless_a_route_pins_them(
     assert "claude-opus-4" not in {row["id"] for row in service.backend_catalog_models("claude")}
 
 
+def test_builtin_reconcile_keeps_a_retired_builtin_a_vibe_agent_pins(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    service.named_agents_override = lambda backend: [("reviewer", "claude-opus-4")] if backend == "claude" else []
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
+    ]
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"claude": {"complete": True, "models": [{"id": "claude-opus-5"}]}},
+    )
+
+    asyncio.run(service.reconcile_builtin_models(("claude",)))
+
+    assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-5", "claude-opus-4"]
+
+
+def test_single_backend_reconcile_never_prunes_another_backend(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin")]
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"codex": {"complete": True, "models": [{"id": "gpt-6-astra"}]}},
+    )
+
+    asyncio.run(service.reconcile_builtin_models(("codex",)))
+
+    assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-4"]
+
+
 def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp_path):
     for store_writable in (False, True):
         service, store, _adapter = _service(tmp_path)

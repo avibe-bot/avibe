@@ -1924,6 +1924,25 @@ def test_config_reload_keeps_a_legacy_mapping_to_a_retired_model(monkeypatch, tm
     assert "claude-opus-4" not in {model.id for model in agent.models}
 
 
+def test_config_reload_drops_an_unmappable_legacy_mapping_to_a_retired_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["mappings"] = [
+        {"builtin_id": "claude-sonnet-4", "target_model_id": "claude-sonnet-4", "enabled": True}
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    agent = loaded.model_hub.agents["claude"]
+    assert "claude-sonnet-4" not in agent.routes
+    assert "claude-sonnet-4" not in {model.id for model in agent.models}
+
+
 def test_config_reload_spells_route_hops_like_the_inventory_they_name(monkeypatch, tmp_path):
     # A hop names a model in a source's inventory, and `inspect_exact_hop` decides
     # membership by comparing the two identifiers exactly, so the chain only

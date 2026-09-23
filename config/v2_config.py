@@ -680,6 +680,10 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                     warnings.append(
                         f"Model Hub route {backend}/{model_id} could not be mapped to a persisted source model"
                     )
+                if model_id in retired_ids and not hops:
+                    # An unmapped retired id has nothing to preserve; materializing
+                    # it would leave a manual catalog row no reconcile removes.
+                    continue
                 routes[model_id] = {"hops": hops}
 
         allowed_agent = {

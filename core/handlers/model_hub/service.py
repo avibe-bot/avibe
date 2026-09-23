@@ -4747,8 +4747,14 @@ class ModelHubService:
                 if admitted is not None:
                     snapshot.append(admitted)
             builtin_order = tuple(model.id for model in snapshot)
-            # A retired built-in leaves the catalog unless the user pinned a route to it.
-            retired = model_hub_retired_menu_ids(backend)
+            # A retired built-in leaves the catalog unless a route or a Vibe Agent
+            # pins it. Only a backend with a fresh snapshot is pruned, so a
+            # single-backend reconcile never drops rows it did not evaluate.
+            retired = (
+                model_hub_retired_menu_ids(backend) - self._agent_pinned_model_ids(cast(BackendName, backend))
+                if backend in snapshots
+                else frozenset()
+            )
             kept = [
                 model
                 for model in agent.models
@@ -4780,6 +4786,16 @@ class ModelHubService:
             if added:
                 changed.append(cast(BackendName, backend))
         return changed
+
+    def _agent_pinned_model_ids(self, backend: BackendName) -> set[str]:
+        pinned: set[str] = set()
+        if self.named_agents_override is not None:
+            for _name, model_id in self.named_agents_override(backend):
+                pinned.add(str(model_id or "").strip())
+        if self.selected_agent_override is not None:
+            pinned.add(str(self.selected_agent_override(backend) or "").strip())
+        pinned.discard("")
+        return pinned
 
     def _builtin_snapshots(
         self,
