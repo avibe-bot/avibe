@@ -563,6 +563,27 @@ def test_reap_marked_processes_is_unconfirmed_when_a_process_cannot_be_inspected
     )
 
     assert outcome == "unconfirmed"
+    unreadable.info["create_time"] = 1000.0
+    # A process born before the marker existed cannot carry it, readable or not.
+    assert (
+        reap_marked_processes(
+            logging.getLogger(__name__),
+            "test process",
+            worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
+            born_after=2000.0,
+        )
+        == "gone"
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable]))
+    assert (
+        reap_marked_processes(
+            logging.getLogger(__name__),
+            "test process",
+            worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
+            born_after=1002.0,
+        )
+        == "unconfirmed"
+    )
     monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid]))
     assert (
         reap_marked_processes(

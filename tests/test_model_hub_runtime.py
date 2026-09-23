@@ -3197,11 +3197,31 @@ def test_supervisor_records_the_launch_before_spawning(tmp_path: Path) -> None:
     supervisor.ensure_running()
 
     [launch] = seen[0]
-    assert set(launch) == {"worker_fingerprint"}
+    assert set(launch) == {"worker_fingerprint", "launched_at"}
+    assert launch["launched_at"] <= psutil.Process(supervisor._process.pid).create_time() + 1
     assert launch["worker_fingerprint"] == fingerprint_process_marker(
         psutil.Process(supervisor._process.pid).environ()[PROCESS_IDENTITY_ENV]
     )
     supervisor.stop()
+
+
+def test_supervisor_retires_the_launch_record_when_the_spawn_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No process exists to carry the marker, so no scan may keep the record alive.
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    def spawn(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason is None
+    assert not (store.root / "engine-process.json").exists()
 
 
 def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path) -> None:

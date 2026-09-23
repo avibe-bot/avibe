@@ -53,6 +53,12 @@ _ENGINE_PROCESS_RECORD = "engine-process.json"
 class _EngineRecord:
     worker_fingerprint: str
     identity: PersistedProcessIdentity | None = None
+    # When the marker was created; no process born earlier can carry it.
+    launched_at: float | None = None
+
+    @property
+    def born_after(self) -> float | None:
+        return self.identity.create_time if self.identity is not None else self.launched_at
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
 
 
@@ -258,7 +264,7 @@ class EngineSupervisor:
         marker = new_process_identity_marker()
         environment = engine_subprocess_environment()
         environment[PROCESS_IDENTITY_ENV] = marker
-        launch = _EngineRecord(fingerprint_process_marker(marker))
+        launch = _EngineRecord(fingerprint_process_marker(marker), launched_at=time.time())
         if not self._store_engine_records_locked([launch]):
             # A launch no record names would become a permanent orphan if this
             # service died, so it never runs untracked.
@@ -275,7 +281,10 @@ class EngineSupervisor:
                 **isolated_subprocess_kwargs(),
             )
         except (OSError, ValueError) as exc:
-            self._reap_recorded_engines_locked()
+            # No process was created, so nothing can carry this marker: retire the
+            # launch record directly instead of scanning for a tree that never was.
+            if not self._store_engine_records_locked([]):
+                raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked") from exc
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
@@ -401,7 +410,10 @@ class EngineSupervisor:
                 continue
             pid = entry.get("pid")
             identity = process_identity_from_payload(entry, pid) if isinstance(pid, int) else None
-            records.append(_EngineRecord(fingerprint, identity))
+            launched_at = entry.get("launched_at")
+            if isinstance(launched_at, bool) or not isinstance(launched_at, (int, float)) or not launched_at > 0:
+                launched_at = None
+            records.append(_EngineRecord(fingerprint, identity, launched_at))
         return records
 
     def _store_engine_records_locked(self, records: list[_EngineRecord]) -> bool:
@@ -415,12 +427,7 @@ class EngineSupervisor:
                 path,
                 json.dumps(
                     {
-                        "engines": [
-                            serialize_process_identity(record.identity)
-                            if record.identity is not None
-                            else {"worker_fingerprint": record.worker_fingerprint}
-                            for record in records
-                        ]
+                        "engines": [_serialize_engine_record(record) for record in records]
                     },
                     sort_keys=True,
                 )
@@ -460,7 +467,12 @@ class EngineSupervisor:
                     reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=record.identity)
                 )
             outcomes.append(
-                reap_marked_processes(logger, "Model Hub engine", worker_fingerprint=record.worker_fingerprint)
+                reap_marked_processes(
+                    logger,
+                    "Model Hub engine",
+                    worker_fingerprint=record.worker_fingerprint,
+                    born_after=record.born_after,
+                )
             )
             if "unconfirmed" in outcomes:
                 survivors.append(record)
@@ -472,6 +484,15 @@ class EngineSupervisor:
                 len(survivors),
             )
         return self._store_engine_records_locked(survivors) and not survivors
+
+def _serialize_engine_record(record: _EngineRecord) -> dict[str, Any]:
+    if record.identity is not None:
+        return serialize_process_identity(record.identity)
+    entry: dict[str, Any] = {"worker_fingerprint": record.worker_fingerprint}
+    if record.launched_at is not None:
+        entry["launched_at"] = record.launched_at
+    return entry
+
 
 def _allocate_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
