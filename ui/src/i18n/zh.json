@@ -562,7 +562,7 @@
       "oauthRemoved": "已移除凭据。",
       "oauthRemoveFailed": "移除凭据失败：{{detail}}",
       "oauthRemovePartial": "已清除 Avibe 内的凭据，但 CLI logout 返回错误：{{detail}}。CLI 自己的凭据文件可能仍在磁盘上。",
-      "nativeAuthHubOwned": "认证由模型网关管理。",
+      "nativeAuthHubOwned": "认证由模型网关管理",
       "openModelHub": "打开模型网关",
       "oauthFlowLockedToast": "OAuth 登录进行中——请先完成或取消，再切换验证方式。",
       "testConnectionTitle": "测试连通性",
@@ -1892,18 +1892,6 @@
         "refreshed": "已更新",
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
-      },
-      "importNotice": {
-        "found_one": "发现 {{count}} 个可导入模型网关的 API Key",
-        "found_other": "发现 {{count}} 个可导入模型网关的 API Key",
-        "review": "查看并迁移",
-        "help": "什么是模型网关？",
-        "helpBody": "模型网关管理你选择的认证信息，并为 AI 助手提供统一的模型入口。",
-        "dismiss": "关闭导入提示",
-        "imported_one": "已迁移 {{count}} 个 API Key 到模型网关",
-        "imported_other": "已迁移 {{count}} 个 API Key 到模型网关",
-        "importedRemaining_one": "已迁移 {{imported}} 个 · 还有 {{count}} 个可迁移",
-        "importedRemaining_other": "已迁移 {{imported}} 个 · 还有 {{count}} 个可迁移"
       }
     }
   },
@@ -5370,8 +5358,6 @@
       "changeProvider": "更换",
       "enter": "进入工作台",
       "entryHint": "添加任意一个订阅或 API Key，即可进入工作台",
-      "entryReady": "已连接，可以开始工作",
-      "entryStopped": "连接已保存，进入工作台即可启动服务",
       "entryFailed": "无法确认可用助手，请刷新后重试",
       "addSubscription": "添加订阅 / 登录",
       "addKey": "添加 API Key",
@@ -5470,8 +5456,6 @@
     "import": {
       "title": "迁移到模型网关",
       "description": "迁移后，这些助手改用模型网关连接模型，原配置文件里对应的 Key 会被移除，其他设置不变。",
-      "review": "查看并迁移",
-      "helpBody": "模型网关统一管理认证和模型连接。迁移会清理已替代的原生认证，并将关联助手切换到模型网关；其他无关设置会保留。",
       "action_one": "查看选中的 {{count}} 项",
       "action_other": "查看选中的 {{count}} 项",
       "scopeNote": "这里只迁移 API Key。订阅登录和无法迁移的配置，请到设置中处理。",

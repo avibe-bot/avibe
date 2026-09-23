@@ -753,11 +753,11 @@ scenarios:
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_masked_credential_is_the_same_masking_the_detail_already_showed
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone
   - id: MH-MIG-004
-    name: Setup's key-import entry counts, offers and submits one and the same set, and leaves subscriptions and reauth rows to the settings migration
+    name: Setup's key-import entry counts, offers and submits one and the same set, skips what the Hub already supplies, and leaves subscriptions and reauth rows to the settings migration
     status: covered
     kind: migration
     layer: unit
-    test: "ui/src/components/onboarding/ImportKeysNotice.test.tsx::MH-MIG-004: submits only the rows still ticked"
+    test: "ui/src/components/onboarding/providers/providerStage.test.ts::MH-MIG-004: leaves out a group whose every key the Hub is already supplying"
     related_tests:
       - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
       - ui/src/components/settings/models/MigrationDialog.test.tsx::applies only complete backend groups with one migration action

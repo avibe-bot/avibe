@@ -8,7 +8,6 @@
   "include": [
     "./**/*.ts",
     "./**/*.tsx",
-    "../ImportKeysNotice.test.tsx",
     "../setupAction.types.test.ts",
     "../setupConfig.test.ts",
     "../SetupFlowShell.test.tsx",

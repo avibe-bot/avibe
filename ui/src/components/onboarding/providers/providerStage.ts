@@ -354,15 +354,53 @@ export const slotSelected = (
  * scope the scan, drop groups this entry point cannot consent to, then take every
  * importable row of the consented backends.
  */
-export function pendingImportRows(selection: MigrationSelection): MigrationItem[] {
+export function pendingImportRows(
+  selection: MigrationSelection,
+  sources: readonly Source[] = [],
+): MigrationItem[] {
   const items = selection.scan?.items ?? [];
+  const held = hubHeldCredentials(sources);
   const consented = new Set(
     setupGroups(items)
-      .filter((group) => groupSelectable(group) && selection.selectedBackends.includes(group.backend))
+      .filter((group) => groupSelectable(group)
+        && selection.selectedBackends.includes(group.backend)
+        && !alreadyInHub(group, held))
       .map((group) => group.backend),
   );
   return appliableItems(items, consented);
 }
+
+/**
+ * The credentials the Hub is already supplying, as the scan would mask them.
+ *
+ * The scan reads native stores and knows nothing of the Hub's inventory, so the same
+ * key present in both arrives as a card saying 已接入网关 and a row proposing to
+ * migrate it — the contradiction the stage's own brand collapse hides but the CTA
+ * does not. Masked credentials are what both sides publish about a secret, and they
+ * carry enough of it to identify one; a provider is deliberately not part of the
+ * match, because the same key reached through two vendor labels is still one key.
+ */
+const hubHeldCredentials = (sources: readonly Source[]): Set<string> => new Set(
+  sources.filter(usableSource)
+    .map((source) => source.masked_credential?.trim())
+    .filter((mask): mask is string => Boolean(mask)),
+);
+
+/**
+ * Whether taking this group over would add nothing the Hub does not already have.
+ *
+ * Whole groups only, because the server migrates a backend whole: one row still
+ * missing from the Hub is a batch worth sending, rows and all. What this decides is
+ * only whether the primary action offers the batch — 「继续」 leads to the screen that
+ * wires the assistants, and Settings still reaches the migration for the native files
+ * a person wants cleaned up.
+ */
+const alreadyInHub = (group: MigrationGroup, held: ReadonlySet<string>): boolean =>
+  group.importRows.length > 0
+  && group.importRows.every((row) => {
+    const mask = row.masked_credential?.trim();
+    return Boolean(mask) && held.has(mask as string);
+  });
 
 /**
  * The keys the capsule offers to review.

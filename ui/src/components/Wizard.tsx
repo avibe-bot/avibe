@@ -207,6 +207,13 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
           </RouteSurfaceActiveContext.Provider>
         </div>;
       })}
+      {/* Where a screen puts what is ancillary to the pair below: in the cell the screens
+          share, resting on its bottom edge and growing upward into the room the screen
+          leaves above the action. In the cell rather than in the column, because the
+          column is centred in the window — a caption in it would move the heading, the
+          cards and the action by half of its own height, which is what made the
+          assistants step sit 9px higher than the two before it. */}
+      <div className="onboarding-action-aside" data-setup-action-aside="" />
     </div>
     <div className="onboarding-setup-footer">
       <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action"
@@ -220,9 +227,6 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
         <ArrowLeft size={14} />{t(back === 'providers' ? 'onboarding.flow.backToProviders' : 'onboarding.flow.backToIntro')}
       </Button>
     </div>
-    {/* Where a screen puts what is ancillary to the pair above: below it, in normal flow,
-        so a caption that grows can neither move the anchor nor cover it. */}
-    <div className="onboarding-action-aside" data-setup-action-aside="" />
     {(authoritativeBlock || (!!error && !loading)) && <div className="onboarding-flow-error" role="alert">
       <p>{authoritativeBlock ? t('onboarding.flow.gatewayRequired') : error?.message ?? t('onboarding.connection.readFailed')}</p>
       {/* Same shape the detection failure already uses one screen over: the sentence

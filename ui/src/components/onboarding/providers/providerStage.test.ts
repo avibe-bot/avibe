@@ -356,6 +356,35 @@ describe('pendingImportRows', () => {
     expect(rows.map((item) => item.id)).toEqual(['mig_1', 'mig_2']);
   });
 
+  it('MH-MIG-004: leaves out a group whose every key the Hub is already supplying', () => {
+    // The scan reads native stores and knows nothing of the Hub's inventory, so the
+    // same key arrives as a card saying 已接入网关 and a row proposing to migrate it.
+    // Offering it would ask for a batch that adds nothing.
+    const selection = {
+      scan: scanOf(row({ id: 'mig_1', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0001' })),
+      selectedBackends: ['codex' as const],
+    };
+
+    expect(pendingImportRows(selection).map((item) => item.id)).toEqual(['mig_1']);
+    expect(pendingImportRows(selection, [
+      source({ id: 'src_1', vendor: 'openai', masked_credential: 'sk-…0001' }),
+    ])).toEqual([]);
+  });
+
+  it('still submits a group the Hub only partly holds, whole', () => {
+    // The server migrates a backend whole and refuses a batch that omits a row, so one
+    // key the Hub does not have keeps the group — and its companion goes with it.
+    const rows = pendingImportRows({
+      scan: scanOf(
+        row({ id: 'mig_1', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0001' }),
+        row({ id: 'mig_2', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0002' }),
+      ),
+      selectedBackends: ['codex'],
+    }, [source({ id: 'src_1', vendor: 'openai', masked_credential: 'sk-…0001' })]);
+
+    expect(rows.map((item) => item.id)).toEqual(['mig_1', 'mig_2']);
+  });
+
   it('submits nothing for a group holding any row it cannot import', () => {
     // Consent is per group, never per row: one row the server does not propose
     // importing blocks the whole custody boundary, so the batch is empty rather

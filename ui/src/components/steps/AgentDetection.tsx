@@ -27,7 +27,6 @@ import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
 import type { BackendConnectionState } from '@/context/ApiContext';
 import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
-import { ImportKeysNotice } from '../onboarding/ImportKeysNotice';
 import { modelHubEnabledFromConfig } from '../settings/models/featureFlags';
 import type { SetupAction, SetupFlowState, SetupScreenHandle, SetupScreenId } from '../onboarding/setupFlow';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
@@ -524,19 +523,30 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       ? setupRoot.current?.closest('.onboarding-step')?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null
       : null);
   }, [onActionChange]);
-  const hintInner = (<>
-        <p className="text-center text-xs text-muted">
-          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
-          {/* The whole-screen rescan, kept as part of the sentence that explains why a
-              card might not say what was expected rather than a control competing with
-              the action above it. */}
+  // Only while the action is held. Once it lights up, the cards already say which
+  // assistants are connected and the button says the rest; a caption repeating it is a
+  // line of type under a settled screen. Held, it is the only place that says WHY the
+  // button is grey — and the rescan goes with it, because the reason to rescan is a
+  // CLI installed outside this window that the screen has not noticed yet.
+  /* The whole-screen rescan: what answers 「I installed it in another window」. In the
+     sentence rather than beside the action, so it reads as part of the explanation
+     instead of a second control competing with the button. */
+  const rescan = (
           <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
             onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
             <RefreshCw size={12} />{t('agentDetection.rescan')}
           </Button>
+  );
+  const hintSentence = canContinue ? null : (
+        <p className="text-center text-xs text-muted">
+          {t('onboarding.connection.entryHint')}{' '}
+          {rescan}
         </p>
+  );
+  const hintInner = (hintSentence || entryError) ? (<>
+        {hintSentence}
         {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
-  </>);
+  </>) : null;
   // Hosted in one place so the order under the pair is the same every time, and so the
   // standalone host keeps the arrangement it already had.
   const permissionNode = <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
@@ -549,7 +559,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // nobody is reading, so what it carries has to answer to the same activity itself.
   const asideNode = onActionChange
     ? (active && routeSurfaceActive && actionAside ? createPortal(<>
-        <div className="onboarding-setup-hint">{hintInner}</div>
+        {hintInner && <div className="onboarding-setup-hint">{hintInner}</div>}
         {permissionNode}
       </>, actionAside) : null)
     : (
@@ -559,7 +569,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
           <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
         </Button>
-        {hintInner}
+        {/* The standalone host has no shell slot and no screen after it, so it keeps the
+            rescan reachable even once the action has lit up. */}
+        {hintInner ?? <p className="text-center text-xs text-muted">{rescan}</p>}
         {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
       </div>
     );
@@ -841,17 +853,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         </div>
       </div>
       {!onActionChange && permissionNode}
-      {/* Wizard-only: the offer to take over API keys already on this machine.
-          Settings → Backends reaches the same migration through
-          BackendSupplyModeCard, with its broader scope intact. Self-hides when
-          there is nothing importable or the gateway isn't reachable — which is
-          why the slot around it is rendered either way: the stage keeps the
-          capsule's height while the read is still out, when it turns out there
-          is nothing to offer, and after the offer is refused, so none of the
-          three can move the action below it. */}
-      <div className="onboarding-import-slot">
-        {visited && modelHubEnabled === true && <ImportKeysNotice />}
-      </div>
       </div>
       {providerDialog}
       {canEditSetupRoute && flowState && setFlowState && onNavigate && agentReads && (

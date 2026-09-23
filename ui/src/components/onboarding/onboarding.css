@@ -35,8 +35,6 @@
   /* The enable switch the connection puts in the role's slot: a 42x24 track with
      a 2px border and a 16px thumb, drawn per theme by the reference (eq9QT) —
      dark keeps a lit border on the on-state, light keeps none. */
-  --ob-notice-fg: #d0ddd6;
-  --ob-notice-link: #3fe0e5;
   --ob-idle-dot: #4c5060;
   --ob-skeleton: #ffffff12;
   --ob-skeleton-strong: #ffffff28;
@@ -60,8 +58,6 @@
   --ob-tile-label: #d3d7e2;
   /* The import notice, drawn as its own mint-tinted plate rather than a variant of
      the assistant row: it is an offer, not part of the list it sits under. */
-  --ob-notice-bg: #172f27;
-  --ob-notice-border: #30473e;
 
   /* The middle band — a 900px-tall window — is the base tier; the bands below
      restate only what their frame draws differently. */
@@ -142,19 +138,14 @@
      the note at its clamp, and the two method rows. A tier that restates its
      padding or its rows restates this with them. */
   --ob-assistant-wrap: 0px;
-  --ob-assistant-h: calc(2px + var(--ob-card-pv) * 2 + var(--ob-id-h) + var(--ob-card-gap) * 2
+  --ob-assistant-h: calc(2px + var(--ob-card-pv) + var(--ob-card-ph) + var(--ob-id-h) + var(--ob-card-gap) * 2
     + var(--ob-life-h) + var(--ob-note-lh) * 2 + var(--ob-spacer-2)
     + var(--ob-method-h) * 2 + var(--ob-method-gap) + var(--ob-assistant-wrap));
-  /* What the assistants step's capsule slot holds whether the offer is absent,
-     still loading, arrived or dismissed: the reference's own 44-tall line on a
-     desktop. The provider step no longer draws an offer, so this is that one
-     step's number and the reservation below does not spend it for everybody. */
-  --ob-import-h: 44px;
   /* One floor under the cards, so a card that grows while its step is read — a
      sentence that wraps in one language, a state row that arrives with detection —
-     cannot move the action. It reserves the cards only. Whatever a step draws under
-     them, the capsule slot included, adds its own height on top, and the shared
-     cell (see `.onboarding-screens`) is what then holds the three steps level. */
+     cannot move the action. It reserves the cards only; whatever a step draws under
+     them adds its own height on top, and the shared cell (see `.onboarding-screens`)
+     is what then holds the three steps level. */
   --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h));
   /* The diagram keeps the box the reference draws it in: the story's card plus the
      band the return wire needs under it — 296 around a 232-tall card, 326 around a
@@ -186,8 +177,6 @@
     --ob-active-border: #10b981;
     --ob-active-shadow: var(--shadow-glow-onboarding-mint);
     --ob-divider: #08081214;
-    --ob-notice-fg: #435f52;
-    --ob-notice-link: #0e7490;
     --ob-idle-dot: #5c6079;
     --ob-skeleton: #08081214;
     --ob-skeleton-strong: #08081224;
@@ -210,9 +199,7 @@
     --ob-tile-hover: #0808120a;
     --ob-well: #eef1f780;
     --ob-tile-label: #5c6079;
-    --ob-notice-bg: #edf7f1;
-    --ob-notice-border: #cedfd5;
-  }
+      }
 }
 [data-theme="light"] .onboarding-shell {
   --ob-card: #ffffff;
@@ -220,8 +207,6 @@
   --ob-active-border: #10b981;
   --ob-active-shadow: var(--shadow-glow-onboarding-mint);
   --ob-divider: #08081214;
-  --ob-notice-fg: #435f52;
-  --ob-notice-link: #0e7490;
   --ob-idle-dot: #5c6079;
   --ob-skeleton: #08081214;
   --ob-skeleton-strong: #08081224;
@@ -243,8 +228,6 @@
   --ob-tile-hover: #0808120a;
   --ob-well: #eef1f780;
   --ob-tile-label: #5c6079;
-  --ob-notice-bg: #edf7f1;
-  --ob-notice-border: #cedfd5;
 }
 
 /* ---- Design tiers ---------------------------------------------------------
@@ -464,10 +447,8 @@
    is the cell the three steps share: it is as tall as the tallest of them, each step
    is stretched to it, and the action pair sits below the cell. `--ob-stage-h` is not
    that guarantee; it is the floor under the cards, so a card growing while its own
-   step is read cannot move the action either. What a step draws under the cards — the
-   assistants step's capsule slot, which keeps its height whether the offer is absent,
-   loading, arrived or refused (see `.onboarding-import-slot`) — adds itself on top and
-   is equally immovable.
+   step is read cannot move the action either. Whatever a step draws under the cards
+   adds itself on top and is held level the same way.
    It applies at every width, phones included: the stack band re-derives the same floor
    from the stacked card instead of the side-by-side one (see the 759 band). The steps
    that are shorter than the tallest spend the difference around their composition
@@ -573,7 +554,10 @@
   border-radius: 18px;
   border: 1px solid var(--ob-card-border);
   background: var(--ob-card);
-  padding: var(--ob-card-pv) var(--ob-card-ph);
+  /* The bottom inset is the side inset, not the top one: what sits on the bottom edge
+     is a full-width row of actions, and a row that stops 20 from the sides and 70 from
+     the floor reads as floating rather than as the card's own last line. */
+  padding: var(--ob-card-pv) var(--ob-card-ph) var(--ob-card-ph);
   gap: var(--ob-card-gap);
   transition: border-color 650ms, box-shadow 650ms;
 }
@@ -1122,7 +1106,11 @@
    the reference stacks them, left-aligned with their icon leading, and the connected
    state wears the same row with a mint check. A wrapped horizontal pair read as two
    chips competing for one line. */
+/* On the card's bottom edge, which is where the reference draws them: the note above
+   is what varies in length — one line in Chinese, two in English — and letting that
+   decide where the methods start leaves three cards with three different floors. */
 .onboarding-assistant-actions {
+  margin-top: auto;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1152,87 +1140,6 @@
    collapses to its floor — which is how the connection step's button ended up 144 wide
    under a 299 one. The reference's 10 between the two rows is this gap. */
 .onboarding-setup-footer { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; }
-
-/* ---- Import notice ------------------------------------------------------- */
-
-/* The capsule's own place in the stage, kept whether or not anything is drawn in it:
-   the offer arrives after a read that the rest of the step does not wait for, and it
-   can be refused. A slot that is always there makes all four states — absent, still
-   loading, arrived, dismissed — cost the same height, so none of them can move the
-   action under the person's pointer. It is the stage's gap that puts the 20 above it,
-   and the stage's own floor holds the same total when the cards below the frame grow,
-   which is why this reserves a height and nothing else. The capsule sits at the top of
-   it: slack belongs under the composition, not between it and the offer. */
-.onboarding-import-slot {
-  width: 100%;
-  min-height: var(--ob-import-h);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-}
-
-/* An offer, not a row of the list above it: a capsule that takes the width of what it
-   says and sits centred under the cards, flat and one line tall. A full-width banner
-   read as a fourth row of the list and as the loudest thing on a step whose subject is
-   the three assistants; a capsule is an aside.
-   The reference gives it 20 above, 44 of its own and 20 below, which is exactly the 64
-   the stage reserves beyond the card — so the offer costs the composition nothing it
-   was not already spending. Its own height stays the reference's line at every tier;
-   what the tier restates is the slot that holds it. */
-.onboarding-import-notice {
-  max-width: 100%;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 8px 0 14px;
-  border: 1px solid var(--ob-notice-border);
-  border-radius: 999px;
-  background: var(--ob-notice-bg);
-  box-shadow: none;
-}
-.onboarding-import-notice-icon { flex-shrink: 0; color: var(--mint-ink); }
-.onboarding-import-notice-text {
-  min-width: 0;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--ob-notice-fg);
-}
-.onboarding-import-notice-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-/* A light control rather than a green word: the sentence already carries the mint, and
-   an action a person is meant to press should look pressable. The reference draws it
-   as a small 6-radius button inside the capsule, 28 tall. */
-.onboarding-import-notice-action {
-  height: 28px;
-  border-radius: 6px;
-  padding: 0 10px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.onboarding-import-notice-help {
-  font-size: 12px;
-  color: var(--ob-notice-link);
-  white-space: nowrap;
-  text-decoration: underline;
-  text-decoration-style: dotted;
-  text-underline-offset: 4px;
-}
-.onboarding-import-notice-help:hover, .onboarding-import-notice-help:focus-visible { color: var(--foreground); }
-.onboarding-import-notice-dismiss {
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  margin-right: -4px;
-  border-radius: 999px;
-  color: var(--ob-notice-fg);
-  transition: color 150ms, background 150ms;
-}
-.onboarding-import-notice-dismiss:hover, .onboarding-import-notice-dismiss:focus-visible {
-  color: var(--foreground);
-  background: var(--ob-tile-hover);
-}
 
 /* ---- Bands --------------------------------------------------------------- */
 
@@ -1297,11 +1204,6 @@
        tier again. */
     --ob-assistant-wrap: 0px;
     --ob-stack-gap: 16px;
-    /* Four things do not fit on one line here, so the capsule folds (see the rule
-       below) and its slot reserves the fold: two rows of type for the sentence,
-       the row gap, and the two actions on a row of their own — which is what a
-       320px reading of the offer actually draws. */
-    --ob-import-h: 126px;
     /* The same reservation as the desktop rows, re-derived from the stack: three
        of the taller card and the two gaps between them. */
     --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-assistant-h)) * 3 + var(--ob-stack-gap) * 2);
@@ -1345,23 +1247,6 @@
      middle of the screen. The column it was aligned to is stacked away here, so the
      fraction has nothing left to point at and the action takes the width instead. */
   .onboarding-action-w { width: 100%; }
-  /* Four things do not fit on one 44px line at this width. The sentence and its
-     dismiss keep the first row — a person must be able to read the offer and refuse
-     it without scanning further — and the two actions take the second. Placement is
-     explicit so it does not depend on the order the component happens to render in. */
-  .onboarding-import-notice {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    row-gap: 8px;
-    padding: 10px 12px;
-    /* Two rows is not a capsule: the pill radius would bow the long sides. */
-    border-radius: 14px;
-  }
-  .onboarding-import-notice-icon { grid-area: 1 / 1; }
-  .onboarding-import-notice-text { grid-area: 1 / 2; }
-  .onboarding-import-notice-dismiss { grid-area: 1 / 3; }
-  .onboarding-import-notice-actions { grid-area: 2 / 1 / 2 / -1; flex-wrap: wrap; }
 }
 /* A short window scrolls. The card answers to the window through the tiers above, so
    a short window gets the shorter authored card instead of a compressed composition;
@@ -1436,11 +1321,32 @@
    cannot intercept a tap meant for the buttons — which is what it did while it was
    lifted out of flow and offset back over the footer. The slot itself costs nothing
    when no screen is contributing one; the caption brings its own gap. */
-.onboarding-action-aside { width: 100%; display: flex; flex-direction: column; gap: 16px; }
-/* The slot costs nothing while no screen contributes to it, and pays for its own
-   distance from the pair the moment one does — so the gap belongs here rather than on
-   whichever node happens to be first. */
-.onboarding-action-aside:not(:empty) { margin-top: 16px; }
+/* The slot sits in the screens' shared cell, on its bottom edge, and grows upward into
+   the room the screen leaves above the action.
+   It is in the cell rather than in the column because the column is centred in the
+   window: a caption in the flow moves the heading, the cards and the action by half of
+   its own height, which is exactly how the assistants step came to sit 9px above the
+   two before it. Bottom-aligned in the cell, what it holds costs the pair nothing, and
+   the space it spends is space the screen was already leaving empty.
+   Capped, because that room is not the same on every screen: the provider step is the
+   tallest and leaves only the band gap. `--ob-aside-max` is the measured floor of the
+   screen's own empty band, and what does not fit scrolls rather than covering a card. */
+.onboarding-screens > .onboarding-action-aside {
+  grid-area: 1 / 1;
+  align-self: end;
+  z-index: 2;
+  margin-bottom: 12px;
+  max-height: var(--ob-aside-max, calc(var(--ob-band-gap) - 12px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+/* The assistants step leaves more room than the band gap — 76 clear at the narrowest
+   desktop tier, 60 on a phone — and it is the step that carries the OpenCode permission
+   block, the tallest thing the slot ever holds. 48 is what every tier can give it
+   without reaching the cards; the block scrolls inside that. */
+.onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
 .onboarding-setup-hint { width: 100%; text-align: center; }
 
 /* Provider tiers are consumed by L2; their bands are the same C3 bands as the shell. */
