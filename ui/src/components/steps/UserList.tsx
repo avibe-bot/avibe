@@ -20,7 +20,7 @@ import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { getEnabledPlatforms, platformSupportsToolcallDelivery } from '../../lib/platforms';
-import { DirectoryBrowser } from '../ui/directory-browser';
+import { FolderBrowser } from '../ui/folder-browser';
 import { copyTextToClipboard } from '../../lib/utils';
 import { PlatformIcon } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
@@ -862,7 +862,7 @@ export const UserList: React.FC = () => {
         const found = aggregated.find((u) => u.key === browsingCwdFor);
         if (!found) return null;
         return (
-          <DirectoryBrowser
+          <FolderBrowser
             initialPath={found.config.custom_cwd || config.runtime?.default_cwd || '~/work'}
             onSelect={(path) => {
               updateUser(found.platform, found.userId, { custom_cwd: path });
