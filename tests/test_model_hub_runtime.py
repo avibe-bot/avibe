@@ -764,6 +764,9 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
         def client_if_running(self):
             return self._client
 
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
+
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
@@ -810,6 +813,9 @@ def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
 
         def client_if_running(self):
             return self._client
+
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
@@ -3219,15 +3225,40 @@ def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path)
 
 def test_supervisor_refresh_and_reap_stop_an_engine_a_previous_service_left_running(tmp_path: Path) -> None:
     record = tmp_path / "state" / "engine-process.json"
-    for operation in ("restart_if_running", "reap_untracked_engines"):
+    for operation in ("restart_if_running", "with_engine_excluded"):
         orphan = _orphan_engine(tmp_path)
         second, _store = _fixture_supervisor(tmp_path)
 
-        getattr(second, operation)()
+        if operation == "with_engine_excluded":
+            assert second.with_engine_excluded(lambda client: client) is None
+        else:
+            second.restart_if_running()
 
         _wait_for(lambda: orphan.poll() is not None)
         assert second._process is None
         assert not record.exists()
+
+
+def test_supervisor_holds_engine_starts_until_grant_removal_returns(tmp_path: Path) -> None:
+    spawned = threading.Event()
+
+    def spawn(args, **kwargs):
+        spawned.set()
+        return subprocess.Popen(args, **kwargs)
+
+    supervisor, _store = _fixture_supervisor(tmp_path, process_factory=spawn)
+
+    def remove_grant(client) -> str:
+        assert client is None
+        threading.Thread(target=supervisor.ensure_running, daemon=True).start()
+        # A start requested mid-removal must wait for it, or it could load the grant.
+        assert not spawned.wait(0.5)
+        return "removed"
+
+    assert supervisor.with_engine_excluded(remove_grant) == "removed"
+    assert spawned.wait(10)
+    _wait_for(lambda: supervisor.client_if_running() is not None)
+    supervisor.stop()
 
 
 def test_supervisor_refresh_refuses_while_a_previous_engine_is_unconfirmed(
@@ -3240,9 +3271,9 @@ def test_supervisor_refresh_refuses_while_a_previous_engine_is_unconfirmed(
     monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
     second, _store = _fixture_supervisor(tmp_path)
 
-    for operation in ("restart_if_running", "reap_untracked_engines"):
+    for call in (second.restart_if_running, lambda: second.with_engine_excluded(pytest.fail)):
         with pytest.raises(EngineUnavailableError) as raised:
-            getattr(second, operation)()
+            call()
         assert raised.value.reason == "previous_engine_alive"
     monkeypatch.undo()
     second.stop()
@@ -3254,11 +3285,8 @@ def test_oauth_revoke_keeps_the_grant_while_a_previous_engine_is_unconfirmed(tmp
         def __init__(self, store: EngineStateStore) -> None:
             self.state_store = store
 
-        def reap_untracked_engines(self) -> None:
+        def with_engine_excluded(self, operation):
             raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
-
-        def client_if_running(self):
-            raise AssertionError("the grant must not be touched before the reap is confirmed")
 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
@@ -3287,11 +3315,8 @@ def test_orphaned_oauth_cleanup_keeps_the_grant_while_a_previous_engine_is_uncon
         def __init__(self, store: EngineStateStore) -> None:
             self.state_store = store
 
-        def reap_untracked_engines(self) -> None:
+        def with_engine_excluded(self, operation):
             raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
-
-        def client_if_running(self):
-            return None
 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
@@ -3929,6 +3954,9 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
 
         def client_if_running(self):
             return self._client
+
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
 
         def restart_if_running(self) -> None:
             restart_started.set()
@@ -7514,8 +7542,9 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         def client_if_running(self):
             return None
 
-        def reap_untracked_engines(self) -> None:
-            pass
+        def with_engine_excluded(self, operation):
+            # The flow started this engine, so it is the running one.
+            return operation(self._client)
 
         def invalidate_configs(self) -> None:
             self.state_store.clear_runtime_configs()

@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -38,6 +38,7 @@ from vibe.model_hub_runtime.state import EngineStateStore
 
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
@@ -119,16 +120,20 @@ class EngineSupervisor:
             self._stop_locked()
             self._start_locked()
 
-    def reap_untracked_engines(self) -> None:
-        """Confirm no engine a previous service left running remains, or raise.
+    def with_engine_excluded(self, operation: Callable[[EngineClient | None], _T]) -> _T:
+        """Run ``operation`` while no engine can start, and return its result.
 
-        For callers about to remove material such an engine may hold (an OAuth
-        grant): an engine this supervisor runs is left alone, since the caller
-        still reaches it through its handle.
+        For removing material an engine may hold (an OAuth grant). ``operation``
+        gets the running engine's client, or ``None`` once no engine a previous
+        service left running remains (raising if that cannot be confirmed). The
+        lifecycle lock is held throughout, so no request can start an engine that
+        loads the material between this check and its removal.
         """
         with self._lock:
-            if not self._is_running_locked():
-                self._require_no_untracked_engine_locked()
+            if self._is_running_locked() and self._connection is not None:
+                return operation(EngineClient(self._connection))
+            self._require_no_untracked_engine_locked()
+            return operation(None)
 
     def _require_no_untracked_engine_locked(self) -> None:
         if not self._reap_recorded_engines_locked():

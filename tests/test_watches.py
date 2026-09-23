@@ -2591,7 +2591,7 @@ def test_managed_watch_service_start_reaps_stale_worker_for_deleted_watch(
     )
     terminated: list[int] = []
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 1234)
-    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr(
         "core.watches.terminate_process_tree_by_pid",
         lambda pid, *_args, **_kwargs: terminated.append(pid) or True,
@@ -3744,7 +3744,7 @@ def test_managed_watch_service_start_preserves_worker_state_when_reap_fails(
         runtime_store=runtime_store,
     )
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
-    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
 
     async def _run() -> None:
@@ -3780,7 +3780,7 @@ def test_managed_watch_service_periodically_unblocks_after_stale_worker_exits(
     monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: worker["alive"])
     monkeypatch.setattr("core.watches.process_group_exists", lambda *_args: False)
-    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
 
     async def fake_run_watch(_watch_id: str) -> None:

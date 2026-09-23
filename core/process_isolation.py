@@ -42,6 +42,9 @@ class ProcessIdentity:
     pid: int
     create_time: float
     worker_fingerprint: str | None
+    # False when the environment could not be read: the marker is unknown, which
+    # is not the same as absent (``worker_fingerprint`` is then ``None`` too).
+    marker_readable: bool = True
 
 
 @dataclass(frozen=True)
@@ -165,27 +168,31 @@ def process_identity_matches(
 def process_identity_recycled(expected: PersistedProcessIdentity, live: ProcessIdentity) -> bool:
     """Whether the recorded pid now provably belongs to another process.
 
-    Only a different birth time AND no matching marker says so; a marker match
-    wins over a shifted birth time.
+    Only a different birth time AND a readable environment without the matching
+    marker says so; a marker match wins over a shifted birth time, and an
+    unreadable marker proves nothing either way.
     """
 
-    return live.create_time != expected.create_time and not _marker_matches(expected, live)
+    return live.marker_readable and live.create_time != expected.create_time and not _marker_matches(expected, live)
 
 
 def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
     process = psutil.Process(pid)
     create_time = float(process.create_time())
     worker_fingerprint = None
+    marker_readable = True
     try:
         marker = process.environ().get(PROCESS_IDENTITY_ENV)
     except (psutil.Error, OSError):
         marker = None
+        marker_readable = False
     if isinstance(marker, str) and marker:
         worker_fingerprint = fingerprint_process_marker(marker)
     return process, ProcessIdentity(
         pid=pid,
         create_time=create_time,
         worker_fingerprint=worker_fingerprint,
+        marker_readable=marker_readable,
     )
 
 

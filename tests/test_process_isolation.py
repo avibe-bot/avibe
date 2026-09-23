@@ -486,6 +486,27 @@ def test_process_identity_is_decided_by_marker_not_a_shifted_birth_time(
     assert process_identity_recycled(expected, live) is recycled
 
 
+def test_unreadable_marker_with_a_shifted_birth_time_is_not_recycled() -> None:
+    expected = PersistedProcessIdentity(pid=4321, create_time=123.0, worker_fingerprint=fingerprint_process_marker("m"))
+    unreadable = ProcessIdentity(pid=4321, create_time=456.0, worker_fingerprint=None, marker_readable=False)
+    stranger = ProcessIdentity(pid=4321, create_time=456.0, worker_fingerprint=None)
+
+    assert process_identity_recycled(expected, unreadable) is False
+    assert process_identity_recycled(expected, stranger) is True
+
+
+def test_open_process_identity_reports_an_unreadable_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    def deny(_process):
+        raise psutil.AccessDenied(os.getpid())
+
+    monkeypatch.setattr(psutil.Process, "environ", deny)
+
+    identity = inspect_process_identity(os.getpid())
+
+    assert identity is not None
+    assert identity.worker_fingerprint is None and identity.marker_readable is False
+
+
 def test_reap_marked_processes_finds_a_tree_by_marker_alone() -> None:
     marker = new_process_identity_marker()
     child = subprocess.Popen(
