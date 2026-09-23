@@ -218,6 +218,34 @@ class OpenCodeResourceExitTests(unittest.TestCase):
             self.assertIs(agent._resource_failure_for_server(server), pressure)
             observe.assert_called_once_with(agent.controller)
 
+    def test_pressure_checks_are_cached_per_observed_server_generation(self):
+        agent = OpenCodeAgent.__new__(OpenCodeAgent)
+        agent.controller = types.SimpleNamespace()
+        server = OpenCodeServerManager(binary="opencode", port=4096)
+        server.observed_runtime_exit_pid = (
+            lambda: server._runtime_generation_token[0]
+        )
+        pressure = AgentResourceFailure(kind="pids", message="first exit")
+        later_pressure = AgentResourceFailure(kind="memory", message="third exit")
+
+        with patch(
+            "modules.agents.opencode.server.runtime.process_create_time",
+            return_value=1000.0,
+        ), patch(
+            "modules.agents.opencode.agent.observe_agent_resource_pressure",
+            side_effect=[pressure, None, later_pressure],
+        ) as observe:
+            server._observe_runtime_generation({"pid": 654, "started_at": 1.0})
+            self.assertIs(agent._resource_failure_for_server(server), pressure)
+            self.assertIs(agent._resource_failure_for_server(server), pressure)
+            server._observe_runtime_generation({"pid": 655, "started_at": 2.0})
+            self.assertIsNone(agent._resource_failure_for_server(server))
+            self.assertIsNone(agent._resource_failure_for_server(server))
+            server._observe_runtime_generation({"pid": 656, "started_at": 3.0})
+            self.assertIs(agent._resource_failure_for_server(server), later_pressure)
+
+        self.assertEqual(observe.call_count, 3)
+
 
 class AgentServiceBackendAliveTests(unittest.TestCase):
     def _service(self, *, backend_name, gate_backend, probe_return):

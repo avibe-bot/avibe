@@ -689,8 +689,9 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     if cwd and callable(retire_idle):
         try:
             process_killed = bool(await retire_idle(cwd))
-        except Exception:  # noqa: BLE001
-            logger.debug("end: codex transport stop failed for %s", cwd, exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("end: codex transport stop failed for %s", cwd, exc_info=True)
+            return {"ok": False, "error": "transport_retire_failed", "detail": str(exc)}
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.

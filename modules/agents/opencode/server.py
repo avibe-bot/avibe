@@ -247,6 +247,7 @@ class OpenCodeServerManager:
         self.host = DEFAULT_OPENCODE_HOST
         self._process: Optional[Process] = None
         self._last_start_failure_pid: int | None = None
+        self._start_attempt_generation = 0
         # The event loop ``_process`` was created on. Subprocess transports
         # bind their internal Future / wait helpers to the creating loop;
         # ``process.wait()`` or ``terminate_process_tree(process)`` from a
@@ -341,6 +342,8 @@ class OpenCodeServerManager:
         if previous is not None and previous != token:
             self._retire_runtime_generation_for_replacement()
         self._runtime_generation_token = token
+        if previous != token:
+            self._last_start_failure_pid = None
         if previous != token or self._observed_runtime_process is None:
             created_at = runtime.process_create_time(token[0])
             self._observed_runtime_process = (
@@ -1893,6 +1896,7 @@ class OpenCodeServerManager:
         # ``runtime.stop_pid``) is loop-agnostic and is the correct
         # cleanup path; just detach the dangling Python object first.
         current_loop = asyncio.get_running_loop()
+        self._start_attempt_generation += 1
         self._last_start_failure_pid = None
         if (
             self._process

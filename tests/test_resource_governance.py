@@ -520,8 +520,11 @@ def test_existing_agent_group_baseline_precedes_migrated_pid(
     base = root / "service"
     group = base / "avibe-agents"
     group.mkdir(parents=True)
+    (base / "memory.max").write_text(str(512 * MIB), encoding="utf-8")
     (group / "cgroup.procs").write_text("", encoding="utf-8")
     (group / "pids.events").write_text("max 4\n", encoding="utf-8")
+    (group / "memory.high").write_text("max\n", encoding="utf-8")
+    (group / "memory.max").write_text("max\n", encoding="utf-8")
     governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
 
     def migrate(*_args, **_kwargs):

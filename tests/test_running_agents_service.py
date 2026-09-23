@@ -875,6 +875,38 @@ def test_end_codex_keeps_transport_when_other_sessions_share_cwd():
     assert res["process_killed"] is False and "/w" in transports
 
 
+def test_end_codex_reports_transport_retirement_failure():
+    async def retire(_cwd):
+        raise RuntimeError("transport still alive")
+
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda _base: "/w",
+        get_thread_id=lambda _base: None,
+        clear=lambda _base: None,
+    )
+    treg = types.SimpleNamespace(
+        get_active_turn=lambda _base: None,
+        clear_session=lambda _base: None,
+    )
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=treg,
+        _transports={"/w": object()},
+        retire_unowned_session_transport=retire,
+    )
+
+    result = asyncio.run(
+        running_agents.end_running_agent(
+            _make_controller(codex=codex), backend="codex", base_session_id="b1"
+        )
+    )
+    assert result == {
+        "ok": False,
+        "error": "transport_retire_failed",
+        "detail": "transport still alive",
+    }
+
+
 def test_codex_idle_retirement_serializes_successor_transport_generation():
     from modules.agents.codex.agent import CodexAgent
 

@@ -990,17 +990,42 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if getattr(process, "returncode", None) is None:
                 return None
             pid = getattr(process, "pid", None)
+            generation = ("process", process)
         else:
             pid = getattr(server, "_last_start_failure_pid", None)
-            if pid is None and server is not None:
+            if pid is not None:
+                generation = (
+                    "startup",
+                    getattr(server, "_start_attempt_generation", 0),
+                    pid,
+                )
+            else:
                 observed_exit = getattr(server, "observed_runtime_exit_pid", None)
                 if callable(observed_exit):
                     pid = observed_exit()
+                generation = (
+                    "adopted",
+                    getattr(server, "_runtime_generation_token", None),
+                    pid,
+                )
         if not isinstance(pid, int) or pid <= 0:
             return None
+        cached_generation = getattr(server, "_vibe_resource_failure_generation", None)
+        same_generation = (
+            cached_generation is not None
+            and cached_generation[0] == generation[0]
+            and (
+                cached_generation[1] is process
+                if generation[0] == "process"
+                else cached_generation == generation
+            )
+        )
+        if same_generation:
+            return getattr(server, "_vibe_resource_failure", None)
         failure = observe_agent_resource_pressure(self.controller)
         if server is not None:
-            setattr(server, "_last_start_failure_pid", None)
+            setattr(server, "_vibe_resource_failure_generation", generation)
+            setattr(server, "_vibe_resource_failure", failure)
         if failure is not None:
             logger.error(
                 "OpenCode server exited while the shared Agent cgroup reported resource pressure: %s",

@@ -727,6 +727,94 @@ def test_resultless_close_after_stop_schedules_teardown() -> None:
     end_running_agent.assert_awaited_once()
 
 
+def test_resultless_close_after_requires_terminal_run_before_teardown() -> None:
+    release = Mock()
+    reserve = Mock()
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            release_runtime_turn=release,
+            reserve_close_after_teardown=reserve,
+            reserve_idle_close_after_teardown=AsyncMock(),
+        )
+    )
+    dispatcher = ConsolidatedMessageDispatcher(controller)
+    wait_for_runs = AsyncMock(return_value=False)
+    dispatcher._wait_for_close_after_runs = wait_for_runs
+    context = MessageContext(
+        user_id="user",
+        channel_id="session-1",
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": "session-1",
+            "agent_backend": "claude",
+            "close_after": True,
+            "task_trigger_kind": "agent_run",
+            "task_execution_id": "run-1",
+            "agent_runtime_turn_key": "runtime-1",
+            "agent_session_target": {
+                "agent_backend": "claude",
+                "session_anchor": "base-session-1",
+            },
+        },
+    )
+    end_running_agent = AsyncMock(return_value={"ok": True})
+
+    async def exercise() -> None:
+        with patch(
+            "core.services.running_agents.end_running_agent", new=end_running_agent
+        ):
+            dispatcher._release_runtime_turn(context, stop_output_for(None))
+            await dispatcher.drain_close_after_runtime()
+
+    asyncio.run(exercise())
+    release.assert_called_once_with(context)
+    reserve.assert_not_called()
+    wait_for_runs.assert_awaited_once_with(("run-1",))
+    end_running_agent.assert_not_awaited()
+
+
+def test_shutdown_drain_skips_teardown_for_unsettled_run() -> None:
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(
+            request_store=SimpleNamespace(
+                get_run=lambda _run_id: {"status": "running"}
+            )
+        ),
+        agent_service=SimpleNamespace(
+            reserve_idle_close_after_teardown=AsyncMock(),
+        ),
+    )
+    dispatcher = ConsolidatedMessageDispatcher(controller)
+    context = MessageContext(
+        user_id="user",
+        channel_id="session-1",
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": "session-1",
+            "agent_backend": "claude",
+            "close_after": True,
+            "agent_runtime_turn_key": "runtime-1",
+            "agent_session_target": {
+                "agent_backend": "claude",
+                "session_anchor": "base-session-1",
+            },
+        },
+    )
+    end_running_agent = AsyncMock(return_value={"ok": True})
+
+    async def exercise() -> None:
+        with patch(
+            "core.services.running_agents.end_running_agent", new=end_running_agent
+        ):
+            dispatcher._schedule_close_after_runtime(
+                context, wait_for_run_ids=("run-1",)
+            )
+            await asyncio.wait_for(dispatcher.drain_close_after_runtime(), timeout=1)
+
+    asyncio.run(exercise())
+    end_running_agent.assert_not_awaited()
+
+
 def test_turn_only_result_keeps_close_after_runtime_for_activity_retry() -> None:
     async def exercise() -> None:
         controller = SimpleNamespace()

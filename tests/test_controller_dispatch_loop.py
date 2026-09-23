@@ -592,6 +592,36 @@ async def test_runtime_work_stack_waits_for_close_after_before_loop_shutdown() -
     assert stopped[-2:] == ["close-after", "supervisor"]
 
 
+@pytest.mark.anyio
+async def test_runtime_work_stack_does_not_drain_after_task_service_failure() -> None:
+    controller = Controller.__new__(Controller)
+    controller._shutdown_tainted = False
+    controller._runtime_work_tokens = []
+    drain = AsyncMock()
+    stopped: list[str] = []
+
+    class _Service:
+        async def stop(self) -> None:
+            raise RuntimeError("Run settlement failed")
+
+    class _Supervisor:
+        def quiesce(self) -> None:
+            stopped.append("quiesce")
+
+        async def stop(self) -> None:
+            stopped.append("supervisor")
+
+    controller.message_dispatcher = SimpleNamespace(drain_close_after_runtime=drain)
+    controller.scheduled_task_service = _Service()
+    controller.runtime_work_supervisor = _Supervisor()
+
+    with pytest.raises(RuntimeError, match="runtime work stack shutdown failed") as exc:
+        await controller._stop_runtime_work_stack()
+    assert str(exc.value.__cause__) == "Run settlement failed"
+    drain.assert_not_awaited()
+    assert stopped == ["quiesce", "supervisor"]
+
+
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()

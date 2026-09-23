@@ -423,19 +423,29 @@ class ConsolidatedMessageDispatcher:
         # Resultless settlements have a separate writer before this release.
         run_terminal = settlement in SETTLEMENTS_WITHOUT_RESULT
         wait_for_run_ids = tuple(payload.pop("_close_after_wait_for_run_ids", ()))
+        if run_terminal and payload.get("close_after"):
+            # The Turn writer can fail after the resultless output is delivered.
+            # Do not reserve or dispose the runtime until its Runs are terminal.
+            wait_for_run_ids = tuple(
+                dict.fromkeys(
+                    (*wait_for_run_ids, *self._terminal_agent_run_ids(context, output_semantics))
+                )
+            )
         should_close = bool(payload.pop("_close_after_runtime_pending", False)) or bool(
             payload.get("close_after") and run_terminal
         )
         lease = None
         try:
             reserve = getattr(service, "reserve_close_after_teardown", None)
-            if should_close and callable(reserve):
+            if should_close and not wait_for_run_ids and callable(reserve):
                 lease = reserve(context)
             elif callable(release):
                 release(context)
         finally:
             if should_close and lease is not False:
-                self._schedule_close_after_runtime(context, lease=lease)
+                self._schedule_close_after_runtime(
+                    context, lease=lease, wait_for_run_ids=wait_for_run_ids
+                )
             elif wait_for_run_ids:
                 self._schedule_close_after_runtime(
                     context, wait_for_run_ids=wait_for_run_ids
@@ -1695,6 +1705,12 @@ class ConsolidatedMessageDispatcher:
                     for run in runs
                 ) and not any(self._run_has_blocking_activity(run_id) for run_id in run_ids):
                     return True
+                if getattr(self, "_close_after_settlement_closed", False):
+                    logger.warning(
+                        "Skipping close-after teardown: Run settlement did not finish for %s",
+                        ",".join(run_ids),
+                    )
+                    return False
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=5)
                 except TimeoutError:
@@ -1852,8 +1868,9 @@ class ConsolidatedMessageDispatcher:
         task.add_done_callback(self._close_after_runtime_tasks.discard)
 
     async def drain_close_after_runtime(self) -> None:
-        """Join admitted disposable-runtime teardowns before the loop stops."""
+        """Join teardowns after the Run settlement owner has stopped."""
 
+        self._close_after_settlement_closed = True
         while self._close_after_runtime_tasks:
             tasks = tuple(self._close_after_runtime_tasks)
             await asyncio.gather(*(asyncio.shield(task) for task in tasks))
