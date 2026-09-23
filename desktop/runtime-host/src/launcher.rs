@@ -504,6 +504,16 @@ struct RuntimeCommand {
     executable: PathBuf,
     prefix_args: Vec<OsString>,
     environment: Vec<(OsString, OsString)>,
+    /// Whether the shell's own `PYTHON*` variables are withheld from the child.
+    ///
+    /// Only the private Runtime sets this. `-I` protects just the interpreter
+    /// that receives the flag: `os.environ` still carries the inherited values,
+    /// and the Controller and UI interpreters that Runtime starts copy it and
+    /// run without `-I`. An inherited `PYTHONHOME` then aborts both before they
+    /// are ready, and a `PYTHONPATH` imports code from outside the verified
+    /// tree. A development shell drives an install it does not own, which runs
+    /// with the user's environment exactly as their terminal would.
+    withholds_inherited_python: bool,
 }
 
 impl RuntimeCommand {
@@ -512,6 +522,7 @@ impl RuntimeCommand {
             executable,
             prefix_args: Vec::new(),
             environment: Vec::new(),
+            withholds_inherited_python: false,
         }
     }
 
@@ -564,14 +575,44 @@ impl RuntimeCommand {
                 // what covers this process itself.
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
+            withholds_inherited_python: true,
         }
     }
 
     fn apply(&self, command: &mut Command) {
         command.args(&self.prefix_args);
+        self.apply_environment(command, env::vars_os());
+    }
+
+    /// The environment half of `apply`, over an explicit inherited set.
+    ///
+    /// Production passes this process's own environment. A test passes one it
+    /// built, so that it never has to mutate a variable every other test thread
+    /// reads while it spawns.
+    fn apply_environment(&self, command: &mut Command, inherited: impl IntoIterator<Item = (OsString, OsString)>) {
+        if self.withholds_inherited_python {
+            for (name, _) in inherited {
+                if is_python_startup_variable(&name) {
+                    command.env_remove(name);
+                }
+            }
+        }
+        // After the removal, so the one Python variable the Runtime does want
+        // is ours rather than whatever the shell was started with.
         for (name, value) in &self.environment {
             command.env(name, value);
         }
+    }
+}
+
+/// Every variable CPython reads at startup is named `PYTHON*`. Windows looks
+/// environment names up without regard to case, so `PythonPath` counts there.
+fn is_python_startup_variable(name: &OsStr) -> bool {
+    let name = name.to_string_lossy();
+    if cfg!(windows) {
+        name.to_ascii_uppercase().starts_with("PYTHON")
+    } else {
+        name.starts_with("PYTHON")
     }
 }
 
@@ -1125,6 +1166,7 @@ mod tests {
             executable: PathBuf::from("/test-owned/Runtime Root/python"),
             prefix_args: vec![OsString::from("-m"), OsString::from("vibe")],
             environment: vec![(OsString::from("AVIBE_DESKTOP_MANAGED_RUNTIME"), OsString::from("1"))],
+            withholds_inherited_python: true,
         };
         let receipt = receipt("started");
         let json = serde_json::to_string(&receipt).expect("fixture JSON");
@@ -1780,6 +1822,101 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `-I` shields the one interpreter it is passed to, not the ones that
+    /// interpreter starts. The Controller and the UI copy `os.environ` and run
+    /// without it, so a `PYTHONHOME` the shell happened to be launched with
+    /// aborted both before readiness.
+    ///
+    /// The shell's own environment is modelled rather than mutated: the
+    /// variables are set on the child the way inheritance would deliver them,
+    /// and passed as the inherited set, so no other test thread sees a change to
+    /// this process's environment while it spawns.
+    #[cfg(unix)]
+    #[test]
+    fn the_private_runtime_does_not_hand_the_shells_python_variables_to_its_descendants() {
+        let python = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+            .map(|entry| entry.join("python3"))
+            .find(|candidate| is_executable_file(candidate))
+            .expect("a python3 interpreter to run the private command against");
+        let dir = scratch_dir("python-environment");
+        let tree = dir.join("runtime");
+        std::fs::create_dir_all(&tree).expect("runtime directory");
+        let command = RuntimeCommand::private(
+            tree.clone(),
+            python,
+            tree.join("tools/bin/node"),
+            tree.join("tools/npm/bin/npm-cli.js"),
+            dir.join("backends"),
+            &"a".repeat(64),
+            env::var_os("PATH").as_deref(),
+        );
+        let inherited = [
+            (
+                OsString::from("PYTHONHOME"),
+                dir.join("no-such-python-home").into_os_string(),
+            ),
+            (
+                OsString::from("PYTHONPATH"),
+                dir.join("outside-the-verified-tree").into_os_string(),
+            ),
+            (OsString::from("AVIBE_UNRELATED_INHERITED"), OsString::from("kept")),
+        ];
+
+        let mut process = Command::new(&command.executable);
+        for (name, value) in &inherited {
+            process.env(name, value);
+        }
+        command.apply_environment(&mut process, env::vars_os().chain(inherited.iter().cloned()));
+        for argument in command.prefix_args.iter().take_while(|argument| *argument != "-m") {
+            process.arg(argument);
+        }
+        // What the Runtime would see, and whether a descendant started the way
+        // `cmd_start` starts the Controller -- no `-I`, `os.environ` copied --
+        // gets as far as running a statement.
+        let output = process
+            .arg("-c")
+            .arg(concat!(
+                "import json, os, subprocess, sys; ",
+                "child = subprocess.run([sys.executable, '-c', 'pass'], env=dict(os.environ)); ",
+                "print(json.dumps({'python': {k: v for k, v in os.environ.items() if k.startswith('PYTHON')}, ",
+                "'unrelated': os.environ.get('AVIBE_UNRELATED_INHERITED'), 'descendant': child.returncode}))",
+            ))
+            .stderr(Stdio::null())
+            .output()
+            .expect("the private interpreter runs");
+        assert!(
+            output.status.success(),
+            "the private interpreter itself must run: {output:?}"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("the child reports its environment");
+
+        assert_eq!(
+            report["python"],
+            serde_json::json!({"PYTHONDONTWRITEBYTECODE": "1"}),
+            "only the Runtime's own Python variable may reach it"
+        );
+        assert_eq!(
+            report["unrelated"], "kept",
+            "only Python startup variables are withheld"
+        );
+        assert_eq!(
+            report["descendant"], 0,
+            "a descendant interpreter without -I must start"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn python_startup_variables_are_recognised_by_prefix() {
+        assert!(is_python_startup_variable(OsStr::new("PYTHONHOME")));
+        assert!(is_python_startup_variable(OsStr::new("PYTHONSTARTUP")));
+        assert!(!is_python_startup_variable(OsStr::new("PATH")));
+        assert!(!is_python_startup_variable(OsStr::new("VIRTUAL_ENV")));
+        assert_eq!(is_python_startup_variable(OsStr::new("PythonPath")), cfg!(windows));
     }
 
     /// The stderr this used to send to the null device is where the cause lives.
