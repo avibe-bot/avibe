@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from core.inbox_events import RUNS_UPDATED_EVENT, bus
 from modules.im import MessageContext
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for
@@ -386,6 +387,172 @@ def test_failed_run_write_does_not_arm_close_after() -> None:
 
     asyncio.run(exercise(detached=False))
     asyncio.run(exercise(detached=True))
+
+
+def test_blocking_activity_delays_close_after_until_run_settles() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        blocked = [True]
+        service.activities.has_blocking_run_activity = lambda _run_id: blocked[0]
+        run = {"status": "running"}
+        controller.scheduled_task_service = SimpleNamespace(
+            request_store=SimpleNamespace(get_run=lambda _run_id: run)
+        )
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "task_execution_id": "run-1",
+                "task_trigger_kind": "agent_run",
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "turn-1",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "claude"
+        recorded = []
+        store = SimpleNamespace(
+            record_turn_run_outputs=lambda _run_ids, **kwargs: recorded.append(kwargs),
+            close=lambda: None,
+        )
+        closed = asyncio.Event()
+
+        async def end_running_agent(*_args, **_kwargs):
+            closed.set()
+            return {"ok": True}
+
+        output = MessageOutput(completes_turn=True, completes_run=True)
+        with (
+            patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=store),
+            patch("core.services.running_agents.end_running_agent", new=end_running_agent),
+        ):
+            dispatcher._record_agent_run_terminal_result(
+                context, "done", None, is_error=False, output_semantics=output
+            )
+            assert recorded[0]["deferred_run_ids"] == ["run-1"]
+            dispatcher._release_runtime_turn(context, output)
+            await asyncio.sleep(0)
+            assert not gate.lock.locked()
+            assert not closed.is_set()
+
+            run["status"] = "succeeded"
+            bus.publish(RUNS_UPDATED_EVENT, {"run_id": "run-1", "status": "succeeded"})
+            await asyncio.sleep(0)
+            assert not closed.is_set()
+
+            blocked[0] = False
+            bus.publish(RUNS_UPDATED_EVENT, {"run_id": "run-1", "status": "succeeded"})
+            await asyncio.wait_for(closed.wait(), timeout=1)
+
+    asyncio.run(exercise())
+
+
+def test_prewrite_cancel_waits_for_durable_run_settlement() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        run = {"status": "running"}
+        controller.scheduled_task_service = SimpleNamespace(
+            request_store=SimpleNamespace(get_run=lambda _run_id: run)
+        )
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "codex",
+                "close_after": True,
+                "task_execution_id": "run-1",
+                "agent_session_target": {
+                    "agent_backend": "codex",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+            },
+        )
+        closed = asyncio.Event()
+
+        async def end_running_agent(*_args, **_kwargs):
+            closed.set()
+            return {"ok": True}
+
+        with patch(
+            "core.services.running_agents.end_running_agent", new=end_running_agent
+        ):
+            dispatcher.defer_close_after_until_run_terminal(context)
+            await asyncio.sleep(0)
+            assert not closed.is_set()
+            run["status"] = "canceled"
+            bus.publish(RUNS_UPDATED_EVENT, {"run_id": "run-1", "status": "canceled"})
+            await asyncio.wait_for(closed.wait(), timeout=1)
+
+    asyncio.run(exercise())
+
+
+def test_deferred_close_after_does_not_stop_successor_after_run_settles() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        run = {"status": "running"}
+        controller.scheduled_task_service = SimpleNamespace(
+            request_store=SimpleNamespace(get_run=lambda _run_id: run)
+        )
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "task_execution_id": "run-1",
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        end_running_agent = AsyncMock(return_value={"ok": True})
+
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._schedule_close_after_runtime(
+                context, wait_for_run_ids=("run-1",)
+            )
+            await asyncio.sleep(0)
+            await gate.lock.acquire()
+            gate.token = "successor-turn"
+            run["status"] = "succeeded"
+            bus.publish(RUNS_UPDATED_EVENT, {"run_id": "run-1", "status": "succeeded"})
+            await asyncio.sleep(0.01)
+            end_running_agent.assert_not_awaited()
+            assert gate.token == "successor-turn"
+            service.release_runtime_turn_key("runtime-1", "successor-turn")
+            assert dispatcher._close_after_session_ids == set()
+
+    asyncio.run(exercise())
 
 
 def test_detached_close_after_does_not_stop_successor_that_won_gate() -> None:

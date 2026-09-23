@@ -611,7 +611,6 @@ class CodexAgent(BaseAgent):
                 # Safety net: if the thread is stale (e.g. Codex server-side
                 # expiry, or the proactive invalidation in _get_or_create_transport
                 # was bypassed by a race), invalidate and retry once.
-                resource_failure = self._resource_failure_for_transport(transport)
                 if (
                     self._is_recoverable_transport_error(e)
                     and backend_dispatch_attempted(request.context) is False
@@ -645,10 +644,6 @@ class CodexAgent(BaseAgent):
                             return  # retry succeeded
                         except Exception as retry_err:
                             e = retry_err  # fall through to normal error handling
-                            resource_failure = (
-                                resource_failure
-                                or self._resource_failure_for_transport(transport)
-                            )
 
                 # FAIL LOUD on a server-side "thread not found": the conversation is
                 # gone, so surface the error instead of silently clearing the
@@ -661,6 +656,9 @@ class CodexAgent(BaseAgent):
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
+                # A successful replacement consumes no shared pressure evidence.
+                # Diagnose only the transport whose failure is actually reported.
+                resource_failure = self._resource_failure_for_transport(transport)
                 error_text = self._error_display_text(
                     e,
                     resource_failure=resource_failure,

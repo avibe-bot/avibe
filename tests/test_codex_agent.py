@@ -1601,7 +1601,11 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
 
-        bad_transport = SimpleNamespace(stop=AsyncMock(), is_alive=False)
+        bad_transport = SimpleNamespace(
+            stop=AsyncMock(),
+            is_alive=False,
+            _process=SimpleNamespace(returncode=137),
+        )
         fresh_transport = SimpleNamespace()
         invalidated = []
         session_mgr = SimpleNamespace(
@@ -1642,7 +1646,9 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent._start_thread = AsyncMock(return_value="thread-new")
         agent._start_turn = AsyncMock(return_value="thread-new")
 
-        await agent.handle_message(request)
+        with patch.object(_MODULE, "observe_agent_resource_pressure") as observe_pressure:
+            await agent.handle_message(request)
+        observe_pressure.assert_not_called()
 
         bad_transport.stop.assert_awaited_once()
         self.assertEqual(agent._transports, {})

@@ -409,6 +409,22 @@ class AgentService:
                     else None
                 )
                 self.release_runtime_turn_key(runtime_key, gate.token)
+                defer_close_after = getattr(
+                    dispatcher,
+                    "defer_close_after_until_run_terminal",
+                    None,
+                )
+                if (
+                    (request.context.platform_specific or {}).get("close_after")
+                    and callable(defer_close_after)
+                ):
+                    try:
+                        defer_close_after(request.context)
+                    except Exception:
+                        logger.warning(
+                            "Failed to defer close-after after prewrite Stop",
+                            exc_info=True,
+                        )
                 cleanup = getattr(
                     dispatcher,
                     "finish_prewrite_stop_surfaces",

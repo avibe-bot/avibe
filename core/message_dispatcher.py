@@ -47,7 +47,11 @@ from core.run_settlement import (
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    SQLiteBackgroundTaskStore,
+    TERMINAL_RUN_STATUSES,
+    normalize_run_status,
+)
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -418,6 +422,7 @@ class ConsolidatedMessageDispatcher:
         # Terminal results arm close-after only after their Run write succeeds.
         # Resultless settlements have a separate writer before this release.
         run_terminal = settlement in SETTLEMENTS_WITHOUT_RESULT
+        wait_for_run_ids = tuple(payload.pop("_close_after_wait_for_run_ids", ()))
         should_close = bool(payload.pop("_close_after_runtime_pending", False)) or bool(
             payload.get("close_after") and run_terminal
         )
@@ -431,6 +436,10 @@ class ConsolidatedMessageDispatcher:
         finally:
             if should_close and lease is not False:
                 self._schedule_close_after_runtime(context, lease=lease)
+            elif wait_for_run_ids:
+                self._schedule_close_after_runtime(
+                    context, wait_for_run_ids=wait_for_run_ids
+                )
 
     async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "processing_indicator", None)
@@ -1226,7 +1235,7 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None,
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
-    ) -> None:
+    ) -> list[str]:
         normalized_run_ids = list(
             dict.fromkeys(
                 run_id
@@ -1264,7 +1273,7 @@ class ConsolidatedMessageDispatcher:
                 error=terminal_error,
                 deferred_run_ids=deferred_run_ids,
             )
-            return
+            return deferred_run_ids
         get_run = getattr(store, "get_run", None)
         eligible_run_ids = (
             [
@@ -1289,11 +1298,13 @@ class ConsolidatedMessageDispatcher:
             ):
                 notification["fallback_run_id"] = min(eligible_run_ids)
             terminal_provenance["turn_failure_notification"] = notification
+        deferred_run_ids: list[str] = []
         for run_id in normalized_run_ids:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
             if run_terminal_status and self._run_has_blocking_activity(run_id):
+                deferred_run_ids.append(run_id)
                 defer_terminal = getattr(store, "defer_run_terminal", None)
                 if callable(defer_terminal):
                     defer_kwargs = {
@@ -1341,6 +1352,7 @@ class ConsolidatedMessageDispatcher:
                     run_id,
                     **record_kwargs,
                 )
+        return deferred_run_ids
 
     def _terminal_agent_run_ids(
         self,
@@ -1612,7 +1624,7 @@ class ConsolidatedMessageDispatcher:
         store = None
         try:
             store = SQLiteBackgroundTaskStore()
-            self._record_agent_run_terminal_for_ids(
+            deferred_run_ids = self._record_agent_run_terminal_for_ids(
                 store=store,
                 run_ids=run_ids,
                 text=text,
@@ -1638,16 +1650,84 @@ class ConsolidatedMessageDispatcher:
                 and not semantics.detached
                 and self._is_current_runtime_turn(context)
             )
-            if defer_close_after:
+            if deferred_run_ids:
+                if defer_close_after:
+                    payload["_close_after_wait_for_run_ids"] = tuple(deferred_run_ids)
+                else:
+                    self._schedule_close_after_runtime(
+                        context, wait_for_run_ids=tuple(deferred_run_ids)
+                    )
+            elif defer_close_after:
                 payload["_close_after_runtime_pending"] = True
             else:
                 self._schedule_close_after_runtime(context)
+
+    async def _wait_for_close_after_runs(self, run_ids: tuple[str, ...]) -> bool:
+        """Wait for the Run writer, not a Turn output, to finish disposal ownership."""
+
+        from core.inbox_events import RUNS_UPDATED_EVENT, bus
+
+        request_store = getattr(
+            getattr(self.controller, "scheduled_task_service", None),
+            "request_store",
+            None,
+        )
+        own_store = request_store is None
+        if own_store:
+            request_store = SQLiteBackgroundTaskStore()
+        get_run = getattr(request_store, "get_run", None)
+        if not callable(get_run):
+            if own_store:
+                request_store.close()
+            return False
+        subscription_id, queue = bus.subscribe()
+        try:
+            while True:
+                runs = [get_run(run_id) for run_id in run_ids]
+                if any(not isinstance(run, dict) for run in runs):
+                    logger.warning(
+                        "Skipping close-after: a Run is missing for %s",
+                        ",".join(run_ids),
+                    )
+                    return False
+                if all(
+                    normalize_run_status(run["status"]) in TERMINAL_RUN_STATUSES
+                    for run in runs
+                ) and not any(self._run_has_blocking_activity(run_id) for run_id in run_ids):
+                    return True
+                try:
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=5)
+                except TimeoutError:
+                    continue
+                if (
+                    event_type != RUNS_UPDATED_EVENT
+                    or not isinstance(payload, dict)
+                    or str(payload.get("run_id") or "") not in run_ids
+                ):
+                    continue
+        finally:
+            bus.unsubscribe(subscription_id)
+            if own_store:
+                request_store.close()
+
+    def defer_close_after_until_run_terminal(self, context: MessageContext) -> None:
+        """Pre-native Stop has no terminal emit; its Run writer owns close-after."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        if not payload.get("close_after"):
+            return
+        run_id = str(payload.get("task_execution_id") or "").strip()
+        if run_id:
+            self._schedule_close_after_runtime(
+                context, wait_for_run_ids=(run_id,)
+            )
 
     def _schedule_close_after_runtime(
         self,
         context: MessageContext,
         *,
         lease: tuple[str, str, asyncio.Task | None] | None = None,
+        wait_for_run_ids: tuple[str, ...] = (),
     ) -> None:
         """Release a runtime explicitly marked disposable after its Run settles."""
 
@@ -1704,6 +1784,10 @@ class ConsolidatedMessageDispatcher:
             # terminal boundary. Keep its gate reserved until that task exits.
             current_lease = lease
             try:
+                if wait_for_run_ids and not await self._wait_for_close_after_runs(
+                    wait_for_run_ids
+                ):
+                    return
                 await asyncio.sleep(0)
                 if current_lease is not None and current_lease[2] is not None:
                     await asyncio.wait({current_lease[2]})

@@ -1465,6 +1465,7 @@ def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy(
         controller.message_dispatcher = SimpleNamespace(
             status_key_for_context=Mock(return_value="status:first"),
             finish_prewrite_stop_surfaces=AsyncMock(side_effect=_stall_surface_cleanup),
+            defer_close_after_until_run_terminal=Mock(),
         )
         service = AgentService(controller=controller)
         controller.agent_service = service
@@ -1480,6 +1481,8 @@ def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy(
         agent = _PrewriteAgent()
         service.register(agent)
         first = _request("first")
+        first.context.platform_specific["close_after"] = True
+        first.context.platform_specific["task_execution_id"] = "run-first"
         first_task = asyncio.create_task(service.handle_message("claude", first))
         await asyncio.wait_for(entered.wait(), timeout=0.5)
 
@@ -1498,6 +1501,9 @@ def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy(
         controller.message_dispatcher.finish_prewrite_stop_surfaces.assert_awaited_once_with(
             first.context,
             consolidated_key="status:first",
+        )
+        controller.message_dispatcher.defer_close_after_until_run_terminal.assert_called_once_with(
+            first.context
         )
 
         second = _request("second")
