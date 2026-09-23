@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vibe.claude_model_catalog import (
     FALLBACK_CLAUDE_MODELS,
+    RETIRED_CLAUDE_MODELS,
     infer_models_from_bundle,
     load_catalog_models,
     sort_catalog_models,
@@ -36,6 +37,46 @@ def test_opus_5_5_is_tracked_in_catalog_and_fallback():
 def test_opus_5_5_sorts_before_opus_5_in_every_tracked_listing():
     for listing in (load_catalog_models(), list(FALLBACK_CLAUDE_MODELS)):
         assert listing.index("claude-opus-5-5") < listing.index("claude-opus-5")
+
+
+def test_retired_models_leave_the_tracked_catalog_and_fallback():
+    """Anthropic retired these on 2026-06-15, or never shipped them under this id."""
+
+    models = load_catalog_models()
+    for model in (
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-20250514",
+        "claude-sonnet-3-7",
+        "claude-haiku-3-5",
+    ):
+        assert model not in models, model
+        assert model not in FALLBACK_CLAUDE_MODELS, model
+
+
+def test_bundle_inference_drops_retired_models(tmp_path):
+    bundle = tmp_path / "cli.js"
+    bundle.write_bytes(b";".join(f'"{model}"'.encode() for model in ("claude-opus-5", *RETIRED_CLAUDE_MODELS)))
+
+    assert infer_models_from_bundle(bundle) == ["claude-opus-5"]
+
+
+def test_live_legacy_models_survive_the_retirement_sweep():
+    """Ids that Claude Code still resolves must stay selectable."""
+
+    models = load_catalog_models()
+    for model in (
+        "claude-opus-4-0",
+        "claude-opus-4-1",
+        "claude-opus-4-1-20250805",
+        "claude-opus-4-20250514",
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+    ):
+        assert model in models, model
 
 
 def test_catalog_excludes_dated_4_6_and_later_internal_ids():

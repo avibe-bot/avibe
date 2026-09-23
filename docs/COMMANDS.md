@@ -932,7 +932,7 @@ direct Agent Run calls.
 | --- | --- |
 | `vibe runs list` | List recent runs |
 | `vibe runs show <run_id>` | Show one run |
-| `vibe runs cancel <run_id>` | Request cancellation |
+| `vibe runs cancel <run_id>` | Request cancellation; once the run's input reached the live Session turn, this stops that turn like Session Stop, including other runs sharing it |
 
 ## 6. Recommended Mental Model
 

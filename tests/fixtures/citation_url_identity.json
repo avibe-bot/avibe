@@ -1,0 +1,341 @@
+{
+  "description": "One shared table for the URL a citation is allowed to carry.\n\nA citation is delivered twice: as the destination of an ordinary Markdown link every surface can follow, and as the `url` of a `message.content.citations` row. The Web renderer draws a badge only when the two agree exactly, so the backend has to write the destination the real Markdown pipeline (remark-parse -> remark-rehype's normalizeUri -> defaultUrlTransform) produces from it - a fixed point - and has to label it with the host a browser actually resolves.\n\nBoth sides of that boundary read this file: tests/test_citations.py asserts core.citations produces `url`/`label` from `raw`, and ui/src/components/ui/markdown.test.tsx renders `url` and asserts the DOM href and the WHATWG host come back unchanged. Neither side can drift without the other failing. `url: null` means the raw value must be rejected outright rather than repaired.\n\n`authority` is the same table for the authority - userinfo, host and port - where the browser is the assertion rather than a reference: every accepted row's `url` is one `new URL` opens rather than refuses, and `new URL(url).hostname` is exactly that row's `label`. The authority stays as the provider wrote it - letter case, a leading zero in a port, an uncompressed IPv6 address - because each of those spellings opens the same page, and the label is where the browser's own answer is shown instead. A `url: null` row is one a browser refuses, apart from the single deliberate exception whose `why` says so. A new authority shape is a row here, not a branch.",
+  "cases": [
+    {
+      "why": "an ordinary result needs no rewriting at all",
+      "raw": "https://developers.openai.com/api/docs/guides/tools-web-search",
+      "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
+      "label": "developers.openai.com"
+    },
+    {
+      "why": "a non-ASCII path: the renderer percent-encodes it, so the backend must too",
+      "raw": "https://example.com/中文",
+      "url": "https://example.com/%E4%B8%AD%E6%96%87",
+      "label": "example.com"
+    },
+    {
+      "why": "a non-ASCII host resolves through IDNA, so the label is the punycode the browser visits",
+      "raw": "https://例え.jp/x",
+      "url": "https://%E4%BE%8B%E3%81%88.jp/x",
+      "label": "xn--r8jz45g.jp"
+    },
+    {
+      "why": "P1: IDNA 2003 folds ss out of a German host, naming a domain the link never opens",
+      "raw": "https://faß.de/",
+      "url": "https://fa%C3%9F.de/",
+      "label": "xn--fa-hia.de"
+    },
+    {
+      "why": "UTS #46 maps a fullwidth host onto ASCII, so no punycode is left to show",
+      "raw": "https://ＥＸＡＭＰＬＥ.com/x",
+      "url": "https://%EF%BC%A5%EF%BC%B8%EF%BC%A1%EF%BC%AD%EF%BC%B0%EF%BC%AC%EF%BC%A5.com/x",
+      "label": "example.com"
+    },
+    {
+      "why": "a Cyrillic look-alike is named by the punycode it is, never by the brand it imitates",
+      "raw": "https://аррӏе.com/",
+      "url": "https://%D0%B0%D1%80%D1%80%D3%8F%D0%B5.com/",
+      "label": "xn--80ak6aa92e.com"
+    },
+    {
+      "why": "UTS #46 ignores a soft hyphen inside a host, so the label is the host without it",
+      "raw": "https://a\u00adb.example/",
+      "url": "https://a%C2%ADb.example/",
+      "label": "ab.example"
+    },
+    {
+      "why": "only a non-ASCII label takes the IDNA path; UTS #46 rejects an ASCII one a browser keeps",
+      "raw": "https://my_site.例え.jp/",
+      "url": "https://my_site.%E4%BE%8B%E3%81%88.jp/",
+      "label": "my_site.xn--r8jz45g.jp"
+    },
+    {
+      "why": "an escaped host keeps its case through urlsplit, and a browser lowercases it anyway",
+      "raw": "https://例え.JP/x",
+      "url": "https://%E4%BE%8B%E3%81%88.JP/x",
+      "label": "xn--r8jz45g.jp"
+    },
+    {
+      "why": "IDNA 2008 disallows a symbol host a browser still resolves, and no label beats a wrong one",
+      "raw": "https://❤.example/",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "parentheses are part of the address and stay literal; only the Markdown link escapes them",
+      "raw": "https://en.wikipedia.org/wiki/Cite_(disambiguation)",
+      "url": "https://en.wikipedia.org/wiki/Cite_(disambiguation)",
+      "label": "en.wikipedia.org"
+    },
+    {
+      "why": "a space cannot survive a Markdown destination unencoded",
+      "raw": "https://example.com/a b",
+      "url": "https://example.com/a%20b",
+      "label": "example.com"
+    },
+    {
+      "why": "an escape that already looks like one is preserved, never double-encoded",
+      "raw": "https://example.com/p%41q",
+      "url": "https://example.com/p%41q",
+      "label": "example.com"
+    },
+    {
+      "why": "a literal percent is not an escape",
+      "raw": "https://example.com/100%",
+      "url": "https://example.com/100%25",
+      "label": "example.com"
+    },
+    {
+      "why": "two characters that are not both alphanumeric do not make an escape",
+      "raw": "https://example.com/%-a",
+      "url": "https://example.com/%25-a",
+      "label": "example.com"
+    },
+    {
+      "why": "P1: a raw backslash in the authority sends urlsplit and the browser to different hosts, so it names no source",
+      "raw": "https://attacker.example\\@developers.openai.com/page",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "P1: a backslash inside the host itself is not a host a browser will resolve",
+      "raw": "https://attacker.example\\developers.openai.com/",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "P1: a numeric host names the address a browser resolves, not the digits it spells",
+      "raw": "https://2130706433/p",
+      "url": "https://2130706433/p",
+      "label": "127.0.0.1"
+    },
+    {
+      "why": "P1: hexadecimal and shortened IPv4 forms reach the same loopback address",
+      "raw": "https://0x7f.1/p",
+      "url": "https://0x7f.1/p",
+      "label": "127.0.0.1"
+    },
+    {
+      "why": "an octal host is still the address it encodes",
+      "raw": "https://017700000001/p",
+      "url": "https://017700000001/p",
+      "label": "127.0.0.1"
+    },
+    {
+      "why": "a leading zero makes a part octal, so the label is not the digits read as decimal",
+      "raw": "https://010.0.0.1/p",
+      "url": "https://010.0.0.1/p",
+      "label": "8.0.0.1"
+    },
+    {
+      "why": "an already canonical address is left exactly as it is",
+      "raw": "https://1.2.3.4/p",
+      "url": "https://1.2.3.4/p",
+      "label": "1.2.3.4"
+    },
+    {
+      "why": "a numeric host the IPv4 parser refuses names no host a browser will reach",
+      "raw": "https://256.1.1.1/p",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "a trailing number turns the whole host numeric, and this one does not parse",
+      "raw": "https://example.com.0x1/p",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "P1: a host of digits wider than an address is refused rather than converted",
+      "raw": "https://99999999999/x",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "the check is the address, not the width: ten digits can overflow too",
+      "raw": "https://9999999999/x",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "the widest address that does fit is still read as one",
+      "raw": "https://4294967295/x",
+      "url": "https://4294967295/x",
+      "label": "255.255.255.255"
+    },
+    {
+      "why": "a hexadecimal part too wide is a number the parser refuses, never a domain name",
+      "raw": "https://example.0xFFFFFFFFFFFFFFFF/x",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "a leading zero makes the part octal however many zeros follow it",
+      "raw": "https://00000000000000000000127/x",
+      "url": "https://00000000000000000000127/x",
+      "label": "0.0.0.87"
+    },
+    {
+      "why": "CommonMark resolves an entity in a destination, so the stored URL is the resolved one",
+      "raw": "https://example.com/s?a=1&amp;b=2",
+      "url": "https://example.com/s?a=1&b=2",
+      "label": "example.com"
+    },
+    {
+      "why": "a destination that would resolve twice is pinned after the first resolution",
+      "raw": "https://example.com/s?a=1&amp;amp;b=2",
+      "url": "https://example.com/s?a=1%26amp;b=2",
+      "label": "example.com"
+    },
+    {
+      "why": "P2: the renderer replaces a C1 reference with U+FFFD, so the stored URL carries that",
+      "raw": "https://example.com/p&#x80;q",
+      "url": "https://example.com/p%EF%BF%BDq",
+      "label": "example.com"
+    },
+    {
+      "why": "a noncharacter reference is replaced the same way rather than kept",
+      "raw": "https://example.com/p&#xFFFE;q",
+      "url": "https://example.com/p%EF%BF%BDq",
+      "label": "example.com"
+    },
+    {
+      "why": "a zero-width reference is escaped, not deleted, so the path still matches",
+      "raw": "https://example.com/p&#x200B;q",
+      "url": "https://example.com/p%E2%80%8Bq",
+      "label": "example.com"
+    },
+    {
+      "why": "a reference spelling a marker delimiter is escaped out of harm rather than dropped",
+      "raw": "https://example.com/p&#xE200;q",
+      "url": "https://example.com/p%EE%88%80q",
+      "label": "example.com"
+    },
+    {
+      "why": "P1: a named tab reference is part of the destination, so the renderer escapes it",
+      "raw": "https://example.com/p&Tab;q",
+      "url": "https://example.com/p%09q",
+      "label": "example.com"
+    },
+    {
+      "why": "the same tab spelled numerically, which a literal tab in a destination cannot reach",
+      "raw": "https://example.com/p&#x9;q",
+      "url": "https://example.com/p%09q",
+      "label": "example.com"
+    },
+    {
+      "why": "P1: a newline reference is escaped too; removing it pointed the citation elsewhere",
+      "raw": "https://example.com/p&#xA;q",
+      "url": "https://example.com/p%0Aq",
+      "label": "example.com"
+    },
+    {
+      "why": "a carriage return reference goes the same way rather than being dropped",
+      "raw": "https://example.com/p&#xD;q",
+      "url": "https://example.com/p%0Dq",
+      "label": "example.com"
+    },
+    {
+      "why": "brackets are Markdown label punctuation and are encoded on both sides",
+      "raw": "https://example.com/a[b]",
+      "url": "https://example.com/a%5Bb%5D",
+      "label": "example.com"
+    },
+    {
+      "why": "angle brackets and quotes would make a pointy destination or break out of an attribute",
+      "raw": "https://example.com/<x>\"y\"",
+      "url": "https://example.com/%3Cx%3E%22y%22",
+      "label": "example.com"
+    },
+    {
+      "why": "a tab is dropped before parsing, exactly as a browser drops it",
+      "raw": "https://example.com/a\tb",
+      "url": "https://example.com/ab",
+      "label": "example.com"
+    },
+    {
+      "why": "a lone surrogate has no encoding; the renderer substitutes U+FFFD",
+      "raw": "https://example.com/\ud800",
+      "url": "https://example.com/%EF%BF%BD",
+      "label": "example.com"
+    },
+    {
+      "why": "the host is named without its www prefix, which is not what distinguishes the source",
+      "raw": "https://www.example.com/x",
+      "url": "https://www.example.com/x",
+      "label": "example.com"
+    },
+    {
+      "why": "P1: a host too long to show is elided from the left, keeping the registrable suffix",
+      "raw": "https://developers.openai.com.padding.padding.padding.padding.padding.padding.attacker.example/x",
+      "url": "https://developers.openai.com.padding.padding.padding.padding.padding.padding.attacker.example/x",
+      "label": "\u2026adding.padding.padding.padding.padding.padding.attacker.example"
+    },
+    {
+      "why": "P1: whole labels alone left only the public suffix a long label was hiding behind",
+      "raw": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.co.uk/x",
+      "url": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.co.uk/x",
+      "label": "\u2026aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.co.uk"
+    },
+    {
+      "why": "a browser lowercases the host but not the path, so the label is lowercase and the URL is not",
+      "raw": "https://Example.COM/X",
+      "url": "https://Example.COM/X",
+      "label": "example.com"
+    },
+    {
+      "why": "P2: a scheme is case-insensitive, and only its lowercase spelling is recognized everywhere",
+      "raw": "HTTPS://Example.com/X",
+      "url": "https://Example.com/X",
+      "label": "example.com"
+    },
+    {
+      "why": "an entity must not be able to smuggle a scheme past the check",
+      "raw": "&#x6a;avascript:alert(1)",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "an unsafe scheme is rejected, not repaired",
+      "raw": "javascript:alert(1)",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "a URL with no host names no source",
+      "raw": "https:///path",
+      "url": null,
+      "label": null
+    }
+  ],
+  "authority": [
+    {"why": "an IPv6 literal is a host a browser resolves, so a citation naming one is delivered instead of dropped", "raw": "https://[2001:db8::1]/docs", "url": "https://[2001:db8::1]/docs", "label": "[2001:db8::1]"},
+    {"why": "the URL keeps the address its source wrote, while the label is the serialized form the address bar shows", "raw": "https://[2001:0db8:0000:0000:0000:0000:0000:0001]/x", "url": "https://[2001:0db8:0000:0000:0000:0000:0000:0001]/x", "label": "[2001:db8::1]"},
+    {"why": "hexadecimal pieces are lowercased for the label, not for the URL", "raw": "https://[2001:DB8::1]/x", "url": "https://[2001:DB8::1]/x", "label": "[2001:db8::1]"},
+    {"why": "an all-zero address is labelled with the empty compression", "raw": "https://[0:0:0:0:0:0:0:0]/x", "url": "https://[0:0:0:0:0:0:0:0]/x", "label": "[::]"},
+    {"why": "only the longest zero run compresses, so the shorter one beside it stays written out", "raw": "https://[1:0:0:2:0:0:0:3]/x", "url": "https://[1:0:0:2:0:0:0:3]/x", "label": "[1:0:0:2::3]"},
+    {"why": "a dotted IPv4 tail is labelled as hexadecimal pieces, which is the host the address bar names", "raw": "https://[::127.0.0.1]/x", "url": "https://[::127.0.0.1]/x", "label": "[::7f00:1]"},
+    {"why": "an IPv4-mapped address is no exception - Python's ipaddress writes it back dotted, a browser does not", "raw": "https://[::ffff:127.0.0.1]/x", "url": "https://[::ffff:127.0.0.1]/x", "label": "[::ffff:7f00:1]"},
+    {"why": "a port belongs to the URL but never to the attribution: the label names the host", "raw": "https://[::1]:8080/x", "url": "https://[::1]:8080/x", "label": "[::1]"},
+    {"why": "the scheme's default port is kept - it opens the same page - and no port reaches the label", "raw": "https://[::1]:443/x", "url": "https://[::1]:443/x", "label": "[::1]"},
+    {"why": "a zone id names an interface only the local machine has, and a browser refuses it", "raw": "https://[fe80::1%25eth0]/x", "url": null, "label": null},
+    {"why": "an unclosed bracket is not an address", "raw": "https://[2001:db8::1/x", "url": null, "label": null},
+    {"why": "a port is carried as it was written, leading zeros and all: it is the same port", "raw": "https://example.com:0080/x", "url": "https://example.com:0080/x", "label": "example.com"},
+    {"why": "the scheme's own default port is no different - dropping it would edit a URL that already opens", "raw": "https://example.com:443/x", "url": "https://example.com:443/x", "label": "example.com"},
+    {"why": "another scheme's default is just a port here", "raw": "https://example.com:80/x", "url": "https://example.com:80/x", "label": "example.com"},
+    {"why": "an empty port is no port, and refusing the URL over it would lose a source a browser opens", "raw": "https://example.com:/x", "url": "https://example.com:/x", "label": "example.com"},
+    {"why": "a port past 16 bits opens nothing, so the citation is refused rather than delivered broken", "raw": "https://example.com:99999/x", "url": null, "label": null},
+    {"why": "a port must be ASCII digits: int() reads an Arabic-Indic three as 3, a browser reads no port at all", "raw": "https://example.com:%D9%A3/x", "url": null, "label": null},
+    {"why": "a C0 control the host spells percent-encoded is a forbidden domain code point once decoded", "raw": "https://exa%01mple.com/x", "url": null, "label": null},
+    {"why": "userinfo is case-folded nowhere - it may be a password - and neither is the host beside it; the label is where the browser's answer shows", "raw": "https://user:PW@Example.COM/x", "url": "https://user:PW@Example.COM/x", "label": "example.com"},
+    {"why": "the label names the host and never the userinfo, so a username cannot dress a link up as a domain", "raw": "https://USER@example.com/x", "url": "https://USER@example.com/x", "label": "example.com"},
+    {"why": "userinfo hides an IPv6 host no better", "raw": "https://attacker.example@[::1]/x", "url": "https://attacker.example@[::1]/x", "label": "[::1]"},
+    {"why": "a well-formed ACE label is the host a browser opens, so it keeps its citation", "raw": "https://xn--fa-hia.de/x", "url": "https://xn--fa-hia.de/x", "label": "xn--fa-hia.de"},
+    {"why": "an ACE prefix in any case is still that label, and the label names it lowercased", "raw": "https://XN--80AK6AA92E.com/x", "url": "https://XN--80AK6AA92E.com/x", "label": "xn--80ak6aa92e.com"},
+    {"why": "an ACE label with no punycode after the prefix makes a browser refuse the URL", "raw": "https://xn--/x", "url": null, "label": null},
+    {"why": "an ACE label whose punycode decodes to a control character is not a host", "raw": "https://xn--abc/x", "url": null, "label": null},
+    {"why": "an ACE label must round-trip to a non-ASCII label: xn--ascii- decodes to plain ascii, and refusing what a browser might still open is the safe direction", "raw": "https://xn--ascii-/x", "url": null, "label": null},
+    {"why": "an ACE label that does not round-trip is refused even beside a valid one", "raw": "https://xn--a.xn--fa-hia/x", "url": null, "label": null},
+    {"why": "an authority is read only where one is written: a browser repairs the missing slashes, but the rule that keeps a hostless URL out keeps this out too, and a search result always writes them", "raw": "https:example.com/x", "url": null, "label": null}
+  ]
+}

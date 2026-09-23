@@ -37,3 +37,14 @@ export function formatLocalDateTime(iso: string | null | undefined): string {
     `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
   );
 }
+
+// Local wall-clock ``HH:mm`` — the compact stamp a message head shows beside a
+// sender name, where the full ``formatLocalDateTime`` value would crowd the
+// line. Same parsing and same empty/unparseable behaviour.
+export function formatLocalClockTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}

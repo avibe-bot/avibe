@@ -85,6 +85,46 @@ afterEach(() => {
 });
 
 describe('BackendModelEditorDialog', () => {
+  it.each(['claude', 'codex', 'opencode'] as const)('does not add Off when saving an existing %s model', async (backend) => {
+    const user = userEvent.setup();
+    const model: BackendModel = {
+      ...blankBackendModel(),
+      id: '模型/unchanged',
+      supports_reasoning: true,
+      native_protocol: backend === 'opencode' ? 'openai_responses' : undefined,
+      reasoning_efforts: ['high', 'medium', '自定义'],
+    };
+    const { onCommit } = renderEditor({ backend, model });
+
+    expect(screen.getByRole('checkbox', { name: 'Off' }).getAttribute('aria-checked')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(model);
+  });
+
+  it.each(['en', 'zh'] as const)('persists Off only after an explicit model choice (%s)', async (language) => {
+    const previous = i18n.language;
+    await i18n.changeLanguage(language);
+    try {
+      const user = userEvent.setup();
+      const model: BackendModel = {
+        ...blankBackendModel(),
+        id: '模型/opt-in',
+        supports_reasoning: true,
+        reasoning_efforts: ['high', '自定义'],
+      };
+      const { onCommit } = renderEditor({ model });
+      const off = screen.getByRole('checkbox', { name: language === 'zh' ? '关闭' : 'Off' });
+      await user.click(off);
+      expect(off.getAttribute('aria-checked')).toBe('true');
+      await user.click(screen.getByRole('button', { name: i18n.t('settings.models.gateway.modelEditor.apply') }));
+      expect(onCommit).toHaveBeenCalledWith({ ...model, reasoning_efforts: ['high', '自定义', 'none'] });
+    } finally {
+      cleanup();
+      await i18n.changeLanguage(previous);
+    }
+  });
+
   it('refuses an empty or already-taken model ID', async () => {
     const user = userEvent.setup();
     const { onCommit } = renderEditor({ takenIds: new Set(['taken']) });

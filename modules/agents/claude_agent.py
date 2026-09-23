@@ -3191,13 +3191,16 @@ class ClaudeAgent(BaseAgent):
             (existing_activity is not None and existing_activity.foreground)
             or (tool_use_id and tool_use_id in foreground_tool_ids)
         )
+        # The SDK task ``summary`` is a CLI-generated receipt such as
+        # 'Background command "..." completed (exit code 0)'. It is not
+        # assistant output, so it never becomes the Activity's visible
+        # fallback text; a completion without assistant text settles silently.
         metadata = {
             key: value
             for key, value in {
                 "task_type": task_type or None,
                 "last_tool_name": self._task_field(message, "last_tool_name"),
                 "output_file": self._task_field(message, "output_file"),
-                "summary": self._task_field(message, "summary"),
             }.items()
             if value not in (None, "")
         }

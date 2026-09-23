@@ -62,7 +62,20 @@ def _seed_session(conn, *, session_id="ses_act"):
     return scope_id
 
 
-def _msg(conn, scope_id, session_id, *, mid, mtype, author, created_at, text="", source="agent", metadata=None):
+def _msg(
+    conn,
+    scope_id,
+    session_id,
+    *,
+    mid,
+    mtype,
+    author,
+    created_at,
+    text="",
+    source="agent",
+    metadata=None,
+    content=None,
+):
     conn.execute(
         messages.insert().values(
             id=mid,
@@ -73,7 +86,7 @@ def _msg(conn, scope_id, session_id, *, mid, mtype, author, created_at, text="",
             type=mtype,
             source=source,
             content_text=text,
-            content_json="{}",
+            content_json=json.dumps(content or {}),
             metadata_json=json.dumps(metadata or {}),
             created_at=created_at,
             updated_at=created_at,
@@ -217,6 +230,49 @@ def test_rows_merge_across_tables_by_parsed_timestamp(isolated_state):
         ("tool_call", "first"),
         ("assistant", "second"),
     ]
+
+
+def test_a_narration_row_carries_its_citation_sidecar(isolated_state):
+    """An intermediate cited answer renders through Activity, not ``MessageRow``.
+
+    Its sources are persisted in ``content.citations`` (see ``core.citations``),
+    so the row contract has to carry them or the Web badge silently degrades to
+    the plain domain link the text already holds. A row with nothing to carry
+    keeps the wire shape it always had.
+    """
+    engine = create_sqlite_engine()
+    sid = "ses_cited"
+    sidecar = [
+        {
+            "index": 1,
+            "ref_id": "turn0view0",
+            "title": "Web search - OpenAI API",
+            "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
+            "label": "developers.openai.com",
+        }
+    ]
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _msg(
+            conn, scope, sid, mid="m_cited", mtype="assistant", author="agent",
+            created_at="2026-06-01T10:00:01.000000+00:00",
+            text="Documented. [developers.openai.com](https://developers.openai.com/api/docs/guides/tools-web-search)",
+            content={"kind": "assistant", "citations": sidecar},
+        )
+        _msg(
+            conn, scope, sid, mid="m_plain", mtype="assistant", author="agent",
+            created_at="2026-06-01T10:00:02.000000+00:00", text="Still working.",
+        )
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:03.000000+00:00", text="done")
+
+    with engine.connect() as conn:
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id="m_cited")
+
+    assert detail is not None
+    rows = {row["id"]: row for row in detail["rows"]}
+    assert rows["m_cited"]["citations"] == sidecar
+    assert "citations" not in rows["m_plain"]
 
 
 def test_agent_annotation_marks_are_not_activity(isolated_state):

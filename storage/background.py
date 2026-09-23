@@ -2881,11 +2881,12 @@ def apply_live_agent_run_cancellation_in_connection(
 ) -> str:
     """Record one live Run cancellation inside the Turn owner's transaction.
 
-    ``detach`` is the outcome of the shared-Turn ownership check made under the
-    same SQLite writer reservation. A detached participant becomes terminal,
-    retires its exact input when the Delivery state proves no native side effect,
-    and suppresses its callback before any terminal writer or callback drain can
-    run; an exclusive owner only records the cancellation request before P0 Stop.
+    ``detach`` is true when the check made under the same SQLite writer
+    reservation proves the Run's input never reached the live Turn. A detached
+    Run becomes terminal, retires its exact input when the Delivery state proves
+    no native side effect, and suppresses its callback before any terminal
+    writer or callback drain can run; a Run inside the Turn only records the
+    cancellation request before P0 Stop.
     """
 
     normalized_run_id = str(run_id or "").strip()

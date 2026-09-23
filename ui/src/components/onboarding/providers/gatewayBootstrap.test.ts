@@ -10,7 +10,7 @@ import type { Mock } from 'vitest';
 import type { BackendConnectionState } from '@/context/ApiContext';
 import type { RuntimeDependency } from '@/components/settings/models/types';
 
-import { GatewayBootstrapError, bootstrapGateway, readSetupConfig } from './gatewayBootstrap';
+import { GatewayBootstrapError, bootstrapGateway, readRuntimeObservation } from './gatewayBootstrap';
 import type { GatewayBootstrapDeps } from './gatewayBootstrap';
 
 const CONFIG = {
@@ -88,38 +88,25 @@ const failure = async (promise: Promise<unknown>): Promise<GatewayBootstrapError
   return error as GatewayBootstrapError;
 };
 
-describe('readSetupConfig', () => {
-  it('accepts the top-level config object the handlers really return', () => {
-    expect(readSetupConfig(CONFIG)).toMatchObject({
-      version: 'v2',
-      capabilityEnabled: true,
-      savedIntentEnabled: true,
-      primaryPlatform: 'avibe',
-    });
-  });
+// The parser both this sequence and the shell's prerequisite read share now lives with
+// its one owner, and is exercised there: `../setupConfig.test.ts`.
 
-  it('rejects the envelope shape nobody sends', () => {
-    // `{ok:true, config:{...}}` reads as a success to a careless check and carries
-    // none of the fields the caller then indexes into.
-    expect(readSetupConfig({ ok: true, config: CONFIG })).toBeNull();
-  });
+describe('readRuntimeObservation', () => {
+  it('is the same read the sequence ends on, reusable without seeding or starting', async () => {
+    const d = deps();
 
-  it('rejects a body that carries an error alongside a plausible payload', () => {
-    expect(readSetupConfig({ ...CONFIG, error: 'config load failed' })).toBeNull();
-    expect(readSetupConfig({ ...CONFIG, ok: false })).toBeNull();
+    await expect(readRuntimeObservation(d)).resolves.toBe(RUNTIME);
+    expect(d.fetch).not.toHaveBeenCalled();
+    expect(d.control).not.toHaveBeenCalled();
   });
 
   it.each([
-    ['version', { version: 'v1' }],
-    ['setup_completed', { setup_completed: 'no' }],
-    ['platforms.primary', { platforms: { enabled: [] } }],
-    ['platforms.enabled', { platforms: { primary: 'avibe', enabled: 'slack' } }],
-    ['runtime', { runtime: null }],
-    ['agents', { agents: [] }],
-    ['capabilities.model_hub', { capabilities: {} }],
-    ['model_hub', { model_hub: {} }],
-  ])('treats a malformed %s as unread rather than as a value', (_field, over) => {
-    expect(readSetupConfig({ ...CONFIG, ...over })).toBeNull();
+    ['a read that threw', async () => { throw new Error('status unavailable'); }],
+    ['a body without the status it had to carry', async () => ({ manifest: {} } as unknown as RuntimeDependency)],
+  ])('reports %s as unread rather than as a runtime', async (_label, getRuntimeStatus) => {
+    const error = await failure(readRuntimeObservation(deps({ getRuntimeStatus: vi.fn(getRuntimeStatus) })));
+
+    expect(error).toMatchObject({ reason: 'unread', step: 'runtime' });
   });
 });
 

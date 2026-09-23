@@ -132,6 +132,23 @@ def test_model_reasoning_resolver_does_not_leak_another_model_map() -> None:
     assert resolve_model_reasoning_options(reasoning_options, "other-model", fallback) == fallback
 
 
+def test_normalize_claude_reasoning_effort_uses_the_model_declaration_for_off() -> None:
+    for model in ("claude-sonnet-4-5", "claude-opus-4-6", "claude-future-6"):
+        assert normalize_claude_reasoning_effort(model, "none") is None
+        assert normalize_claude_reasoning_effort(model, "none", ["low", "ultra"]) is None
+        assert normalize_claude_reasoning_effort(model, "none", []) is None
+        assert normalize_claude_reasoning_effort(model, "none", ["low", "none"]) == "none"
+        assert normalize_claude_reasoning_effort(model, None, ["low", "none"]) is None
+        assert [item["value"] for item in build_claude_reasoning_options(model, ["low", "none"])] == [
+            "__default__", "low", "none",
+        ]
+
+
+def test_claude_reasoning_options_keep_off_out_of_undeclared_defaults() -> None:
+    for model in (None, "claude-opus-5", "claude-sonnet-4-5"):
+        assert "none" not in [item["value"] for item in build_claude_reasoning_options(model)]
+
+
 def test_normalize_claude_reasoning_effort_drops_invalid_efforts() -> None:
     assert normalize_claude_reasoning_effort("claude-sonnet-4-5", "max") is None
     assert normalize_claude_reasoning_effort("claude-opus-4-6", "xhigh") is None

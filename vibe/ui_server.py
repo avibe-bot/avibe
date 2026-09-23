@@ -9338,6 +9338,7 @@ def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None
     """Project the active claimed Delivery as a temporary transcript row."""
 
     from storage import message_deliveries
+    from storage.sender_identity import attach_sender_labels
 
     turn = message_deliveries.active_turn(conn, session_id)
     if turn is None:
@@ -9354,7 +9355,12 @@ def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None
         delivered_at=turn.get("started_at") or turn.get("created_at"),
         read_at=None,
     )
-    return payload
+    # This row joins a transcript whose durable rows were already enriched by
+    # ``messages_service``, so it has to carry the same identity fields or the
+    # sender would appear only once the Delivery materializes. Attached after
+    # the public projection, which rewrites metadata rather than allow-listing
+    # fields.
+    return attach_sender_labels(conn, [payload])[0]
 
 
 def _append_active_input(

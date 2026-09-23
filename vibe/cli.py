@@ -7499,7 +7499,10 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             ),
             "controller_status_code": normalized_status_code,
             "controller_response": body,
-            "message": "Run was canceled without stopping the shared Session turn.",
+            "message": i18n_t(
+                "harness.run.cli.canceledBeforeLiveTurn",
+                _configured_cli_language(),
+            ),
         }
     if (
         normalized_status_code is not None
@@ -17199,7 +17202,10 @@ def build_parser():
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
     runs_show_parser.add_argument("run_id", nargs="?")
     _add_json_noop(runs_show_parser)
-    runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run")
+    runs_cancel_parser = runs_subparsers.add_parser(
+        "cancel",
+        help=i18n_t("harness.run.cli.help.cancel", _configured_cli_language()),
+    )
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
 

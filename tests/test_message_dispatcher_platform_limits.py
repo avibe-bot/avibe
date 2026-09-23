@@ -25,7 +25,10 @@ class _StubIMClient:
     def supports_message_editing(self, context=None):
         return self._supports_editing
 
-    async def send_message(self, context, text, parse_mode=None, reply_to=None):
+    async def send_message(self, context, text, parse_mode=None, reply_to=None, subtext=None):
+        # ``subtext`` is part of the platform interface (a de-emphasized footer
+        # Slack and Discord render below the body); a stub that rejected it
+        # would fail every send the dispatcher makes for a result with a footer.
         if self._max_bytes is not None and len(text.encode("utf-8")) > self._max_bytes:
             raise RuntimeError("message too large")
         self.sent.append((context.channel_id, context.thread_id, text, parse_mode))

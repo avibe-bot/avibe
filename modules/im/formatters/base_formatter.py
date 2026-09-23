@@ -1,10 +1,111 @@
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Any, Dict
+from typing import Callable, Optional, List, Tuple, Any, Dict
 import json
 import logging
 import re
+import uuid
+
+from core.reply_enhancer import inline_links, unescape_markdown
 
 logger = logging.getLogger(__name__)
+
+
+def hold_markdown_escapes(
+    text: str,
+    *,
+    render: Optional[Callable[[str], str]] = None,
+) -> Tuple[str, Dict[str, str]]:
+    """Resolve CommonMark backslash escapes behind per-platform placeholders.
+
+    One Markdown text is delivered to every platform, and a backslash escape in
+    it means "show this character, do not read it as syntax". No IM dialect
+    knows that: Slack and Telegram read the escaped character as markup of
+    their own, and WeChat does not forward Markdown at all - its own pass
+    converts the text locally, turning
+    ``[a\\*b\\*.example](https://a*b*.example/x)`` into
+    ``a*b*.example (https://a*b*.example/x)``, so an escaped bracket or star is
+    a syntax question for that conversion too. Discord and Feishu were measured
+    here only as local pass-through - what their renderers show for a stray
+    backslash has not been observed on those platforms. So the escape is
+    resolved here, before a platform formatter runs, and the character it
+    protected is held behind a placeholder until that formatter is done - which
+    is the same reason it was escaped upstream, honoured in the dialect that is
+    actually about to parse the text.
+
+    ``render`` is how the platform wants the character to come back: Telegram
+    needs it HTML-escaped, the others want it verbatim. Restore with
+    ``restore_held`` once the platform pass is finished.
+    """
+    held: Dict[str, str] = {}
+
+    def hold(character: str) -> str:
+        token = _placeholder()
+        held[token] = render(character) if render else character
+        return token
+
+    return unescape_markdown(text, replace=hold), held
+
+
+def hold_links(
+    text: str,
+    *,
+    render: Callable[[str, str], str],
+) -> Tuple[str, Dict[str, str]]:
+    """Hide every inline link from a platform's text scanner, whole.
+
+    A link is one unit: a label a reader taps and an address the tap goes to.
+    A platform converter does not see it that way - it scans a line for
+    patterns - and both halves are its to get wrong. Slack's third-party
+    mrkdwn converter read ``https://a*b*.example/x`` as emphasis and delivered
+    a link to ``https://a_b_.example/x``, a different site; holding only the
+    address left the brackets around it in the stream, where the same pass
+    paired them with the wrong text and sent
+    ``[^f]: [p](https://example.com/x)`` out as one link labelled ``^f]: [p``.
+
+    So the whole unit is held and the platform is asked to spell it again from
+    what a Markdown reader actually resolves: ``render(label, destination)``.
+    The destination is the resolved one - angle-bracket form, backslash escapes
+    and character references already applied, and a title left out, because it
+    is not part of the address and no IM dialect has a place to put it. Both
+    fields may still hold the placeholders of an escape pass that ran first, so
+    ``render`` is where those come back: a character restored after the unit is
+    spelled is a character its dialect can no longer encode. Restore with
+    ``restore_held`` BEFORE restoring that pass, so the text around the units
+    is the only thing left for it to reach.
+
+    ``inline_links`` returns non-overlapping spans in source order, so this
+    splices each one exactly once.
+    """
+    links = inline_links(text)
+    if not links:
+        return text, {}
+    held: Dict[str, str] = {}
+    parts: List[str] = []
+    cursor = 0
+    for link in links:
+        token = _placeholder()
+        held[token] = render(text[link.label_start : link.label_end], link.destination)
+        parts.append(text[cursor : link.start])
+        parts.append(token)
+        cursor = link.end
+    parts.append(text[cursor:])
+    return "".join(parts), held
+
+
+def _placeholder() -> str:
+    """An inert stand-in no platform's formatter reads as markup of its own.
+
+    The shape is shared by every hold pass so one ``restore_held`` call can put
+    back whichever of them wrote the token it finds.
+    """
+    return f"\ue000MD{uuid.uuid4().hex}\ue001"
+
+
+def restore_held(text: str, held: Dict[str, str]) -> str:
+    """Put back what ``hold_markdown_escapes`` (or a sibling pass) held."""
+    for token, replacement in held.items():
+        text = text.replace(token, replacement)
+    return text
 
 
 def _truncate_status(text: str, max_len: int) -> str:

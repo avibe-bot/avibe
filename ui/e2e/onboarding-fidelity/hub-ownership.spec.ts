@@ -4,13 +4,21 @@ import { ORIGIN, serveProduct } from './support';
 // Exercise the actual App/AuthGuard/Settings overlay/Wizard boundary. All
 // server responses are fixture-owned; the Vite server has a dead backend.
 // The Python connection tests separately establish the readiness producer.
+//
+// C4 moved the assistant card's model entry into a dialog the step owns, so setup
+// no longer leaves for the Hub settings page at all. This used to cover the return
+// from it — going out, migrating there and coming back to the same step. There is
+// nothing to come back from now, and the contract that mattered is the one that
+// survives it: the Hub owns authentication, the take-over happens without the step
+// ever being unmounted, and completion stays gated on a real readiness answer.
 for (const width of [1200, 390]) {
-  test(`Hub takeover returns to the same setup step and permits completion at ${width}px`, async ({ page }, info) => {
+  test(`Hub owns assistant authentication and its take-over completes inside setup at ${width}px`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 844 });
     const denied = await serveProduct(page);
     const nativeRequests: string[] = [];
     const writes: string[] = [];
     const applied: string[][] = [];
+    const configWrites: unknown[] = [];
     const observedReady: boolean[] = [];
     const pageErrors: string[] = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -39,10 +47,17 @@ for (const width of [1200, 390]) {
       agent: { default_cwd: '/fixture/work' },
       model_hub: { enabled: true, runtime_default_applied: true },
     });
+    // The gate joins the route to the named Agent it would enter on, so a taken-over
+    // credential is only half the answer: the backend also has to say which model this
+    // name resolves to. That row is what the server writes when the take-over lands,
+    // and without it this machine has a source it cannot run a turn with.
     const supply = () => ({
       backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed',
       sources: { order: migrated ? [source.id] : [], eligibility: [] },
-      routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null,
+      routes: {}, builtin_models: [], catalog_models: [], menu: null,
+      named_agents: migrated
+        ? [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok', route_reason: null }]
+        : [],
       model_supply: [], supply_status: migrated ? 'ok' : 'unavailable',
     });
     const items = () => migrated ? [] : [{
@@ -64,6 +79,7 @@ for (const width of [1200, 390]) {
       if (path === '/api/config') {
         if (request.method() === 'POST') {
           const body = request.postDataJSON();
+          configWrites.push(body);
           if (body.setup_completed === true) completed = true;
         }
         return answer(config());
@@ -123,15 +139,24 @@ for (const width of [1200, 390]) {
 
     await page.goto('/setup');
     await page.getByRole('button', { name: 'Get started', exact: true }).click();
+    // Nothing is connected yet, so the journey opens on Providers with only the
+    // take-over it found on offer. Saying so there is what leaves a way through to
+    // the screen that owns the Hub — and the take-over is still only on offer when
+    // it does: the credential this run imports is taken over from the Hub itself.
+    await expect(page.locator('[data-setup-screen="providers"]')).toBeVisible();
+    await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
     const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
     await expect(enter).toBeDisabled();
     await expect.poll(() => observedReady.length).toBeGreaterThan(0);
     const wizard = await page.locator('.onboarding-assistants').elementHandle();
     const claude = page.getByLabel('Claude Code', { exact: true });
+    // The card offers no native key: whatever this backend authenticates with is
+    // the Hub's to hold, and the step says so rather than offering a second way.
     await expect(claude.getByRole('button', { name: 'Add API Key', exact: true })).toHaveCount(0);
-    await claude.getByRole('button', { name: 'Open Model Hub', exact: true }).click();
-    await expect(page).toHaveURL(/\/settings\/models$/);
-    await page.getByRole('button', { name: 'Migrate configuration', exact: true }).click();
+
+    // The take-over is the step's own: the notice opens the Hub's migration dialog
+    // in place, so nothing here navigates and there is no step to come back to.
+    await page.getByRole('button', { name: 'Review migration', exact: true }).click();
     const migration = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Migrate to the Model Hub', exact: true }) });
     await expect(migration).toBeVisible();
     await migration.getByRole('button', { name: 'Start migration', exact: true }).click();
@@ -139,13 +164,18 @@ for (const width of [1200, 390]) {
     await expect(migration).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`hub-migrated-${width}.png`) });
 
-    // Actual browser history closes both the desktop sheet and mobile surface.
-    await page.goBack();
-    await expect(page).toHaveURL(/\/setup$/);
+    // The step was never unmounted, so the same node is still the one being read.
     await expect(page.locator('.onboarding-assistants')).toBeVisible();
     expect(await wizard!.evaluate((node) => node.isConnected)).toBe(true);
+
+    // Readiness is re-read the way this step says it is: the caption under the pair
+    // offers the rescan, and the answer it gets is what opens the workspace. The
+    // take-over used to be followed by a return to this screen, which re-read the
+    // backends on the way in; completing it in place needs the rescan to do it.
+    await expect(enter).toBeDisabled();
+    await page.getByRole('button', { name: 'Re-scan', exact: true }).click();
     await expect(enter).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Review and migrate', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Review migration', exact: true })).toHaveCount(0);
     expect(observedReady).toContain(true);
     await page.screenshot({ path: info.outputPath(`setup-hub-ready-${width}.png`), fullPage: true });
     await enter.click();
@@ -154,9 +184,16 @@ for (const width of [1200, 390]) {
     expect(pageErrors).toEqual([]);
     expect(nativeRequests).toEqual([]);
     expect(writes.filter((write) => !write.endsWith('/api/models/migration/scan'))).toEqual([
+      'POST /api/config',
       'POST /api/models/migration/apply',
       'POST /api/config',
     ]);
+    // The two config writes are not the same write. The first is the provider screen's
+    // bootstrap seed — an empty patch whose only effect is a config file the controller
+    // can load — and the second is the completion itself. Reading their payloads is what
+    // keeps this an exact account rather than a count: the take-over writes the Hub's
+    // sources and nothing else, and no screen slipped a preference in along the way.
+    expect(configWrites).toEqual([{}, { setup_completed: true }]);
     // Initial/return flow must never need a running backend. App-shell reads
     // after completion are not part of this test's connection contract.
     expect(denied.filter((request) => /\/backend\/.*\/auth/.test(request))).toEqual([]);

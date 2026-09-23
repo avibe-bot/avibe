@@ -165,7 +165,10 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
     "turn.request_nonfallback": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
         discriminator="request_nonfallback",
-        copy_keys=(("default", "modelHub.launch.request_incompatible"),),
+        copy_keys=(
+            ("default", "modelHub.launch.request_incompatible"),
+            ("upstream_detail", "modelHub.launch.request_incompatible_detail"),
+        ),
     ),
     "turn.engine_down": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
@@ -215,6 +218,8 @@ class TurnOutcomeProjectionInput:
     stream_started: bool = False
     next_current_changed: bool = False
     source_transition_persisted: bool | None = None
+    # Redacted, bounded upstream error text for this turn's reply only.
+    upstream_detail: str | None = None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -251,6 +256,8 @@ def _turn_outcome_variant(
         return "next_current"
     if projection.stream_started and "stream_started" in copy_keys:
         return "stream_started"
+    if projection.upstream_detail and "upstream_detail" in copy_keys:
+        return "upstream_detail"
     if (
         projection.supply_facts is not None
         and projection.supply_facts.supply_state == "waiting"
@@ -274,6 +281,7 @@ def produce_turn_outcome(
     attempted_hop: tuple[str, str] | None = None,
     stream_started: bool = False,
     source_transition_persisted: bool | None = None,
+    upstream_detail: str | None = None,
 ) -> TurnOutcomeProjectionInput:
     """Produce complete terminal facts from one authoritative matrix row."""
 
@@ -340,6 +348,11 @@ def produce_turn_outcome(
         stream_started=stream_started,
         next_current_changed=next_current_changed,
         source_transition_persisted=source_transition_persisted,
+        upstream_detail=(
+            upstream_detail
+            if "upstream_detail" in variants and upstream_detail
+            else None
+        ),
     )
     if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
         raise TurnOutcomeProductionError(
@@ -480,6 +493,7 @@ def project_turn_outcome_copy(
             "source": facts.source if facts is not None else "",
             "retry_at": facts.retry_at if facts is not None else "",
             "blockers": facts.blockers if facts is not None else (),
+            "detail": projection.upstream_detail or "",
         },
     )
 

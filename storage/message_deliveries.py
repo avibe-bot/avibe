@@ -2261,19 +2261,22 @@ def accepted_agent_run_ids_for_turn(conn: Connection, turn_id: str) -> list[str]
     return run_ids
 
 
-def agent_run_exclusively_owns_turn(
+def agent_run_input_reached_turn(
     conn: Connection,
     *,
     run_id: str,
     turn_id: str,
 ) -> tuple[bool, str]:
-    """Whether stopping ``run_id`` may safely interrupt the exact Turn.
+    """Whether canceling ``run_id`` must stop the exact live Turn.
 
-    A Run may own either the sole claimed input of a starting Turn or the sole
-    accepted input of an active Turn. Steers, claimed batch siblings, and live
-    replacement control are independent participants. The caller holds SQLite's
-    writer reservation while asking, so no participant can slip between this
-    proof and the P0 control-slot write.
+    One live Turn is one backend process turn: every initial, batched, or
+    steered input written into it shares that process, so no single Run can be
+    withdrawn from it. Canceling any Run whose input may have reached the Turn
+    therefore stops the whole Turn, exactly like Session Stop. Only inputs
+    proven outside the Turn (queued, pending steer, a waiting replacement) are
+    canceled alone. A replacement already interrupting the Turn keeps its own
+    authority. The caller holds SQLite's writer reservation while asking, so no
+    participant can change between this proof and the P0 control-slot write.
     """
 
     normalized_run_id = str(run_id or "").strip()
@@ -2285,11 +2288,10 @@ def agent_run_exclusively_owns_turn(
         return False, "turn_not_active"
     row = conn.execute(
         select(
-            agent_runs.c.status,
-            agent_runs.c.delivery_id,
             message_deliveries.c.session_id,
             message_deliveries.c.state,
             message_deliveries.c.turn_id,
+            message_deliveries.c.current_target_turn_id,
         )
         .select_from(
             agent_runs.join(
@@ -2304,29 +2306,21 @@ def agent_run_exclusively_owns_turn(
         return False, "run_delivery_missing"
     if str(row["session_id"] or "") != str(turn["session_id"] or ""):
         return False, "run_session_mismatch"
-    expected_delivery_state = "claimed" if turn["state"] == "starting" else "accepted"
-    if (
-        str(row["turn_id"] or "") != normalized_turn_id
-        or row["state"] != expected_delivery_state
-    ):
+    in_turn = (
+        str(row["turn_id"] or "") == normalized_turn_id
+        and row["state"] in {"claimed", "accepted"}
+    ) or (
+        str(row["current_target_turn_id"] or "") == normalized_turn_id
+        and row["state"] in {"steering", "reconciling_steer"}
+    )
+    if not in_turn:
         return False, "run_not_owned_by_turn"
-    if str(row["delivery_id"] or "") != str(turn["initial_delivery_id"] or ""):
-        return False, "run_is_steered_participant"
-    if str(row["status"] or "").strip().lower() not in {
-        "running",
-        "processing",
-    }:
-        return False, "run_not_running"
-    if agent_run_ids_for_delivery(conn, {"id": row["delivery_id"]}) != [
-        normalized_run_id
-    ]:
-        return False, "delivery_has_other_runs"
-    if turn.get("control_mode") == "replace" and turn.get("control_state") in {
-        "pending",
-        "interrupting",
-        "waiting_terminal",
-        "reconciling",
-    }:
+    # Only an accepted replacement owns the Turn's end; before its receipt the
+    # caller waits for it, and a refusal leaves this Run to stop the Turn.
+    if (
+        turn.get("control_mode") == "replace"
+        and turn.get("control_state") == "waiting_terminal"
+    ):
         successor_turn_id = str(turn.get("control_successor_turn_id") or "")
         successor_delivery_id = str(
             turn.get("control_successor_delivery_id") or ""
@@ -2346,31 +2340,7 @@ def agent_run_exclusively_owns_turn(
         ):
             return False, "turn_has_replacement_successor"
         return False, "turn_replacement_unresolved"
-    participant_delivery_ids = [
-        str(value)
-        for value in conn.execute(
-            select(message_deliveries.c.id)
-            .where(
-                or_(
-                    and_(
-                        message_deliveries.c.turn_id == normalized_turn_id,
-                        message_deliveries.c.state.in_(("claimed", "accepted")),
-                    ),
-                    and_(
-                        message_deliveries.c.current_target_turn_id
-                        == normalized_turn_id,
-                        message_deliveries.c.state.in_(
-                            ("pending_steer", "steering", "reconciling_steer")
-                        ),
-                    ),
-                )
-            )
-            .order_by(message_deliveries.c.turn_position, message_deliveries.c.id)
-        ).scalars()
-    ]
-    if participant_delivery_ids != [str(row["delivery_id"])]:
-        return False, "turn_has_other_participants"
-    return True, "exclusive_run_owner"
+    return True, "run_input_in_turn"
 
 
 def retire_queued_with_run(

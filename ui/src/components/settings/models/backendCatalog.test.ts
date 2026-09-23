@@ -271,23 +271,28 @@ describe('the bare id chokepoint', () => {
  * producer that reaches for the resolver directly is one that is about to write
  * a draft field without the write that carries the rule.
  */
-const MODELS_DIR = join(process.cwd(), 'src/components/settings/models');
-const OWNER = 'backendCatalog.ts';
+const SRC_DIR = join(process.cwd(), 'src');
+const OWNER = 'components/settings/models/backendCatalog.ts';
 
 /**
- * Every Model Hub module that ships, by path relative to the tree's root.
+ * Every module that ships, by path relative to the source root.
  *
  * Recursive, and tests excluded. Recursive because a producer one folder down is
  * exactly the one a flat read would miss, and a boundary test that can be
- * escaped by moving a file is a boundary in name only.
+ * escaped by moving a file is a boundary in name only — which is why the walk
+ * starts at the source root rather than at the Model Hub's own folder. A
+ * producer in another folder is the same producer: setup's route step reached
+ * past both chokepoints below from `components/onboarding`, and shipped a
+ * defaulted protocol and an addition that promised nothing about its suppliers
+ * while a Hub-scoped walk stayed green.
  */
 const shippedModules = (): { name: string; source: string }[] => {
   const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (
     entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)]
   ));
-  return walk(MODELS_DIR)
+  return walk(SRC_DIR)
     .filter((path) => /\.tsx?$/.test(path) && !/\.test\.tsx?$/.test(path))
-    .map((path) => ({ name: relative(MODELS_DIR, path), source: readFileSync(path, 'utf8') }));
+    .map((path) => ({ name: relative(SRC_DIR, path), source: readFileSync(path, 'utf8') }));
 };
 
 /** Whoever calls this, outside the module that owns the rule, is who breaks it. */

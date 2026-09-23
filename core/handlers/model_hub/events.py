@@ -113,6 +113,31 @@ def redact_credential_material(value: str) -> str:
     return redacted
 
 
+# Everything after a secret-like label (``token=…``, ``client_secret: "…"``,
+# ``password: `a b c` ``, serialized ``{"api_key": "…"}``) in free text Avibe
+# republishes. The value's extent is
+# deliberately not parsed: quoting, backticks, and escapes vary per upstream, and a
+# parser that misjudges the end leaks the rest of the value, so the remainder of the
+# message is dropped instead. The label needs no word boundary (``client_secret``
+# still matches on ``secret``) and has no nested quantifier, so matching stays linear
+# on hostile input. ``contains_credential_material`` keeps the narrower shape-based
+# patterns so benign labels such as ``max token: 4096`` in a model name are not
+# rejected.
+_LABELED_SECRET_PATTERN = re.compile(
+    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
+)
+
+
+def redact_untrusted_text(value: str) -> str:
+    """Redact credential shapes, then everything after the first labeled secret."""
+
+    redacted = redact_credential_material(value)
+    match = _LABELED_SECRET_PATTERN.search(redacted)
+    if match is None:
+        return redacted
+    return redacted[: match.end()] + "[redacted]"
+
+
 def contains_credential_material(value: object) -> bool:
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return any(pattern.search(rendered) for pattern in _CREDENTIAL_PATTERNS)

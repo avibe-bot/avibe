@@ -2178,7 +2178,7 @@ def test_source_create_nonce_owns_permanent_credential_through_cancellation(tmp_
 
 def test_agents_endpoint_projects_builtin_models(tmp_path):
     """list_agents() carries each fixed menu from the backend catalog."""
-    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+    from vibe.backend_model_catalog import load_bundled_catalog, visible_backend_model_entries
 
     service, _store, _adapter = _service(tmp_path)
     agents = {agent["backend"]: agent for agent in service.list_agents()}
@@ -2187,7 +2187,7 @@ def test_agents_endpoint_projects_builtin_models(tmp_path):
 
     catalog = load_bundled_catalog()
     for backend in ("claude", "codex"):
-        expected = [entry["id"] for entry in backend_model_entries(backend, catalog)]
+        expected = [entry["id"] for entry in visible_backend_model_entries(backend, catalog)]
         assert expected, f"bundled catalog must list built-in {backend} models"
         assert agents[backend]["builtin_models"] == expected
 
@@ -2854,6 +2854,198 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     assert "invalid\ud800" not in {model.id for model in agent.models}
     assert {model.id: model.to_payload() for model in agent.models if model.id in unchanged} == unchanged
     assert refreshed == ["codex"]
+
+
+def test_retired_builtins_leave_the_picker_but_stay_routeable(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_pinned0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Pinned supplier",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-sonnet-4", provenance="manual")],
+        credential_ref="cred_pinned0001",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["claude"]
+    agent.sources.order = [source.id]
+    pinned_hop = ModelHubRouteHopConfig(source_id=source.id, model_id="claude-sonnet-4")
+    agent.models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-haiku-4", origin="manual"),
+    ]
+    agent.routes = {"claude-sonnet-4": ModelHubRouteConfig(hops=(pinned_hop,))}
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"claude": {"complete": True, "models": [{"id": "claude-opus-5"}]}},
+    )
+
+    asyncio.run(service.reconcile_builtin_models(("claude",)))
+
+    # Every persisted row survives, so session, channel, and Agent pins still route.
+    assert [model.id for model in store.config.agents["claude"].models] == [
+        "claude-opus-5",
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    ]
+    # Only the unpinned retired built-in leaves the picker.
+    assert [row["id"] for row in service.backend_catalog_models("claude")] == [
+        "claude-opus-5",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    ]
+
+
+def test_compatibility_projections_hide_retired_builtins_unless_requested(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+    store.requested_models["claude"] = "claude-sonnet-4"
+
+    payload = service.get_agent_sources("claude")
+
+    assert payload["builtin_models"] == ["claude-opus-5", "claude-sonnet-4"]
+    assert [row["model_id"] for row in payload["model_supply"]] == ["claude-opus-5", "claude-sonnet-4"]
+    assert [row["id"] for row in payload["catalog_models"]] == ["claude-opus-5", "claude-sonnet-4"]
+
+
+def test_a_remote_only_tombstone_hides_an_existing_builtin(monkeypatch, tmp_path):
+    from vibe import backend_model_catalog
+
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4-8", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "load_cached_remote_catalog",
+        lambda **_kwargs: {"backends": {"claude": {"models": [{"id": "claude-opus-4-8", "visibility": "hide"}]}}},
+    )
+
+    assert [row["id"] for row in service.backend_catalog_models("claude")] == ["claude-opus-5"]
+    assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-5", "claude-opus-4-8"]
+
+
+def test_a_native_source_cannot_reoffer_a_hidden_retired_builtin(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Native supplier",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-opus-4", provenance="manual"),
+            ModelHubModelConfig(id="claude-opus-4-8", provenance="manual"),
+        ],
+        credential_ref="cred_native0001",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["claude"]
+    agent.sources.order = [source.id]
+    agent.models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+
+    providers = [row["id"] for row in service.agent_model_candidates("claude")["providers"]]
+
+    assert "claude-opus-4" not in providers
+    assert "claude-opus-4-8" in providers
+
+
+def test_a_native_source_cannot_reoffer_a_removed_retired_builtin(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0002",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Native supplier",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4", provenance="manual")],
+        credential_ref="cred_native0002",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["claude"]
+    agent.sources.order = [source.id]
+    agent.models = [ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin")]
+    agent.removed_model_ids = ["claude-opus-4"]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+
+    providers = [row["id"] for row in service.agent_model_candidates("claude")["providers"]]
+
+    assert "claude-opus-4" not in providers
+
+
+def test_a_legacy_only_retired_codex_row_leaves_the_picker(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["codex"].models = [
+        ModelHubBackendModelConfig(id="gpt-6-sol", origin="builtin"),
+        ModelHubBackendModelConfig(id="gpt-5.1-codex-max", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["codex"] = [{"id": "gpt-6-sol"}]
+
+    assert [row["id"] for row in service.backend_catalog_models("codex")] == ["gpt-6-sol"]
+    assert [model.id for model in store.config.agents["codex"].models] == ["gpt-6-sol", "gpt-5.1-codex-max"]
+
+
+def test_picker_reads_schedule_the_remote_catalog_refresh(monkeypatch, tmp_path):
+    from vibe import backend_model_catalog
+
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+    ]
+    service._builtin_snapshot_cache["claude"] = [{"id": "claude-opus-5"}]
+    calls = []
+
+    def cached(*, schedule_refresh=True, **_kwargs):
+        calls.append(schedule_refresh)
+        return {}
+
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", cached)
+
+    service.get_agent_sources("claude")
+
+    assert calls and all(calls)
+
+
+def test_a_snapshot_revived_retired_builtin_stays_in_the_picker(monkeypatch, tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin", display_name="Opus 4 (kept)"),
+    ]
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"claude": {"complete": True, "models": [{"id": "claude-opus-4"}]}},
+    )
+
+    asyncio.run(service.reconcile_builtin_models(("claude",)))
+
+    rows = service.backend_catalog_models("claude")
+    assert [(row["id"], row["display_name"]) for row in rows] == [("claude-opus-4", "Opus 4 (kept)")]
 
 
 def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp_path):
@@ -6991,6 +7183,9 @@ def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
 
         def client_if_running(self):
             return self._client
+
+        def with_engine_excluded(self, operation):
+            return operation(self._client)
 
     class RuntimeCleanupAdapter(FakeAdapter):
         def __init__(self, runtime_adapter):

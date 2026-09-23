@@ -27,6 +27,7 @@ from core.process_isolation import (
     process_group_identity_status,
     process_identity_from_payload,
     process_identity_matches,
+    process_identity_recycled,
     serialize_process_identity,
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
@@ -1434,7 +1435,7 @@ class ManagedWatchService:
                 )
                 block(watch_id, entry)
                 continue
-            if live_identity.create_time != expected_identity.create_time:
+            if process_identity_recycled(expected_identity, live_identity):
                 logger.info(
                     "Recorded stale watch worker pid=%s watch_id=%s no longer exists; "
                     "the pid belongs to a newer process",
@@ -1529,10 +1530,7 @@ class ManagedWatchService:
                             live_identity.create_time,
                         )
                     else:
-                        worker_is_gone = (
-                            live_identity.create_time
-                            != expected_identity.create_time
-                        )
+                        worker_is_gone = process_identity_recycled(expected_identity, live_identity)
             except Exception:
                 logger.debug(
                     "Failed to recheck blocked stale watch pid=%s watch_id=%s",

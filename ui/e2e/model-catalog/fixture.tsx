@@ -19,6 +19,14 @@ const backend = params.get('backend') as AgentBackend;
 const language = createInstance();
 await language.init({ lng: params.get('lang') ?? 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
 let saved: BackendModel[] = [{ ...blankBackendModel(), id: 'claude-existing-model', display_name: 'Existing model', context_window: 200000 }];
+if (params.has('reasoning-off')) {
+  saved = [{
+    ...saved[0],
+    supports_reasoning: true,
+    reasoning_efforts: ['high', 'medium', '自定义'],
+    native_protocol: backend === 'opencode' ? 'anthropic' : undefined,
+  }];
+}
 const writes: BackendModelsPut[] = [];
 const supply = (): AgentSupply => ({
   backend, cli_present: true, mode: 'hub', menu_kind: backend === 'opencode' ? 'open' : 'fixed',

@@ -1305,6 +1305,10 @@ export type WorkbenchMessage = {
   source: 'user' | 'agent' | 'harness' | string | null;
   author_id: string | null;
   author_name: string | null;
+  // Read-side display name for a human sender on an Organization instance,
+  // resolved from author_id. Absent on a personal instance and whenever the
+  // sender cannot be resolved; never carries the underlying email address.
+  sender_label?: string | null;
   // Read-side provenance for an agent-callback ("自动触发") harness message (A9a):
   // the session that triggered the run, resolved from the run's source_actor.
   // Present only on agent_run harness messages; enables the source-session chip

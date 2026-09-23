@@ -369,23 +369,43 @@ transport is authorized by this amendment.
 
 ### Registration Synchronization Decision
 
-Pinned-engine experiments proved file/atomic/management configuration hot reload
-with unchanged PID and uninterrupted existing streams for all three protocols.
-However, neither the management acknowledgment nor `/v1/models` provides an
-atomic scheduler/config-generation completion barrier. The feature therefore
-retains the existing supervised restart transaction with explicit in-flight
-protection instead of introducing an unproven readiness heuristic.
+Saving configuration never restarts the engine and never waits for in-flight
+work. Pinned-engine experiments proved that CPA hot-reloads its config with an
+unchanged PID and uninterrupted existing streams for all three protocols. They
+also proved that CPA does not observe an atomic rename of its watched config
+file. A running engine therefore receives the rendered projection through the
+management `PUT /v0/management/config.yaml`, which validates it, writes the
+file in place and reloads.
 
-The adapter owns invocation leases and drains existing transport operations
-before a configuration-triggered engine restart. New invocations wait behind the
-same configuration barrier. Lease release belongs to transport completion,
-close, or cancellation, independently of service settlement and its mutation
-lock. A synchronization cancellation or exception cannot leak a barrier or
-lease. Do not cancel unrelated active requests just to save configuration.
-Pure reordering with unchanged registration remains restart-free, and ordinary
-invocations never trigger registration changes. Exercise buffered and streaming
-completion, early close, cancellation, sync failure/rollback, and concurrent Save
-to prove there is no deadlock or partial-output interruption.
+Neither the acknowledgment nor `/v1/models` is an atomic config-generation
+barrier, and a save may leave every routed ID unchanged (for example a
+reasoning-effort edit). Each rendered projection therefore carries a
+per-process generation in every API-key model's display name. Synchronization
+completes when CPA's Grok-client model listing, the one format that keeps both
+the routed ID and the display name, shows every expected route at this
+generation and no removed one, within a bounded wait. A rejection or timeout
+fails the save and restores the previous projection through the same reload
+path. A lost acknowledgment or a stalled management path never stops a live
+process, because neither proves its streams dead; only an engine that has
+already exited is left to its next start, which renders the projection.
+
+The adapter's routing lock orders a projection change against new admissions.
+A request admitted before a save keeps its projection until the engine has
+read the request body, so a removal cannot strand it; that wait is bounded by a
+local write, never by inference. CPA resolves the route on reading the body and
+applies a config write only after its reload debounce, so the written body
+orders the request first; its only later acknowledgment, response headers,
+waits for upstream output and would make a save wait on inference. Established transport leases are neither
+awaited nor cancelled, and a Save settles while a turn is streaming. Leases
+still gate the one remaining restart: an engine binary upgrade. Credential
+revocation follows an unbinding save, so a live engine drops the secret through
+the same verified hot reload, which rewrites its config; other instances'
+configs are cleared. An unverifiable reload fails the revocation instead of
+restarting, and the journaled pending revocation is retried. Pure reordering with
+unchanged registration is a no-op, and ordinary invocations never trigger
+registration changes. Exercise buffered and streaming calls across a Save,
+cancellation, reload failure/rollback, and concurrent Save, to prove there is
+no waiting, restart, or partial-output interruption.
 
 Acceptance states properties, with fixtures covering the supported shapes:
 

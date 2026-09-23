@@ -5078,32 +5078,50 @@ def get_settings(platform: Optional[str] = None, *, user_context: Any = None) ->
 
 
 def _normalize_backend_routing_payload(routing_payload: dict) -> dict:
+    from config.v2_config import is_model_hub_enabled
+    from core.handlers.model_hub.service import V2ModelHubConfigStore
     from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
     routing = _parse_routing(routing_payload or {})
-    if _backend_for_routing_agent(routing.agent_name) == "claude":
+    backend, agent_model = _routing_agent_backend_and_model(routing.agent_name)
+    if backend == "claude" and routing.reasoning_effort:
+        model = routing.model or agent_model
+        catalog_efforts = None
+        agent_catalog = (
+            V2ModelHubConfigStore().load().agents["claude"] if is_model_hub_enabled() else None
+        )
+        if agent_catalog is not None and agent_catalog.mode == "hub":
+            row = next((row for row in agent_catalog.models if row.id == model), None)
+            if row is not None:
+                # Match the picker: a present empty list (or non-reasoning
+                # model) is authoritative, not a request for backend tiers.
+                catalog_efforts = [] if row.supports_reasoning is False else row.reasoning_efforts
+            # Unknown Hub rows retain the existing generic normalization;
+            # a same-named native model must not grant them Off support.
+        else:
+            catalog_efforts = backend_model_catalog.catalog_reasoning_efforts_for_model("claude", model)
         routing.reasoning_effort = normalize_claude_reasoning_effort(
-            routing.model,
+            model,
             routing.reasoning_effort,
+            catalog_efforts,
         )
     return _routing_to_dict(routing)
 
 
-def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
+def _routing_agent_backend_and_model(agent_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     name = str(agent_name or "").strip()
     if not name:
-        return None
-    if is_agent_backend(name):
-        return name
+        return None, None
     store = VibeAgentStore()
     try:
         agent = store.get(name)
-        return agent.backend if agent is not None else None
+        if agent is not None:
+            return agent.backend, agent.model
     except Exception:
         logger.debug("Failed to resolve Agent backend while normalizing routing payload", exc_info=True)
-        return None
     finally:
         store.close()
+    return (name, None) if is_agent_backend(name) else (None, None)
 
 
 def _normalize_show_message_types_for_platform(show_message_types: Optional[list], platform: str) -> list[str]:
