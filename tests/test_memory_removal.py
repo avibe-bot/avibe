@@ -60,9 +60,13 @@ def _old_config(tmp_path, monkeypatch):
     return path, payload
 
 
-def test_retired_memory_removed_only_after_successful_startup_migration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("minimal_hub", [False, True])
+def test_retired_memory_removed_only_after_successful_startup_migration(tmp_path, monkeypatch, minimal_hub):
     """MUC-001: startup persistence removes the key without losing other keys or data."""
     path, payload = _old_config(tmp_path, monkeypatch)
+    if minimal_hub:
+        payload["model_hub"] = {"enabled": False, "runtime_default_applied": True}
+        path.write_text(json.dumps(payload))
     data = tmp_path / "home/memory/sentinel.bin"
     data.parent.mkdir(parents=True)
     data.write_bytes(b"\x00legacy\xff")
@@ -73,7 +77,7 @@ def test_retired_memory_removed_only_after_successful_startup_migration(tmp_path
     assert not loaded.load_warnings
     assert "memory" not in saved
     assert saved["legacy_delivery"] == payload["legacy_delivery"]
-    assert saved["model_hub"] == loaded.model_hub.to_payload()
+    assert saved["model_hub"] == payload["model_hub"]
     assert data.read_bytes() == b"\x00legacy\xff"
     assert any(path.parent.glob("config.json.bak-model-hub-migration-*"))
 

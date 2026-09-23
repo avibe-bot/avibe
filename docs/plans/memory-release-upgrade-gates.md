@@ -12,6 +12,8 @@ either one by themselves.
 
 - MUC-001/002/003: on successful startup migration, remove only the obsolete
   root `memory` key; preserve every other root key and all Memory user files.
+  A memory-only write preserves even a minimal valid Model Hub payload exactly;
+  a real Model Hub migration retains its existing serialization behavior.
   Recovery and losing a config compare-and-swap leave the old file intact.
 - MUC-004: before GitHub asset upload and PyPI publication, download both
   published v3.1.0 wheels, verify their fixed SHA-256 identities, then run the

@@ -3267,7 +3267,8 @@ class V2Config:
         ):
             persisted_payload = copy.deepcopy(payload)
             persisted_payload.pop("memory", None)
-            persisted_payload["model_hub"] = config.model_hub.to_payload()
+            if migrated:
+                persisted_payload["model_hub"] = config.model_hub.to_payload()
             try:
                 backup, persistence_warning = _persist_migrated_config_payload(
                     path,
