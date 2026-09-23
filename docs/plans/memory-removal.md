@@ -361,10 +361,10 @@ contains pre-existing uncommitted files; preserve unrelated changes.
 ### Historical release compatibility (2026-09-23)
 
 PR #2120 was closed without merging. Its review, CI and repository branch remain
-available for local testing. On 2026-09-23 the owner approved item 1, the inert
-old-updater bridge, as a narrow exception to removing Memory release artifacts.
-Item 2, historical release asset availability, is still a separate pending
-decision. Neither decision authorizes publishing, modifying an existing release,
+available for local testing. The owner requested both release compatibility
+concerns on 2026-09-23 and then chose the inert old-updater wheel for item 1.
+Item 2 retains only the scheduled protection of already-published historical
+assets. Neither choice authorizes publishing, modifying an existing release,
 reopening/merging the closed PR, or restarting a local service.
 
 1. **Old-client upgrade bridge (owner-approved for implementation).** Released updaters with Memory enabled or the
@@ -392,7 +392,7 @@ reopening/merging the closed PR, or restarting a local service.
    `avibe-memory` wheel. Test any additional supported historical updater tags
    against their tagged code rather than treating every earlier version alike.
 
-2. **Historical asset availability (owner-approved for implementation, 2026-09-23 11:45 Asia/Shanghai).** Keep the published old Memory Runtime
+2. **Historical asset availability (owner-requested release-only compatibility).** Keep the published old Memory Runtime
    URLs valid independently of the removed product. Retain a scheduled,
    release-only guard for historical self-pinned manifests, ideally using the
    original verifier from an immutable repository commit rather than packaging
@@ -438,12 +438,16 @@ excluded, while a new `avibe-memory` wheel is ignored only after its exact
 three-file dist-info shape, version and dependency/extra emptiness are verified.
 No Runtime manifest fallback is allowed for malformed historical wheels. Guard
 tests cover foreign tags, content tampering, pinned URLs, backup output identity
-and repeat fetch byte preservation. This guard remains separate from application
-packaging, startup, dependencies and Memory data.
+and repeat fetch byte preservation. A hermetic test also executes the actual
+`resolve_manifests` workflow shell with mocked GitHub release responses: valid
+historical manifests enter the guard matrix, inert preview wheels and malformed
+legacy wheels have explicit, distinct exclusions, and fixture assets stay
+byte-identical. A failed fetch preserves an existing verified local backup.
+The focused release/guard suite passed 103 tests. This guard remains separate
+from application packaging, startup, dependencies and Memory data.
 
 No Memory configuration, CLI, UI, sidecar, capture/recall, package import or data
-migration returns. Before declaring it complete, verify the old tagged updater
-can fetch the wheel at its exact URL and complete an isolated upgrade, that new
-installs do not acquire the distribution, and that neither legacy user-data
-path is written. Keep the historical guard release-only and never execute it in
-local application startup or ordinary package installation.
+migration returns. Keep the historical guard release-only; it is not invoked
+by application startup or ordinary package installation. These branch tests do
+not run the scheduled workflow against live GitHub Releases; the branch and
+closed PR do not deploy either compatibility measure.
