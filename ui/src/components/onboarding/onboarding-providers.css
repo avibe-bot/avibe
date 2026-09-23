@@ -101,7 +101,14 @@
   border-color: var(--mint);
   box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
+/* Greying a card out and showing the no-entry cursor says the person is being kept
+   from acting. A connected card is disabled for a purely mechanical reason — there is
+   nothing left to press — and the reference draws it at full strength beside the rest.
+   Only a blocked card, which the person really is being held out of, wears the denial. */
 .setup-provider-card:disabled {
+  cursor: default;
+}
+.setup-provider-card[data-blocked]:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -171,7 +178,7 @@
 }
 .setup-provider-name {
   font-size: var(--obp-card-name);
-  font-weight: 600;
+  font-weight: 550;
   line-height: 1.3333;
   color: var(--foreground);
   overflow: hidden;
@@ -365,7 +372,7 @@
 }
 .setup-destination-name {
   font-size: var(--obp-card-name);
-  font-weight: 600;
+  font-weight: 550;
   line-height: 1.3333;
   color: var(--foreground);
   overflow: hidden;
