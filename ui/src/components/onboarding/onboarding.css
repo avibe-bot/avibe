@@ -1414,7 +1414,33 @@
    desktop tier, 60 on a phone — and it is the step that carries the OpenCode permission
    block, the tallest thing the slot ever holds. 48 is what every tier can give it
    without reaching the cards; the block scrolls inside that. */
-.onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
+/* Align the captions without moving the shared heading, card, or action anchors. */
+@media (min-width: 760px) {
+  .onboarding-shell {
+    --ob-caption-drop: calc(var(--ob-story-band) - var(--ob-summary-h) / 2 - var(--ob-card-h) * 38 / 300);
+    --ob-caption-nudge: 36px;
+  }
+  [data-setup-screen-root="intro"] .onboarding-story-caption {
+    top: calc(var(--ob-card-h) * 338 / 300 + (var(--ob-stage-h) - var(--ob-diagram-h)) / 2 + var(--ob-caption-drop) + var(--ob-caption-nudge));
+  }
+  /* The hint grows around the caption line inside the room above the action. */
+  .onboarding-step[data-setup-screen="assistants"] > .onboarding-screens > .onboarding-action-aside:not(:empty) {
+    --ob-aside-half: calc(var(--ob-card-h) * 38 / 300 - 8px);
+    margin-bottom: calc(var(--ob-band-gap) + var(--ob-summary-h) / 2 - var(--ob-aside-half));
+    min-height: calc(var(--ob-aside-half) * 2);
+    max-height: calc(var(--ob-aside-half) * 2);
+    justify-content: center;
+  }
+}
+@media (max-height: 800px) and (min-width: 760px) {
+  .onboarding-shell { --ob-caption-nudge: 37.5px; }
+}
+@media (min-width: 1600px) and (min-height: 950px) {
+  .onboarding-shell { --ob-caption-nudge: 19.5px; }
+}
+@media (max-width: 759px) {
+  .onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
+}
 .onboarding-setup-hint { width: 100%; text-align: center; }
 /* Sentence centred on the action's axis, rescan beside it: equal flanking columns put
    the middle one in the middle of the slot whatever the link costs, and the link starts

@@ -574,6 +574,29 @@ const expectSamePair = async (page: Page, before: Pair) => {
  * slot leaves them agreeing.
  */
 test.describe('shared screen anchors', () => {
+  for (const viewport of [{ width: 1132, height: 664 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }]) {
+    test(`${viewport.width} desktop captions share one horizontal line`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await serveProduct(page);
+      await serveModelHub(page);
+      await openOnboarding(page, { lang: 'zh' });
+      const center = async (selector: string) => {
+        const rect = await box(page, selector);
+        return rect.y + rect.height / 2;
+      };
+      const welcome = await center('.onboarding-story-caption');
+      await page.getByRole('button', { name: '立即开始' }).click();
+      await page.clock.runFor(950);
+      await expect(page.locator('.setup-provider-summary')).toContainText('已选');
+      const providers = await center('.setup-provider-summary');
+      await page.locator('.onboarding-setup-hint button').click();
+      await page.clock.runFor(950);
+      const assistants = await center('.onboarding-setup-hint');
+      expect(welcome).toBeCloseTo(providers, 0);
+      expect(assistants).toBeCloseTo(providers, 0);
+    });
+  }
+
   test('the heading and the action keep one y on every screen, with or without an aside', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     const denied = await serveProduct(page);
@@ -659,12 +682,15 @@ test.describe('shared action anchor', () => {
           await expect(page.locator('[data-setup-screen-root]:not([hidden]) h1')).toBeFocused();
           await expect(page.locator('[data-setup-screen-root][hidden]:not([inert])')).toHaveCount(0);
         }
-        // The last screen contributes a caption, and a caption is ancillary: it is drawn
-        // below the pair it explains. That placement is what lets it grow without moving
-        // the anchor, and what keeps it off the button it is describing.
+        // The desktop hint sits in the free band above the action; phone keeps its
+        // own compact placement below the pair. Neither position moves the action.
         const caption = await box(page, '.onboarding-setup-hint');
         const backRect = await box(page, '.onboarding-back-action');
-        expect(caption.y).toBeGreaterThanOrEqual(backRect.y + backRect.height - 1);
+        if (viewport.width >= 760) {
+          expect(caption.y + caption.height).toBeLessThanOrEqual(action.y - 8);
+        } else {
+          expect(caption.y).toBeGreaterThanOrEqual(backRect.y + backRect.height - 1);
+        }
         await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
         await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
         // And the last word on reachability is a real click, which Playwright refuses to
