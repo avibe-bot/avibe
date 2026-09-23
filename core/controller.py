@@ -7,10 +7,6 @@ import concurrent.futures
 import json
 import logging
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
-from copy import deepcopy
-from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -18,7 +14,6 @@ from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_AGENT_PROGRESS_STYLE,
-    V2Config,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient

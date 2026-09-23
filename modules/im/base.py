@@ -1,7 +1,6 @@
 """Base classes and data structures for IM platform abstraction"""
 
 import logging
-from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Dict, Any, List, Tuple, Literal, cast
 from dataclasses import dataclass

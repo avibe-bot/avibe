@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 from contextlib import nullcontext
-import json
 import os
 import stat
 import subprocess
@@ -21,7 +19,6 @@ from vibe import upgrade as vibe_upgrade
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     AtomicActivation,
-    PIP_DOWNLOAD_DEST_PLACEHOLDER,
     UpgradePlan,
     build_upgrade_plan,
     has_newer_version,
@@ -51,7 +48,6 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
     """
 
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
-    
 
 
 def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
@@ -1327,6 +1323,7 @@ def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, caps
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: {"job_id": "restart"})
+    monkeypatch.setattr(cli, "verify_python_environment", lambda _python: SimpleNamespace(ok=True))
     monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
 
     def execute(plan, **kwargs):
@@ -1344,46 +1341,6 @@ PREVIEW_VERSION = "3.0.16rc1"
 PREVIEW_CORE_URL = (
     "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl"
 )
-
-
-def _installed_from(monkeypatch, origin: str | None) -> None:
-    """Record where the installer says this copy of core came from."""
-
-    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
-
-
-def test_a_missing_or_unreadable_origin_record_reads_as_an_index_install(monkeypatch):
-    class _Distribution:
-        def __init__(self, recorded):
-            self._recorded = recorded
-
-        def read_text(self, _name):
-            return self._recorded
-
-    recorded_values = [None, "", "not json", "[]", "{}", '{"url": 7}']
-    for recorded in recorded_values:
-        monkeypatch.setattr(
-            "importlib.metadata.distribution",
-            lambda _name, recorded=recorded: _Distribution(recorded),
-        )
-        assert vibe_upgrade._recorded_install_origin("avibe-os") is None, recorded
-
-    def _raise(_name):
-        raise RuntimeError("metadata is unreadable")
-
-    monkeypatch.setattr("importlib.metadata.distribution", _raise)
-    assert vibe_upgrade._recorded_install_origin("avibe-os") is None
-
-
-def test_a_recorded_origin_is_read_from_the_installers_own_pep_610_record(monkeypatch):
-    class _Distribution:
-        def read_text(self, name):
-            assert name == "direct_url.json"
-            return json.dumps({"url": PREVIEW_CORE_URL, "archive_info": {}})
-
-    monkeypatch.setattr("importlib.metadata.distribution", lambda _name: _Distribution())
-
-    assert vibe_upgrade._recorded_install_origin("avibe-os") == PREVIEW_CORE_URL
 
 
 def _metadata_records(monkeypatch, distribution: str, version: str) -> None:
@@ -1504,6 +1461,27 @@ def test_an_unknown_install_shape_is_never_forced_on_a_guess(monkeypatch, case, 
 
 def test_exact_package_spec_uses_the_explicit_distribution() -> None:
     assert pinned_package_spec("3.0.10", package_name="avibe-os") == "avibe-os==3.0.10"
+
+
+@pytest.mark.parametrize(
+    "package_name",
+    [
+        "https://username:secret@example.invalid/avibe-os.whl",
+        "../avibe-os.whl",
+        "avibe-os[extra]",
+        "avibe-os==3.0.10",
+    ],
+)
+def test_exact_package_spec_rejects_non_bare_package_names(package_name: str) -> None:
+    with pytest.raises(ValueError, match="configured upgrade package spec cannot carry a version pin") as exc:
+        pinned_package_spec("3.0.10", package_name=package_name)
+    assert package_name not in str(exc.value)
+
+
+def test_unpinned_package_spec_preserves_explicit_name() -> None:
+    assert pinned_package_spec(None, package_name="https://example.invalid/avibe-os.whl") == (
+        "https://example.invalid/avibe-os.whl"
+    )
 
 
 def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
@@ -1933,7 +1911,6 @@ def test_official_index_release_reaches_every_install_command(
 
     version = package_version_from_release_tag(tag)
     # No PEP610 record is the normal index-install shape, including dev.
-    _installed_from(monkeypatch, None)
     monkeypatch.setattr(vibe_upgrade, "is_uv_tool_install", lambda _: method == "uv")
     monkeypatch.setattr(vibe_upgrade, "is_legacy_uv_tool_install", lambda _: False)
     monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv" if method == "uv" else None)
@@ -1973,11 +1950,8 @@ def test_published_dev_origin_reaches_every_install_command(
     release_base = "https://github.com/avibe-bot/avibe/releases/download"
     directory = f"{release_base}/{tag}"
     core = f"{directory}/avibe_os-{version}-py3-none-any.whl"
-    _installed_from(monkeypatch, core)
-
     # A forward plan must use the selected target, not this older installed
     # origin. This exercises the artifact-version gate as well as URL selection.
-    _installed_from(monkeypatch, PREVIEW_CORE_URL)
     monkeypatch.setattr(vibe_upgrade, "is_uv_tool_install", lambda _: method == "uv")
     monkeypatch.setattr(vibe_upgrade, "is_legacy_uv_tool_install", lambda _: False)
     monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv" if method == "uv" else None)

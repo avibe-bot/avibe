@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import hashlib
 import json
 import logging
 import os
@@ -37,22 +36,19 @@ import re
 import socket
 import stat
 import time
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from config.atomic_io import write_atomic
 from core.delivery_target import normalize_message_kind
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
+from core.services.dispatch import SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
-from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller

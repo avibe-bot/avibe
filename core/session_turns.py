@@ -28,9 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iter
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import backend_failure_notification_output

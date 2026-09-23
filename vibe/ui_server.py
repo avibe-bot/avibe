@@ -69,14 +69,12 @@ from core.show_session_events import (
     ShowSessionEventError,
     localized_show_event_error,
     show_event_payload_session_mismatch,
-    show_event_request_requests_dispatch,
     show_event_requests_dispatch,
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
-from vibe.message_types import types_with
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
@@ -3722,7 +3720,6 @@ async def _wait_for_remote_session_authorization_loss(
 ) -> str:
     """Return the terminal state for one accepted remote socket."""
 
-    from vibe import remote_access
     from vibe.authorization import context_from_session_payload
 
     if payload is None:
@@ -5851,7 +5848,6 @@ def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
     context = _request_authorization_context(context)
     if context is None or _has_runtime_management_access(context):
         return payload
-    from storage import project_access_service
 
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -7243,7 +7239,6 @@ def _remote_resource_access_context():
     """Resolve the signed remote session required by local ACL metadata APIs."""
 
     from storage import resource_access_service
-    from vibe import remote_access
 
     config = _load_remote_access_config()
     if (

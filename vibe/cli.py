@@ -11,7 +11,6 @@ import platform
 import select as select_module
 import shlex
 import shutil
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -33,7 +32,7 @@ from apscheduler.triggers.cron import CronTrigger
 from tzlocal import get_localzone_name
 from sqlalchemy import select
 
-from config import SettingsStore, paths
+from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.scheduled_tasks import (

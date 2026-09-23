@@ -18,18 +18,16 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import yaml
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
-from config.atomic_io import write_atomic
 from config.v2_config import (
     CONFIG_LOCK,
     V2Config,
@@ -59,8 +57,6 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
-    AtomicActivation,
-    PACKAGE_NAME,
     _candidate_python,
     activation_block_reason,
     activate_upgrade_candidate,
@@ -105,7 +101,6 @@ from core.vibe_agents import (
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
 from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
-from storage.lock import MigrationFileLock, MigrationLockTimeout
 
 
 logger = logging.getLogger(__name__)

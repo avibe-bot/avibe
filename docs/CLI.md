@@ -660,4 +660,3 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 - [Slack Setup Guide](SLACK_SETUP.md)
 - [Telegram Setup Guide](TELEGRAM_SETUP.md)
 - [Codex Setup Guide](CODEX_SETUP.md)
-

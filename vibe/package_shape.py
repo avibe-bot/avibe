@@ -1,6 +1,5 @@
 """Package identities shared by the forward upgrade path."""
 
-from packaging.version import Version
 
 
 CORE_PACKAGE_NAME = "avibe-os"

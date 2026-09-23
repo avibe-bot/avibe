@@ -22,7 +22,7 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal, Optional
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 

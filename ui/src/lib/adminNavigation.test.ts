@@ -11,7 +11,6 @@ import {
 beforeEach(() => {
   window.localStorage.clear();
 });
-
 describe('isOwnerOnlyPath', () => {
   it('covers canonical machine-management destinations and their details', () => {
     const ownerOnly = [
@@ -38,7 +37,6 @@ describe('isOwnerOnlyPath', () => {
     expect(isOwnerOnlyPath('/admin/permissions')).toBe(false);
   });
 });
-
 describe('settings landing', () => {
   it('opens General, which every role can read', () => {
     expect(SETTINGS_LANDING_PATH).toBe('/settings/general');
@@ -54,5 +52,3 @@ describe('isLocalOnlyMessagingField', () => {
     expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
   });
 });
-
-

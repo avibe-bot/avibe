@@ -9,7 +9,6 @@ import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +21,6 @@ from typing import (
     Mapping,
     Optional,
     TypeVar,
-    Union,
-    get_args,
 )
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 

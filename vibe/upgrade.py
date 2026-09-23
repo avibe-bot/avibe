@@ -21,15 +21,7 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from packaging.requirements import InvalidRequirement, Requirement
-from packaging.utils import (
-    InvalidSdistFilename,
-    InvalidWheelFilename,
-    canonicalize_name,
-    parse_sdist_filename,
-    parse_wheel_filename,
-)
-from packaging.version import InvalidVersion, Version
+from packaging.utils import canonicalize_name
 
 from vibe.package_shape import CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME
 
@@ -1164,51 +1156,11 @@ def _names_a_published_release(version: str) -> bool:
     return not match.group("local")
 
 
-def _published_version(value: str | None) -> str | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        version = str(Version(value))
-    except InvalidVersion:
-        return None
-    return version if _names_a_published_release(version) else None
-
-
-def _wheel_distribution(package_name: str) -> str:
-    """Spell one distribution name the way a wheel filename does."""
-
-    return canonicalize_name(package_name).replace("-", "_")
-
-
-def _recorded_install_origin(package_name: str) -> str | None:
-    """The URL an installed distribution was taken from, per PEP 610.
-
-    Installers write `direct_url.json` only when the distribution came from
-    somewhere other than an index, so its absence is itself the answer: this
-    copy was resolved by name and can be repaired the same way.
-    """
-
-    try:
-        from importlib.metadata import PackageNotFoundError, distribution
-
-        recorded = distribution(package_name).read_text("direct_url.json")
-    except PackageNotFoundError:
-        return None
-    except Exception:
-        logger.warning("Could not read %s install origin; assuming an index install", package_name, exc_info=True)
-        return None
-    if not recorded:
-        return None
-    try:
-        url = json.loads(recorded).get("url")
-    except (ValueError, AttributeError):
-        return None
-    return url if isinstance(url, str) else None
-
-
 def pinned_package_spec(version: str | None, *, package_name: str) -> str:
     if not version:
         return package_name
+    if _BARE_PACKAGE_NAME_RE.fullmatch(package_name) is None:
+        raise ValueError("The configured upgrade package spec cannot carry a version pin")
     return f"{package_name}=={version}"
 
 

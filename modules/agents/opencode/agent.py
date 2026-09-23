@@ -27,7 +27,7 @@ from core.caller_context import (
     caller_env_for_platform_payload,
     validated_caller_env_snapshot,
 )
-from core.message_output import stop_output_for, terminal_output_for
+from core.message_output import stop_output_for
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,

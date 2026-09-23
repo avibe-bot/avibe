@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
