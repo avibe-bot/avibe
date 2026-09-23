@@ -22,6 +22,8 @@ def backend_model_admission_error(
     canonical = canonical_model_id(model_id)
     if canonical is None or canonical != model_id:
         return "backend_model_id_invalid"
+    if backend == "claude" and canonical == "default":
+        return "backend_model_id_invalid"
     # Backend model IDs are routing identities, not vendor labels. In
     # particular, Claude Code may explicitly launch a Hub model such as
     # ``grok-4.7`` and the Gateway must preserve that exact spelling.
