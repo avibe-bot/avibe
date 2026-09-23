@@ -749,7 +749,8 @@
   },
   "message": {
     "ack": "{agent} 已收到，正在处理...",
-    "quickReplyNote": "回复：{text}"
+    "quickReplyNote": "回复：{text}",
+    "citationUnresolved": "（来源不可用）"
   },
   "backend": {
     "claude": "ClaudeCode",

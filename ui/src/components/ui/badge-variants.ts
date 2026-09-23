@@ -34,6 +34,17 @@ export const badgeVariants = cva(
 export const interactiveBadgeTriggerClassName =
   "relative cursor-pointer justify-center before:absolute before:left-1/2 before:top-1/2 before:h-full before:min-h-11 before:w-full before:min-w-11 before:-translate-x-1/2 before:-translate-y-1/2 before:content-[''] md:before:hidden";
 
+// The same idea for a badge that lives INSIDE a sentence. An inline chip cannot
+// claim 44px without taking taps from the words and chips around it - a citation
+// run is separated by a single space, and a 44px box reaches into the prose lines
+// above and below - so its hit area grows only into the space it actually owns:
+// the line box, and half the gap to its neighbour. WCAG 2.2 SC 2.5.8 exempts
+// exactly this case ("the target is in a sentence ... constrained by the
+// line-height of non-target text"); a target that opens the WRONG source has no
+// exemption.
+export const inlineBadgeTriggerClassName =
+  "relative cursor-pointer justify-center before:absolute before:inset-x-[-2px] before:inset-y-[-3px] before:content-[''] md:before:hidden";
+
 // Mobile badge popovers sit below shell headers and must reserve the notch area
 // in both their origin and their available height.
 export const mobileHeaderPopoverClassName =

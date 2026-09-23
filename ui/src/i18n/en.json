@@ -4196,6 +4196,11 @@
       "vaultExpired": "Expired",
       "agentFallback": "agent"
     },
+    "citation": {
+      "badge": "Source {{index}}: {{source}}",
+      "badgeWithDomain": "Source {{index}}: {{source}} ({{domain}})",
+      "open": "Open source page"
+    },
     "annotation": {
       "titleUser": "User annotation",
       "titleAgent": "Agent annotation",
