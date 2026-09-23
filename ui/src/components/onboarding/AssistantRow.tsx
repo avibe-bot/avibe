@@ -8,13 +8,14 @@ import { Card } from '../ui/card';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 import type { AssistantId } from './collaborationTimeline';
 
-/** One card's reading of the route every enabled assistant shares. */
+/** One card's reading of its current Model Hub route. */
 export type AssistantRouteView = {
   loading: boolean;
   /** What this assistant's stored chain will call first. Null when there is no route. */
   model: string | null;
   /** How many models sit behind that one. */
   backups: number;
+  noModel: boolean;
 };
 
 export interface AssistantRowProps {
@@ -46,8 +47,7 @@ export interface AssistantRowProps {
   /** Whether the assistant is switched on. The pill and the note read from it, so
       the card says the same thing its own switch does. */
   enabled?: boolean;
-  /** What this card says about the shared route, read once by the step and handed
-      down to all three. `loading` is the window before that read lands, where the
+  /** What this card says about its own route. `loading` is the window before that read lands, where the
       button keeps its box and shows nothing it does not know yet. */
   route?: AssistantRouteView;
 }
@@ -71,7 +71,7 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
   const label = getBackendUiMeta(backend).label;
   // With Model Hub holding the credentials, a card has three things it can be, and
   // each one has a single next step: install it, switch it on, or look at the route
-  // it already shares. Anything else the card could say about connections belongs to
+  // it owns. Anything else the card could say about connections belongs to
   // the other supply modes below.
   const hub = hubManaged || connection === 'hub';
   const native = connection === 'hub' ? undefined : connection;
@@ -80,7 +80,7 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
       : status === 'missing' ? 'missing'
         : 'checking';
   const routeModel = route?.model ?? null;
-  const routeLead = (live: boolean) => (live && route?.backups ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
+  const routeLead = () => (route?.backups ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
       : t('onboarding.setup.defaultModel'));
   // Off, the card still shows the model the assistant would call, so switching it on
   // has no surprise in it. It is a statement then, not a control: no chevron, nothing
@@ -91,7 +91,7 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
       aria-disabled={live ? undefined : true}
       disabled={!live || configuringDisabled || installing || detecting || !!connectionPending}>
       <span>
-        <small>{route?.loading ? t('onboarding.setup.defaultModel') : routeLead(live)}</small>
+        <small>{route?.loading ? t('onboarding.setup.defaultModel') : routeLead()}</small>
         {route?.loading
           ? <strong className="onboarding-model-choice-pending" aria-hidden="true" />
           : <strong>{routeModel}</strong>}
@@ -149,7 +149,8 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
           {hubState
             ? t(hubState === 'missing' ? 'onboarding.setup.noteNotInstalled'
               : hubState === 'enabled'
-                ? (route && !route.loading && !routeModel ? 'onboarding.setup.noteNoModels' : 'onboarding.setup.noteEnabled')
+                ? (route?.noModel ? 'onboarding.setup.noteModelUnset'
+                  : route && !route.loading && !routeModel ? 'onboarding.setup.noteNoModels' : 'onboarding.setup.noteEnabled')
                 : 'onboarding.setup.noteNotEnabled', { name: label })
             : status === 'missing'
               ? t('onboarding.setup.installFirstNamed', { name: label })
@@ -165,15 +166,14 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
               {installing ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Download size={16} />}
               {t(installing ? 'agentDetection.installing' : error ? 'common.retry' : 'onboarding.setup.installAndEnable')}
             </Button>
-          ) : hubState === 'idle' ? (
+          ) : route?.noModel && (hubState === 'idle' || hubState === 'enabled') ? null : hubState === 'idle' ? (
             /* The model it would call, stated but not offered — or, with no route to
                state, the receipt that the binary is already there. */
             routeModel || route?.loading ? routeChoice(false) : (
               <span className="onboarding-method-receipt"><Check size={16} />{t('onboarding.setup.installedNotEnabled')}</span>
             )
           ) : hubState === 'enabled' ? (
-            /* The route is shared by every enabled assistant, so the card shows the model
-               this one will call and opens the one dialog that changes it for all of them.
+            /* The card shows the model this assistant will call and opens its route.
                With nothing to show yet the button keeps its box, so the card does not
                grow under the pointer when the read lands. */
             routeModel || route?.loading ? routeChoice(true) : (

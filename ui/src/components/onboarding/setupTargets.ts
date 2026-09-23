@@ -86,7 +86,7 @@ export async function readSetupTargets(
     try {
       const result = await reader.getVibeAgent(brief.name, { cache: false });
       if (!result.ok || result.agent == null) {
-        if (options.requireReadable) throw new Error('onboarding.route.readFailed');
+        if (options.requireReadable) throw new Error('setup_target_read_failed');
         return null;
       }
       if (!sameCurrentIdentity(brief, result.agent)) return null;

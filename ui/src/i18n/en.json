@@ -1402,19 +1402,19 @@
         "cancel": "Cancel",
         "save": "Save",
         "saving": "Saving route chain…",
-        "refreshing": "Route chain saved. Refreshing the model surface…",
+        "refreshing": "Route chain saved. Refreshing…",
         "fail": {
           "read": "The route chain could not be read",
           "save": "The route chain was not saved",
           "unconfirmed": "The save outcome is not confirmed",
-          "reconcileRead": "The current model surface could not be read"
+          "reconcileRead": "The route could not be read right now"
         },
         "retry": "Retry",
         "empty": "This model follows default routing, but no eligible provider can route it.",
         "impact": {
           "title": "The route chain was saved",
           "detail": "These are the items this save actually removed or interrupted.",
-          "refreshFail": "The route chain was saved, but the model surface could not be refreshed.",
+          "refreshFail": "The route chain was saved, but the display could not be refreshed.",
           "done": "Done"
         },
         "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it."
@@ -5289,7 +5289,7 @@
       "configureRoute": "Configure model route",
       "defaultModel": "Default model",
       "defaultModelNamed": "Model route for {{name}}, review and reorder",
-      "noteEnabled": "Uses the default Model Hub route",
+      "noteEnabled": "Uses a Model Hub route",
       "notEnabled": "Not enabled",
       "installAndEnable": "Install and enable",
       "installedNotEnabled": "Installed, not enabled",
@@ -5297,28 +5297,8 @@
       "noteNotInstalled": "Install {{name}} to use your models",
       "defaultModelWithBackups_one": "Default model · 1 backup",
       "defaultModelWithBackups_other": "Default model · {{count}} backups",
-      "noteNoModels": "No usable model yet"
-    },
-    "route": {
-      "title": "Default model route",
-      "description": "Set one model order for every enabled assistant. Saving updates each assistant's route.",
-      "preferred": "Preferred",
-      "backup": "Backup {{index}}",
-      "singleNote": "This route has one model. Add a source, then select a backup model.",
-      "noEligible": "No model source in this route is available to this assistant",
-      "readFailed": "Couldn't read every assistant's route; try again",
-      "changed": "This assistant's route changed elsewhere; reopen the route editor",
-      "catalogFailed": "Couldn't add the preferred model to this assistant's model list",
-      "chainWriteFailed": "Couldn't save this assistant's preferred model route",
-      "modelSwitchFailed": "The route was saved, but this assistant's model couldn't be switched",
-      "selectAssistantModel": "Choose a model for {{name}}",
-      "chooseModel": "Choose model",
-      "setModel": "Set model",
-      "openModelSettings": "Add a model in Model Hub settings",
-      "addSource": "Add model source",
-      "done": "Done",
-      "moveUpNamed": "Move {{name}} up",
-      "moveDownNamed": "Move {{name}} down"
+      "noteNoModels": "No usable model yet",
+      "noteModelUnset": "No model set yet; you can set one later in Model Hub"
     },
     "connection": {
       "method": "Connection method",

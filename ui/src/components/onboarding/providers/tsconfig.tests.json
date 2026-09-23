@@ -16,10 +16,6 @@
     "../setupTargets.ts",
     "../entryGate.test.ts",
     "../entryGate.ts",
-    "../setupRoute.ts",
-    "../setupRoute.test.ts",
-    "../DefaultRouteDialog.tsx",
-    "../DefaultRouteDialog.test.tsx",
     "../../../i18n/i18next.d.ts"
   ],
   "exclude": []
