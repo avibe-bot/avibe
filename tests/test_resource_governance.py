@@ -59,6 +59,13 @@ def test_governor_diagnoses_pid_limit_from_counter_delta(
     assert failure.event_delta == 1
     assert "events.max_delta=1" in failure.message
     assert "shared Agent cgroup" in failure.message
+    assert governor.observe_resource_pressure() is None
+    (group / "pids.current").write_text("0\n", encoding="utf-8")
+    (group / "pids.events").write_text("max 6\n", encoding="utf-8")
+    zero_failure = governor.observe_resource_pressure()
+    assert zero_failure is not None
+    assert zero_failure.pids_current == 0
+    assert "current=0" in zero_failure.message
 
 
 def test_governor_diagnoses_memory_limit_from_counter_delta(
@@ -88,6 +95,7 @@ def test_governor_diagnoses_memory_limit_from_counter_delta(
     assert failure is not None
     assert failure.kind == "memory"
     assert "event=max" in failure.message
+    assert governor.observe_resource_pressure() is None
 
 
 def test_derive_agent_limits_honors_explicit_bytes() -> None:

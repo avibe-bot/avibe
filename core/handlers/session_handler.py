@@ -2769,7 +2769,11 @@ class SessionHandler(BaseHandler):
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
             reason = self._t(reason_key, **reason_values)
-            diagnostic = self.claude_error_diagnostic(composite_key, error)
+            diagnostic = self.claude_error_diagnostic(
+                composite_key,
+                error,
+                client=client,
+            )
             logger.error(
                 "Claude process for session %s terminated (%s): %s",
                 composite_key,
@@ -2835,10 +2839,20 @@ class SessionHandler(BaseHandler):
             )
         return False
 
-    def claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+    def claude_error_diagnostic(
+        self,
+        composite_key: str,
+        error: Exception,
+        *,
+        client=None,
+    ) -> str:
         """Add process state and captured stderr to a Claude failure diagnostic."""
         diagnostic = str(error)
-        client = self.claude_sessions.get(composite_key)
+        # Callers that observe a concrete failed generation pass it through so a
+        # replacement registered under the same composite key cannot steal the
+        # diagnosis. The optional fallback preserves older direct callers.
+        if client is None:
+            client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
             diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"

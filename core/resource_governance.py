@@ -83,6 +83,16 @@ def _parse_pid(value: str | None) -> int | None:
     return pid if pid > 0 else None
 
 
+def _parse_non_negative_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _parse_counter_file(path: Path) -> dict[str, int]:
     text = _read_text(path)
     if not text:
@@ -466,7 +476,7 @@ class AgentResourceGovernor:
         if group is None:
             return None
         return AgentResourceSnapshot(
-            pids_current=_parse_pid(_read_text(group / "pids.current")),
+            pids_current=_parse_non_negative_int(_read_text(group / "pids.current")),
             pids_max=_parse_pids_max(_read_text(group / "pids.max")),
             pids_events=_parse_counter_file(group / "pids.events"),
             memory_events=_parse_counter_file(group / "memory.events"),
@@ -482,6 +492,7 @@ class AgentResourceGovernor:
 
         pids_max_delta = current.pids_events.get("max", 0) - baseline.pids_events.get("max", 0)
         if pids_max_delta > 0:
+            self._event_baseline = current
             current_label = (
                 str(current.pids_current)
                 if current.pids_current is not None
@@ -507,6 +518,7 @@ class AgentResourceGovernor:
         for event_name in ("oom_kill", "oom", "max"):
             delta = current.memory_events.get(event_name, 0) - baseline.memory_events.get(event_name, 0)
             if delta > 0:
+                self._event_baseline = current
                 return AgentResourceFailure(
                     kind="memory",
                     message=(

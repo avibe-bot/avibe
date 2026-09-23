@@ -408,13 +408,20 @@ class ConsolidatedMessageDispatcher:
     def _release_runtime_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "agent_service", None)
         release = getattr(service, "release_runtime_turn", None)
+        payload = getattr(context, "platform_specific", None) or {}
+        should_close = payload.pop("_close_after_runtime_pending", False) or bool(
+            payload.get("close_after")
+        )
+        lease = None
         try:
-            if callable(release):
+            reserve = getattr(service, "reserve_close_after_teardown", None)
+            if should_close and callable(reserve):
+                lease = reserve(context)
+            elif callable(release):
                 release(context)
         finally:
-            payload = getattr(context, "platform_specific", None) or {}
-            if payload.pop("_close_after_runtime_pending", False):
-                self._schedule_close_after_runtime(context)
+            if should_close and lease is not False:
+                self._schedule_close_after_runtime(context, lease=lease)
 
     async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "processing_indicator", None)
@@ -1626,7 +1633,12 @@ class ConsolidatedMessageDispatcher:
             else:
                 self._schedule_close_after_runtime(context)
 
-    def _schedule_close_after_runtime(self, context: MessageContext) -> None:
+    def _schedule_close_after_runtime(
+        self,
+        context: MessageContext,
+        *,
+        lease: tuple[str, str] | None = None,
+    ) -> None:
         """Release a runtime explicitly marked disposable after its Run settles."""
 
         payload = getattr(context, "platform_specific", None) or {}
@@ -1650,6 +1662,14 @@ class ConsolidatedMessageDispatcher:
             or not base_session_id
             or backend not in {"claude", "codex", "opencode"}
         ):
+            if lease is not None:
+                release_lease = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "release_runtime_turn_key",
+                    None,
+                )
+                if callable(release_lease):
+                    release_lease(*lease)
             logger.warning(
                 "close-after requested without a disposable runtime target: session_id=%s base_session_id=%s backend=%s",
                 session_id,
@@ -1658,6 +1678,14 @@ class ConsolidatedMessageDispatcher:
             )
             return
         if session_id in self._close_after_session_ids:
+            if lease is not None:
+                release_lease = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "release_runtime_turn_key",
+                    None,
+                )
+                if callable(release_lease):
+                    release_lease(*lease)
             return
         self._close_after_session_ids.add(session_id)
 
@@ -1666,6 +1694,22 @@ class ConsolidatedMessageDispatcher:
             # asking the canonical runtime teardown path to close the backend.
             try:
                 await asyncio.sleep(0)
+                runtime_key = str(
+                    payload.get("agent_runtime_turn_key") or ""
+                ).strip()
+                runtime_active = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "runtime_turn_active",
+                    None,
+                )
+                if lease is None and runtime_key and callable(runtime_active) and runtime_active(runtime_key):
+                    logger.info(
+                        "Skipping close-after teardown for Agent Session %s: "
+                        "a successor turn owns or is queued on runtime %s",
+                        session_id,
+                        runtime_key,
+                    )
+                    return
                 from core.services.running_agents import end_running_agent
 
                 result = await end_running_agent(
@@ -1687,6 +1731,14 @@ class ConsolidatedMessageDispatcher:
                     exc_info=True,
                 )
             finally:
+                if lease is not None:
+                    release_lease = getattr(
+                        getattr(self.controller, "agent_service", None),
+                        "release_runtime_turn_key",
+                        None,
+                    )
+                    if callable(release_lease):
+                        release_lease(*lease)
                 self._close_after_session_ids.discard(session_id)
 
         task = asyncio.create_task(

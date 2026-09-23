@@ -123,10 +123,24 @@ class ClaudeAgent(BaseAgent):
         # )
         self._question_handler = None
 
-    def _claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+    def _claude_error_diagnostic(
+        self,
+        composite_key: str,
+        error: Exception,
+        *,
+        client=None,
+    ) -> str:
         diagnostic = getattr(self.session_handler, "claude_error_diagnostic", None)
         if callable(diagnostic):
             try:
+                if client is not None:
+                    try:
+                        return diagnostic(composite_key, error, client=client)
+                    except TypeError:
+                        # Keep compatibility with lightweight test doubles and
+                        # older session handlers that still expose the two-arg
+                        # diagnostic hook.
+                        pass
                 return diagnostic(composite_key, error)
             except Exception:
                 logger.debug("claude: failed to build error diagnostic", exc_info=True)
@@ -142,7 +156,13 @@ class ClaudeAgent(BaseAgent):
         lang = getattr(getattr(self.controller, "config", None), "language", "en")
         return str(i18n_t(key, lang, **kwargs))
 
-    def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
+    def _format_error_notify(
+        self,
+        error: Exception,
+        *,
+        composite_key: str | None = None,
+        client=None,
+    ) -> str:
         """Return the durable notify text for Claude terminal errors."""
         if isinstance(error, ClaudeSessionNotFoundError):
             detail = self._translate_error(
@@ -153,7 +173,8 @@ class ClaudeAgent(BaseAgent):
             return f"❌ {detail}"
         if is_claude_sdk_buffer_error(error):
             return f"❌ {self._translate_error('error.sessionConnectionLost')}"
-        client = self.claude_sessions.get(composite_key) if composite_key else None
+        if client is None:
+            client = self.claude_sessions.get(composite_key) if composite_key else None
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
@@ -277,7 +298,11 @@ class ClaudeAgent(BaseAgent):
             missing_session = isinstance(e, ClaudeSessionNotFoundError)
             if missing_session:
                 mark_prewrite_recovery_required(context, "native_session_not_found")
-            diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
+            diagnostic = self._claude_error_diagnostic(
+                runtime_session_key,
+                e,
+                client=client,
+            )
             # Classify BEFORE recording: ``record_model_hub_native_failure``
             # turns the pending native/hub attempt into a failed one, so a
             # process the service killed on purpose would settle that source's
@@ -292,7 +317,11 @@ class ClaudeAgent(BaseAgent):
             self._remove_pending_request(runtime_session_key, request)
             self._mark_session_idle_if_no_pending_requests(runtime_session_key)
             await self._remove_ack_reaction(request)
-            error_notify = self._format_error_notify(e, composite_key=runtime_session_key)
+            error_notify = self._format_error_notify(
+                e,
+                composite_key=runtime_session_key,
+                client=client,
+            )
             try:
                 # A typed local resume failure takes precedence over incidental
                 # auth words in the working path or captured process diagnostic.
@@ -2255,8 +2284,16 @@ class ClaudeAgent(BaseAgent):
         contained = False
         if returncode is not None:
             eof_error = RuntimeError(terminal_error)
-            diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
-            error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
+            diagnostic = self._claude_error_diagnostic(
+                composite_key,
+                eof_error,
+                client=client,
+            )
+            error_notify = self._format_error_notify(
+                eof_error,
+                composite_key=composite_key,
+                client=client,
+            )
             failure_context = getattr(pending_request, "context", context)
             intentional_teardown = self._teardown_is_intentional(
                 composite_key, eof_error, client=client
@@ -2371,13 +2408,21 @@ class ClaudeAgent(BaseAgent):
             pending_request = pending[0] if pending else None
             self._adopt_pending_turn_token(context, pending_request)
             await self._clear_pending_reactions(composite_key, context)
-            diagnostic = self._claude_error_diagnostic(composite_key, error)
-            error_notify = self._format_error_notify(error, composite_key=composite_key)
-            failure_context = getattr(pending_request, "context", context)
             # Read the client once and reuse it for both the health gate and the
             # handler, so a replacement registering in between cannot make the
             # two disagree about which generation actually failed.
             errored_client = self.claude_sessions.get(composite_key)
+            diagnostic = self._claude_error_diagnostic(
+                composite_key,
+                error,
+                client=errored_client,
+            )
+            error_notify = self._format_error_notify(
+                error,
+                composite_key=composite_key,
+                client=errored_client,
+            )
+            failure_context = getattr(pending_request, "context", context)
             intentional_teardown = self._teardown_is_intentional(
                 composite_key, error, client=errored_client
             )

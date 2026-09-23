@@ -9,6 +9,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.handlers.session_handler import ClaudeSessionNotFoundError, SessionHandler
+from core.resource_governance import AgentResourceFailure
 from modules.im import MessageContext
 
 
@@ -561,6 +562,35 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     assert "Claude process terminated: SIGABRT (signal 6)" in diagnostic
     assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in diagnostic
+
+
+def test_claude_resource_diagnostic_uses_failed_client_not_replacement(monkeypatch) -> None:
+    controller = _Controller(platform="slack")
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    failed_client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+    )
+    replacement = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+    )
+    controller.claude_sessions[composite_key] = replacement
+    failure = AgentResourceFailure(kind="memory", message="shared cgroup memory event")
+    monkeypatch.setattr(
+        "core.handlers.session_handler.observe_agent_resource_pressure",
+        lambda _controller: failure,
+    )
+
+    diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("old generation ended"),
+        client=failed_client,
+    )
+
+    assert "SIGKILL" in diagnostic
+    assert "shared cgroup memory event" in diagnostic
+    assert failed_client._vibe_resource_failure is failure
+    assert not hasattr(replacement, "_vibe_resource_failure")
 
 
 def test_service_initiated_teardown_signal_is_not_reported_as_session_error() -> None:

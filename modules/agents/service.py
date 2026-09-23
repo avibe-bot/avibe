@@ -939,7 +939,40 @@ class AgentService:
         finally:
             self.release_runtime_turn_key(runtime_key, runtime_token)
 
-    def release_runtime_turn_key(self, runtime_key: str, runtime_token: str | None = None) -> None:
+    def reserve_close_after_teardown(self, context: Any) -> tuple[str, str] | bool | None:
+        """Hold the completed turn's gate while its disposable runtime is closed.
+
+        An already queued successor takes priority and retains the runtime.
+        Otherwise the reservation prevents a newly arriving successor from
+        starting during asynchronous backend teardown.
+        """
+        payload = getattr(context, "platform_specific", None) or {}
+        runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
+        gate = self._turn_gates.get(runtime_key)
+        if not runtime_key or not runtime_token or gate is None or gate.token != runtime_token:
+            return None
+        if self._lock_has_live_waiters(gate.lock):
+            self.release_runtime_turn(context)
+            return False
+        manager = getattr(self.controller, "session_turns", None)
+        bind_terminal = getattr(manager, "on_native_terminal", None)
+        try:
+            if callable(bind_terminal):
+                bind_terminal(context, outcome="terminal")
+        except Exception:
+            logger.exception("native terminal ownership reconciliation failed before close-after")
+        reservation = f"close-after:{uuid.uuid4().hex}"
+        self.release_runtime_turn_key(runtime_key, runtime_token, reserve_token=reservation)
+        return runtime_key, reservation
+
+    def release_runtime_turn_key(
+        self,
+        runtime_key: str,
+        runtime_token: str | None = None,
+        *,
+        reserve_token: str | None = None,
+    ) -> None:
         runtime_key = str(runtime_key or "").strip()
         if not runtime_key:
             return
@@ -950,7 +983,7 @@ class AgentService:
             return
         liveness_task = gate.liveness_task
         gate.liveness_task = None
-        gate.token = ""
+        gate.token = reserve_token or ""
         gate.backend = ""
         gate.runtime_started = False
         gate.runtime_progress_token = ""
@@ -967,7 +1000,7 @@ class AgentService:
                 current = None
             if liveness_task is not current:
                 liveness_task.cancel()
-        if gate.lock.locked():
+        if gate.lock.locked() and reserve_token is None:
             gate.lock.release()
 
     async def force_cancel_backend_turns(self, backend: str) -> None:
