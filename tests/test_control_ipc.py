@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from config import paths
 from core import control_ipc, internal_server, session_turns
 from vibe import internal_client, model_hub_client
 
@@ -165,6 +166,96 @@ def test_windows_control_ipc_artifacts_have_exact_private_security(monkeypatch, 
     security.validate_path(target)
     assert control_ipc.load_descriptor(target) == descriptor
     assert not list(target.parent.glob(f".{target.name}.*.tmp"))
+
+
+def _restore_windows_inheritance(root: Path) -> None:
+    """Undo a protected DACL so pytest can still delete *root* afterwards.
+
+    Teardown only, and deliberately not ``check=True``: a cleanup failure must
+    never replace the assertion failure the test exists to report.
+    """
+
+    for arguments in (["/inheritance:e"], ["/reset", "/T", "/C", "/Q"]):
+        subprocess.run(["icacls", str(root), *arguments], capture_output=True, text=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_control_ipc_hardening_keeps_existing_runtime_siblings_readable(monkeypatch, tmp_path):
+    """Hardening the descriptor must not orphan files the runtime already owns.
+
+    ``SetNamedSecurityInfoW`` with ``PROTECTED_DACL`` propagates: when the DACL
+    it applies carries no inheritable ACE, the inherited ACEs are stripped from
+    every child that already exists. Children created purely by inheritance hold
+    no explicit ACE of their own, so they are left unreadable to the very
+    process that made them. This is what killed the gh-v3.1.1rc9 Windows leg --
+    the service lock, both captured stdio logs and the model-hub tree all became
+    ``[Errno 13]`` about twenty milliseconds after the Controller started.
+
+    The assertion is deliberately about a file that exists *before* the securing
+    call. A file created after it stays readable even with the defect present,
+    so testing that direction would pass on broken code.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path)
+    runtime = paths.get_runtime_dir()
+    runtime.mkdir(parents=True)
+
+    lock = runtime / "service.lock"
+    lock.write_text("4321\n", encoding="utf-8")
+    service_log = runtime / "service_stderr.log"
+    service_log.write_text("started\n", encoding="utf-8")
+    hub = runtime / "model-hub"
+    hub.mkdir()
+    (hub / "manifest.json").write_text("{}", encoding="utf-8")
+
+    descriptor = _descriptor()
+    try:
+        control_ipc.write_descriptor_atomic(paths.get_runtime_control_ipc_endpoint_path(), descriptor)
+
+        # vibe/runtime.py opens the service lock exactly this way on every lease
+        # poll, and rc9 died on this call.
+        with lock.open("a+", encoding="utf-8") as handle:
+            handle.seek(0)
+            assert handle.read() == "4321\n"
+        # The probe's own diagnostics: losing these is what made rc9 tell us
+        # less than rc8 did.
+        assert service_log.read_text(encoding="utf-8") == "started\n"
+        # rc9 failed here twice, on scandir and again on the chmod that
+        # TemporaryDirectory cleanup falls back to.
+        assert sorted(entry.name for entry in os.scandir(hub)) == ["manifest.json"]
+        assert control_ipc.load_descriptor(paths.get_runtime_control_ipc_endpoint_path()) == descriptor
+    finally:
+        _restore_windows_inheritance(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_control_ipc_hardening_survives_a_second_service_start(monkeypatch, tmp_path):
+    """Cover the create path and the repair path in the order a service hits them.
+
+    The first write reaches ``CreateDirectoryW``; the second reaches
+    ``secure_existing_owned_path``. Between them the launcher writes the files a
+    running service produces, so a second start must not strand them.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path)
+    endpoint = paths.get_runtime_control_ipc_endpoint_path()
+    first = _descriptor(instance_id="1" * 32, bearer_token="B" * 43)
+    successor = _descriptor(instance_id="2" * 32, bearer_token="C" * 43)
+
+    try:
+        control_ipc.write_descriptor_atomic(endpoint, first)
+
+        lock = paths.get_runtime_dir() / "service.lock"
+        lock.write_text("8765\n", encoding="utf-8")
+
+        control_ipc.write_descriptor_atomic(endpoint, successor)
+
+        with lock.open("a+", encoding="utf-8") as handle:
+            handle.seek(0)
+            assert handle.read() == "8765\n"
+        assert control_ipc.load_descriptor(endpoint) == successor
+    finally:
+        _restore_windows_inheritance(tmp_path)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
