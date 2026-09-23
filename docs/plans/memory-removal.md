@@ -478,3 +478,18 @@ had no `avibe-memory` distribution or importable module; core imports and
 This is package replacement evidence, not a test of a published new Release or
 of stopping and restarting a live service. The one-off probe has not been
 committed as a repeatable test.
+
+### Scheduled remote caller authorization invariant (2026-09-23)
+
+Review 5291701548 exposed a shared boundary regression: synthetic scheduled and
+watch turns use a non-user author such as `scheduled`, while their durable
+definition carries the trusted `resource_user_context` snapshot that authorized
+creation. Caller-context reconstruction must therefore mark such a turn as
+remote only when that persisted snapshot is structurally valid, and carry it
+through the Agent environment for the downstream resource ACL to re-check. A
+missing or malformed snapshot is an anonymous remote caller (never local Owner),
+and revoked or mismatched authority remains denied by the existing resource
+authorization service. Interactive Workbench author matching, ordinary IM/local
+turns, and `session_stable` semantics remain unchanged. The audit covers both
+ScheduledTaskService and Watch producers and the shared SessionHandler consumer;
+no removed Memory owner metadata is reintroduced.

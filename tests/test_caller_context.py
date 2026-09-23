@@ -529,6 +529,63 @@ def test_remote_workbench_caller_without_matching_snapshot_fails_closed() -> Non
     assert caller_resource_user_context(context) == {}
 
 
+def test_scheduled_remote_editor_uses_persisted_snapshot_without_owner_fallback() -> None:
+    from modules.im import MessageContext
+
+    snapshot = {
+        "sub": "editor-1",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+    }
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {
+                "task_trigger_kind": "scheduled",
+                "message_metadata": {"resource_user_context": snapshot},
+            }
+        ),
+        message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and context.is_remote
+    assert caller_resource_user_context(context) == snapshot
+    assert context.to_env()[AVIBE_CALLER_REMOTE_ENV] == "1"
+
+
+@pytest.mark.parametrize("snapshot", [{}, {"vibe_instance_role": "editor"}, "invalid"])
+def test_scheduled_missing_or_malformed_snapshot_never_becomes_local_owner(snapshot) -> None:
+    from modules.im import MessageContext
+
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {
+                "task_trigger_kind": "scheduled",
+                "message_metadata": {"resource_user_context": snapshot},
+            }
+        ),
+        message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and context.is_remote
+    assert caller_resource_user_context(context) == {}
+
+
+def test_local_scheduled_turn_without_persisted_remote_context_stays_local() -> None:
+    from modules.im import MessageContext
+
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload({"task_trigger_kind": "scheduled"}),
+        message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and not context.is_remote
+    assert caller_resource_user_context(context) is None
+
+
 def test_a_dm_loses_nothing_to_the_session_scoped_form() -> None:
     """The case where the person IS the scope.
 

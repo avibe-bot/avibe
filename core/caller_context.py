@@ -322,6 +322,29 @@ def _scope_id_from_session_key(session_key: str) -> Optional[str]:
     return "::".join(parts[:3])
 
 
+def _harness_resource_context(
+    source: str, message_metadata: object,
+) -> Optional[dict[str, Any]]:
+    """Recover durable remote authority for synthetic Harness turns.
+
+    Scheduled/watch authors are synthetic (normally ``scheduled``), so matching
+    ``message.user_id`` cannot identify the Workbench editor who created the
+    definition.  Only the persisted resource snapshot is an authority source;
+    malformed snapshots become an anonymous remote caller and are rejected by
+    the existing ACL checks rather than falling back to local Owner authority.
+    """
+
+    if source not in {"scheduled", "watch"} or not isinstance(message_metadata, Mapping):
+        return None
+    snapshot = message_metadata.get(_RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return {}
+    subject = _clean(snapshot.get("sub"))
+    if not subject:
+        return {}
+    return dict(snapshot)
+
+
 def _origin_thread_id(
     context_platform: str,
     payload: Mapping[str, object] | None,
@@ -499,6 +522,14 @@ def caller_context_from_platform_payload(
             subject = _clean(raw_resource_context.get("sub"))
             if subject and authorization_user_id == f"remote:{subject}":
                 resource_user_context = dict(raw_resource_context)
+
+    harness_resource_context = _harness_resource_context(source, message_metadata)
+    if harness_resource_context is not None:
+        # Keep ``is_remote`` true even for an invalid snapshot.  An empty remote
+        # context fails closed in resource ACLs; treating it as local would grant
+        # the installation Owner authority to a deferred command.
+        is_remote = True
+        resource_user_context = harness_resource_context
 
     return CallerContext(
         session_id=session_id,
