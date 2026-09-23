@@ -74,12 +74,12 @@ def _disable_previous_endpoints(
     endpoints = _normalize_previous_endpoints(previous_endpoints, endpoint)
     if not endpoints:
         return
+    # A replaced endpoint can no longer authorize another automatic repair.
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
         .where(web_push_subscriptions.c.endpoint.in_(endpoints))
-        .where(web_push_subscriptions.c.enabled == 1)
-        .values(enabled=0, updated_at=now)
+        .values(enabled=0, provider_invalidated_at=None, updated_at=now)
     )
 
 
@@ -111,8 +111,7 @@ def upsert_subscription(
             .where(web_push_subscriptions.c.user_key == user_key)
             .where(web_push_subscriptions.c.device_id == device_id)
             .where(web_push_subscriptions.c.endpoint != endpoint)
-            .where(web_push_subscriptions.c.enabled == 1)
-            .values(enabled=0, updated_at=now)
+            .values(enabled=0, provider_invalidated_at=None, updated_at=now)
         )
     stmt = sqlite_insert(web_push_subscriptions).values(
         id=_new_id(),
@@ -138,6 +137,8 @@ def upsert_subscription(
             "user_agent": user_agent,
             "device_label": device_label,
             "enabled": 1,
+            "last_failure_at": None,
+            "provider_invalidated_at": None,
             "failure_count": 0,
             "updated_at": now,
         },
@@ -147,6 +148,50 @@ def upsert_subscription(
         select(web_push_subscriptions).where(web_push_subscriptions.c.endpoint == endpoint)
     ).mappings().one()
     return _row_to_dict(row)
+
+
+def upsert_background_rotated_subscription(
+    conn: Connection,
+    *,
+    user_key: str,
+    payload: dict[str, Any],
+    previous_endpoints: list[str] | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any] | None:
+    """Accept a service-worker rotation only for an active or provider-failed row."""
+
+    endpoint, _, _ = validate_subscription_payload(payload)
+    previous_candidates = _normalize_previous_endpoints(previous_endpoints, endpoint)
+    if not previous_candidates:
+        return None
+    previous = conn.execute(
+        select(web_push_subscriptions)
+        .where(web_push_subscriptions.c.user_key == user_key)
+        .where(web_push_subscriptions.c.endpoint.in_(previous_candidates))
+        .where(
+            (web_push_subscriptions.c.enabled == 1)
+            | web_push_subscriptions.c.provider_invalidated_at.is_not(None)
+        )
+        .limit(1)
+    ).mappings().first()
+    if previous is None:
+        return None
+
+    current = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+    if current is not None and not current["enabled"] and not current.get("provider_invalidated_at"):
+        return None
+    return upsert_subscription(
+        conn,
+        user_key=user_key,
+        payload=payload,
+        user_agent=user_agent,
+        device_id=(
+            current.get("device_id")
+            if current is not None
+            else previous.get("device_id")
+        ),
+        previous_endpoints=previous_endpoints,
+    )
 
 
 def attach_device_to_enabled_subscription(
@@ -164,6 +209,40 @@ def attach_device_to_enabled_subscription(
     if not device_id:
         return get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
     now = _utc_now_iso()
+    previous_candidates = _normalize_previous_endpoints(previous_endpoints, endpoint)
+    recoverable_previous = None
+    if previous_candidates:
+        previous_rows = conn.execute(
+            select(web_push_subscriptions)
+            .where(web_push_subscriptions.c.user_key == user_key)
+            .where(web_push_subscriptions.c.endpoint.in_(previous_candidates))
+            .where(
+                (web_push_subscriptions.c.enabled == 1)
+                | web_push_subscriptions.c.provider_invalidated_at.is_not(None)
+            )
+        ).mappings().all()
+        for previous_row in previous_rows:
+            previous_device_id = previous_row["device_id"]
+            if previous_device_id is not None and previous_device_id != device_id:
+                continue
+            recoverable_previous = previous_row
+            break
+    existing = get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+    if existing is None:
+        if (
+            get_by_endpoint(conn, endpoint=endpoint, user_key=user_key) is None
+            and recoverable_previous is not None
+        ):
+            return upsert_subscription(
+                conn,
+                user_key=user_key,
+                payload=payload,
+                user_agent=user_agent,
+                device_label=device_label,
+                device_id=device_id,
+                previous_endpoints=previous_endpoints,
+            )
+        return None
     _disable_previous_endpoints(
         conn,
         user_key=user_key,
@@ -171,16 +250,12 @@ def attach_device_to_enabled_subscription(
         previous_endpoints=previous_endpoints,
         now=now,
     )
-    existing = get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
-    if existing is None:
-        return None
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
         .where(web_push_subscriptions.c.device_id == device_id)
         .where(web_push_subscriptions.c.endpoint != endpoint)
-        .where(web_push_subscriptions.c.enabled == 1)
-        .values(enabled=0, updated_at=now)
+        .values(enabled=0, provider_invalidated_at=None, updated_at=now)
     )
     values = {
         "p256dh": p256dh,
@@ -210,7 +285,7 @@ def disable_subscription(conn: Connection, *, endpoint: str, user_key: str | Non
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     result = conn.execute(
-        stmt.values(enabled=0, updated_at=now)
+        stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=now)
     )
     return bool(result.rowcount)
 
@@ -222,23 +297,34 @@ def disable_device_subscription(
     device_id: str | None = None,
     endpoint: str | None = None,
 ) -> bool:
-    """Disable only the logging-out browser's selected Push subscription."""
+    """Disable the submitted endpoint and any rotated row for this browser."""
 
     device_id = device_id.strip() if isinstance(device_id, str) else ""
     endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
     if not device_id and not endpoint:
         return False
+    device_ids = {device_id} if device_id else set()
+    if endpoint:
+        endpoint_row = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+        if endpoint_row and endpoint_row.get("device_id"):
+            # A previous endpoint keeps the rotation's device identity even if
+            # another tab submitted a different ID during logout.
+            device_ids.add(endpoint_row["device_id"])
     stmt = (
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.user_key == user_key)
-        .where(web_push_subscriptions.c.enabled == 1)
     )
-    if endpoint:
+    if endpoint and device_ids:
+        stmt = stmt.where(
+            (web_push_subscriptions.c.endpoint == endpoint)
+            | (web_push_subscriptions.c.device_id.in_(device_ids))
+        )
+    elif endpoint:
         stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
     else:
-        stmt = stmt.where(web_push_subscriptions.c.device_id == device_id)
+        stmt = stmt.where(web_push_subscriptions.c.device_id.in_(device_ids))
     result = conn.execute(
-        stmt.values(enabled=0, updated_at=_utc_now_iso())
+        stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=_utc_now_iso())
     )
     return bool(result.rowcount)
 
@@ -270,7 +356,7 @@ def has_enabled_user_key(conn: Connection, *, user_key: str) -> bool:
     return row is not None
 
 
-def get_enabled_by_endpoint(
+def get_by_endpoint(
     conn: Connection,
     *,
     endpoint: str,
@@ -282,7 +368,6 @@ def get_enabled_by_endpoint(
     stmt = (
         select(web_push_subscriptions)
         .where(web_push_subscriptions.c.endpoint == endpoint)
-        .where(web_push_subscriptions.c.enabled == 1)
     )
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
@@ -290,12 +375,23 @@ def get_enabled_by_endpoint(
     return _row_to_dict(row) if row else None
 
 
+def get_enabled_by_endpoint(
+    conn: Connection,
+    *,
+    endpoint: str,
+    user_key: str | None = None,
+) -> dict[str, Any] | None:
+    row = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+    return row if row and row["enabled"] else None
+
+
 def mark_send_success(conn: Connection, *, endpoint: str) -> None:
     now = _utc_now_iso()
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.endpoint == endpoint)
-        .values(last_success_at=now, last_failure_at=None, failure_count=0, updated_at=now)
+        .where(web_push_subscriptions.c.enabled == 1)
+        .values(last_success_at=now, last_failure_at=None, provider_invalidated_at=None, failure_count=0, updated_at=now)
     )
 
 
@@ -308,6 +404,10 @@ def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False)
     }
     if disable:
         values["enabled"] = 0
+        values["provider_invalidated_at"] = now
     conn.execute(
-        web_push_subscriptions.update().where(web_push_subscriptions.c.endpoint == endpoint).values(**values)
+        web_push_subscriptions.update()
+        .where(web_push_subscriptions.c.endpoint == endpoint)
+        .where(web_push_subscriptions.c.enabled == 1)
+        .values(**values)
     )

@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 const mocks = vi.hoisted(() => ({ createProject: vi.fn() }));
 vi.mock('../../context/WorkbenchProjectsContext', () => ({ useWorkbenchProjectsActions: () => mocks }));
-vi.mock('../ui/directory-browser', () => ({ DirectoryBrowser: ({ initialPath, onSelect }: { initialPath?: string; onSelect: (path: string) => void }) => (
+vi.mock('../ui/folder-browser', () => ({ FolderBrowser: ({ initialPath, onSelect }: { initialPath?: string; onSelect: (path: string) => void }) => (
   <button data-testid="directory" data-path={initialPath} onClick={() => onSelect('/工作区/选择的项目')}>select-folder</button>
 ) }));
 import { NewProjectDialog } from './NewProjectDialog';

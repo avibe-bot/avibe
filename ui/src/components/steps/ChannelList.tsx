@@ -19,7 +19,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { DirectoryBrowser } from '../ui/directory-browser';
+import { FolderBrowser } from '../ui/folder-browser';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { getEnabledPlatforms, platformSupportsChannels, platformSupportsToolcallDelivery } from '../../lib/platforms';
@@ -1657,7 +1657,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             ? threadConfigs[browseChannelId]?.[browseTopicId]
             : platformConfigs[browseChannelId];
           return (
-            <DirectoryBrowser
+            <FolderBrowser
               initialPath={selectedConfig?.custom_cwd || config.runtime?.default_cwd || '~/work'}
               onSelect={(path) => {
                 if (browseTopicId && selectedConfig) {
@@ -2041,7 +2041,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
 
     {/* Directory browser modal */}
     {browsingCwdFor && (
-      <DirectoryBrowser
+      <FolderBrowser
         initialPath={configs[browsingCwdFor]?.custom_cwd || config.runtime?.default_cwd || '~/work'}
         onSelect={(path) => {
           updateConfig(browsingCwdFor, { custom_cwd: path });

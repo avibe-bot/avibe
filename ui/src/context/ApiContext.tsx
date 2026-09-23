@@ -536,8 +536,9 @@ export type ApiContextType = {
     deviceLabel?: string,
     deviceId?: string,
     previousEndpoints?: string[],
+    backgroundRotation?: boolean,
   ) => Promise<WebPushSubscriptionResult>;
-  unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
+  unsubscribeWebPush: (endpoint: string, deviceId?: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
   /** Read the session's Show Page without creating it; rejects with
@@ -2616,6 +2617,7 @@ export type WebPushStatus = {
   public_key: string;
   subscription_count: number;
   current_subscription_enabled?: boolean;
+  current_subscription_repairable?: boolean;
   normal_delivery?: WebPushNormalDelivery;
 };
 
@@ -2629,6 +2631,7 @@ export type WebPushStatusPayload = {
 
 export type WebPushSubscriptionResult = {
   ok: boolean;
+  accepted: boolean;
   subscription: {
     id: string;
     user_key: string;
@@ -2637,7 +2640,7 @@ export type WebPushSubscriptionResult = {
     device_id?: string | null;
     user_agent?: string | null;
     device_label?: string | null;
-  };
+  } | null;
 };
 
 export type WebPushTestResult = {
@@ -3768,14 +3771,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
-    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints) =>
+    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation) =>
       postJson('/api/web-push/subscriptions', {
         subscription,
         device_label: deviceLabel,
         device_id: deviceId,
         previous_endpoints: previousEndpoints,
+        background_rotation: backgroundRotation,
       }),
-    unsubscribeWebPush: (endpoint) => deleteJson('/api/web-push/subscriptions', { endpoint }),
+    unsubscribeWebPush: (endpoint, deviceId) =>
+      deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),
     sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}),
     setShowPageAvailability: (sessionId, offline) => postJson(
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
@@ -4546,7 +4551,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Logout remains authoritative when Push APIs are unavailable.
       }
       return postJson('/auth/logout', {
-        device_id: getWebPushDeviceId(),
+        device_id: await getWebPushDeviceId(),
         ...(endpoint ? { endpoint } : {}),
       });
     },

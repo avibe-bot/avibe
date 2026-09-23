@@ -6482,7 +6482,7 @@ def web_push_status():
                 logger.debug("web push: ignoring invalid status subscription payload", exc_info=True)
         subscription_count = web_push_service.count_enabled(conn, user_key=user_key)
         current_subscription = (
-            web_push_service.get_enabled_by_endpoint(
+            web_push_service.get_by_endpoint(
                 conn,
                 endpoint=endpoint,
                 user_key=user_key,
@@ -6490,13 +6490,20 @@ def web_push_status():
             if isinstance(endpoint, str) and endpoint.strip()
             else None
         )
+        current_subscription_enabled = bool(current_subscription and current_subscription["enabled"])
+        current_subscription_repairable = bool(
+            current_subscription
+            and not current_subscription_enabled
+            and current_subscription.get("provider_invalidated_at")
+        )
     return jsonify(
         {
             "ok": True,
             "configured": True,
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
-            "current_subscription_enabled": current_subscription is not None,
+            "current_subscription_enabled": current_subscription_enabled,
+            "current_subscription_repairable": current_subscription_repairable,
             "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
     )
@@ -6520,21 +6527,31 @@ def web_push_subscribe():
     device_id = payload.get("device_id") if isinstance(payload.get("device_id"), str) else None
     previous_endpoints = payload.get("previous_endpoints") if isinstance(payload.get("previous_endpoints"), list) else None
     subscription = payload.get("subscription") if isinstance(payload.get("subscription"), dict) else payload
+    background_rotation = payload.get("background_rotation") is True
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            row = web_push_service.upsert_subscription(
-                conn,
-                user_key=_web_push_user_key(),
-                payload=subscription,
-                user_agent=user_agent,
-                device_label=device_label,
-                device_id=device_id,
-                previous_endpoints=previous_endpoints,
-            )
+            if background_rotation:
+                row = web_push_service.upsert_background_rotated_subscription(
+                    conn,
+                    user_key=_web_push_user_key(),
+                    payload=subscription,
+                    user_agent=user_agent,
+                    previous_endpoints=previous_endpoints,
+                )
+            else:
+                row = web_push_service.upsert_subscription(
+                    conn,
+                    user_key=_web_push_user_key(),
+                    payload=subscription,
+                    user_agent=user_agent,
+                    device_label=device_label,
+                    device_id=device_id,
+                    previous_endpoints=previous_endpoints,
+                )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
-    return jsonify({"ok": True, "subscription": row})
+    return jsonify({"ok": True, "accepted": row is not None, "subscription": row})
 
 
 @app.route("/api/web-push/subscriptions", methods=["DELETE"])
@@ -6543,13 +6560,15 @@ def web_push_unsubscribe():
 
     payload = request.json or {}
     endpoint = payload.get("endpoint")
+    device_id = payload.get("device_id") if isinstance(payload.get("device_id"), str) else None
     if not isinstance(endpoint, str) or not endpoint.strip():
         return jsonify({"ok": False, "error": "endpoint_required"}), 400
     engine = _projects_engine()
     with engine.begin() as conn:
-        disabled = web_push_service.disable_subscription(
+        disabled = web_push_service.disable_device_subscription(
             conn,
             endpoint=endpoint,
+            device_id=device_id,
             user_key=_web_push_user_key(),
         )
     return jsonify({"ok": True, "disabled": disabled})

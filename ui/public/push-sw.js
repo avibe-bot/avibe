@@ -17,6 +17,150 @@ function syncAppBadge(count) {
 
 const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
 const WEB_PUSH_LAUNCH_ENTRY_PATH = '/__avibe/web-push-launch';
+const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
+const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
+
+function endpointCacheUrl() {
+  return new URL(WEB_PUSH_ENDPOINT_ENTRY_PATH, self.location.origin).href;
+}
+
+async function rememberedPushEndpoint() {
+  if (!self.caches) return null;
+  try {
+    const cache = await self.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    const response = await cache.match(endpointCacheUrl());
+    const payload = response ? await response.json() : null;
+    return typeof payload?.endpoint === 'string' && payload.endpoint ? payload.endpoint : null;
+  } catch {
+    return null;
+  }
+}
+
+async function rememberPushEndpoint(endpoint) {
+  if (!self.caches || !endpoint) return;
+  try {
+    const cache = await self.caches.open(WEB_PUSH_ENDPOINT_CACHE);
+    await cache.put(endpointCacheUrl(), new Response(JSON.stringify({ endpoint }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+  } catch {
+    // Foreground reconciliation remains available if Cache Storage fails.
+  }
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = self.atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+function arrayBuffersEqual(left, right) {
+  if (!left || left.byteLength !== right.byteLength) return false;
+  const leftView = new Uint8Array(left);
+  const rightView = new Uint8Array(right);
+  for (let i = 0; i < leftView.length; i += 1) {
+    if (leftView[i] !== rightView[i]) return false;
+  }
+  return true;
+}
+
+async function fetchCsrfToken() {
+  const response = await fetch('/api/csrf-token', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`CSRF token request failed (${response.status})`);
+  const payload = await response.json();
+  if (typeof payload?.csrf_token !== 'string' || !payload.csrf_token) {
+    throw new Error('CSRF token missing from response');
+  }
+  return payload.csrf_token;
+}
+
+async function isInvalidCsrfResponse(response) {
+  if (response.status !== 403 || typeof response.json !== 'function') return false;
+  try {
+    const payload = await response.json();
+    return payload?.message === 'Forbidden: invalid csrf token';
+  } catch {
+    return false;
+  }
+}
+
+async function postPushSubscription(subscription, previousEndpoints, csrfToken) {
+  return fetch('/api/web-push/subscriptions', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Vibe-CSRF-Token': csrfToken,
+    },
+    body: JSON.stringify({
+      subscription: subscription.toJSON(),
+      previous_endpoints: previousEndpoints,
+      background_rotation: true,
+    }),
+  });
+}
+
+async function syncPushSubscription(subscription, previousEndpoints) {
+  let csrfToken = await fetchCsrfToken();
+  let response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
+  if (
+    !response.ok
+    && await isInvalidCsrfResponse(response)
+  ) {
+    csrfToken = await fetchCsrfToken();
+    response = await postPushSubscription(subscription, previousEndpoints, csrfToken);
+  }
+  if (!response.ok) throw new Error(`Push subscription sync failed (${response.status})`);
+  const payload = await response.json();
+  return payload?.accepted !== false;
+}
+
+async function fetchVapidPublicKey() {
+  const response = await fetch('/api/web-push/vapid-public-key', {
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error(`VAPID key request failed (${response.status})`);
+  const payload = await response.json();
+  if (typeof payload?.public_key !== 'string' || !payload.public_key) {
+    throw new Error('VAPID public key missing from response');
+  }
+  return urlBase64ToUint8Array(payload.public_key);
+}
+
+async function replacementSubscription(event) {
+  const applicationServerKey = await fetchVapidPublicKey();
+  const replacement = event.newSubscription;
+  if (
+    replacement
+    && arrayBuffersEqual(replacement.options?.applicationServerKey, applicationServerKey)
+  ) {
+    return replacement;
+  }
+  if (replacement) {
+    await replacement.unsubscribe();
+    const remaining = await self.registration.pushManager.getSubscription();
+    if (remaining?.endpoint === replacement.endpoint) {
+      throw new Error('Stale push subscription was not removed');
+    }
+  }
+  const current = await self.registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey,
+  });
+  if (
+    !arrayBuffersEqual(current.options?.applicationServerKey, applicationServerKey)
+    || (replacement && current.endpoint === replacement.endpoint)
+  ) {
+    throw new Error('Push subscription replacement is still stale');
+  }
+  return current;
+}
 
 // iOS may honor an installed PWA's manifest start URL instead of the path passed
 // to openWindow(). Leave a short-lived launch handoff in Cache Storage so the
@@ -32,6 +176,20 @@ function rememberPendingNotificationLaunch(url) {
     .then((cache) => cache.put(entryUrl, response))
     .catch(() => {});
 }
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      const previousEndpoint = event.oldSubscription?.endpoint ?? await rememberedPushEndpoint();
+      const subscription = await replacementSubscription(event);
+      const accepted = await syncPushSubscription(
+        subscription,
+        previousEndpoint ? [previousEndpoint] : [],
+      );
+      if (accepted) await rememberPushEndpoint(subscription.endpoint);
+    })().catch(() => undefined),
+  );
+});
 
 self.addEventListener('push', (event) => {
   let payload = {};

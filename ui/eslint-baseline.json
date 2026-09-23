@@ -166,9 +166,6 @@
     "src/components/steps/SlackConfig.tsx": {
       "react-hooks/exhaustive-deps": 3
     },
-    "src/components/ui/directory-browser.tsx": {
-      "react-hooks/exhaustive-deps": 1
-    },
     "src/components/ui/editor-dialog.tsx": {
       "react-hooks/exhaustive-deps": 1
     },
