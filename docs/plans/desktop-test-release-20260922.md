@@ -551,3 +551,62 @@ identical file acquires once `os.name` is not `posix`.
   the Runtime mid-flight — a race a TEST prerelease installer does not need to
   survive. They do block a master merge, which this PR is not authorized to do.
   Tracked in issue 2135.
+
+## H11 — the control IPC owner check under an elevated token
+
+`gh-v3.1.1rc8` proved the H9 lease fix: Windows got past `Unsafe native lease
+file` and reached `IM runtime ready`, then failed one layer deeper with
+`control IPC path is not owned by the current user`, which stopped the runtime
+through the lost-lease path.
+
+The cause is Windows object ownership, not a path problem and not another POSIX
+assumption. `_WindowsSecurity` builds its expected descriptor from the token
+**user** SID — `self.sddl = f"O:{self.current_user_sid}..."`, fed by
+`_read_current_user_sid()` reading `TokenUser` — and then requires the existing
+directory's owner to equal that SID. But Windows stamps a newly created object
+with the token's **default owner**, and for an elevated token that default is
+`BUILTIN\Administrators`, not the user. An elevated Avibe therefore creates a
+runtime directory it then refuses to recognise as its own.
+
+Two independent owner checks had to move together, which the first reading of
+this bug missed. `secure_existing_owned_path` gates on
+`_named_path_owner_matches`, and then finishes with `validate_path` →
+`_validate_security_descriptor`, which re-checks the owner itself. Because
+`SetNamedSecurityInfoW` is called with `None` for the owner argument — repair
+rewrites the DACL and never the owner — relaxing only the first check would have
+left the second one failing on exactly the same directory. Both now route
+through one predicate, `_owner_is_self`, so there is a single answer to "did
+this process create this path".
+
+Acceptance is derived from the running token, not from a hardcoded well-known
+SID: an unelevated process still accepts only its user SID, and
+`BUILTIN\Administrators` is accepted only when it is genuinely this token's
+default owner.
+
+**Tradeoff, stated rather than slipped in.** An elevated Avibe now trusts an IPC
+runtime directory owned by `BUILTIN\Administrators`, which means any
+administrator on the machine could have created it. The DACL contract is
+deliberately unchanged — still present, still protected, still exactly
+`(A;;FA;;;<user>)(A;;FA;;;SY)` — so an Administrators-owned path is still
+rejected unless its access control list grants nobody but this user and SYSTEM.
+For an elevated Windows service that matches normal practice, where
+administrator-equivalence is already assumed; without it an elevated Avibe
+cannot use control IPC at all.
+
+The Linux-executable tests pin the acceptance rule by driving `_owner_is_self`
+and `_validate_security_descriptor` through a bypassed constructor with fake
+`advapi32` bindings. They prove the decision logic, including that an unrelated
+SID and a non-protected DACL are still rejected. They cannot prove the Win32
+behavior underneath; as with H9, only the next prerelease's Windows leg settles
+that.
+
+## Known-by-design ledger additions
+
+- **Deferred.** `clamp_window_frame` picks the single largest-overlap monitor and
+  clamps unconditionally, so a saved frame that legitimately spans two adjacent
+  displays is moved on restore. Window geometry only, off the packaging path, and
+  recoverable by moving the window. Tracked in issue 2139.
+- **Deferred.** `BackendLifecycleChip` returns the desktop-managed hint before it
+  reaches the error branch, so a failing desktop-managed backend reads as
+  healthy in the popover text. The error badge and Reinstall action still render,
+  so the failure stays visible while the wording is wrong. Tracked in issue 2140.

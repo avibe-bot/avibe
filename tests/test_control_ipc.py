@@ -591,3 +591,107 @@ def test_sse_reconnect_loads_successor_descriptor(monkeypatch, tmp_path):
             await _stop_server(first_task)
 
     asyncio.run(_run())
+
+
+class _FakeSid:
+    """A SID pointer stand-in that compares by the SDDL text that produced it."""
+
+    def __init__(self, value: str | None = None) -> None:
+        self.value = value
+
+    def __bool__(self) -> bool:
+        return self.value is not None
+
+
+class _FakeCtypes:
+    @staticmethod
+    def byref(cell):
+        return cell
+
+
+class _FakeWinTypes:
+    LPVOID = _FakeSid
+    BOOL = _FakeSid
+    DWORD = _FakeSid
+
+
+def _windows_security_stub(*, user_sid: str, owner_sid: str):
+    """Drive the real owner-acceptance logic without Windows ctypes bindings.
+
+    ``_WindowsSecurity.__init__`` loads ``advapi32``/``kernel32``, so it cannot
+    run off Windows. Every method under test reads only instance attributes, so
+    a bypassed constructor with fake bindings exercises the real decision.
+    """
+
+    security = object.__new__(control_ipc._WindowsSecurity)
+    security.ctypes = _FakeCtypes
+    security.wintypes = _FakeWinTypes
+    security.current_user_sid = user_sid
+    security.current_owner_sid = owner_sid
+    security.sddl = f"O:{user_sid}D:P(A;;FA;;;{user_sid})(A;;FA;;;SY)"
+
+    def _convert(sddl, _revision, descriptor_ref, _size_ref):
+        descriptor_ref.value = sddl
+        return 1
+
+    def _descriptor_owner(descriptor, owner_ref, _defaulted_ref):
+        owner_ref.value = descriptor.value.split("D:", 1)[0][len("O:") :]
+        return 1
+
+    security.advapi32 = MagicMock(
+        ConvertStringSecurityDescriptorToSecurityDescriptorW=_convert,
+        GetSecurityDescriptorOwner=_descriptor_owner,
+        EqualSid=lambda left, right: left.value == right.value,
+    )
+    security.kernel32 = MagicMock(LocalFree=lambda *_args: None)
+    return security
+
+
+_USER_SID = "S-1-5-21-1111-2222-3333-1001"
+_ADMINISTRATORS_SID = "S-1-5-32-544"
+_STRANGER_SID = "S-1-5-21-9999-8888-7777-500"
+
+
+def test_elevated_token_default_owner_is_accepted_as_self():
+    """An elevated token stamps BUILTIN\\Administrators on what it creates."""
+
+    security = _windows_security_stub(user_sid=_USER_SID, owner_sid=_ADMINISTRATORS_SID)
+
+    assert security._owner_is_self(_FakeSid(_USER_SID)) is True
+    assert security._owner_is_self(_FakeSid(_ADMINISTRATORS_SID)) is True
+    assert security._owner_is_self(_FakeSid(_STRANGER_SID)) is False
+    assert security._owner_is_self(_FakeSid(None)) is False
+
+
+def test_administrators_is_not_trusted_when_it_is_not_this_token_owner():
+    """Acceptance follows the process token, not a hardcoded well-known SID."""
+
+    security = _windows_security_stub(user_sid=_USER_SID, owner_sid=_USER_SID)
+
+    assert security._self_owner_sddls() == (security.sddl,)
+    assert security._owner_is_self(_FakeSid(_USER_SID)) is True
+    assert security._owner_is_self(_FakeSid(_ADMINISTRATORS_SID)) is False
+
+
+def test_relaxed_owner_still_requires_the_protected_private_dacl():
+    """Only the owner rule moved; the DACL contract is unchanged."""
+
+    security = _windows_security_stub(user_sid=_USER_SID, owner_sid=_ADMINISTRATORS_SID)
+    security._descriptor_dacl = lambda _descriptor: "private-dacl"
+    security._acl_signature = lambda acl: (str(acl).encode(),)
+    control = control_ipc._WindowsSecurity._SE_DACL_PRESENT | control_ipc._WindowsSecurity._SE_DACL_PROTECTED
+
+    security._descriptor_control = lambda _descriptor: control
+    security._validate_security_descriptor(
+        _FakeSid(_ADMINISTRATORS_SID), "private-dacl", object(), Path("runtime")
+    )
+
+    for broken_control, dacl in (
+        (control_ipc._WindowsSecurity._SE_DACL_PRESENT, "private-dacl"),
+        (control, "inherited-dacl"),
+    ):
+        security._descriptor_control = lambda _descriptor, value=broken_control: value
+        with pytest.raises(control_ipc.ControlIpcSecurityError, match="owner or DACL"):
+            security._validate_security_descriptor(
+                _FakeSid(_ADMINISTRATORS_SID), dacl, object(), Path("runtime")
+            )

@@ -583,6 +583,7 @@ class _WindowsSecurity:
     _SE_DACL_PROTECTED = 0x1000
     _TOKEN_QUERY = 0x0008
     _TOKEN_USER = 1
+    _TOKEN_OWNER = 4
     _ERROR_INSUFFICIENT_BUFFER = 122
     _ERROR_FILE_EXISTS = 80
     _ERROR_ALREADY_EXISTS = 183
@@ -621,6 +622,9 @@ class _WindowsSecurity:
         class TokenUser(ctypes.Structure):
             _fields_ = [("User", SidAndAttributes)]
 
+        class TokenOwner(ctypes.Structure):
+            _fields_ = [("Owner", wintypes.LPVOID)]
+
         class AclSizeInformation(ctypes.Structure):
             _fields_ = [
                 ("AceCount", wintypes.DWORD),
@@ -630,9 +634,14 @@ class _WindowsSecurity:
 
         self.SecurityAttributes = SecurityAttributes
         self.TokenUser = TokenUser
+        self.TokenOwner = TokenOwner
         self.AclSizeInformation = AclSizeInformation
         self._configure_functions()
         self.current_user_sid = self._read_current_user_sid()
+        # Windows stamps newly created objects with the token's *default owner*,
+        # which is BUILTIN\Administrators for an elevated token rather than the
+        # token user. Both SIDs therefore name "an object this process made".
+        self.current_owner_sid = self._read_current_owner_sid()
         self.sddl = f"O:{self.current_user_sid}D:P(A;;FA;;;{self.current_user_sid})(A;;FA;;;SY)"
 
     def _configure_functions(self) -> None:
@@ -755,6 +764,12 @@ class _WindowsSecurity:
         self.kernel32.CreateFileW.restype = wintypes.HANDLE
 
     def _read_current_user_sid(self) -> str:
+        return self._read_token_sid(self._TOKEN_USER, self.TokenUser, lambda info: info.User.Sid, "user")
+
+    def _read_current_owner_sid(self) -> str:
+        return self._read_token_sid(self._TOKEN_OWNER, self.TokenOwner, lambda info: info.Owner, "owner")
+
+    def _read_token_sid(self, information_class: int, structure: type, select, label: str) -> str:
         ctypes = self.ctypes
         wintypes = self.wintypes
         token = wintypes.HANDLE()
@@ -768,7 +783,7 @@ class _WindowsSecurity:
             required = wintypes.DWORD()
             self.advapi32.GetTokenInformation(
                 token,
-                self._TOKEN_USER,
+                information_class,
                 None,
                 0,
                 ctypes.byref(required),
@@ -778,23 +793,23 @@ class _WindowsSecurity:
             buffer = ctypes.create_string_buffer(required.value)
             if not self.advapi32.GetTokenInformation(
                 token,
-                self._TOKEN_USER,
+                information_class,
                 buffer,
                 required,
                 ctypes.byref(required),
             ):
                 self._raise_last_error("cannot read the current process token")
-            token_user = ctypes.cast(buffer, ctypes.POINTER(self.TokenUser)).contents
+            information = ctypes.cast(buffer, ctypes.POINTER(structure)).contents
             sid_text = wintypes.LPWSTR()
             if not self.advapi32.ConvertSidToStringSidW(
-                token_user.User.Sid,
+                select(information),
                 ctypes.byref(sid_text),
             ):
-                self._raise_last_error("cannot encode the current user SID")
+                self._raise_last_error(f"cannot encode the current {label} SID")
             try:
                 value = sid_text.value
                 if not value:
-                    raise ControlIpcSecurityError("the current process token has no user SID")
+                    raise ControlIpcSecurityError(f"the current process token has no {label} SID")
                 return value
             finally:
                 self.kernel32.LocalFree(ctypes.cast(sid_text, wintypes.HLOCAL))
@@ -803,12 +818,38 @@ class _WindowsSecurity:
 
     @contextmanager
     def _security_descriptor(self) -> Iterator[object]:
+        with self._descriptor_from_sddl(self.sddl) as descriptor:
+            yield descriptor
+
+    def _self_owner_sddls(self) -> tuple[str, ...]:
+        """Every SDDL owner this process can legitimately have created a path as.
+
+        An unelevated token owns what it creates as the token user. An elevated
+        token owns it as the token's default owner, normally
+        ``BUILTIN\\Administrators``. Both are "us"; anything else is not.
+        """
+
+        if self.current_owner_sid == self.current_user_sid:
+            return (self.sddl,)
+        return (self.sddl, f"O:{self.current_owner_sid}")
+
+    def _owner_is_self(self, owner: object) -> bool:
+        if not owner:
+            return False
+        for sddl in self._self_owner_sddls():
+            with self._descriptor_from_sddl(sddl) as expected:
+                if bool(self.advapi32.EqualSid(owner, self._descriptor_owner(expected))):
+                    return True
+        return False
+
+    @contextmanager
+    def _descriptor_from_sddl(self, sddl: str) -> Iterator[object]:
         ctypes = self.ctypes
         wintypes = self.wintypes
         descriptor = wintypes.LPVOID()
         size = wintypes.DWORD()
         if not self.advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            self.sddl,
+            sddl,
             self._SDDL_REVISION_1,
             ctypes.byref(descriptor),
             ctypes.byref(size),
@@ -1010,9 +1051,7 @@ class _WindowsSecurity:
                 result
             )
         try:
-            with self._security_descriptor() as expected:
-                expected_owner = self._descriptor_owner(expected)
-                return bool(owner) and bool(self.advapi32.EqualSid(owner, expected_owner))
+            return self._owner_is_self(owner)
         finally:
             self.kernel32.LocalFree(descriptor)
 
@@ -1024,13 +1063,12 @@ class _WindowsSecurity:
         path: Path,
     ) -> None:
         control = self._descriptor_control(descriptor)
+        owner_is_self = self._owner_is_self(owner)
         with self._security_descriptor() as expected:
-            expected_owner = self._descriptor_owner(expected)
             expected_dacl = self._descriptor_dacl(expected)
             valid = (
-                bool(owner)
+                owner_is_self
                 and bool(dacl)
-                and bool(self.advapi32.EqualSid(owner, expected_owner))
                 and bool(control & self._SE_DACL_PRESENT)
                 and bool(control & self._SE_DACL_PROTECTED)
                 and self._acl_signature(dacl) == self._acl_signature(expected_dacl)
