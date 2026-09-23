@@ -198,19 +198,23 @@ describe('saveSetupRoutes', () => {
     options: { failOn?: string } = {},
   ) => {
     const store = { ...chains };
+    const agentModels: Record<string, string> = { claude: 'opus-5', codex: 'gpt-5', opencode: 'gpt-5' };
     const keyOf = (backend: string, model: string) => `${backend}:${model}`;
     return {
       store,
       api: {
         getVibeAgent: vi.fn(async (name: string) => ({
           ok: true,
-          agent: full(brief(name, name === 'codex' ? 'codex' : 'claude', store[keyOf(name === 'codex' ? 'codex' : 'claude', name === 'codex' ? 'gpt-5' : 'opus-5')]?.model_id ?? 'opus-5')),
+          agent: full(brief(name, name as VibeAgentBrief['backend'], agentModels[name]!)),
         })),
+        updateVibeAgent: vi.fn(async (name: string, payload: { model: string }) => {
+          agentModels[name] = payload.model;
+          return { ok: true, agent: full(brief(name, name as VibeAgentBrief['backend'], payload.model)) };
+        }),
         listAgents: vi.fn(async () => [supply('claude', [{ name: 'claude', model: 'opus-5' }]), supply('codex', [{ name: 'codex', model: 'gpt-5' }])]),
         getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) => {
           const current = store[keyOf(backend, model)];
-          if (!current) throw new Error(`missing ${backend} ${model}`);
-          return current;
+          return current ?? chainOf(backend, model, [], 'automatic');
         }),
         previewAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string, body: { manual_override: { hops: RouteHop[] } | null }) =>
           chainOf(backend, model, body.manual_override?.hops ?? [], 'manual')),
@@ -270,9 +274,75 @@ describe('saveSetupRoutes', () => {
     const { api, store } = writes({ 'claude:opus-5': claude.chain, 'codex:gpt-5': codex.chain });
     const results = await saveSetupRoutes([A, C], [claude, codex], api, { dirty: true });
     expect(api.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [A, C] });
-    expect(api.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [A, C] });
+    expect(api.putAgentChain).toHaveBeenCalledWith('codex', 'opus-5', { hops: [A, C] });
     expect(results.every((row) => row.kind === 'confirmed')).toBe(true);
-    expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([A, C]);
+    expect(store['codex:opus-5']?.manual_override?.hops).toEqual([A, C]);
+    expect(api.updateVibeAgent).toHaveBeenCalledWith('codex', { model: 'opus-5' });
+  });
+
+  it('makes Codex and OpenCode menu models follow the shared first hop while Claude keeps its menu entry', async () => {
+    const first = hop('src_a', 'claude-opus-5-5');
+    const order = [first, C, B];
+    const targets = [
+      target('claude', 'opus-5', [A], ['claude']),
+      target('codex', 'gpt-5', [C], ['codex']),
+      target('opencode', 'gpt-5', [C], ['opencode']),
+    ];
+    const { api, store } = writes(Object.fromEntries(targets.map((row) =>
+      [`${row.backend}:${row.modelId}`, row.chain])));
+    const models: Record<string, string> = { claude: 'opus-5', codex: 'gpt-5', opencode: 'gpt-5' };
+    api.getVibeAgent = vi.fn(async (name: string) => ({
+      ok: true, agent: full(brief(name, name as VibeAgentBrief['backend'], models[name]!)),
+    }));
+    api.updateVibeAgent = vi.fn(async (name: string, payload: { model: string }) => {
+      models[name] = payload.model;
+      return { ok: true, agent: full(brief(name, name as VibeAgentBrief['backend'], payload.model)) };
+    });
+    api.listAgents = vi.fn(async () => targets.map((row) => supply(row.backend, [{ name: row.backend, model: models[row.backend]! }])));
+    const results = await saveSetupRoutes(order, targets, api);
+    expect(results.map((row) => row.kind)).toEqual(['confirmed', 'confirmed', 'confirmed']);
+    expect(models).toEqual({ claude: 'opus-5', codex: first.model_id, opencode: first.model_id });
+    for (const backend of ['codex', 'opencode'] as const) {
+      expect(store[`${backend}:${first.model_id}`]?.manual_override?.hops).toEqual(order);
+      expect(store[`${backend}:gpt-5`]?.manual_override?.hops).toEqual([C]);
+    }
+    expect(store['claude:opus-5']?.manual_override?.hops).toEqual(order);
+  });
+
+  it('keeps the old Agent model when writing the preferred chain fails', async () => {
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api } = writes({ 'codex:gpt-5': codex.chain }, { failOn: 'codex:opus-5' });
+    const results = await saveSetupRoutes([A, C], [codex], api);
+    expect(results[0]?.kind).toBe('failed');
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('retries a failed model switch after the preferred chain was saved', async () => {
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api, store } = writes({ 'codex:gpt-5': codex.chain });
+    api.updateVibeAgent.mockRejectedValueOnce(new Error('model patch denied'));
+    const first = await saveSetupRoutes([A, C], [codex], api);
+    expect(first[0]).toEqual(expect.objectContaining({ kind: 'failed', error: 'onboarding.route.modelSwitchFailed' }));
+    expect(store['codex:opus-5']?.manual_override?.hops).toEqual([A, C]);
+    expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([C]);
+    const second = await retrySetupRoutes([A, C], [codex], first, api);
+    expect(second[0]?.kind).toBe('confirmed');
+    expect(api.putAgentChain).toHaveBeenCalledTimes(1);
+    expect(api.updateVibeAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a confirmed switched target during retry when its eligible route is a subset', async () => {
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api } = writes({ 'codex:gpt-5': codex.chain });
+    api.listAgents = vi.fn(async () => [{ ...supply('codex', [{ name: 'codex', model: 'gpt-5' }]),
+      sources: { order: ['src_a'], eligibility: [
+        { source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: false },
+      ] } }]);
+    const first = await saveSetupRoutes([A, C], [codex], api);
+    expect(first[0]?.kind).toBe('confirmed');
+    const second = await retrySetupRoutes([A, C], [codex], first, api);
+    expect(second[0]?.kind).toBe('confirmed');
+    expect(api.putAgentChain).toHaveBeenCalledTimes(1);
   });
 
   it('shares Hub keys while excluding backend-specific native subscription hops', async () => {
@@ -294,6 +364,31 @@ describe('saveSetupRoutes', () => {
     expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([C, D]);
   });
 
+  it('reconciles source eligibility drift before either the first save or a retry writes', async () => {
+    const claude = brief('claude', 'claude', 'opus-5');
+    const baselineSupply = { ...supply('claude', [{ name: 'claude', model: 'opus-5' }]),
+      sources: { order: ['src_a', 'src_b'], eligibility: [
+        { source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: true },
+      ] } };
+    const hydration = await hydrateSetupRoutes({
+      listVibeAgents: vi.fn(async () => ({ ok: true, agents: [claude], default_agent_name: 'claude' })),
+      getVibeAgent: vi.fn(async () => ({ ok: true, agent: full(claude) })),
+      getAgentChain: vi.fn(async () => chainOf('claude', 'opus-5', [A, C])),
+    }, [baselineSupply]);
+    const { api } = writes({ 'claude:opus-5': chainOf('claude', 'opus-5', [A, C]) });
+    api.listAgents = vi.fn(async () => [{ ...baselineSupply,
+      sources: { order: ['src_a'], eligibility: [
+        { source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: false },
+      ] } }]);
+    const first = await saveSetupRoutes([C, A], hydration.targets, api);
+    expect(first[0]?.kind).toBe('reconcile');
+    const second = await retrySetupRoutes([C, A], hydration.targets,
+      [{ key: targetKey('claude', 'opus-5'), kind: 'failed', error: 'transient' }], api);
+    expect(second[0]?.kind).toBe('reconcile');
+    expect(api.previewAgentChain).not.toHaveBeenCalled();
+    expect(api.putAgentChain).not.toHaveBeenCalled();
+  });
+
   it('reordering an automatic chain persists a manual override and reads it back', async () => {
     const claude = target('claude', 'opus-5', [A, B], ['claude'], 'automatic');
     const { api, store } = writes({ 'claude:opus-5': claude.chain });
@@ -312,11 +407,7 @@ describe('saveSetupRoutes', () => {
     const { api, store } = writes({
       'claude:opus-5': claude.chain,
       'codex:gpt-5': codex.chain,
-    }, { failOn: 'codex:gpt-5' });
-    api.getVibeAgent = vi.fn(async (name: string) => ({
-      ok: true,
-      agent: full(brief(name, name === 'codex' ? 'codex' : 'claude', name === 'codex' ? 'gpt-5' : 'opus-5')),
-    }));
+    }, { failOn: 'codex:sonnet-4' });
     const shared = [B, A];
     const first = await saveSetupRoutes(shared, [claude, codex], api, { dirty: true });
     expect(first[0]).toEqual(expect.objectContaining({ kind: 'confirmed' }));
@@ -325,11 +416,10 @@ describe('saveSetupRoutes', () => {
     expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([A, B]);
 
     const retried = writes(store);
-    retried.api.getVibeAgent = api.getVibeAgent;
     retried.api.listAgents = api.listAgents;
     const second = await retrySetupRoutes(shared, [claude, codex], first, retried.api);
     expect(retried.api.putAgentChain).toHaveBeenCalledTimes(1);
-    expect(retried.api.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [B, A] });
+    expect(retried.api.putAgentChain).toHaveBeenCalledWith('codex', 'sonnet-4', { hops: [B, A] });
     expect(second[0]?.kind).toBe('confirmed');
     expect(second[1]?.kind).toBe('confirmed');
   });
@@ -340,7 +430,7 @@ describe('saveSetupRoutes', () => {
     const { api, store } = writes({
       'claude:opus-5': claude.chain,
       'codex:gpt-5': codex.chain,
-    }, { failOn: 'codex:gpt-5' });
+    }, { failOn: 'codex:opus-5' });
     const first = await saveSetupRoutes([A, B], [claude, codex], api);
     expect(first.map((row) => row.kind)).toEqual(['skipped', 'failed']);
 
@@ -434,8 +524,12 @@ describe('saveSetupRoutes', () => {
         [`opencode:${modelId}`]: chainOf('opencode', modelId, [], 'automatic'),
       };
       let listed = catalog;
+      let agentModel = modelId;
       const api = {
-        getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(brief(name, 'opencode', modelId)) })),
+        getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(brief(name, 'opencode', agentModel)) })),
+        updateVibeAgent: vi.fn(async (name: string, payload: { model: string }) => ({
+          ok: true, agent: full(brief(name, 'opencode', agentModel = payload.model)),
+        })),
         listAgents: vi.fn(async () => [{
           ...supply('opencode', [{ name: 'opencode', model: modelId }]),
           menu_kind: 'open' as const,
@@ -465,7 +559,7 @@ describe('saveSetupRoutes', () => {
         putAgentModels: vi.fn(async (_backend: AgentChain['backend'], body: BackendModelsPut) => {
           calls.push('models');
           listed = body.models;
-          return supply('opencode', [{ name: 'opencode', model: 'glm-4.6' }]);
+          return { ...supply('opencode', [{ name: 'opencode', model: modelId }]), catalog_models: listed };
         }),
       };
       return { api, calls, store };
@@ -474,12 +568,13 @@ describe('saveSetupRoutes', () => {
     // has just put one source under the model their Agent already names.
     const live = (modelId: string) => ({
       ...target('opencode', modelId, [], ['opencode'], 'automatic'),
-      membership: [A],
+      membership: [hop('src_a', modelId)],
     });
+    const desired = (modelId: string) => [hop('src_a', modelId)];
 
     it('reconciles the saved model into the catalog before the preview, and the save lands', async () => {
       const { api, calls, store } = opencodeWrites('glm-4.6', [], [candidate('glm-4.6', 'openai_responses')]);
-      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      const results = await saveSetupRoutes(desired('glm-4.6'), [live('glm-4.6')], api, { dirty: true });
       expect(calls).toEqual(['candidates', 'models', 'preview']);
       expect(api.putAgentModels).toHaveBeenCalledWith('opencode', {
         baseline: [],
@@ -493,7 +588,7 @@ describe('saveSetupRoutes', () => {
         expected_suppliers: { 'glm-4.6': [] },
       });
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
-      expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: [A] });
+      expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: desired('glm-4.6') });
     });
 
     // The reason the row is the server's candidate rather than one built here. An
@@ -503,14 +598,14 @@ describe('saveSetupRoutes', () => {
     it('adopts an Anthropic-family model with the protocol the server states', async () => {
       const id = 'claude-sonnet-4-5';
       const { api, store } = opencodeWrites(id, [], [candidate(id, 'anthropic')]);
-      const results = await saveSetupRoutes([A], [live(id)], api, { dirty: true });
+      const results = await saveSetupRoutes(desired(id), [live(id)], api, { dirty: true });
       expect(api.putAgentModels).toHaveBeenCalledWith('opencode', {
         baseline: [],
         models: [expect.objectContaining({ id, native_protocol: 'anthropic' })],
         expected_suppliers: { [id]: [] },
       });
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
-      expect(store[`opencode:${id}`]?.manual_override).toEqual({ hops: [A] });
+      expect(store[`opencode:${id}`]?.manual_override).toEqual({ hops: desired(id) });
     });
 
     // The other half of the same agreement. The server matches an addition
@@ -525,12 +620,12 @@ describe('saveSetupRoutes', () => {
         source_id: 'src_a', source_name: 'Relay', model_id: 'glm-4.6-air',
       };
       const { api, store } = opencodeWrites('glm-4.6', [], [candidate('glm-4.6', 'openai_responses', [supplier])]);
-      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      const results = await saveSetupRoutes(desired('glm-4.6'), [live('glm-4.6')], api, { dirty: true });
       expect(api.putAgentModels).toHaveBeenCalledWith('opencode', expect.objectContaining({
         expected_suppliers: { 'glm-4.6': [{ source_id: 'src_a', model_id: 'glm-4.6-air' }] },
       }));
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
-      expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: [A] });
+      expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: desired('glm-4.6') });
     });
 
     // Nobody has an authoritative answer for this id, so nobody invents one: the
@@ -541,10 +636,10 @@ describe('saveSetupRoutes', () => {
     ])('writes no catalog when %s', async (_label, candidates) => {
       const id = 'claude-sonnet-4-5';
       const { api, calls } = opencodeWrites(id, [], candidates);
-      const results = await saveSetupRoutes([A], [live(id)], api, { dirty: true });
+      const results = await saveSetupRoutes(desired(id), [live(id)], api, { dirty: true });
       expect(api.putAgentModels).not.toHaveBeenCalled();
-      expect(calls).toEqual(['candidates', 'preview']);
-      expect(results).toEqual([expect.objectContaining({ kind: 'failed', error: `unknown model ${id}` })]);
+      expect(calls).toEqual(['candidates']);
+      expect(results).toEqual([expect.objectContaining({ kind: 'failed', error: 'onboarding.route.catalogFailed' })]);
     });
 
     it('reads no candidates and writes no catalog when it already names the model', async () => {
@@ -555,7 +650,7 @@ describe('saveSetupRoutes', () => {
         native_protocol: 'openai_responses', locked: false, routeable: true,
       };
       const { api, calls } = opencodeWrites('glm-4.6', [held], [candidate('glm-4.6', 'openai_responses')]);
-      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      const results = await saveSetupRoutes(desired('glm-4.6'), [live('glm-4.6')], api, { dirty: true });
       expect(api.getAgentModelCandidates).not.toHaveBeenCalled();
       expect(api.putAgentModels).not.toHaveBeenCalled();
       expect(calls).toEqual(['preview']);
@@ -571,7 +666,7 @@ describe('saveSetupRoutes', () => {
     it('writes nothing at all, catalog included, when the chain moved after hydration', async () => {
       const { api, calls, store } = opencodeWrites('glm-4.6', [], [candidate('glm-4.6', 'openai_responses')]);
       store['opencode:glm-4.6'] = chainOf('opencode', 'glm-4.6', [C], 'manual');
-      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      const results = await saveSetupRoutes(desired('glm-4.6'), [live('glm-4.6')], api, { dirty: true });
       expect(results).toEqual([expect.objectContaining({ kind: 'reconcile' })]);
       expect(api.putAgentModels).not.toHaveBeenCalled();
       expect(api.putAgentChain).not.toHaveBeenCalled();

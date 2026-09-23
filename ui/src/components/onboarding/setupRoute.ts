@@ -9,6 +9,7 @@ import type {
   AgentBackend,
   AgentChain,
   AgentSupply,
+  AgentSources,
   BackendModelCandidates,
   BackendModelsPut,
   RouteHop,
@@ -23,8 +24,10 @@ export type SetupRouteTargetSnapshot = {
   backend: AgentBackend;
   modelId: string;
   agentNames: string[];
+  designatedNames?: string[];
   chain: AgentChain;
   membership: RouteHop[];
+  sourceBaseline?: string;
 };
 
 export type SetupRouteHydration = {
@@ -76,6 +79,7 @@ export type SetupRouteReadApi = {
 
 export type SetupRouteWriteApi = {
   getVibeAgent: SetupRouteReadApi['getVibeAgent'];
+  updateVibeAgent: (name: string, payload: { model: string }) => Promise<{ ok: boolean; agent?: VibeAgentFull | null }>;
   listAgents: () => Promise<AgentSupply[]>;
   getAgentChain: SetupRouteReadApi['getAgentChain'];
   previewAgentChain: (
@@ -125,6 +129,18 @@ export const targetChanged = (shared: RouteHop[], target: SetupRouteTargetSnapsh
 
 const eligibleRoute = (shared: RouteHop[], supply: AgentSupply): RouteHop[] =>
   supply.sources ? shared.filter((hop) => eligibilityOf(supply, hop.source_id).eligible) : shared;
+
+const sourceBaseline = (sources: AgentSources | null | undefined): string => {
+  if (!sources) return 'null';
+  const ids = [...new Set([
+    ...sources.order,
+    ...(sources.eligibility ?? []).map((entry) => entry.source_id),
+  ])].sort();
+  return JSON.stringify({
+    order: sources.order,
+    eligible: ids.map((id) => [id, eligibilityOf({ sources }, id).eligible]),
+  });
+};
 
 export const withMembershipHop = (membership: RouteHop[], hop: RouteHop): RouteHop[] => {
   if (membership.some((row) => hopIdentity(row) === hopIdentity(hop))) return membership;
@@ -243,8 +259,10 @@ export async function hydrateSetupRoutes(
         backend: group.backend,
         modelId: group.modelId,
         agentNames: discloseNames(group.backend, group.modelId, group.names, supplies),
+        designatedNames: group.names,
         chain,
         membership: chainMembership(chain),
+        sourceBaseline: sourceBaseline(supplyByBackend.get(group.backend)?.sources),
       });
     } catch {
       throw new Error('onboarding.route.readFailed');
@@ -287,6 +305,7 @@ const precheckTarget = async (
     const supplies = await api.listAgents();
     const supply = supplies.find((row) => row.backend === target.backend);
     if (supply?.mode !== 'hub') return 'reconcile';
+    if (target.sourceBaseline !== undefined && target.sourceBaseline !== sourceBaseline(supply.sources)) return 'reconcile';
     for (const name of target.agentNames) {
       const result = await api.getVibeAgent(name, { cache: false });
       if (result.ok && result.agent && result.agent.backend === target.backend && result.agent.model === target.modelId) {
@@ -341,20 +360,67 @@ const adoptTargetModel = async (
   target: SetupRouteTargetSnapshot,
   api: SetupRouteWriteApi,
   supply: AgentSupply,
-): Promise<void> => {
-  if (supply.menu_kind !== 'open') return;
+): Promise<AgentSupply> => {
+  if (target.backend === 'claude') return supply;
   const catalog = catalogModels(supply);
-  if (!catalog || catalog.some((model) => model.id === target.modelId)) return;
+  if (!catalog || catalog.some((model) => model.id === target.modelId)) return supply;
   const offered = offeredCandidates(await api.getAgentModelCandidates(target.backend));
   const candidate = offered.get(target.modelId);
-  if (!candidate?.native_protocol) return;
+  if (!candidate?.native_protocol) throw new Error('onboarding.route.catalogFailed');
   const chosen = chosenCandidate(candidate);
   const adopted = draftRowFor(chosen.candidate, [], catalog);
-  await api.putAgentModels(target.backend, {
+  return api.putAgentModels(target.backend, {
     baseline: catalog,
     models: [...catalog, adopted],
     expected_suppliers: { [adopted.id]: chosen.expected_suppliers },
   });
+};
+
+const writePreferredTarget = async (
+  target: SetupRouteTargetSnapshot,
+  desired: RouteHop[],
+  api: SetupRouteWriteApi,
+  supply: AgentSupply,
+): Promise<TargetSaveResult> => {
+  const key = targetKey(target.backend, target.modelId);
+  const preferred = desired[0]?.model_id;
+  if (!preferred || target.backend === 'claude' || preferred === target.modelId) {
+    return writeTarget(target, desired, api, supply);
+  }
+  let stage: 'catalogFailed' | 'chainWriteFailed' | 'modelSwitchFailed' = 'catalogFailed';
+  try {
+    const oldChain = await api.getAgentChain(target.backend, target.modelId);
+    if (classifyRetry(target, oldChain, chainMembership(target.chain)) === 'reconcile') {
+      return { key, kind: 'reconcile', chain: oldChain };
+    }
+    const adoptedSupply = await adoptTargetModel({ ...target, modelId: preferred }, api, supply);
+    stage = 'chainWriteFailed';
+    const nextChain = await api.getAgentChain(target.backend, preferred);
+    const nextTarget = { ...target, modelId: preferred, chain: nextChain, membership: chainMembership(nextChain) };
+    const saved = await writeTarget(nextTarget, desired, api, adoptedSupply);
+    if (saved.kind === 'failed') return { key, kind: 'failed', error: 'onboarding.route.chainWriteFailed' };
+    if (saved.kind !== 'confirmed') return { ...saved, key };
+    // The route must exist before the Agent can name it. A failed model switch
+    // leaves the old Agent route intact and the new chain available for retry.
+    stage = 'modelSwitchFailed';
+    for (const name of target.designatedNames ?? target.agentNames) {
+      const current = await api.getVibeAgent(name, { cache: false });
+      if (!current.ok || !current.agent || current.agent.backend !== target.backend
+        || (current.agent.model !== target.modelId && current.agent.model !== preferred)) {
+        return { key, kind: 'reconcile', chain: saved.chain };
+      }
+      if (current.agent.model === preferred) continue;
+      const updated = await api.updateVibeAgent(name, { model: preferred });
+      if (!updated.ok || updated.agent?.name !== name || updated.agent.backend !== target.backend
+        || updated.agent.model !== preferred) throw new Error('onboarding.route.modelSwitchFailed');
+      const readback = await api.getVibeAgent(name, { cache: false });
+      if (!readback.ok || readback.agent?.model !== preferred) throw new Error('onboarding.route.modelSwitchFailed');
+    }
+    return { ...saved, key };
+  } catch (error) {
+    return { key, kind: 'failed', error: error instanceof Error && error.message.startsWith('onboarding.route.')
+      ? error.message : `onboarding.route.${stage}` };
+  }
 };
 
 /**
@@ -440,11 +506,12 @@ export async function saveSetupRoutes(
       continue;
     }
     const baselineHops = chainMembership(target.chain);
-    if (desired.length === 0 || sameRouteDraft(desired, baselineHops)) {
+    if (desired.length === 0 || (sameRouteDraft(desired, baselineHops)
+      && (target.backend === 'claude' || target.modelId === desired[0]?.model_id))) {
       results.push({ key, kind: 'skipped' });
       continue;
     }
-    results.push(await writeTarget(target, desired, api, precheck.supply));
+    results.push(await writePreferredTarget(target, desired, api, precheck.supply));
   }
   return results;
 }
@@ -459,6 +526,37 @@ export async function retrySetupRoutes(
   for (const target of targets) {
     const key = targetKey(target.backend, target.modelId);
     const prior = previous.find((row) => row.key === key);
+    if (prior?.kind === 'confirmed' && prior.chain.model_id !== target.modelId) {
+      try {
+        const supplies = await api.listAgents();
+        const supply = supplies.find((row) => row.backend === target.backend);
+        if (supply?.mode !== 'hub' || (target.sourceBaseline !== undefined
+          && target.sourceBaseline !== sourceBaseline(supply.sources))) {
+          results.push({ key, kind: 'reconcile', chain: prior.chain });
+          continue;
+        }
+        const desired = eligibleRoute(shared, supply);
+        const current = await api.getAgentChain(target.backend, prior.chain.model_id);
+        const agents = await Promise.all((target.designatedNames ?? target.agentNames).map((name) =>
+          api.getVibeAgent(name, { cache: false })));
+        if (sameRouteDraft(chainMembership(prior.chain), desired)
+          && routeChainMatchesAttempt(current, {
+            backend: target.backend, modelId: prior.chain.model_id,
+            submitted: desired, manual_override: { hops: desired },
+          }) && agents.every((row) => row.ok && row.agent?.model === prior.chain.model_id)) {
+          results.push(prior);
+        } else {
+          results.push({ key, kind: 'reconcile', chain: current });
+        }
+      } catch (error) {
+        results.push({ key, kind: 'failed', error: errorMessage(error) });
+      }
+      continue;
+    }
+    if (prior?.kind === 'confirmed' && sameRouteDraft(chainMembership(prior.chain), shared)) {
+      results.push(prior);
+      continue;
+    }
     if (!prior || prior.kind === 'skipped') {
       // A skipped receipt belongs to the old draft. A later edit may now require
       // this target, so compare it against the current order again.
@@ -499,6 +597,10 @@ export async function retrySetupRoutes(
       results.push({ key, kind: 'failed', error: 'onboarding.route.noEligible' });
       continue;
     }
+    if (target.backend !== 'claude' && target.modelId !== desired[0]?.model_id) {
+      results.push(await writePreferredTarget(target, desired, api, precheck.supply));
+      continue;
+    }
     const classification = classifyRetry(target, current, desired);
     if (classification === 'skip') {
       results.push({ key, kind: 'confirmed', chain: current });
@@ -508,7 +610,7 @@ export async function retrySetupRoutes(
       results.push({ key, kind: 'reconcile', chain: current });
       continue;
     }
-    results.push(await writeTarget(target, desired, api, precheck.supply));
+    results.push(await writePreferredTarget(target, desired, api, precheck.supply));
   }
   return results;
 }

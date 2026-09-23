@@ -495,6 +495,22 @@ describe('Hub route refresh', () => {
     expect(mock.models.putAgentChain).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
   });
+
+  it('reports a failed shared-route read when enabling a Hub assistant', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.enabled = false;
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockRejectedValue(new Error('route unavailable'));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: backend === 'claude',
+      auth: 'api_key', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={INITIAL_SETUP_FLOW_STATE}
+      setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    fireEvent.click(row('Claude Code').getByRole('switch'));
+    await waitFor(() => expect(row('Claude Code').getByRole('alert').textContent).toContain(en.onboarding.route.readFailed));
+    expect(mock.models.putAgentChain).not.toHaveBeenCalled();
+  });
 });
 
 const pending = <T,>() => { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };

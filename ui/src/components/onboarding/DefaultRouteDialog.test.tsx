@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import en from '../../i18n/en.json';
+import { blankBackendModel } from '../settings/models/backendCatalog';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import type { AgentChain, AgentSupply, RouteHop, Source } from '../settings/models/types';
 import { DefaultRouteDialog } from './DefaultRouteDialog';
@@ -183,6 +184,21 @@ describe('DefaultRouteDialog', () => {
     expect(screen.getByRole('button', { name: en.onboarding.route.done }).hasAttribute('disabled')).toBe(false);
   });
 
+  it('offers only routeable catalog models when repairing a model-less assistant', async () => {
+    const missing = { ...agent, model: null };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [missing], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: missing });
+    const reads = { ...agentReads, read: async () => ({ kind: 'current' as const, value: [{
+      ...supplies[0]!, catalog_models: [
+        { ...blankBackendModel(), id: 'Default', display_name: 'Default', routeable: false },
+        { ...blankBackendModel(), id: 'opus-5', display_name: 'Claude Opus', routeable: true },
+      ],
+    }] }) };
+    render(<Host reads={reads} />);
+    const choose = await screen.findByRole('combobox', { name: 'Choose a model for claude' });
+    expect(Array.from(choose.querySelectorAll('option')).map((option) => option.value)).toEqual(['', 'opus-5']);
+  });
+
   it('keeps a dirty draft when adding a source and returning', async () => {
     const onNavigate = vi.fn();
     render(<Host onNavigate={onNavigate} />);
@@ -260,6 +276,10 @@ describe('DefaultRouteDialog', () => {
       ok: true,
       agent: name === 'codex' ? codex : agent,
     }));
+    mock.api.updateVibeAgent.mockImplementation(async (name: string, payload: { model: string }) => {
+      codex.model = payload.model;
+      return { ok: true, agent: name === 'codex' ? codex : agent };
+    });
     mock.models.getAgentChain.mockImplementation(async (backend: string, model: string) => (
       backend === 'codex' ? empty('codex', model) : empty('claude', model)
     ));
@@ -290,7 +310,7 @@ describe('DefaultRouteDialog', () => {
     await user.click(screen.getByRole('option', { name: /opus-5/ }));
     await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.add.confirm }));
     await user.click(screen.getByRole('button', { name: en.onboarding.route.done }));
-    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [A] }));
+    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'opus-5', { hops: [A] }));
     expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [A] });
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ backend: 'codex', agentName: 'codex' }));
   });

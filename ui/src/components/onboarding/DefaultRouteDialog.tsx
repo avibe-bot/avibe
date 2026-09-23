@@ -8,6 +8,7 @@ import { DialogOverlay } from '@/components/ui/dialog';
 import { useApi } from '@/context/ApiContext';
 import type { CollectionReadAuthority } from '@/components/settings/models/collectionReadAuthority';
 import { eligibleSources } from '@/components/settings/models/eligibility';
+import { catalogModelIds } from '@/components/settings/models/backendCatalog';
 import { modelsApi } from '@/components/settings/models/modelsApi';
 import { RouteCandidatePopover } from '@/components/settings/models/RouteCandidatePopover';
 import { RouteOriginBadge } from '@/components/settings/models/RouteOriginBadge';
@@ -60,9 +61,17 @@ export function DefaultRouteDialog({
   onSaved,
 }: DefaultRouteDialogProps) {
   const { t } = useTranslation();
-  const routeErrorText = React.useCallback((message: string): string =>
-    message === 'onboarding.route.readFailed' || message === 'onboarding.route.noEligible'
-      ? t(message) : message, [t]);
+  const routeErrorText = React.useCallback((message: string): string => {
+    switch (message) {
+      case 'onboarding.route.readFailed': return t('onboarding.route.readFailed');
+      case 'onboarding.route.noEligible': return t('onboarding.route.noEligible');
+      case 'onboarding.route.changed': return t('onboarding.route.changed');
+      case 'onboarding.route.catalogFailed': return t('onboarding.route.catalogFailed');
+      case 'onboarding.route.chainWriteFailed': return t('onboarding.route.chainWriteFailed');
+      case 'onboarding.route.modelSwitchFailed': return t('onboarding.route.modelSwitchFailed');
+      default: return message;
+    }
+  }, [t]);
   const api = useApi();
   const [phase, setPhase] = React.useState<'idle' | 'loading' | 'saving' | 'failed'>('idle');
   const [status, setStatus] = React.useState('');
@@ -85,6 +94,7 @@ export function DefaultRouteDialog({
 
   const writes = React.useMemo(() => ({
     getVibeAgent: (name: string, params?: { cache?: boolean }) => api.getVibeAgent(name, params),
+    updateVibeAgent: (name: string, payload: { model: string }) => api.updateVibeAgent(name, payload),
     listAgents: () => agentReads.readValue(),
     getAgentChain: modelsApi.getAgentChain,
     previewAgentChain: modelsApi.previewAgentChain,
@@ -192,6 +202,8 @@ export function DefaultRouteDialog({
         if (!live) return [];
         return [{
           ...live,
+          previousKey: row.key,
+          modelId: row.chain.model_id,
           chain: row.chain,
           membership: row.chain.manual_override?.hops.length
             ? row.chain.manual_override.hops
@@ -200,7 +212,7 @@ export function DefaultRouteDialog({
       });
       if (confirmed.length) {
         const nextTargets = targets.map((target) =>
-          confirmed.find((row) => row.backend === target.backend && row.modelId === target.modelId) ?? target);
+          confirmed.find((row) => row.previousKey === targetKey(target.backend, target.modelId)) ?? target);
         baselines.current = nextTargets;
         setTargets(nextTargets);
       }
@@ -294,8 +306,10 @@ export function DefaultRouteDialog({
             )}
             {missingModels.map(({ backend, agentName }) => {
               const supply = supplies.find((row) => row.backend === backend);
-              const models = supply?.catalog_models?.map((row) => ({ id: row.id, label: row.display_name || row.id }))
-                ?? supply?.builtin_models?.map((id) => ({ id, label: id })) ?? [];
+              const models = supply ? catalogModelIds(supply).map((id) => ({
+                id,
+                label: supply.catalog_models?.find((row) => row.id === id)?.display_name || id,
+              })) : [];
               return (
                 <div className="setup-add-row" key={agentName}>
                   <div className="setup-add-row-copy">

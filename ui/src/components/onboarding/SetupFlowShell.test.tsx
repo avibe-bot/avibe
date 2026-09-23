@@ -54,7 +54,7 @@ it.each(['pending', 'disabled', 'enabled'] as const)('policy %s never removes a 
 it('a held journey refuses the screen own navigate, not only the buttons', () => {
   const { container, rerender } = render(show('enabled', true, { navigationLocked: true }));
   const current = () => container.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
-  expect(screen.getByRole('button', { name: 'Get started' }).hasAttribute('disabled')).toBe(true);
+  expect(screen.getByRole('button', { name: 'Get started' }).hasAttribute('disabled')).toBe(false);
   // Held, not busy: nothing is running, so nothing spins. The spinner carries Tailwind's
   // `motion-safe:` variant, so the token in the DOM is the whole `motion-safe:animate-spin`
   // — feeding a genuinely busy action proves this selector can find one, which is what
@@ -74,7 +74,7 @@ it('a held journey does not hand the shared primary to the config retry either',
   const onRetrySetup = vi.fn();
   render(show('disabled', false, { navigationLocked: true, onRetrySetup }));
   const primary = screen.getByRole('button', { name: en.common.retry });
-  expect(primary.hasAttribute('disabled')).toBe(true);
+  expect(primary.hasAttribute('disabled')).toBe(false);
   fireEvent.click(primary);
   expect(onRetrySetup).not.toHaveBeenCalled();
 });

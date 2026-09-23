@@ -218,7 +218,7 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
     </div>
     <div className="onboarding-setup-footer">
       <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action"
-        disabled={loading || !!handoff || navigationLocked || (!retry && (!action || action.disabled || action.busy || !ready))}
+        disabled={loading || !!handoff || (!retry && (!action || action.disabled || action.busy || !ready))}
         onClick={() => { if (transitioning.current || policy.current.locked) return; if (retry) onRetrySetup(); else if (ready && action && !action.disabled && !action.busy) handles.current[current.current.id]?.activate(); }}>
         {t(loading ? 'common.loading' : retry ? 'common.retry' : action?.labelKey ?? 'common.loading', action?.labelArgs)}
         {(loading || action?.busy || action?.icon === 'spinner')

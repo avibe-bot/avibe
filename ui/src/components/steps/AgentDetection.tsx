@@ -160,9 +160,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const confirmedRoute = useRef<RouteHop[]>([]);
   const confirmedRouteRead = useRef(false);
   const readSharedRoute = useCallback(async () => {
-    if (!agentReads || !setFlowState) return;
+    if (!agentReads || !setFlowState) return false;
     const token = ++routeReadToken.current;
     const epoch = activation.current;
+    confirmedRouteRead.current = false;
     try {
       const [supplyRead, listed] = await Promise.all([
         agentReads.read(),
@@ -174,18 +175,20 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         getVibeAgent: (name, params) => api.getVibeAgent(name, params),
         getAgentChain: modelsApi.getAgentChain,
       }, supplies);
-      if (token !== routeReadToken.current || epoch !== activation.current) return;
+      if (token !== routeReadToken.current || epoch !== activation.current) return false;
       confirmedRoute.current = hydration.union;
       confirmedRouteRead.current = true;
       setRouteRead({ done: true, targets: hydration.targets, sources: Array.isArray(listed) ? listed : [], supplies });
       setFlowState((current) => (current.routeOrderDirty
         ? current
         : { ...current, routeOrder: hydration.union }));
+      return true;
     } catch {
-      if (token !== routeReadToken.current || epoch !== activation.current) return;
+      if (token !== routeReadToken.current || epoch !== activation.current) return false;
       // The card falls back to the label that opens the dialog, and the dialog reads
       // for itself.
       setRouteRead((current) => ({ ...current, done: true }));
+      return false;
     }
   }, [agentReads, api, setFlowState]);
   useEffect(() => {
@@ -294,7 +297,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // A newly enabled assistant joins the saved route before readiness is measured.
   const adoptSharedRoute = useCallback(async (backend: RuntimeBackendId) => {
     if (!agentReads || !setFlowState) return;
-    if (!confirmedRouteRead.current) await readSharedRoute();
+    if (!confirmedRouteRead.current && !await readSharedRoute()) {
+      throw new Error(t('onboarding.route.readFailed'));
+    }
     const shared = confirmedRoute.current;
     if (shared.length === 0) return;
     let failure: Error | null = null;
@@ -309,6 +314,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (mine.length) {
         const outcomes = await saveSetupRoutes(shared, mine, {
           getVibeAgent: (name, params) => api.getVibeAgent(name, params),
+          updateVibeAgent: (name, payload) => api.updateVibeAgent(name, payload),
           listAgents: () => agentReads.readValue(),
           getAgentChain: modelsApi.getAgentChain,
           previewAgentChain: modelsApi.previewAgentChain,
@@ -319,7 +325,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         if (saveNeedsRetry(outcomes)) {
           const failed = outcomes.find((row) => row.kind === 'failed' || row.kind === 'reconcile');
           const message = failed?.kind === 'failed' ? failed.error : 'onboarding.route.changed';
-          throw new Error(message === 'onboarding.route.changed' ? t('onboarding.route.changed') : message);
+          const label = message === 'onboarding.route.changed' ? t('onboarding.route.changed')
+            : message === 'onboarding.route.catalogFailed' ? t('onboarding.route.catalogFailed')
+              : message === 'onboarding.route.chainWriteFailed' ? t('onboarding.route.chainWriteFailed')
+                : message === 'onboarding.route.modelSwitchFailed' ? t('onboarding.route.modelSwitchFailed') : message;
+          throw new Error(label);
         }
         await refreshConnection(backend);
       }
