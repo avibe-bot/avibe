@@ -13881,6 +13881,22 @@ def cmd_start(*, open_browser: bool | None = None):
         memory_ui_secret=ui_memory_secret,
         start_info=ui_start,
     )
+    if ui_pid is None:
+        # No pid means start_ui found a stale UI it could not stop and refused
+        # to start a replacement that would only die on bind. Nothing below can
+        # complete without that pid: the status writes carry it and
+        # validate_start_receipt rejects a receipt missing it. Running on
+        # anyway ended the command in the receipt builder, after the service
+        # this command had just started was already up -- and a service with no
+        # receipt is adopted as `reused` next time, so the desktop shell never
+        # owns its stop again. Undo our own start instead; a service that was
+        # already running is not ours to stop, and this command has then
+        # changed nothing to undo.
+        if not service_reused:
+            # stop_service() logs the pid it could not stop, so a rollback that
+            # itself fails still leaves evidence; either way the start failed.
+            runtime.stop_service()
+        raise RuntimeError("Vibe UI could not be started because a stale UI process could not be stopped")
     if service_reused and ui_pid != live_ui_pid:
         logger.warning(
             "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "

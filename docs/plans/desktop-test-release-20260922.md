@@ -870,3 +870,14 @@ regression guard, not a second instance of the defect.
   reaches the error branch, so a failing desktop-managed backend reads as
   healthy in the popover text. The error badge and Reinstall action still render,
   so the failure stays visible while the wording is wrong. Tracked in issue 2140.
+- **Fixed here.** This PR gave `runtime.start_ui` a `None` return for a stale UI
+  it could not stop, and left `cmd_start` unaware of it: the command ran on to a
+  receipt `validate_start_receipt` rejects, so the service it had just started
+  stayed alive with no receipt ever printed, and an unreceipted service is
+  adopted as `reused` on the next attempt. `cmd_start` now rolls back the
+  service *it* started and fails there. Consequence class is #2135's, but the
+  `None` return is ours, so the one caller this PR broke is fixed here and
+  nothing in receipt or adoption semantics is touched. A start that fails this
+  way still leaves the status file reading `starting`, exactly as the adjacent
+  `start_service` failure path already does; correcting that is a separate,
+  pre-existing concern and was deliberately left out rather than half-fixed.
