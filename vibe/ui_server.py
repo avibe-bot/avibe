@@ -6455,21 +6455,31 @@ def web_push_subscribe():
     device_id = payload.get("device_id") if isinstance(payload.get("device_id"), str) else None
     previous_endpoints = payload.get("previous_endpoints") if isinstance(payload.get("previous_endpoints"), list) else None
     subscription = payload.get("subscription") if isinstance(payload.get("subscription"), dict) else payload
+    background_rotation = payload.get("background_rotation") is True
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            row = web_push_service.upsert_subscription(
-                conn,
-                user_key=_web_push_user_key(),
-                payload=subscription,
-                user_agent=user_agent,
-                device_label=device_label,
-                device_id=device_id,
-                previous_endpoints=previous_endpoints,
-            )
+            if background_rotation:
+                row = web_push_service.upsert_background_rotated_subscription(
+                    conn,
+                    user_key=_web_push_user_key(),
+                    payload=subscription,
+                    user_agent=user_agent,
+                    previous_endpoints=previous_endpoints,
+                )
+            else:
+                row = web_push_service.upsert_subscription(
+                    conn,
+                    user_key=_web_push_user_key(),
+                    payload=subscription,
+                    user_agent=user_agent,
+                    device_label=device_label,
+                    device_id=device_id,
+                    previous_endpoints=previous_endpoints,
+                )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
-    return jsonify({"ok": True, "subscription": row})
+    return jsonify({"ok": True, "accepted": row is not None, "subscription": row})
 
 
 @app.route("/api/web-push/subscriptions", methods=["DELETE"])

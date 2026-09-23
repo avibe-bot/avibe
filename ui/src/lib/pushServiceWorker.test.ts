@@ -126,6 +126,7 @@ describe('push service worker notification launches', () => {
         keys: { p256dh: 'new-key', auth: 'new-auth' },
       },
       previous_endpoints: ['https://push.example.test/sub/old'],
+      background_rotation: true,
     });
   });
 
@@ -205,6 +206,7 @@ describe('push service worker notification launches', () => {
     expect(JSON.parse(String(requests[2].init?.body))).toEqual({
       subscription: currentSubscription.toJSON(),
       previous_endpoints: ['https://push.example.test/sub/old'],
+      background_rotation: true,
     });
   });
 

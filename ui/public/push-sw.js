@@ -71,6 +71,7 @@ async function postPushSubscription(subscription, previousEndpoints, csrfToken) 
     body: JSON.stringify({
       subscription: subscription.toJSON(),
       previous_endpoints: previousEndpoints,
+      background_rotation: true,
     }),
   });
 }

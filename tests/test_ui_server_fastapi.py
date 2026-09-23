@@ -3516,6 +3516,57 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
         ) is None
 
 
+def test_web_push_background_rotation_preserves_logout_opt_out(monkeypatch, tmp_path):
+    from storage import web_push_service
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    previous = {
+        "endpoint": "https://push.example.test/sub/previous",
+        "keys": {"p256dh": "previous-key", "auth": "previous-auth"},
+    }
+    current = {
+        "endpoint": "https://push.example.test/sub/current",
+        "keys": {"p256dh": "current-key", "auth": "current-auth"},
+    }
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": previous, "device_id": "device-1"},
+        headers=headers,
+    ).status_code == 200
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        assert web_push_service.disable_subscription(
+            conn,
+            endpoint=previous["endpoint"],
+            user_key="local",
+        ) is True
+
+    rotated = client.post(
+        "/api/web-push/subscriptions",
+        json={
+            "subscription": current,
+            "previous_endpoints": [previous["endpoint"]],
+            "background_rotation": True,
+        },
+        headers=headers,
+    )
+
+    assert rotated.status_code == 200
+    assert rotated.get_json() == {
+        "accepted": False,
+        "ok": True,
+        "subscription": None,
+    }
+    with engine.connect() as conn:
+        assert web_push_service.count_enabled(conn, user_key="local") == 0
+
+
 def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):
     from storage import web_push_service
     from storage.db import create_sqlite_engine

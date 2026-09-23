@@ -150,6 +150,46 @@ def upsert_subscription(
     return _row_to_dict(row)
 
 
+def upsert_background_rotated_subscription(
+    conn: Connection,
+    *,
+    user_key: str,
+    payload: dict[str, Any],
+    previous_endpoints: list[str] | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any] | None:
+    """Accept a service-worker rotation only for an active or provider-failed row."""
+
+    endpoint, _, _ = validate_subscription_payload(payload)
+    previous_candidates = _normalize_previous_endpoints(previous_endpoints, endpoint)
+    if not previous_candidates:
+        return None
+    previous = conn.execute(
+        select(web_push_subscriptions)
+        .where(web_push_subscriptions.c.user_key == user_key)
+        .where(web_push_subscriptions.c.endpoint.in_(previous_candidates))
+        .where(
+            (web_push_subscriptions.c.enabled == 1)
+            | web_push_subscriptions.c.last_failure_at.is_not(None)
+        )
+        .limit(1)
+    ).mappings().first()
+    if previous is None:
+        return None
+
+    current = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
+    if current is not None and not current["enabled"] and not current.get("last_failure_at"):
+        return None
+    return upsert_subscription(
+        conn,
+        user_key=user_key,
+        payload=payload,
+        user_agent=user_agent,
+        device_id=current.get("device_id") if current is not None else None,
+        previous_endpoints=previous_endpoints,
+    )
+
+
 def attach_device_to_enabled_subscription(
     conn: Connection,
     *,

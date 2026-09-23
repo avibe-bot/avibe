@@ -152,6 +152,70 @@ def test_attach_device_to_enabled_subscription_does_not_reenable_disabled_endpoi
         assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 0
 
 
+def test_background_rotation_requires_active_or_provider_failed_previous(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/previous"),
+        )
+        current = _payload("https://push.example.test/sub/current")
+
+        accepted = web_push_service.upsert_background_rotated_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=current,
+            previous_endpoints=[previous["endpoint"]],
+        )
+        assert accepted is not None
+        assert accepted["endpoint"] == current["endpoint"]
+
+        web_push_service.disable_subscription(
+            conn,
+            endpoint=accepted["endpoint"],
+            user_key="remote:user-a",
+        )
+        rejected = web_push_service.upsert_background_rotated_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/next"),
+            previous_endpoints=[accepted["endpoint"]],
+        )
+        assert rejected is None
+
+
+def test_background_rotation_accepts_provider_failed_previous(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        previous = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/previous"),
+        )
+        web_push_service.mark_send_failure(
+            conn,
+            endpoint=previous["endpoint"],
+            disable=True,
+        )
+
+        accepted = web_push_service.upsert_background_rotated_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload("https://push.example.test/sub/current"),
+            previous_endpoints=[previous["endpoint"]],
+        )
+
+        assert accepted is not None
+        assert accepted["endpoint"] == "https://push.example.test/sub/current"
+
+
 def test_attach_device_to_enabled_subscription_preserves_same_origin_legacy_rows(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
