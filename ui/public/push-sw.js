@@ -14,22 +14,85 @@ function syncAppBadge(count) {
   return op && typeof op.catch === 'function' ? op.catch(() => {}) : null;
 }
 
+let badgeWrite = Promise.resolve();
+let pageBadgeRevision = 0;
+let workerBadgeRefresh = 0;
+
+function queueAppBadge(count, refreshId = null, pageRevisionAtStart = null) {
+  badgeWrite = badgeWrite.catch(() => {}).then(() => {
+    if (refreshId !== null && refreshId !== workerBadgeRefresh) return;
+    if (pageRevisionAtStart !== null && pageRevisionAtStart !== pageBadgeRevision) return;
+    return syncAppBadge(count);
+  });
+  return badgeWrite;
+}
+
+const APP_SHELL_PATHS = ['/inbox', '/search', '/agents', '/skills', '/harness', '/vaults', '/projects', '/apps', '/settings', '/more', '/chat', '/admin'];
+
+function isAppShellClient(client) {
+  try {
+    const url = new URL(client.url);
+    if (url.origin !== self.location.origin) return false;
+    if (url.pathname === '/') return true;
+    return APP_SHELL_PATHS.some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
+  } catch {
+    return false;
+  }
+}
+
+async function appWindowClients() {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  return clients.filter(isAppShellClient);
+}
+
+function requestForegroundBadgeRefresh(clients) {
+  for (const client of clients) {
+    try {
+      client.postMessage({ type: 'vibe.push-badge-refresh' });
+    } catch {
+      // A closing window will refresh its Inbox on the next launch.
+    }
+  }
+}
+
 // Push delivery can lag behind a mark-read response. The count embedded when
 // the push was sent may already be obsolete by the time this worker runs.
 async function refreshAppBadge() {
   if (!('setAppBadge' in navigator)) return;
+  const refreshId = ++workerBadgeRefresh;
+  const pageRevisionAtStart = pageBadgeRevision;
   try {
+    let clients = await appWindowClients();
+    if (clients.some((client) => client.visibilityState === 'visible')) {
+      requestForegroundBadgeRefresh(clients);
+      return;
+    }
     const response = await fetch('/api/inbox?platform=avibe&limit=1', {
       credentials: 'same-origin',
       cache: 'no-store',
+      headers: { 'X-Avibe-Background-Push': '1' },
     });
     if (!response.ok) return;
     const payload = await response.json();
-    await syncAppBadge(payload?.unread_total);
+    clients = await appWindowClients();
+    if (clients.some((client) => client.visibilityState === 'visible')) {
+      requestForegroundBadgeRefresh(clients);
+      return;
+    }
+    await queueAppBadge(payload?.unread_total, refreshId, pageRevisionAtStart);
+    requestForegroundBadgeRefresh(clients);
   } catch {
     // An unavailable or unauthenticated read is not evidence that the badge is zero.
   }
 }
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'vibe.app-badge-current') return;
+  const count = event.data.count;
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) return;
+  pageBadgeRevision += 1;
+  event.waitUntil(queueAppBadge(count));
+});
 
 const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
 const WEB_PUSH_LAUNCH_ENTRY_PATH = '/__avibe/web-push-launch';
@@ -183,8 +246,14 @@ async function replacementSubscription(event) {
 // app shell can still prefer the tapped notification over its remembered page.
 function rememberPendingNotificationLaunch(url) {
   if (!self.caches) return Promise.resolve();
-  const entryUrl = new URL(WEB_PUSH_LAUNCH_ENTRY_PATH, self.location.origin).href;
-  const response = new Response(JSON.stringify({ url, createdAt: Date.now() }), {
+  const createdAt = Date.now();
+  // Distinct cache keys let a page consume click A without deleting click B
+  // if B arrives while A's response body is being read.
+  const entryUrl = new URL(
+    `${WEB_PUSH_LAUNCH_ENTRY_PATH}/${createdAt}-${Math.random().toString(36).slice(2)}`,
+    self.location.origin,
+  ).href;
+  const response = new Response(JSON.stringify({ url, createdAt }), {
     headers: { 'content-type': 'application/json' },
   });
   return self.caches
@@ -242,32 +311,17 @@ self.addEventListener('notificationclick', (event) => {
     type: 'vibe.notification-click',
     url: targetUrl.pathname + targetUrl.search + targetUrl.hash,
   };
-  const appShellPaths = ['/inbox', '/search', '/agents', '/skills', '/harness', '/vaults', '/projects', '/apps', '/settings', '/more', '/chat', '/admin'];
-  const isAppShellClient = (url) => {
-    if (url.origin !== self.location.origin) return false;
-    if (url.pathname === '/') return true;
-    return appShellPaths.some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
-  };
-
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
-        if ('focus' in client && isAppShellClient(new URL(client.url))) {
+        if ('focus' in client && isAppShellClient(client)) {
           // A suspended page may miss postMessage even after focus resolves.
           // Persist the target before waking it so the page's resume handler
           // can consume the same one-shot handoff as a cold launch.
           return rememberPendingNotificationLaunch(message.url)
             .then(() => client.focus())
-            .then(async (focusedClient) => {
+            .then((focusedClient) => {
               const target = focusedClient || client;
-              if (typeof target.navigate === 'function') {
-                try {
-                  const navigated = await target.navigate(href);
-                  if (navigated && new URL(navigated.url).href === href) return navigated;
-                } catch {
-                  // A live page can still handle the notification message.
-                }
-              }
               target.postMessage(message);
               return target;
             })

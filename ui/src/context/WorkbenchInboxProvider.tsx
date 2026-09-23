@@ -7,6 +7,7 @@ import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext'
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
 import { useConsumerActivation } from '../lib/useConsumerActivation';
+import { onPageReactivated } from '../lib/pageActivity';
 import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
@@ -928,7 +929,34 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     if (!unreadLoaded) return;
     const op = totalUnread > 0 ? nav.setAppBadge?.(totalUnread) : nav.clearAppBadge?.();
     void op?.catch?.(() => {});
+    // Fence a background worker read that started before this authoritative
+    // map arrived. The worker serializes its own setter after this message, so
+    // a late Push response cannot be the final badge write.
+    try {
+      navigator.serviceWorker?.controller?.postMessage({
+        type: 'vibe.app-badge-current',
+        count: totalUnread,
+      });
+    } catch {
+      // The direct badge write above still works without a controlling worker.
+    }
   }, [totalUnread, unreadLoaded]);
+
+  // A worker can finish a background badge write after this page's last
+  // unread update. Revalidate on its completion signal and whenever the page
+  // returns from suspension, even if the local unread total did not change.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator) || !('setAppBadge' in navigator)) return;
+    const onWorkerMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'vibe.push-badge-refresh') void refreshUnread();
+    };
+    const unsubscribeResume = onPageReactivated(() => void refreshUnread());
+    navigator.serviceWorker.addEventListener('message', onWorkerMessage);
+    return () => {
+      unsubscribeResume();
+      navigator.serviceWorker.removeEventListener('message', onWorkerMessage);
+    };
+  }, [refreshUnread]);
 
   // Browser tabs have no Badging API. Keep their favicon useful while the
   // Inbox map is authoritative, and restore the original icon after reading.

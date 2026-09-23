@@ -10,8 +10,9 @@ interface PendingWebPushLaunch {
 }
 
 interface LaunchCache {
-  match(request: string): Promise<Response | undefined>;
-  delete(request: string): Promise<boolean>;
+  keys(): Promise<readonly (Request | string)[]>;
+  match(request: Request | string): Promise<Response | undefined>;
+  delete(request: Request | string): Promise<boolean>;
 }
 
 interface LaunchCacheStorage {
@@ -41,15 +42,34 @@ async function consumePendingWebPushLaunch(
   if (!environment) return null;
   try {
     const cache = await environment.cacheStorage.open(CACHE_NAME);
-    const entryUrl = new URL(CACHE_ENTRY_PATH, environment.origin).href;
-    const response = await cache.match(entryUrl);
-    if (!response) return null;
-    const path = parsePendingWebPushLaunch(await response.json(), environment.now());
+    const requests = (await cache.keys()).filter((request) =>
+      new URL(typeof request === 'string' ? request : request.url).pathname.startsWith(CACHE_ENTRY_PATH),
+    );
+    const now = environment.now();
+    const entries = await Promise.all(requests.map(async (request) => {
+      try {
+        const response = await cache.match(request);
+        const payload = response ? await response.json() : null;
+        return {
+          request,
+          path: parsePendingWebPushLaunch(payload, now),
+          createdAt: typeof payload?.createdAt === 'number' ? payload.createdAt : -1,
+        };
+      } catch {
+        return { request, path: null, createdAt: -1 };
+      }
+    }));
+    const latest = entries.reduce<(typeof entries)[number] | null>(
+      (current, entry) => entry.path && (!current || entry.createdAt >= current.createdAt) ? entry : current,
+      null,
+    );
     // A newer notification may have replaced the handoff before a prior
     // message reaches the page. Do not consume that newer destination.
-    if (expectedPath && path && path !== normalizeRestorablePwaPath(expectedPath)) return null;
-    await cache.delete(entryUrl);
-    return path;
+    if (expectedPath && latest?.path && latest.path !== normalizeRestorablePwaPath(expectedPath)) return null;
+    // Delete only keys returned by this snapshot. A click written while JSON
+    // was loading has its own key and must survive for the next resume.
+    await Promise.all(entries.map((entry) => cache.delete(entry.request)));
+    return latest?.path ?? null;
   } catch {
     return null;
   }

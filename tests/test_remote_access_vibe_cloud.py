@@ -18,6 +18,7 @@ from storage.models import remote_access_authorizations
 from tests.ui_server_test_helpers import remote_session_cookie
 from vibe import api, model_service, remote_access, ui_server
 from vibe import runtime
+from vibe.ui_compat import g, jsonify
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +222,22 @@ def test_session_cookie_roundtrip() -> None:
 
     assert remote_access.validate_session_cookie(config, cookie) is True
     assert remote_access.validate_session_cookie(config, cookie + "x") is False
+
+
+def test_background_push_inbox_read_does_not_renew_remote_cookie(monkeypatch):
+    config = _config()
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    monkeypatch.setattr(remote_access, "renew_session_cookie", lambda *_: "renewed-cookie")
+
+    for path, headers, should_renew in (
+        ("/api/inbox", {"X-Avibe-Background-Push": "1"}, False),
+        ("/api/inbox", {}, True),
+        ("/api/session", {"X-Avibe-Background-Push": "1"}, True),
+    ):
+        with ui_server.app.test_request_context(path, headers=headers):
+            g.remote_session_renew = {"sub": "user-1"}
+            response = ui_server.renew_remote_access_cookie(jsonify({"ok": True}))
+            assert (remote_access.SESSION_COOKIE_NAME in response.headers.get("Set-Cookie", "")) is should_renew
 
 
 def test_session_cookie_rejects_empty_session_secret() -> None:
