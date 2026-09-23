@@ -175,6 +175,18 @@ describe('DefaultRouteDialog', () => {
     expect(preferred.closest('.setup-add-row')?.textContent).toContain('sonnet-4');
   });
 
+  it('reconciles a chain changed elsewhere while a dirty draft was away', async () => {
+    render(<Host />);
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.moveDownNamed.replace('{{name}}', 'Anthropic · opus-5') }));
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.addSource }));
+    mock.models.getAgentChain.mockResolvedValue(chainOf([A]));
+    fireEvent.click(screen.getByRole('button', { name: 'reopen' }));
+    await waitFor(() => expect(mock.models.getAgentChain).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
+    await waitFor(() => expect(screen.getByRole('button', { name: en.common.retry })).toBeTruthy());
+    expect(mock.models.putAgentChain).not.toHaveBeenCalled();
+  });
+
   it('selects the first exact hop on an empty route and shows it on reopen', async () => {
     const user = userEvent.setup();
     mock.models.getAgentChain.mockResolvedValue(chainOf([], 'automatic'));

@@ -42,6 +42,7 @@ import type { AssistantRouteView } from '../onboarding/AssistantRow';
 import {
   chainMembership,
   hydrateSetupRoutes,
+  saveNeedsRetry,
   saveSetupRoutes,
   type SetupRouteFocus,
   type SetupRouteTargetSnapshot,
@@ -155,9 +156,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // there is the fresher copy, so this only ever fills an empty one.
   const [routeRead, setRouteRead] = useState<{ done: boolean; targets: SetupRouteTargetSnapshot[]; sources: Source[]; supplies: AgentSupply[] }>(
     { done: false, targets: [], sources: [], supplies: [] });
-  const routeReadStarted = useRef(false);
+  const routeReadToken = useRef(0);
   const readSharedRoute = useCallback(async () => {
     if (!agentReads || !setFlowState) return;
+    const token = ++routeReadToken.current;
+    const epoch = activation.current;
     try {
       const [supplyRead, listed] = await Promise.all([
         agentReads.read(),
@@ -169,56 +172,25 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         getVibeAgent: (name, params) => api.getVibeAgent(name, params),
         getAgentChain: modelsApi.getAgentChain,
       }, supplies);
+      if (token !== routeReadToken.current || epoch !== activation.current) return;
       setRouteRead({ done: true, targets: hydration.targets, sources: Array.isArray(listed) ? listed : [], supplies });
-      setFlowState((current) => (current.routeOrderDirty || current.routeOrder.length > 0
+      setFlowState((current) => (current.routeOrderDirty
         ? current
         : { ...current, routeOrder: hydration.union }));
     } catch {
+      if (token !== routeReadToken.current || epoch !== activation.current) return;
       // The card falls back to the label that opens the dialog, and the dialog reads
       // for itself.
       setRouteRead((current) => ({ ...current, done: true }));
     }
   }, [agentReads, api, setFlowState]);
   useEffect(() => {
-    if (!active || !modelHubEnabled || !canEditSetupRoute || routeReadStarted.current) return;
-    routeReadStarted.current = true;
+    if (!active || !modelHubEnabled || !canEditSetupRoute) return;
     void readSharedRoute();
   }, [active, modelHubEnabled, canEditSetupRoute, readSharedRoute]);
   const sharedRoute = flowState?.routeOrder ?? [];
   const sharedRouteRef = useRef(sharedRoute);
   sharedRouteRef.current = sharedRoute;
-  // Switching an assistant on is the moment it joins the shared route, so it is the
-  // moment the route is written for it. Without this the card would promise the shared
-  // model while the assistant still called whatever its own chain said — which is the
-  // difference between the screen describing the setup and the screen performing it.
-  const adoptSharedRoute = useCallback(async (backend: RuntimeBackendId) => {
-    const shared = sharedRouteRef.current;
-    if (!agentReads || !setFlowState || shared.length === 0) return;
-    try {
-      const supplyRead = await agentReads.read();
-      const hydration = await hydrateSetupRoutes({
-        listVibeAgents: (params) => api.listVibeAgents(params),
-        getVibeAgent: (name, params) => api.getVibeAgent(name, params),
-        getAgentChain: modelsApi.getAgentChain,
-      }, supplyRead.kind === 'current' ? supplyRead.value : []);
-      const mine = hydration.targets.filter((target) => target.backend === backend);
-      if (mine.length) {
-        await saveSetupRoutes(shared, mine, {
-          getVibeAgent: (name, params) => api.getVibeAgent(name, params),
-          listAgents: () => agentReads.readValue(),
-          getAgentChain: modelsApi.getAgentChain,
-          previewAgentChain: modelsApi.previewAgentChain,
-          putAgentChain: modelsApi.putAgentChain,
-          getAgentModelCandidates: modelsApi.getAgentModelCandidates,
-          putAgentModels: modelsApi.putAgentModels,
-        }, { dirty: true });
-      }
-    } catch {
-      // Nothing is claimed on a failed write: the read below is what the cards show,
-      // so a route that did not move is reported as the model it still resolves to.
-    }
-    await readSharedRoute();
-  }, [agentReads, api, setFlowState, readSharedRoute]);
   // Source and backend catalogs come from the same route read; no per-card fetch.
   const modelLabel = (hop: RouteHop): string => {
     const source = routeRead.sources.find((row) => row.id === hop.source_id);
@@ -317,9 +289,38 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
-  const onRoutesSaved = async (saved: SetupRouteFocus) => {
+  // A newly enabled assistant joins the saved route before readiness is measured.
+  const adoptSharedRoute = useCallback(async (backend: RuntimeBackendId) => {
+    const shared = sharedRouteRef.current;
+    if (!agentReads || !setFlowState || shared.length === 0) return;
+    try {
+      const supplyRead = await agentReads.read();
+      const hydration = await hydrateSetupRoutes({
+        listVibeAgents: (params) => api.listVibeAgents(params),
+        getVibeAgent: (name, params) => api.getVibeAgent(name, params),
+        getAgentChain: modelsApi.getAgentChain,
+      }, supplyRead.kind === 'current' ? supplyRead.value : []);
+      const mine = hydration.targets.filter((target) => target.backend === backend);
+      if (mine.length) {
+        const outcomes = await saveSetupRoutes(shared, mine, {
+          getVibeAgent: (name, params) => api.getVibeAgent(name, params),
+          listAgents: () => agentReads.readValue(),
+          getAgentChain: modelsApi.getAgentChain,
+          previewAgentChain: modelsApi.previewAgentChain,
+          putAgentChain: modelsApi.putAgentChain,
+          getAgentModelCandidates: modelsApi.getAgentModelCandidates,
+          putAgentModels: modelsApi.putAgentModels,
+        }, { dirty: true });
+        if (!saveNeedsRetry(outcomes)) await refreshConnection(backend);
+      }
+    } catch {
+      // A failed write leaves the card showing its last confirmed chain.
+    }
+    await readSharedRoute();
+  }, [agentReads, api, setFlowState, readSharedRoute, refreshConnection]);
+  const onRoutesSaved = async (_saved: SetupRouteFocus) => {
     await agentReads?.refresh();
-    await refreshConnection(saved.backend);
+    await Promise.all(ASSISTANT_ORDER.map((backend) => refreshConnection(backend)));
     // The cards read from the same route the dialog just wrote, so they read it again.
     await readSharedRoute();
   };

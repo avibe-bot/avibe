@@ -11,6 +11,7 @@ import en from '../../i18n/en.json';
 import type { BackendConnectionState } from '../../context/ApiContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { SetupAction } from './setupFlow';
+import { INITIAL_SETUP_FLOW_STATE } from './setupFlow';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
@@ -38,6 +39,25 @@ const next = vi.fn();
 const shown = (saved: ReturnType<typeof data>, active: boolean, onActionChange: (action: SetupAction) => void) =>
   wrap(<AgentDetection data={saved} active={active} onActionChange={onActionChange} onNext={next} />, active);
 const configureAction = () => row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ });
+const hubAgent = (enabled = true) => ({
+  id: 'claude-claude', name: 'claude', display_name: 'claude', description: null,
+  backend: 'claude' as const, model: 'opus-5', reasoning_effort: null,
+  enabled, archived: false, archived_at: null, source: 'file', updated_at: '',
+  system_prompt: null, created_at: '', metadata: { builtin_default: true },
+});
+const hubChain = (modelId: string) => ({
+  contract_version: 10, backend: 'claude', model_id: 'opus-5',
+  manual_override: { hops: [{ source_id: 'src_a', model_id: modelId }] },
+  route_origin: 'manual', current: { source_id: 'src_a', model_id: modelId },
+  chain: [{ source_id: 'src_a', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
+  supply_state: 'ok',
+});
+const hubReads = {
+  read: async () => ({ kind: 'current' as const, value: [{ backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const, named_agents: [{ name: 'claude', effective_model_id: 'opus-5', supply_status: 'ok' as const }] }] }),
+  refresh: async () => ({ kind: 'current' as const, value: [] }),
+  readValue: async () => [{ backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const, named_agents: [{ name: 'claude', effective_model_id: 'opus-5', supply_status: 'ok' as const }] }],
+  invalidate: () => undefined,
+};
 beforeEach(() => {
   vi.resetAllMocks();
   mock.api.getConfig.mockResolvedValue(data());
@@ -395,6 +415,54 @@ describe('assistant installation presentation', () => {
     rerender(connectedRow(false));
     fireEvent.click(screen.getByRole('button', { name: 'Subscription connected' }));
     expect(configure).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Hub route refresh', () => {
+  it('reads the current route again when the retained assistants screen reopens', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    const flowState = { ...INITIAL_SETUP_FLOW_STATE };
+    const setFlowState = vi.fn();
+    const props = { data: saved, onNext: vi.fn(), flowState, setFlowState, onNavigate: vi.fn(), agentReads: hubReads };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    await waitFor(() => expect(row('Claude Code').getByText('model-a')).toBeTruthy());
+    view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-b'));
+    view.rerender(wrap(<AgentDetection {...props} active />));
+    await waitFor(() => expect(row('Claude Code').getByText('model-b')).toBeTruthy());
+  });
+
+  it('refreshes entry readiness after adopting a route on enable', async () => {
+    let enabled = false;
+    let routeSaved = false;
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    for (const name of ['claude', 'codex', 'opencode']) saved.agents[name].enabled = false;
+    saved.agents.claude.status = 'ok';
+    mock.api.mutateConfig.mockImplementation(async () => { enabled = true; return {}; });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: backend === 'claude' && enabled,
+      auth: 'api_key', application: 'applied', ready: backend === 'claude' && enabled && routeSaved,
+      entry_eligible: backend === 'claude' && enabled && routeSaved, supply_mode: 'hub',
+    }));
+    mock.api.listVibeAgents.mockImplementation(async () => ({
+      ok: true, agents: enabled ? [hubAgent()] : [], default_agent_name: 'claude',
+    }));
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChain.mockImplementation(async () => routeSaved ? hubChain('model-a') : {
+      ...hubChain('model-a'), manual_override: null, current: null, chain: [], route_origin: 'automatic',
+    });
+    mock.models.previewAgentChain.mockResolvedValue(hubChain('model-a'));
+    mock.models.putAgentChain.mockImplementation(async () => { routeSaved = true; return { chain: hubChain('model-a') }; });
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={{ ...INITIAL_SETUP_FLOW_STATE, routeOrder: [{ source_id: 'src_a', model_id: 'model-a' }] }} setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    const enter = screen.getByRole('button', { name: 'Enter workspace' });
+    expect(enter.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(row('Claude Code').getByRole('switch'));
+    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalled());
+    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
   });
 });
 

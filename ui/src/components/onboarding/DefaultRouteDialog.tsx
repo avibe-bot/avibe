@@ -71,8 +71,14 @@ export function DefaultRouteDialog({
   const [targets, setTargets] = React.useState<SetupRouteTargetSnapshot[]>([]);
   const [receipts, setReceipts] = React.useState<TargetSaveResult[]>([]);
   const [loadFailed, setLoadFailed] = React.useState(false);
+  const baselines = React.useRef<SetupRouteTargetSnapshot[]>([]);
   const addButtonRef = React.useRef<HTMLButtonElement>(null);
   const loadToken = React.useRef(0);
+  const dirtyRef = React.useRef(flowState.routeOrderDirty);
+
+  React.useLayoutEffect(() => {
+    dirtyRef.current = flowState.routeOrderDirty;
+  }, [flowState.routeOrderDirty]);
 
   const writes = React.useMemo(() => ({
     getVibeAgent: (name: string, params?: { cache?: boolean }) => api.getVibeAgent(name, params),
@@ -104,12 +110,15 @@ export function DefaultRouteDialog({
         getAgentChain: modelsApi.getAgentChain,
       }, nextSupplies);
       if (token !== loadToken.current) return;
-      setTargets(hydration.targets);
-      setFlowState((current) => (
-        current.routeOrderDirty
-          ? current
-          : { ...current, routeOrder: hydration.union, routeOrderDirty: false }
-      ));
+      if (!dirtyRef.current || baselines.current.length === 0) {
+        baselines.current = hydration.targets;
+        setTargets(hydration.targets);
+        setFlowState((current) => (
+          current.routeOrderDirty
+            ? current
+            : { ...current, routeOrder: hydration.union, routeOrderDirty: false }
+        ));
+      }
       setPhase('idle');
     } catch (error) {
       if (token !== loadToken.current) return;
@@ -172,6 +181,7 @@ export function DefaultRouteDialog({
       if (confirmed.length) {
         const nextTargets = targets.map((target) =>
           confirmed.find((row) => row.backend === target.backend && row.modelId === target.modelId) ?? target);
+        baselines.current = nextTargets;
         setTargets(nextTargets);
       }
       setFlowState((current) => ({ ...current, routeOrderDirty: false }));
