@@ -8015,6 +8015,203 @@ def test_run_cancel_of_a_prewrite_batch_member_replays_its_siblings(
     assert surviving["turn_id"] != turn_id
 
 
+def _prewrite_batch_with_absorbing_runner(monkeypatch, tmp_path, native_id):
+    """Start a real two-Run pre-write batch whose dispatch absorbs cancellation."""
+
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services.dispatch import TurnDispatchOutcome
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id=native_id)
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    texts = ("canceled batch participant", "surviving batch participant")
+    runs = [
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+        )
+        for message in texts
+    ]
+    assert all(request_store.claim(run.id) is not None for run in runs)
+    with engine.begin() as conn:
+        deliveries = [
+            _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                text=text,
+            )
+            for text in texts
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="claude",
+            deliveries=deliveries,
+            dispatch_text="\n\n".join(texts),
+        )
+        for run, delivery in zip(runs, claimed["deliveries"], strict=True):
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session_id,
+                delivery_id=str(delivery["id"]),
+            )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    dispatch_entered = asyncio.Event()
+    release_unwind = asyncio.Event()
+    release_unwind.set()
+
+    async def absorbing_prewrite_dispatch(_controller, dispatch_context, *_a, **_k):
+        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
+        dispatch_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # OpenCode absorbs the inner cancellation after its cleanup.
+            await release_unwind.wait()
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=None,
+                backend_dispatch_attempted=False,
+            )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        absorbing_prewrite_dispatch,
+    )
+    real_run = manager._run
+    successor_starts: list[str] = []
+
+    async def _run(run_session_id, run_context, text, **kwargs):
+        if kwargs.get("logical_turn_id") == turn_id:
+            return await real_run(run_session_id, run_context, text, **kwargs)
+        successor_starts.append(text)
+
+    monkeypatch.setattr(manager, "_run", _run)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+    return SimpleNamespace(
+        engine=engine,
+        session_id=session_id,
+        request_store=request_store,
+        runs=runs,
+        delivery_ids=[str(row["id"]) for row in claimed["deliveries"]],
+        turn_id=turn_id,
+        manager=manager,
+        controller=controller,
+        context=context,
+        dispatch_entered=dispatch_entered,
+        release_unwind=release_unwind,
+        successor_starts=successor_starts,
+    )
+
+
+def test_run_cancel_of_an_absorbing_prewrite_runner_replays_its_siblings(
+    monkeypatch,
+    tmp_path,
+):
+    """The runner's own pre-write Stop settlement honors the Run cancel scope."""
+
+    batch = _prewrite_batch_with_absorbing_runner(
+        monkeypatch,
+        tmp_path,
+        "proj_absorbing_prewrite_run_cancel",
+    )
+
+    async def _go():
+        assert await batch.manager._start_persisted_turn(
+            batch.turn_id,
+            context=batch.context,
+        )
+        await asyncio.wait_for(batch.dispatch_entered.wait(), timeout=1.0)
+        return await batch.manager.cancel(
+            batch.session_id,
+            agent_run_id=batch.runs[0].id,
+        )
+
+    result = asyncio.run(_go())
+
+    assert result == {
+        "ok": True,
+        "session_id": batch.session_id,
+        "status": "cancel_requested",
+        "reason": "prewrite_canceled",
+    }
+    batch.controller.command_handler.handle_stop.assert_not_awaited()
+    assert batch.successor_starts == ["surviving batch participant"]
+    assert batch.request_store.get_run(batch.runs[0].id)["status"] == "canceled"
+    assert batch.request_store.get_run(batch.runs[1].id)["status"] == "running"
+    with batch.engine.connect() as conn:
+        original = message_deliveries.get_turn(conn, batch.turn_id)
+        canceled, surviving = (
+            message_deliveries.get_delivery(conn, delivery_id)
+            for delivery_id in batch.delivery_ids
+        )
+    assert original is not None and original["terminal_outcome"] == "not_written"
+    assert canceled is not None and canceled["state"] == "retired"
+    assert surviving is not None and surviving["state"] == "claimed"
+    assert surviving["turn_id"] != batch.turn_id
+
+
+def test_session_stop_joining_a_prewrite_run_cancel_retires_the_whole_batch(
+    monkeypatch,
+    tmp_path,
+):
+    """A Session Stop that joins a Run cancel still retires every input."""
+
+    batch = _prewrite_batch_with_absorbing_runner(
+        monkeypatch,
+        tmp_path,
+        "proj_prewrite_run_cancel_joined_stop",
+    )
+    batch.release_unwind.clear()
+
+    async def _go():
+        assert await batch.manager._start_persisted_turn(
+            batch.turn_id,
+            context=batch.context,
+        )
+        await asyncio.wait_for(batch.dispatch_entered.wait(), timeout=1.0)
+        run_cancel = asyncio.create_task(
+            batch.manager.cancel(batch.session_id, agent_run_id=batch.runs[0].id)
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+            with batch.engine.connect() as conn:
+                turn = message_deliveries.get_turn(conn, batch.turn_id)
+            if turn is not None and turn.get("control_state") == "interrupting":
+                break
+        session_stop = await batch.manager.cancel(batch.session_id)
+        batch.release_unwind.set()
+        return await run_cancel, session_stop
+
+    run_result, stop_result = asyncio.run(_go())
+
+    assert run_result["ok"] is True, run_result
+    assert stop_result["ok"] is True, stop_result
+    assert batch.successor_starts == []
+    with batch.engine.connect() as conn:
+        states = [
+            message_deliveries.get_delivery(conn, delivery_id)["state"]
+            for delivery_id in batch.delivery_ids
+        ]
+    assert states == ["retired", "retired"]
+
+
 def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
     """A stale observed Turn cannot detach a Run that owns the current Turn."""
 

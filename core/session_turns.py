@@ -523,6 +523,10 @@ class Turn:
     #: stopping, even when the semantic outcome is a user Stop. This is Turn-local
     #: cancellation state, not a persistent Session queue hold.
     cancel_defers_queue_resume: bool = False
+    #: Inputs a pre-write Stop retires. ``None`` retires every claimed input
+    #: (Session Stop); a Run cancel narrows it to that Run's input so batch
+    #: siblings replay. A Session Stop joining the cancellation widens it back.
+    cancel_retire_delivery_ids: Optional[set[str]] = None
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
@@ -3646,6 +3650,19 @@ class SessionTurnManager:
                         )
                 if control_in_progress:
                     joined = True
+                    joined_turn = self.in_flight.get(request.session_id)
+                    if (
+                        request.content is None
+                        and joined_turn is not None
+                        and joined_turn.logical_turn_id == current_id
+                        and joined_turn.cancel_retire_delivery_ids is not None
+                    ):
+                        joined_turn.cancel_retire_delivery_ids = (
+                            joined_turn.cancel_retire_delivery_ids
+                            | prewrite_retire_delivery_ids
+                            if prewrite_retire_delivery_ids is not None
+                            else None
+                        )
                     if request.content is None and current.get("control_mode") == "replace":
                         successor_turn_id = str(
                             current.get("control_successor_turn_id") or ""
@@ -3791,6 +3808,11 @@ class SessionTurnManager:
                         )
                         if claimed_control is None:
                             raise RuntimeError("pre-write P0 control claim lost")
+                        # Published with the control claim so a joining Session
+                        # Stop can widen it before the runner settles.
+                        projected.cancel_retire_delivery_ids = (
+                            prewrite_retire_delivery_ids
+                        )
 
         if current is None and successor_id:
             await self._start_persisted_turn(successor_id, context=context)
@@ -3812,7 +3834,6 @@ class SessionTurnManager:
             canceled = await self._cancel_prewrite_durable_turn(
                 request.session_id,
                 interrupt_target_id,
-                retire_delivery_ids=prewrite_retire_delivery_ids,
             )
             if delivery_id is not None:
                 return self._committed_delivery_result(
@@ -3850,13 +3871,11 @@ class SessionTurnManager:
         self,
         session_id: str,
         logical_turn_id: str | None,
-        *,
-        retire_delivery_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Cancel a live Turn that has definitive evidence of no native write.
 
-        Session Stop retires every claimed input. A Run cancel passes only its
-        own input, so the other claimed inputs return to the queue.
+        Session Stop retires every claimed input. A Run cancel retires only the
+        inputs on ``Turn.cancel_retire_delivery_ids``; the rest replay.
         """
 
         projected = self.in_flight.get(session_id)
@@ -3873,6 +3892,8 @@ class SessionTurnManager:
         mark_prewrite_user_stop(projected.context)
         projected.task.cancel()
         await asyncio.gather(projected.task, return_exceptions=True)
+        # Read after unwinding: a joining Session Stop may have widened it.
+        retire_delivery_ids = projected.cancel_retire_delivery_ids
 
         with self._sqlite_engine().connect() as conn:
             turn = delivery_store.get_turn(conn, logical_turn_id)
@@ -5160,6 +5181,7 @@ class SessionTurnManager:
         settled_by: str | None,
         terminal_is_error: bool,
         cancel_defers_queue_resume: bool = False,
+        cancel_retire_delivery_ids: set[str] | None = None,
         failure_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Contain post-native ownership writes so runner cleanup always finishes."""
@@ -5228,6 +5250,8 @@ class SessionTurnManager:
                             )
                             if row["state"] == "claimed"
                         }
+                    if cancel_retire_delivery_ids is not None:
+                        initial_delivery_ids &= cancel_retire_delivery_ids
                     return self._terminalize_durable_turn(
                         turn_id,
                         "not_written",
@@ -7534,6 +7558,11 @@ class SessionTurnManager:
                             settled_by=settled_by,
                             terminal_is_error=terminal_is_error,
                             cancel_defers_queue_resume=cancel_defers_queue_resume,
+                            cancel_retire_delivery_ids=(
+                                turn.cancel_retire_delivery_ids
+                                if turn is not None
+                                else None
+                            ),
                             failure_evidence=prewrite_failure_evidence(context),
                         )
                     # Only definitive pre-write failure may synthesize an empty
@@ -8299,6 +8328,13 @@ class SessionTurnManager:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
         # ``claimed``: a pre-write stop settled the Turn and started its successor.
         if result.state in {"settled", "claimed"}:
+            if normalized_agent_run_id and result.reason == "prewrite_canceled":
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "cancel_requested",
+                    "reason": result.reason,
+                }
             if normalized_agent_run_id:
                 return {
                     "ok": True,
