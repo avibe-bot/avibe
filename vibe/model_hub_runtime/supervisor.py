@@ -8,6 +8,7 @@ import socket
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -19,9 +20,12 @@ from core.process_isolation import (
     PROCESS_IDENTITY_ENV,
     PersistedProcessIdentity,
     capture_spawned_process_identity,
+    fingerprint_process_marker,
+    is_valid_worker_fingerprint,
     isolated_subprocess_kwargs,
     new_process_identity_marker,
     process_identity_from_payload,
+    reap_marked_processes,
     reap_orphaned_process_tree,
     serialize_process_identity,
     signal_process_tree,
@@ -39,8 +43,15 @@ logger = logging.getLogger(__name__)
 MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
 # Durable identity of the engine this state root last spawned. A service that
 # dies without running ``atexit`` (SIGKILL, crash, forced restart) leaves its
-# isolated engine group running; the next start reaps it by identity.
+# isolated engine group running; the next start reaps it by identity. The marker
+# is recorded before the spawn, so an engine is findable before its pid is known.
 _ENGINE_PROCESS_RECORD = "engine-process.json"
+
+
+@dataclass(frozen=True)
+class _EngineRecord:
+    worker_fingerprint: str
+    identity: PersistedProcessIdentity | None = None
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
 
 
@@ -224,6 +235,11 @@ class EngineSupervisor:
         marker = new_process_identity_marker()
         environment = engine_subprocess_environment()
         environment[PROCESS_IDENTITY_ENV] = marker
+        launch = _EngineRecord(fingerprint_process_marker(marker))
+        if not self._store_engine_records_locked([launch]):
+            # A launch no record names would become a permanent orphan if this
+            # service died, so it never runs untracked.
+            raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked")
         try:
             process = self._process_factory(
                 [str(binary), "-config", str(config_path)],
@@ -236,12 +252,13 @@ class EngineSupervisor:
                 **isolated_subprocess_kwargs(),
             )
         except (OSError, ValueError) as exc:
+            self._reap_recorded_engines_locked()
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
         if not self._record_engine_locked(process, marker):
-            # An engine no record names would become a permanent orphan if this
-            # service died, so it never runs untracked.
+            # The marker-only launch record still names the tree, so the stop below
+            # confirms every process it forked is gone before the record retires.
             self._stop_locked()
             raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked")
         started_at = time.monotonic()
@@ -336,30 +353,35 @@ class EngineSupervisor:
     def _engine_record_path(self) -> Path:
         return self.state_store.root / _ENGINE_PROCESS_RECORD
 
-    def _load_engine_records_locked(self) -> list[PersistedProcessIdentity] | None:
-        """Return the recorded engine identities, or ``None`` if the record is unreadable."""
+    def _load_engine_records_locked(self) -> list[_EngineRecord] | None:
+        """Return the recorded engines, or ``None`` if the record is unreadable."""
 
         try:
-            text = self._engine_record_path.read_text(encoding="utf-8")
+            text: str | None = self._engine_record_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return []
+        except UnicodeDecodeError:
+            # Corrupt contents, like malformed JSON: nothing in it can be trusted.
+            text = None
         except OSError:
             logger.warning("Model Hub engine process record could not be read", exc_info=True)
             return None
         try:
-            payload = json.loads(text)
+            payload = json.loads(text) if text is not None else None
         except ValueError:
             payload = None
         entries = payload.get("engines") if isinstance(payload, dict) else None
-        records: list[PersistedProcessIdentity] = []
+        records: list[_EngineRecord] = []
         for entry in entries if isinstance(entries, list) else ():
-            pid = entry.get("pid") if isinstance(entry, dict) else None
+            fingerprint = entry.get("worker_fingerprint") if isinstance(entry, dict) else None
+            if not is_valid_worker_fingerprint(fingerprint):
+                continue
+            pid = entry.get("pid")
             identity = process_identity_from_payload(entry, pid) if isinstance(pid, int) else None
-            if identity is not None:
-                records.append(identity)
+            records.append(_EngineRecord(fingerprint, identity))
         return records
 
-    def _store_engine_records_locked(self, records: list[PersistedProcessIdentity]) -> bool:
+    def _store_engine_records_locked(self, records: list[_EngineRecord]) -> bool:
         path = self._engine_record_path
         try:
             if not records:
@@ -369,7 +391,14 @@ class EngineSupervisor:
             write_atomic(
                 path,
                 json.dumps(
-                    {"engines": [serialize_process_identity(identity) for identity in records]},
+                    {
+                        "engines": [
+                            serialize_process_identity(record.identity)
+                            if record.identity is not None
+                            else {"worker_fingerprint": record.worker_fingerprint}
+                            for record in records
+                        ]
+                    },
                     sort_keys=True,
                 )
                 + "\n",
@@ -380,30 +409,39 @@ class EngineSupervisor:
         return True
 
     def _record_engine_locked(self, process: Any, marker: str) -> bool:
-        """Durably name the new engine; return whether it is tracked."""
+        """Complete the launch record with the engine's pid; return whether it is tracked."""
 
         pid = getattr(process, "pid", None)
         identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
         if identity is None:
             return False
-        return self._store_engine_records_locked([identity])
+        return self._store_engine_records_locked([_EngineRecord(identity.worker_fingerprint, identity)])
 
     def _reap_recorded_engines_locked(self) -> bool:
         """Stop every recorded engine tree; return whether all are confirmed gone.
 
-        An unreadable record is left untouched and counts as unconfirmed; the
-        identities of unconfirmed trees stay recorded for the next attempt.
+        A record with a pid is reaped by identity and group; every record is also
+        swept by its marker, which finds a launch whose pid was never recorded and
+        members that left the group. An unreadable record is left untouched and
+        counts as unconfirmed; unconfirmed records stay for the next attempt.
         """
 
         records = self._load_engine_records_locked()
         if records is None:
             return False
-        survivors: list[PersistedProcessIdentity] = []
-        for identity in records:
-            outcome = reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=identity)
-            if outcome == "unconfirmed":
-                survivors.append(identity)
-            elif outcome == "reaped":
+        survivors: list[_EngineRecord] = []
+        for record in records:
+            outcomes = []
+            if record.identity is not None:
+                outcomes.append(
+                    reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=record.identity)
+                )
+            outcomes.append(
+                reap_marked_processes(logger, "Model Hub engine", worker_fingerprint=record.worker_fingerprint)
+            )
+            if "unconfirmed" in outcomes:
+                survivors.append(record)
+            elif "reaped" in outcomes:
                 logger.warning("Reaped a Model Hub engine left running by an earlier service")
         if survivors:
             logger.warning(
@@ -411,7 +449,6 @@ class EngineSupervisor:
                 len(survivors),
             )
         return self._store_engine_records_locked(survivors) and not survivors
-
 
 def _allocate_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:

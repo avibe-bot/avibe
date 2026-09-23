@@ -23,6 +23,7 @@ import yaml
 from jsonschema import Draft7Validator
 
 from core import managed_runtime
+from core.process_isolation import PROCESS_IDENTITY_ENV, fingerprint_process_marker
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     EngineHealth,
@@ -3163,6 +3164,102 @@ def test_supervisor_ignores_a_corrupt_engine_record(tmp_path: Path) -> None:
 
     assert supervisor._process is not None
     supervisor.stop()
+
+
+def test_supervisor_ignores_an_engine_record_that_is_not_utf8(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "engine-process.json").write_bytes(b'{"engines": [\xff\xfe')
+
+    supervisor.ensure_running()
+
+    assert supervisor._process is not None
+    supervisor.stop()
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_records_the_launch_before_spawning(tmp_path: Path) -> None:
+    # A service killed between spawn and pid capture must still leave the engine findable.
+    seen: list[list[dict]] = []
+
+    def spawn(*args, **kwargs):
+        record = tmp_path / "state" / "engine-process.json"
+        seen.append(json.loads(record.read_text(encoding="utf-8"))["engines"])
+        return subprocess.Popen(*args, **kwargs)
+
+    supervisor, _store = _fixture_supervisor(tmp_path, process_factory=spawn)
+    supervisor.ensure_running()
+
+    [launch] = seen[0]
+    assert set(launch) == {"worker_fingerprint"}
+    assert launch["worker_fingerprint"] == fingerprint_process_marker(
+        psutil.Process(supervisor._process.pid).environ()[PROCESS_IDENTITY_ENV]
+    )
+    supervisor.stop()
+
+
+def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path) -> None:
+    orphan = _orphan_engine(tmp_path)
+    record = tmp_path / "state" / "engine-process.json"
+    # The service died after the spawn and before the pid was written.
+    [entry] = json.loads(record.read_text(encoding="utf-8"))["engines"]
+    record.write_text(
+        json.dumps({"engines": [{"worker_fingerprint": entry["worker_fingerprint"]}]}),
+        encoding="utf-8",
+    )
+
+    second, _store = _fixture_supervisor(tmp_path)
+    second.ensure_running()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert _recorded_engine_pids(record) == [second._process.pid]
+    second.stop()
+    assert not record.exists()
+
+
+def test_supervisor_failed_tracking_reaps_a_descendant_that_ignores_sigterm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    stubborn = tmp_path / "stubborn-engine"
+    stubborn.write_text(
+        "#!/bin/sh\n"
+        f"'{sys.executable}' -c 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(60)' &\n"
+        "exec sleep 60\n",
+        encoding="utf-8",
+    )
+    stubborn.chmod(0o755)
+    markers: list[str] = []
+
+    def spawn(args, **kwargs):
+        markers.append(kwargs["env"][PROCESS_IDENTITY_ENV])
+        process = subprocess.Popen([str(stubborn)], **kwargs)
+        time.sleep(0.5)
+        return process
+
+    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_: None)
+    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason == "engine_untracked"
+    assert _processes_with_marker(markers[0]) == []
+    assert not (store.root / "engine-process.json").exists()
+
+
+def _processes_with_marker(marker: str) -> list[int]:
+    found = []
+    for process in psutil.process_iter():
+        try:
+            if process.environ().get(PROCESS_IDENTITY_ENV) == marker:
+                found.append(process.pid)
+        except (psutil.Error, OSError):
+            continue
+    return found
 
 
 def test_supervisor_starts_checks_health_and_stops_mock_engine(

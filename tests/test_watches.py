@@ -2685,7 +2685,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
-        lambda pid: _live_identity(pid=pid, create_time=456.0),
+        lambda pid: _live_identity(pid=pid, create_time=456.0, worker_fingerprint=None),
     )
     monkeypatch.setattr(
         "core.watches.terminate_process_tree_by_pid",
