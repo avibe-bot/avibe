@@ -4,6 +4,99 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
 describe('push service worker notification launches', () => {
+  it('navigates a reused app window to the tapped session', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const client = {
+      url: 'https://avibe.local/settings/general',
+      focus: vi.fn(async () => client),
+      navigate: vi.fn(async (href: string) => ({ url: href })),
+      postMessage: vi.fn(),
+    };
+    const openWindow = vi.fn();
+    let storedPayload: unknown;
+    const cache = {
+      put: vi.fn(async (_request: string, response: Response) => {
+        storedPayload = await response.json();
+      }),
+    };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      caches: { open: vi.fn(async () => cache) },
+      clients: { matchAll: vi.fn(async () => [client]), openWindow },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('notificationclick')?.({
+      notification: { close: vi.fn(), data: { url: '/chat/session-3' } },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(client.focus).toHaveBeenCalledOnce();
+    expect(storedPayload).toMatchObject({ url: '/chat/session-3', createdAt: expect.any(Number) });
+    expect(cache.put.mock.invocationCallOrder[0]).toBeLessThan(client.focus.mock.invocationCallOrder[0]);
+    expect(client.navigate).toHaveBeenCalledWith('https://avibe.local/chat/session-3');
+    expect(client.postMessage).not.toHaveBeenCalled();
+    expect(openWindow).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the live-page message when a reused window cannot navigate', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const client = {
+      url: 'https://avibe.local/inbox',
+      focus: vi.fn(async () => client),
+      navigate: vi.fn(async () => null),
+      postMessage: vi.fn(),
+    };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      clients: { matchAll: vi.fn(async () => [client]) },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('notificationclick')?.({
+      notification: { close: vi.fn(), data: { url: '/chat/session-4' } },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(client.postMessage).toHaveBeenCalledWith({
+      type: 'vibe.notification-click',
+      url: '/chat/session-4',
+    });
+  });
+
+  it('opens the target when an existing app window cannot be focused', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const client = {
+      url: 'https://avibe.local/apps/files',
+      focus: vi.fn(async () => { throw new Error('window closed'); }),
+    };
+    const openWindow = vi.fn(async () => null);
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      clients: { matchAll: vi.fn(async () => [client]), openWindow },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, { self: worker, navigator: {}, URL, Response, Date, Number, JSON, Promise });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('notificationclick')?.({
+      notification: { close: vi.fn(), data: { url: '/chat/session-5' } },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(openWindow).toHaveBeenCalledWith('https://avibe.local/chat/session-5');
+  });
+
   it('persists and posts the target when no app-shell client is open', async () => {
     const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
     const handlers = new Map<string, (event: unknown) => void>();
@@ -49,6 +142,110 @@ describe('push service worker notification launches', () => {
       type: 'vibe.notification-click',
       url: '/chat/session-3',
     });
+  });
+
+  it('uses current server unread count instead of a delayed push count for the app badge', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const setAppBadge = vi.fn(async () => {});
+    const clearAppBadge = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => Response.json({ unread_total: 0 }));
+    const showNotification = vi.fn(async () => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      registration: { showNotification },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: { setAppBadge, clearAppBadge },
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ title: 'Avibe', badge_count: 3 }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(showNotification).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith('/api/inbox?platform=avibe&limit=1', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    expect(clearAppBadge).toHaveBeenCalledOnce();
+    expect(setAppBadge).not.toHaveBeenCalled();
+  });
+
+  it('leaves the badge alone when the current unread count cannot be verified', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const setAppBadge = vi.fn(async () => {});
+    const clearAppBadge = vi.fn(async () => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      registration: { showNotification: vi.fn(async () => {}) },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, {
+      self: worker,
+      fetch: vi.fn(async () => new Response(null, { status: 401 })),
+      navigator: { setAppBadge, clearAppBadge },
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ badge_count: 3 }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(setAppBadge).not.toHaveBeenCalled();
+    expect(clearAppBadge).not.toHaveBeenCalled();
+  });
+
+  it('sets a verified nonzero badge count while the app is closed', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const setAppBadge = vi.fn(async () => {});
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      registration: { showNotification: vi.fn(async () => {}) },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, {
+      self: worker,
+      fetch: vi.fn(async () => Response.json({ unread_total: 2 })),
+      navigator: { setAppBadge },
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ badge_count: 1 }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(setAppBadge).toHaveBeenCalledWith(2);
   });
 
   it('syncs a replacement subscription and retires the old endpoint', async () => {

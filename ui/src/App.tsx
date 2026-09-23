@@ -102,7 +102,7 @@ import {
   shouldRestorePwaLaunch,
   writeLastPwaPath,
 } from './lib/pwaRouteMemory';
-import { takePendingWebPushLaunchPath } from './lib/webPushLaunch';
+import { takePendingWebPushLaunchPath, takeResumedWebPushLaunchPath } from './lib/webPushLaunch';
 import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -257,11 +257,22 @@ const WebPushNotificationNavigator = () => {
             const data = event.data;
             if (!data || typeof data !== 'object' || data.type !== 'vibe.notification-click') return;
             const path = notificationClickPath(data.url);
-            if (path) navigate(path);
+            if (path) {
+                void takeResumedWebPushLaunchPath(path);
+                navigate(path);
+            }
         };
 
+        const unsubscribeResume = onPageReactivated(() => {
+            void takeResumedWebPushLaunchPath().then((path) => {
+                if (path) navigate(path);
+            });
+        });
         navigator.serviceWorker.addEventListener('message', onMessage);
-        return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+        return () => {
+            unsubscribeResume();
+            navigator.serviceWorker.removeEventListener('message', onMessage);
+        };
     }, [navigate]);
 
     return null;
@@ -635,9 +646,9 @@ const PwaRouteMemory = () => {
       iosStandalone,
       locationKey: location.key,
       location,
-      pendingNotificationPath: iosStandalone
-        ? takePendingWebPushLaunchPath()
-        : Promise.resolve<string | null>(null),
+      // Consume a launch handoff even when the browser honored openWindow's
+      // exact route, so it cannot redirect a later resume.
+      pendingNotificationPath: takePendingWebPushLaunchPath(),
     };
   });
   const [launchRestorePath, setLaunchRestorePath] = useState<string | null | undefined>(

@@ -4,15 +4,31 @@
 // browsers without the API (and non-installed contexts) simply no-op, and a
 // rejected badge promise must never block the notification from showing.
 //
-// Returns a promise to await, or null when there is nothing to do. `count` is
-// the global unread total the server computed for this push; a missing/invalid
-// count leaves the existing badge untouched (we don't guess).
+// Returns a promise to await, or null when there is nothing to do. A
+// missing/invalid count leaves the existing badge untouched (we don't guess).
 function syncAppBadge(count) {
   if (!('setAppBadge' in navigator)) return null;
   if (typeof count !== 'number' || !Number.isFinite(count)) return null;
   const n = Math.max(0, Math.trunc(count));
   const op = n === 0 ? navigator.clearAppBadge?.() : navigator.setAppBadge(n);
   return op && typeof op.catch === 'function' ? op.catch(() => {}) : null;
+}
+
+// Push delivery can lag behind a mark-read response. The count embedded when
+// the push was sent may already be obsolete by the time this worker runs.
+async function refreshAppBadge() {
+  if (!('setAppBadge' in navigator)) return;
+  try {
+    const response = await fetch('/api/inbox?platform=avibe&limit=1', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    await syncAppBadge(payload?.unread_total);
+  } catch {
+    // An unavailable or unauthenticated read is not evidence that the badge is zero.
+  }
 }
 
 const WEB_PUSH_LAUNCH_CACHE = 'avibe.web-push-launch.v1';
@@ -211,8 +227,7 @@ self.addEventListener('push', (event) => {
   };
 
   const tasks = [self.registration.showNotification(title, options)];
-  const badgeTask = syncAppBadge(payload.badge_count);
-  if (badgeTask) tasks.push(badgeTask);
+  tasks.push(refreshAppBadge());
   event.waitUntil(Promise.all(tasks));
 });
 
@@ -227,7 +242,7 @@ self.addEventListener('notificationclick', (event) => {
     type: 'vibe.notification-click',
     url: targetUrl.pathname + targetUrl.search + targetUrl.hash,
   };
-  const appShellPaths = ['/inbox', '/agents', '/skills', '/harness', '/vaults', '/projects', '/more', '/chat', '/admin'];
+  const appShellPaths = ['/inbox', '/search', '/agents', '/skills', '/harness', '/vaults', '/projects', '/apps', '/settings', '/more', '/chat', '/admin'];
   const isAppShellClient = (url) => {
     if (url.origin !== self.location.origin) return false;
     if (url.pathname === '/') return true;
@@ -238,10 +253,25 @@ self.addEventListener('notificationclick', (event) => {
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
         if ('focus' in client && isAppShellClient(new URL(client.url))) {
-          return client.focus().then((focusedClient) => {
-            (focusedClient || client).postMessage(message);
-            return focusedClient || client;
-          });
+          // A suspended page may miss postMessage even after focus resolves.
+          // Persist the target before waking it so the page's resume handler
+          // can consume the same one-shot handoff as a cold launch.
+          return rememberPendingNotificationLaunch(message.url)
+            .then(() => client.focus())
+            .then(async (focusedClient) => {
+              const target = focusedClient || client;
+              if (typeof target.navigate === 'function') {
+                try {
+                  const navigated = await target.navigate(href);
+                  if (navigated && new URL(navigated.url).href === href) return navigated;
+                } catch {
+                  // A live page can still handle the notification message.
+                }
+              }
+              target.postMessage(message);
+              return target;
+            })
+            .catch(() => self.clients.openWindow?.(href));
         }
       }
       if (self.clients.openWindow) {
