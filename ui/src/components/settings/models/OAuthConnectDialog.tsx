@@ -62,7 +62,6 @@ const DEADLINE_MS = 16 * 60 * 1000;
 
 type ConnectPhase = 'choose' | 'flow';
 
-const CHANNELS: SupplyChannel[] = ['native_cli', 'hub'];
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2/40 px-4 py-3">
@@ -747,7 +746,7 @@ export const OAuthConnectDialog: React.FC<{
   const recommended = recommendedSubscriptionChannel(vendor);
   const optionOrder = subscriptionOptionOrder(vendor);
   const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
-  const selectableChannels = CHANNELS.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
+  const selectableChannels = optionOrder.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
 
   const moveSelection = (direction: number) => {
     const currentIndex = selectableChannels.indexOf(channel);
@@ -800,9 +799,7 @@ export const OAuthConnectDialog: React.FC<{
                   ? 'settings.models.addSub.opt.added'
                   : candidate === recommended
                     ? 'settings.models.addSub.badge.recommended'
-                    : vendorCopy === 'claude'
-                      ? 'settings.models.addSub.badge.secondary'
-                      : 'settings.models.addSub.badge.supportedNotRecommended';
+                    : 'settings.models.addSub.badge.secondary';
                 const optionKey = isNative ? 'native' : 'hub';
                 return (
                   <button
@@ -849,12 +846,14 @@ export const OAuthConnectDialog: React.FC<{
                         <span className="model-hub-add-sub-option-label font-semibold text-foreground">
                           {t(`settings.models.addSub.opt.${optionKey}.label`)}
                         </span>
-                        <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
-                          {t(badgeKey)}
-                        </span>
+                        {(optionOrder.length > 1 || disabled) && (
+                          <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
+                            {t(badgeKey)}
+                          </span>
+                        )}
                       </span>
                       <span className="model-hub-add-sub-description block text-muted">
-                        {t(`settings.models.addSub.opt.${optionKey}.desc.${vendorCopy}`)}
+                        {t(isNative ? 'settings.models.addSub.opt.native.desc.claude' : `settings.models.addSub.opt.hub.desc.${vendorCopy}`)}
                       </span>
                       {vendorCopy === 'claude' && candidate === 'hub' && (
                         <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10">
@@ -867,10 +866,12 @@ export const OAuthConnectDialog: React.FC<{
                 );
               })}
             </div>
-            <p className="model-hub-add-sub-hint flex items-start gap-2 text-muted">
-              <Info className="mt-0.5 size-3 shrink-0" />
-              <span>{t(`settings.models.addSub.hint.${vendorCopy}`)}</span>
-            </p>
+            {vendorCopy === 'claude' && (
+              <p className="model-hub-add-sub-hint flex items-start gap-2 text-muted">
+                <Info className="mt-0.5 size-3 shrink-0" />
+                <span>{t('settings.models.addSub.hint.claude')}</span>
+              </p>
+            )}
           </div>
 
           <div className="model-hub-add-sub-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">

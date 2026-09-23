@@ -89,7 +89,7 @@ describe('add-subscription channel choice', () => {
     expect(recommendedSubscriptionChannel('anthropic')).toBe('native_cli');
     expect(subscriptionOptionOrder('anthropic')).toEqual(['native_cli', 'hub']);
     expect(recommendedSubscriptionChannel('openai')).toBe('hub');
-    expect(subscriptionOptionOrder('openai')).toEqual(['hub', 'native_cli']);
+    expect(subscriptionOptionOrder('openai')).toEqual(['hub']);
   });
 
   it('uses the recommended option while the native slot is free', () => {

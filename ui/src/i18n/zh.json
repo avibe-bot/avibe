@@ -1520,8 +1520,7 @@
           "native": {
             "label": "由 Agent 管理",
             "desc": {
-              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。",
-              "chatgpt": "Codex 直接用这个 ChatGPT 账号登录。"
+              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。"
             }
           },
           "hub": {
@@ -1534,15 +1533,13 @@
         },
         "badge": {
           "recommended": "推荐",
-          "secondary": "次选",
-          "supportedNotRecommended": "支持，不推荐"
+          "secondary": "次选"
         },
         "tos": {
           "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
         },
         "hint": {
-          "claude": "两条都要也可以，分两次添加。",
-          "chatgpt": "额度用完不会自动切换，也看不到用量。"
+          "claude": "两条都要也可以，分两次添加。"
         },
         "signIn": "去登录",
         "cancel": "取消",

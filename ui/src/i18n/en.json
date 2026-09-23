@@ -1520,8 +1520,7 @@
           "native": {
             "label": "Use natively",
             "desc": {
-              "claude": "Claude Code uses this subscription directly; the credential stays on this machine.",
-              "chatgpt": "Codex signs in with this ChatGPT account directly."
+              "claude": "Claude Code uses this subscription directly; the credential stays on this machine."
             }
           },
           "hub": {
@@ -1534,15 +1533,13 @@
         },
         "badge": {
           "recommended": "Recommended",
-          "secondary": "Second choice",
-          "supportedNotRecommended": "Supported, not recommended"
+          "secondary": "Second choice"
         },
         "tos": {
           "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
         },
         "hint": {
-          "claude": "You can have both — add them one at a time.",
-          "chatgpt": "Nothing takes over when the quota runs out, and usage stays invisible."
+          "claude": "You can have both — add them one at a time."
         },
         "signIn": "Sign in",
         "cancel": "Cancel",
