@@ -89,11 +89,16 @@
   --ob-sub-lh: 24px;
   --ob-heading-gap: 8px;
   /* The heading block reserves its tier's own height — the two lines of type plus
-     the slack the frame draws under them — and then sits its tier's own distance
-     above the stage. Both numbers come from the frames' heading boxes: 71 and 15
-     under an 800px window, 88 and 12 under 900, 132 and 18 at 1920x1080. */
+     the slack the frame draws under them. The number comes from the frames' heading
+     boxes: 71 under an 800px window, 88 under 900, 132 at 1920x1080. */
   --ob-heading-h: 88px;
-  --ob-heading-mb: 12px;
+  /* One breathing distance, spent twice: under the heading and under the stage.
+     The reference gives its heading 38 (`flow-heading{margin-bottom:38px}`) and
+     leaves comparable air above the action, so the composition reads as one band
+     with the same margin top and bottom instead of content pinned under the title
+     with the slack dumped above the button. Authored per tier like the type around
+     it: 40 standard, 32 on a short window, 48 at the large reading, 27 stacked. */
+  --ob-band-gap: 40px;
   --ob-main-top: 16px;
   --ob-access-w: 740px;
   --ob-access-pad: 28px;
@@ -140,18 +145,23 @@
   --ob-assistant-h: calc(2px + var(--ob-card-pv) * 2 + var(--ob-id-h) + var(--ob-card-gap) * 2
     + var(--ob-life-h) + var(--ob-note-lh) * 2 + var(--ob-spacer-2)
     + var(--ob-method-h) * 2 + var(--ob-method-gap) + var(--ob-assistant-wrap));
-  --ob-import-gap: 20px;
-  /* What the capsule's slot holds whether the offer is absent, still loading,
-     arrived or dismissed: the reference's own 44-tall line on a desktop. */
+  /* What the assistants step's capsule slot holds whether the offer is absent,
+     still loading, arrived or dismissed: the reference's own 44-tall line on a
+     desktop. The provider step no longer draws an offer, so this is that one
+     step's number and the reservation below does not spend it for everybody. */
   --ob-import-h: 44px;
-  /* One reservation, spent by both steps: the taller of the two cards, the gap
-     under it, and the capsule's slot. */
-  --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-import-gap) + var(--ob-import-h));
-  /* The diagram keeps the box the reference draws it in — the story's own card
-     plus the same band — so a reservation that has to hold a wrapped sentence on
-     the other step does not redraw the story. What it takes instead is slack
-     under the diagram, which is what the shorter step was already given. */
-  --ob-diagram-h: calc(var(--ob-card-h) + var(--ob-import-gap) + var(--ob-import-h));
+  /* One floor under the cards, so a card that grows while its step is read — a
+     sentence that wraps in one language, a state row that arrives with detection —
+     cannot move the action. It reserves the cards only. Whatever a step draws under
+     them, the capsule slot included, adds its own height on top, and the shared
+     cell (see `.onboarding-screens`) is what then holds the three steps level. */
+  --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h));
+  /* The diagram keeps the box the reference draws it in: the story's card plus the
+     band the return wire needs under it — 296 around a 232-tall card, 326 around a
+     262, 394 around a 330, the card plus 64 at every reading. A reservation that
+     has to hold a wrapped sentence on another step does not redraw the story. */
+  --ob-story-band: 64px;
+  --ob-diagram-h: calc(var(--ob-card-h) + var(--ob-story-band));
 
   background: var(--background);
   color: var(--foreground);
@@ -263,7 +273,7 @@
     --ob-sub-lh: 22px;
     --ob-heading-gap: 6px;
     --ob-heading-h: 72px;
-    --ob-heading-mb: 15px;
+    --ob-band-gap: 32px;
     --ob-main-top: 6px;
     --ob-access-pad: 22px;
     --ob-access-lead-fs: 13px;
@@ -303,7 +313,7 @@
     --ob-sub-lh: 31px;
     --ob-heading-gap: 12px;
     --ob-heading-h: 132px;
-    --ob-heading-mb: 18px;
+    --ob-band-gap: 48px;
     /* Only the floor under the header now: the composition is centred in the room
        the window leaves, so a large screen no longer needs the offset that used to
        push a top-anchored frame down into view. */
@@ -439,26 +449,29 @@
   width: 100%;
   max-width: var(--ob-content-w);
   margin: 0 auto;
-  /* Spacing is carried by margins, not by one flex gap: the heading's distance to
-     the stage is a tier number (15 / 12 / 18 / 27) while the stage's distance to
-     the action is 20 in every row, and the access block sits 40 under the action. */
+  /* Spacing is carried by margins, not by one flex gap: the heading and the stage
+     each sit `--ob-band-gap` from what follows them, and the access block sits 40
+     under the action.
+     `min-height: 100%` is what lets a short step spend the cell it shares: the cell
+     is as tall as the tallest step, so this step is stretched to the same height and
+     its stage (below, `flex: 1`) is given the difference to centre its content in
+     instead of leaving all of it above the action. */
+  min-height: 100%;
 }
-/* The block between the heading and the action, in both steps, and the one owner of
-   every layout reservation this screen makes. Its floor is `--ob-stage-h`: the taller
-   of the two steps' cards plus the band the reference draws under it — so the shorter
-   step is padded to exactly the taller one's height instead of both being given a
-   number to keep in sync by hand. That is what puts "Get started" and "Enter
-   Workbench" on identical coordinates: same heading above, same stage height, same
-   action width below.
-   The same floor is what keeps the action still when the import notice is dismissed:
-   the notice lives inside this box, in a slot that keeps its height either way (see
-   `.onboarding-import-slot`), so refusing the offer changes what is drawn in the box,
-   not the height of the box or of anything under it.
+/* The block between the heading and the action, in every step, and the one owner of
+   the layout reservations this screen makes.
+   What holds "Get started", "Continue" and "Enter Workbench" on identical coordinates
+   is the cell the three steps share: it is as tall as the tallest of them, each step
+   is stretched to it, and the action pair sits below the cell. `--ob-stage-h` is not
+   that guarantee; it is the floor under the cards, so a card growing while its own
+   step is read cannot move the action either. What a step draws under the cards — the
+   assistants step's capsule slot, which keeps its height whether the offer is absent,
+   loading, arrived or refused (see `.onboarding-import-slot`) — adds itself on top and
+   is equally immovable.
    It applies at every width, phones included: the stack band re-derives the same floor
-   from the stacked card instead of the side-by-side one (see the 759 band), so the
-   invariant holds there too. Matching the two costs slack at the bottom of whichever
-   step is shorter — accepted, because a person moving between the two steps, or
-   refusing the offer, should not have the button move out from under their finger. */
+   from the stacked card instead of the side-by-side one (see the 759 band). The steps
+   that are shorter than the tallest spend the difference around their composition
+   rather than under it, which is the `justify-content` below. */
 .onboarding-stage {
   width: 100%;
   display: flex;
@@ -466,7 +479,14 @@
   align-items: center;
   gap: 20px;
   min-height: var(--ob-stage-h);
-  margin-bottom: 20px;
+  margin-bottom: var(--ob-band-gap);
+  /* The composition is centred in the band between the heading and the action, so a
+     step shorter than the tallest one reads as one frame with equal air above and
+     below rather than as content pushed against its title. The tallest step has no
+     slack to spend, which is what makes `--ob-band-gap` its own exact distance both
+     ways; every shorter step can only be further from its heading, never nearer. */
+  flex: 1;
+  justify-content: center;
 }
 
 /* The reference swaps the two screens as one composition: the outgoing layer
@@ -492,7 +512,7 @@
   text-align: center;
   width: 100%;
   min-height: var(--ob-heading-h);
-  margin-bottom: var(--ob-heading-mb);
+  margin-bottom: var(--ob-band-gap);
 }
 /* The heading block reserves its tier's own two lines of type, so a title that wraps
    in one step or one language and not the other cannot move the stage below it. On
@@ -1271,7 +1291,7 @@
     --ob-heading-h: 138px;
     --ob-h1-min: calc(2 * var(--ob-h1-lh));
     --ob-p-min: var(--ob-sub-lh);
-    --ob-heading-mb: 27px;
+    --ob-band-gap: 27px;
     /* Stacked, the cards are one above another and nothing is narrow enough to
        wrap a name or a method row: the card's own composition answers for the
        tier again. */
@@ -1283,9 +1303,8 @@
        320px reading of the offer actually draws. */
     --ob-import-h: 126px;
     /* The same reservation as the desktop rows, re-derived from the stack: three
-       of the taller card, the two gaps between them, and the capsule's band. */
-    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-assistant-h)) * 3 + var(--ob-stack-gap) * 2
-      + var(--ob-import-gap) + var(--ob-import-h));
+       of the taller card and the two gaps between them. */
+    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-assistant-h)) * 3 + var(--ob-stack-gap) * 2);
     --ob-main-top: 0px;
     --ob-access-w: 100%;
     --ob-access-pad: 24px;
