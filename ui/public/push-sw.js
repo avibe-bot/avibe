@@ -144,11 +144,22 @@ async function replacementSubscription(event) {
   }
   if (replacement) {
     await replacement.unsubscribe();
+    const remaining = await self.registration.pushManager.getSubscription();
+    if (remaining?.endpoint === replacement.endpoint) {
+      throw new Error('Stale push subscription was not removed');
+    }
   }
-  return self.registration.pushManager.subscribe({
+  const current = await self.registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey,
   });
+  if (
+    !arrayBuffersEqual(current.options?.applicationServerKey, applicationServerKey)
+    || (replacement && current.endpoint === replacement.endpoint)
+  ) {
+    throw new Error('Push subscription replacement is still stale');
+  }
+  return current;
 }
 
 // iOS may honor an installed PWA's manifest start URL instead of the path passed

@@ -112,6 +112,33 @@ def test_late_provider_failure_does_not_undo_logout_opt_out(tmp_path):
         assert disabled["provider_invalidated_at"] is None
 
 
+def test_late_send_success_preserves_provider_invalidation(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        row = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload(),
+        )
+        web_push_service.mark_send_failure(conn, endpoint=row["endpoint"], disable=True)
+        invalidated = web_push_service.get_by_endpoint(
+            conn, endpoint=row["endpoint"], user_key="remote:user-a"
+        )
+        assert invalidated is not None
+        assert invalidated["provider_invalidated_at"] is not None
+        web_push_service.mark_send_success(conn, endpoint=row["endpoint"])
+        after_success = web_push_service.get_by_endpoint(
+            conn, endpoint=row["endpoint"], user_key="remote:user-a"
+        )
+        assert after_success is not None
+        assert after_success["enabled"] is False
+        assert after_success["provider_invalidated_at"] == invalidated["provider_invalidated_at"]
+        assert after_success["last_failure_at"] == invalidated["last_failure_at"]
+
+
 def test_subscription_upsert_disables_previous_endpoint_for_same_device(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

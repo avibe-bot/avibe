@@ -380,6 +380,7 @@ def mark_send_success(conn: Connection, *, endpoint: str) -> None:
     conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.endpoint == endpoint)
+        .where(web_push_subscriptions.c.enabled == 1)
         .values(last_success_at=now, last_failure_at=None, provider_invalidated_at=None, failure_count=0, updated_at=now)
     )
 

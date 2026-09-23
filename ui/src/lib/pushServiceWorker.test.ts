@@ -226,6 +226,7 @@ describe('push service worker notification launches', () => {
       registration: {
         showNotification: vi.fn(),
         pushManager: {
+          getSubscription: vi.fn(async () => null),
           subscribe: vi.fn(async () => currentSubscription),
         },
       },
@@ -276,6 +277,54 @@ describe('push service worker notification launches', () => {
       previous_endpoints: ['https://push.example.test/sub/old'],
       background_rotation: true,
     });
+  });
+
+  it('does not sync a stale subscription the browser refused to remove', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const staleSubscription = {
+      endpoint: 'https://push.example.test/sub/stale',
+      options: { applicationServerKey: new Uint8Array([9, 9, 9, 9]).buffer },
+      unsubscribe: vi.fn(async () => false),
+    };
+    const pushManager = {
+      getSubscription: vi.fn(async () => staleSubscription),
+      subscribe: vi.fn(),
+    };
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      registration: { pushManager },
+      atob,
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    const fetchMock = vi.fn(async () => Response.json({ public_key: 'AQIDBA' }));
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: {},
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+      Uint8Array,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('pushsubscriptionchange')?.({
+      newSubscription: staleSubscription,
+      oldSubscription: { endpoint: 'https://push.example.test/sub/old' },
+      waitUntil: (promise: Promise<unknown>) => {
+        completion = promise;
+      },
+    });
+    await completion;
+
+    expect(staleSubscription.unsubscribe).toHaveBeenCalledOnce();
+    expect(pushManager.getSubscription).toHaveBeenCalledOnce();
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('retries subscription sync once after an invalid CSRF token', async () => {

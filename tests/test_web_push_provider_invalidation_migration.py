@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+from alembic import command
 
 from storage import migrations, web_push_service
 from storage.db import create_sqlite_engine
@@ -65,7 +66,19 @@ def test_upgrade_keeps_legacy_disabled_failure_opted_out(tmp_path):
         )
         assert enabled is not None
         assert enabled["enabled"] is True
+        web_push_service.mark_send_failure(conn, endpoint=enabled["endpoint"], disable=True)
     with sqlite3.connect(path) as conn:
         assert conn.execute("select version_num from alembic_version").fetchone() == (
             "20260923_0062",
         )
+
+    command.downgrade(migrations.alembic_config(path), "20260907_0061")
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "select provider_invalidated_at from web_push_subscriptions where id = 'still-enabled'"
+        ).fetchone() == (None,)
+    migrations.run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "select provider_invalidated_at from web_push_subscriptions where id = 'still-enabled'"
+        ).fetchone() == (None,)

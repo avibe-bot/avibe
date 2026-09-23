@@ -36,4 +36,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if "provider_invalidated_at" in _columns():
-        op.drop_column("web_push_subscriptions", "provider_invalidated_at")
+        # Older SQLite cannot drop a column without rebuilding the table.
+        # Keep the harmless additive column, but revoke repair eligibility:
+        # older code cannot clear this marker on an explicit opt-out.
+        op.get_bind().exec_driver_sql(
+            'update "web_push_subscriptions" set "provider_invalidated_at" = null'
+        )
