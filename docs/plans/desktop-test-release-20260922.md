@@ -976,7 +976,9 @@ sleeps past the old budget and then prints a valid descriptor, so it fails on th
 constant rather than on a value read back from it. It is `#[cfg(unix)]`, like
 every other process-spawning test in that module, which reuses the existing
 `write_fake_runtime` harness instead of inventing a Windows equivalent for a
-mechanism that has no platform-specific branch.
+mechanism that has no platform-specific branch. **Ruled by the orchestrator:
+accepted.** The 60s constant has no platform branch, so a Windows fake-runtime
+harness would test the harness rather than the deadline.
 
 ## H18 — the rollback belonged to the region, not to the branch
 
@@ -1072,6 +1074,13 @@ directory by hand.
   reports `extracted` on every launch is the rc12 defect in one word. Writing the
   log never changes an outcome — every I/O error in it is dropped.
 
+**Known residual, accepted by the orchestrator.** `discard_install_path` renames
+the primary slot away even while a Runtime of the same version is still running
+from it, and that Runtime outlives the window. Files it already holds open
+survive the rename; imports it has not yet made do not. With `-B` in place, both
+slots can go invalid only through external tampering, and the alternative is the
+permanent brick this section removed, so the trade stands.
+
 ### A timing fact the timeout test had to learn
 
 The endpoint-timeout test passed alone and failed under the full `cargo test`
@@ -1127,7 +1136,93 @@ stubbed `ui_server_healthy`, but adoption on this branch is decided by
 adopted whatever answered on `127.0.0.1:5123` — on a developer machine, their own
 running UI — and failed. It fails the same way at `5da131969` without this
 round's changes, and passes on CI only because nothing listens there. It now
-stubs the seam that decides.
+stubs the seam that decides. The listener it found was the rc11 desktop app the
+orchestrator had launched on the same machine to prove H17's root cause: the
+"real services are production data" case in `AGENTS.md`, met in practice.
+
+## H21 — review of `bb0c8de75`, native Settings, and what this head leaves out
+
+Three review findings, fixed in their own commits, plus one owner item.
+
+- **F1 — a spawned child could outlive the step that was meant to record it.**
+  Every rollback could undo only what it had been told it created, and it was
+  told only after the spawn primitive returned. The work between `Popen` and
+  that return (the Memory UI secret written to stdin, the pid record) could
+  raise with the child already running, and H18 and H20 each closed one such
+  window at a consumer. The fix is at the primitive: `spawn_background` and
+  `spawn_service_background_process` share one implementation that kills and
+  reaps the child if anything after `Popen` fails, then re-raises, and the
+  service start applies the same rule to its reservation write. `cmd_start`
+  opens its rollback region before `start_service`, so an interrupt during the
+  lock wait undoes a service it created. Consuming tests use real sleeping
+  children with the failure injected at the pid write, the stdin write and the
+  reservation. **Known residual:** a signal delivered after `spawn_background`
+  returns but before `start_ui` captures the result in its `ProcessStartInfo`
+  still leaves that UI unnamed. Closing it means masking signals across the
+  hand-off, which is out of proportion to a window of a few instructions.
+- **F2 — the main window dropped every new browsing context.** `target="_blank"`
+  links and `window.open(url)` did nothing, so the OAuth dialog's provider link
+  could not be followed. The main window now answers each request with one
+  decision: http(s) goes to the system browser and the request is denied;
+  anything else, `about:blank` included, is denied. There is deliberately no
+  relay webview: on macOS a popup webview must share the opener's
+  `WKWebViewConfiguration`, and wry registers each webview's init scripts and IPC
+  handler on that shared content controller, so a relay would copy its scripts
+  into the main window and, when dropped, remove the main window's IPC handler.
+  The window's config entry is `create: false`, so the startup window and every
+  recreated one come from `ensure_main_window` and carry the handler.
+  **Accepted UX limitations of this release:**
+  - The OAuth dialog pre-opens `about:blank`, which is now denied, so it falls
+    back to its visible provider link. That link needs one extra click; it opens
+    in the system browser, and the callback still completes through loopback
+    polling.
+  - The Show Page launch menu hides "New link" in the shell, because that item
+    navigates a pre-opened tab that never exists here. "New window" is kept.
+  - Every other "open in new tab" affordance (Dock, Library, app search, Show
+    Pages list) now opens the Workbench URL in the system browser instead of
+    doing nothing.
+- **F3 — the private Runtime inherited the shell's `PYTHON*` variables.** `-I`
+  shields only the interpreter it is passed to; the Controller and UI
+  interpreters the Runtime starts run without it, so an inherited `PYTHONHOME`
+  aborted both and a `PYTHONPATH` imported code from outside the verified tree.
+  The private `RuntimeCommand` now strips every inherited `PYTHON*` variable
+  (case-insensitively on Windows) before its own overlay. The development shell
+  keeps the user's environment.
+- **The desktop marker.** The main window defines a non-writable
+  `window.__AVIBE_DESKTOP_SHELL__ = true` through an initialization script before
+  any Workbench script runs, top-level document only: macOS injects it into the
+  main frame alone, and the script checks `window.self === window.top` because
+  WebView2 injects into subframes too. The UI reads it through `isDesktopShell()`
+  in `ui/src/lib/desktopShell.ts`, deliberately separate from `useIsDesktop`,
+  which is the viewport breakpoint. No user agent sniffing and no
+  `__TAURI_INTERNALS__` check.
+- **Settings… in the app menu and the tray** (`CmdOrCtrl+,`). It delivers
+  `avibe://settings` through the existing deep-link path, which maps it to
+  `/admin/settings/service`; the Workbench redirects that legacy path to
+  `/settings/service`. The item is enabled only while the shell monitors a
+  Workbench it navigated to, and the handler applies the same rule before
+  delivering, so the bootstrap window is never navigated to the Workbench origin
+  and nothing is queued for a later start. No new Tauri command.
+
+**Deferred by the orchestrator: Check for Updates.** The runtime's update checker
+short-circuits for a managed runtime; PyPI cannot see the `gh-v` desktop builds;
+and answering from GitHub Releases is a new resolver, not a small change. It
+moves to a follow-up PR.
+
+**Not in this head: the overlay title bar.** The owner's shape (macOS overlay
+title bar, hidden title, a shell-only top inset under the traffic lights, a drag
+region on the top strip) needs a drag path, and on macOS there is only one.
+WKWebView honours no `app-region` CSS and swallows the mouse events that would
+move the window natively (tao notes the same about
+`movable_by_window_background`); wry enables non-client regions only on
+WebView2. Tauri's `data-tauri-drag-region` script invokes
+`plugin:window|start_dragging` over IPC, and the Workbench is a remote origin
+with no capability, so the call is refused. Making it work means adding a
+capability with a `remote` URL for the loopback Workbench origin, which would
+break this shell's stated invariant that no capability names a remote URL. The
+lane will not change that boundary on its own authority. Shipping the overlay
+without a drag region would leave an undraggable window, so the item was dropped
+from this head, as the owner allowed.
 
 ## Known-by-design ledger additions
 
@@ -1162,3 +1257,11 @@ stubs the seam that decides.
   way still leaves the status file reading `starting`, exactly as the adjacent
   `start_service` failure path already does; correcting that is a separate,
   pre-existing concern and was deliberately left out rather than half-fixed.
+- **Known flake, not chased.** `test_lifecycle_status_report_does_not_block_stop`
+  asserts a `< 0.5s` wall-clock bound and failed once under a loaded local run,
+  then passed alone 5/5 and on the full re-run. This PR does not touch it.
+- **Known flake, not chased.** CI run 35844911380 at `bb0c8de75` failed only
+  `tests/test_reply_enhancer_platform.py::test_file_link_parser_handles_many_openers_in_bounded_time`:
+  12.84s against its 10.0s wall-clock bound. This PR does not touch
+  `core/reply_enhancer.py` or that test, and it passes locally at about 4.6s.
+  Classified by the orchestrator as runner timing, not a finding.
