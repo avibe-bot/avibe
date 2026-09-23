@@ -6876,7 +6876,10 @@ class ModelHubService:
         if category == "served":
             return produce_turn_outcome("turn.served")
         if category == "request_nonfallback":
-            return produce_turn_outcome("turn.request_nonfallback")
+            return produce_turn_outcome(
+                "turn.request_nonfallback",
+                upstream_detail=outcome.upstream_detail,
+            )
         if category == "upstream_protocol":
             # The Gateway's existing protocol-error copy is the positive row;
             # a request-incompatible projection would misclassify the failure.

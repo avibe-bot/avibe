@@ -650,6 +650,47 @@ def test_machine_permission_denial_precedes_every_status_heuristic(
     assert BoundedEventLog(tmp_path / "events.json").list() == []
 
 
+def test_request_nonfallback_surfaces_upstream_detail_without_persisting_it(tmp_path):
+    source = _source("src_route031", ("upstream-first",))
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-first"),)
+    )
+    detail = "Claude Code 2.1.261 does not support this model; 2.1.280 is required."
+    adapter = FakeAdapter()
+    adapter.outcomes.append(
+        RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=400,
+            error_code=None,
+            error_type="invalid_request_error",
+            redacted_message="upstream returned HTTP 400",
+            stream_started=False,
+            model_id="upstream-first",
+            source_id=source.id,
+            upstream_detail=detail,
+        )
+    )
+    service, store, _ = _service(tmp_path, config, adapter)
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
+        )
+
+    assert exc.value.turn_outcome is not None
+    assert exc.value.turn_outcome.upstream_detail == detail
+    copy = project_turn_outcome_copy(exc.value.turn_outcome)
+    assert copy is not None
+    assert copy.key == "modelHub.launch.request_incompatible_detail"
+    assert copy.params["detail"] == detail
+    assert store.load().sources[0].state.status == "standby"
+    persisted = "".join(
+        path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.json")
+    )
+    assert detail not in persisted
+
+
 def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
     first = _source("src_route022", ("upstream-first", "upstream-second"))
     second = _source("src_route023", ("upstream-third",))

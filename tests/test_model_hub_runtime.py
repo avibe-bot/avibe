@@ -36,8 +36,13 @@ from core.handlers.model_hub.classification import (
     classify_outcome,
     terminal_outcome_category,
 )
+from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.stream_wire import (
+    ProtocolObservation,
+    ProtocolUsageReport,
+    observe_buffered_protocol_response,
+)
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
@@ -6199,6 +6204,195 @@ def test_engine_error_fields_preserve_nested_candidates(
     else:
         assert decision.action == "fallback"
         assert decision.reason == "server_error"
+
+
+def _detail_source() -> SourceRecord:
+    return SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol="anthropic",
+        base_url="https://api.example.test",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+
+
+def test_engine_http_error_carries_redacted_upstream_detail_apart_from_classification() -> None:
+    message = (
+        "Claude Code 2.1.261 does not support this model;\n version 2.1.280 or newer "
+        "is required. key=sk-live_abcdefghijklmnop"
+    )
+    payload = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+                "details": {"error_code": "claude_code_version_too_old"},
+            },
+        }
+    ).encode()
+
+    outcome = client_module._reduce_protocol_observation(
+        ProtocolObservation(
+            outcome="failed_terminal",
+            error_payload=payload,
+            error_envelope_paths=(("error",),),
+            message="upstream returned HTTP 400",
+        ),
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=400,
+        stream_started=False,
+    )
+
+    assert outcome is not None
+    assert outcome.redacted_message == "upstream returned HTTP 400"
+    assert outcome.upstream_detail == (
+        "Claude Code 2.1.261 does not support this model; version 2.1.280 or newer "
+        "is required. key=[redacted]"
+    )
+    assert "sk-live" not in outcome.upstream_detail
+    assert classify_outcome(outcome).error_code == "upstream_request_invalid"
+
+
+def test_engine_streamed_error_event_carries_upstream_detail() -> None:
+    state = client_module.ProtocolSSEState("anthropic")
+    state.observe(
+        b'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error",'
+        b'"message":"Claude Code 2.1.261 is too old;  key=sk-live_abcdefghijklmnop"}}\n\n'
+    )
+
+    observation = state.terminal_observation()
+    assert observation is not None
+    assert "sk-live" not in repr(observation)
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=200,
+        stream_started=False,
+    )
+
+    assert outcome is not None
+    assert outcome.upstream_detail == "Claude Code 2.1.261 is too old; key=[redacted]"
+
+
+def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
+    body = json.dumps(
+        {"type": "error", "error": {"type": "invalid_request_error", "message": "model retired"}}
+    ).encode()
+
+    observation = observe_buffered_protocol_response("anthropic", io.BytesIO(body))
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=200,
+        stream_started=False,
+    )
+
+    assert observation.outcome == "failed_terminal"
+    assert outcome is not None
+    assert outcome.upstream_detail == "model retired"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"not json",
+        json.dumps({"error": {"type": "invalid_request_error"}}).encode(),
+        json.dumps({"error": {"message": {"nested": "x"}}}).encode(),
+        json.dumps({"error": {"message": "   "}}).encode(),
+        json.dumps({"message": "outside the trusted envelope"}).encode(),
+    ],
+)
+def test_engine_upstream_detail_is_absent_without_an_envelope_message(payload: bytes) -> None:
+    assert client_module._upstream_error_detail(payload, (("error",),)) is None
+
+
+def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
+    payload = json.dumps({"error": {"message": "模型不可用" * 200}}, ensure_ascii=False).encode()
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail is not None
+    assert len(detail) == client_module._UPSTREAM_DETAIL_CHARS
+    assert detail.startswith("模型不可用") and detail.endswith("…")
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("refresh failed: token=abc123opaque", "refresh failed: token=[redacted]"),
+        ("bad secret: xyz", "bad secret: [redacted]"),
+        ('client_secret="two words" rejected', "client_secret=[redacted]"),
+        ("session_key=s1, password='p w'", "session_key=[redacted]"),
+        ("password: `correct horse battery staple`", "password: [redacted]"),
+        ('bad token=\\"a\\" b\\" c', "bad token=[redacted]"),
+        ('rejected {"token":"opaquevalue123456789"}', 'rejected {"token":[redacted]'),
+        ("""echo {'password': 'correct horse battery staple'}""", "echo {'password': [redacted]"),
+        ('{"api_key" : "opaque"}', '{"api_key" : [redacted]'),
+        ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
+    ],
+)
+def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
+    assert client_module._bounded_upstream_detail(message) == expected
+
+
+def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> None:
+    started = time.monotonic()
+    redact_untrusted_text("a-" * 8000 + "x")
+    redact_untrusted_text("key " * 4000 + "x")
+    assert time.monotonic() - started < 0.5
+
+
+def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() -> None:
+    detail = client_module._bounded_upstream_detail(
+        "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
+    )
+
+    assert detail is not None
+    for mention in ("@everyone", "@ops_lead", "<@123>", "<@&456>", "<!here>", "<#C1>"):
+        assert mention not in detail
+    assert detail.replace("\u200b", "") == "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "[Update required](https://attacker.example/fix) to continue",
+        "[Update required](https://attacker.example/fix_(now)) to continue",
+        "[Update required] (<https://attacker.example/fix>)",
+        "see <https://attacker.example|the docs>",
+    ],
+)
+def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str) -> None:
+    detail = client_module._bounded_upstream_detail(message)
+
+    assert detail is not None
+    assert "](" not in detail.replace(" ", "")
+    assert "<h" not in detail
+    # Only zero-width breaks were inserted: the destination still reads as written.
+    assert detail.replace("\u200b", "") == message
+
+
+def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
+    assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
+        "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
+    )
+
+
+def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
+    payload = b'{"error": {"message": "bad \\ud800 byte"}}'
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail == "bad \ufffd byte"
+    detail.encode("utf-8")
 
 
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:

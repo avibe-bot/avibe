@@ -1035,7 +1035,8 @@
       "waiting_without_retry": "本次请求未完成，自动恢复已结束。你可以重试模型 {model} 或切换模型。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
-      "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。"
+      "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
+      "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"
     }
   },
   "remote_access": {

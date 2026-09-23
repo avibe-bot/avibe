@@ -1035,7 +1035,8 @@
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help."
+      "request_incompatible": "This request is incompatible; switching Sources will not help.",
+      "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"
     }
   },
   "remote_access": {
