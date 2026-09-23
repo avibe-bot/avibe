@@ -951,6 +951,26 @@
       "oauth_time_mismatch_body": "Avibe Cloud 已完成登录,但这台机器因为本地时间不同步而拒绝了安全令牌。请校准系统时间后重试。",
       "invalid_oauth_nonce_title": "无法验证此次登录",
       "invalid_oauth_nonce_body": "本次登录未能通过验证,为保护你的账户已中止。请重新登录以继续。"
+    },
+    "cli": {
+      "pairHelpEpilog": "使用说明：\n  已有配对密钥时，可直接使用此命令。\n  如需引导式设置，请运行 `vibe remote`。\n  不提供密钥时，命令会继续本机可恢复的配对；没有待处理操作时会提示输入密钥。\n  要替换结果不确定的待处理配对，请明确提供新密钥和原本使用的后端地址。\n  配对会保存远程访问配置，然后自动启动托管隧道。\n  配对密钥只能使用一次；若配对失败，请在 Avibe Cloud 控制台获取新密钥。\n\n示例：\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
+      "localWriteUnavailableTitle": "远程访问设置已在联系 Avibe Cloud 前停止。",
+      "localWriteUnavailableBody": "本地配置无法可靠保存配对信息，因此没有消耗配对密钥。",
+      "saveFailedAfterRedeemTitle": "云端已完成配对，但本地保存失败。",
+      "orphanedBinding": "孤立绑定：实例 {instance_id}（设备 {device_name}）。",
+      "recoveryRetained": "已兑换的凭据仍保存在本机，不需要新的配对密钥。",
+      "retryAfterLocalFix": "修复本地配置问题后运行：",
+      "recoveryInvalid": "已保存的配对恢复记录无效，无法重放。",
+      "recoveryUnavailable": "本地配对恢复无法启动，没有消耗新的配对密钥。",
+      "recoveryNotReady": "配对尚无可靠保存的响应，可能仍在运行，也可能已消耗密钥。无密钥重试无法恢复此结果。",
+      "recoveryRevoked": "已保存的配对恢复记录已被本地解绑操作作废。",
+      "recoveryIndeterminate": "配对结果不确定，或已被本地后续操作取代，无法保证存在可恢复的响应；不要重复使用已提交的密钥。",
+      "replacePendingPairing": "先检查云端控制台，并确认没有仍在进行的配对。若要明确替换待处理操作，请将以下命令中的占位符替换为新密钥和原本要使用的后端地址（默认后端为 https://avibe.bot）：",
+      "retirementFailed": "配对已应用，但恢复记录未能清理。请不要更换密钥并重试。",
+      "failedClaimCleanup": "本次配对失败，尚未应用。修复本地存储后，不提供密钥重试，以清理失败操作的记录。",
+      "failedClaimUnrecorded": "本次配对失败，尚未应用，且无法记录清理状态。修复本地存储后，请向 'vibe remote pair' 显式提供新的配对密钥；无密钥重试无法恢复此结果。",
+      "failedClaimRetired": "失败的配对记录已清理。获取新的配对密钥后，运行以下命令安全输入：",
+      "retryPairCommand": "使用以下命令重试本地配对恢复："
     }
   },
   "turn": {

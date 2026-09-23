@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import ipaddress
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from config import paths
 from config.v2_config import (
     AgentsConfig,
     ModelHubModelConfig,
@@ -69,7 +71,7 @@ from vibe.claude_config import (
     materialize_claude_subprocess_env,
     read_claude_settings_env,
 )
-from vibe import remote_access, runtime, show_identity, ui_server
+from vibe import cli, remote_access, runtime, show_identity, ui_server
 from vibe.ui_server import app
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.adapter import (
@@ -525,6 +527,191 @@ def _save_remote_web_auth_config() -> V2Config:
     cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
     config.save()
     return config
+
+
+@pytest.mark.parametrize("setup_host", ["192.0.2.5", "fd00::1", "2001:db8::5", "[2001:db8::5]"])
+async def test_cloud_pairing_origin_reaches_effective_ui_listener(monkeypatch, setup_host):
+    """Scenario: AUTH-SETUP-907 — every origin consumer reaches the widened UI bind."""
+    ipv6 = ":" in setup_host
+    if ipv6:
+        if not socket.has_ipv6:
+            pytest.skip("Platform has no IPv6 support")
+        # Probe OS capability separately: failures in the produced bind or URL
+        # below must fail the scenario, never become capability skips.
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+                probe.bind(("::1", 0))
+        except OSError as exc:
+            if exc.errno in {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL}:
+                pytest.skip(f"IPv6 loopback unavailable: {exc}")
+            raise
+
+    config = _save_remote_web_auth_config()
+    config.ui.setup_host = setup_host
+    config.save()
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(remote_access, "status", lambda cfg: {"running": True, "binary_found": True})
+    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: None)
+    requests_seen = []
+
+    async def health(request):
+        requests_seen.append(request.path)
+        return web.json_response({"ok": True})
+
+    local_ui = web.Application()
+    local_ui.router.add_get("/health", health)
+    runner = web.AppRunner(local_ui)
+    await runner.setup()
+    try:
+        site = web.TCPSite(runner, host=runtime.effective_ui_bind_host(config), port=0)
+        await site.start()
+        listener = site._server.sockets[0]
+        if ipv6:
+            assert listener.family == socket.AF_INET6
+            assert listener.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
+        monkeypatch.setenv("VIBE_UI_PORT", str(listener.getsockname()[1]))
+
+        # Consume the persisted config and effective port just as pairing does.
+        origin = remote_access.origin_service_for_pairing()
+        async with httpx.AsyncClient(trust_env=False, timeout=2) as client:
+            response = await client.get(f"{origin}/health")
+            assert response.json() == {"ok": True}
+        payload = await asyncio.to_thread(remote_access.runtime_status_payload, config)
+        assert payload["expected_origin_service"] == origin
+        assert payload["ui_healthy"] is True
+        assert requests_seen == ["/health"]
+    finally:
+        await runner.cleanup()
+
+    # Closing the disposable listener must remain visible as an unhealthy UI.
+    payload = await asyncio.to_thread(remote_access.runtime_status_payload, config)
+    assert payload["ui_healthy"] is False
+
+
+@pytest.mark.parametrize("consumer", ["cli", "web"])
+def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys, consumer):
+    """Scenario: AUTH-SETUP-908 — HTTP failure, fresh CLI/Web retry, durable identity."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    config.save()
+    monkeypatch.setattr(
+        remote_access,
+        "_resolve_pairing_backend_addresses",
+        lambda host, port: (ipaddress.ip_address("93.184.216.34"),),
+    )
+    response = {
+        "instance_id": "scenario-inst",
+        "client_id": "scenario-client",
+        "issuer": "https://backend.test",
+        "authorization_endpoint": "https://backend.test/oauth/authorize",
+        "token_endpoint": "https://backend.test/oauth/token",
+        "jwks_uri": "https://backend.test/jwks.json",
+        "public_url": "https://scenario.avibe.bot",
+        "redirect_uri": "https://scenario.avibe.bot/auth/callback",
+        "tunnel_token": "scenario-tunnel",
+        "instance_secret": "scenario-secret",
+        "instance_kind": "personal",
+    }
+    calls = []
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda url, payload, **kwargs: calls.append(payload["pairing_key"]) or dict(response),
+    )
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda next_config=None, **kwargs: {"ok": True, "paired": True, "running": True},
+    )
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: None)
+
+    import config.v2_config as config_module
+
+    original_write = config_module.write_atomic
+    fail_once = [True]
+
+    def write(path, content, **kwargs):
+        if Path(path) == paths.get_config_path() and fail_once[0]:
+            fail_once[0] = False
+            raise OSError("scenario config publication failure")
+        return original_write(path, content, **kwargs)
+
+    monkeypatch.setattr(config_module, "write_atomic", write)
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    def redeem(current):
+        client = app.test_client()
+        response = client.post(
+            "/api/remote-access/vibe-cloud/pair",
+            json={"pairing_key": "scenario-key", "backend_url": "https://backend.test"},
+            headers=csrf_headers(client),
+        )
+        assert response.status_code == 400
+        current.first = response.get_json()
+        assert current.first["error"] == "pairing_save_failed_after_redeem"
+        assert not V2Config.load().remote_access.vibe_cloud.instance_id
+        current.journal = json.loads(remote_access._pending_pairing_path().read_text())
+        assert len(calls) == 1
+
+    def retry_from_consumer(current):
+        if consumer == "cli":
+            exit_code = cli.cmd_remote_pair(SimpleNamespace(
+                pairing_key=None,
+                backend_url="https://avibe.bot",
+                device_name="scenario",
+                json=True,
+            ))
+            assert exit_code == 0
+            current.second = json.loads(capsys.readouterr().out)
+        else:
+            client = app.test_client()
+            pending = client.get("/api/remote-access/status").get_json()["pending_pairing"]
+            assert pending == {"phase": "redeemed", "can_resume": True}
+            response = client.post(
+                "/api/remote-access/vibe-cloud/pair",
+                json={"pairing_key": ""},
+                headers=csrf_headers(client),
+            )
+            assert response.status_code == 200
+            current.second = response.get_json()
+        assert current.second["ok"] is True
+        assert len(calls) == 1
+
+    def verify_durable_identity(current):
+        saved = V2Config.load().remote_access.vibe_cloud
+        binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+        assert saved.instance_id == binding["instance_id"] == "scenario-inst"
+        assert saved.instance_secret == "scenario-secret"
+        assert saved.session_secret == current.journal["pairing"]["session_secret"]
+        assert not remote_access.pending_pairing_record_exists()
+
+    asyncio.run(runner.run(
+        ScenarioStep("redeem_and_record_local_failure", redeem),
+        ScenarioStep(f"retry_from_fresh_{consumer}_consumer", retry_from_consumer),
+        ScenarioStep("verify_durable_identity_and_binding", verify_durable_identity),
+    ))
+    ScenarioExpect.step_history(
+        runner,
+        [
+            "redeem_and_record_local_failure",
+            f"retry_from_fresh_{consumer}_consumer",
+            "verify_durable_identity_and_binding",
+        ],
+    )
 
 
 def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_path):

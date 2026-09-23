@@ -1510,22 +1510,7 @@ def _remote_examples_text() -> str:
 
 
 def _remote_pair_examples_text() -> str:
-    return dedent(
-        """\
-        Guidance:
-          This is the direct pairing command for users who already have a pairing key.
-          For the guided setup flow, run `vibe remote`.
-          If you omit the pairing key, the CLI prompts for it without echoing it to the terminal.
-          Pairing saves the remote-access config and then starts the managed tunnel automatically.
-          The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.
-
-        Examples:
-          vibe remote
-          vibe remote pair vrp_abc123
-          vibe remote pair --device-name "Mac Studio"
-          vibe remote pair --backend-url https://avibe.bot
-        """
-    )
+    return i18n_t("remote_access.cli.pairHelpEpilog", _configured_cli_language())
 
 
 def _show_examples_text() -> str:
@@ -13567,6 +13552,7 @@ def _print_remote_pair_start() -> None:
 
 def _print_remote_pair_failure(result: dict) -> None:
     error_code = str(result.get("error") or "unknown_error")
+    language = _configured_cli_language()
     if error_code in {"invalid_pairing_key", "pairing_key_expired", "pairing_key_used"}:
         print("Pairing key is invalid or expired.", file=sys.stderr)
         print("Create a new pairing key at https://avibe.bot, then run:", file=sys.stderr)
@@ -13578,6 +13564,74 @@ def _print_remote_pair_failure(result: dict) -> None:
         print("  vibe remote", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
+    if error_code == "pairing_local_write_unavailable":
+        print(i18n_t("remote_access.cli.localWriteUnavailableTitle", language), file=sys.stderr)
+        print(i18n_t("remote_access.cli.localWriteUnavailableBody", language), file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
+        print("  vibe remote", file=sys.stderr)
+        return
+    if error_code == "pairing_save_failed_after_redeem":
+        orphan = result.get("orphaned_binding") or {}
+        print(i18n_t("remote_access.cli.saveFailedAfterRedeemTitle", language), file=sys.stderr)
+        if orphan.get("instance_id"):
+            print(i18n_t(
+                "remote_access.cli.orphanedBinding",
+                language,
+                instance_id=orphan["instance_id"],
+                device_name=orphan.get("device_name") or "unknown",
+            ), file=sys.stderr)
+        print(i18n_t("remote_access.cli.recoveryRetained", language), file=sys.stderr)
+        print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
+        print("  vibe remote pair", file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
+    if error_code == "pairing_recovery_invalid":
+        print(i18n_t("remote_access.cli.recoveryInvalid", language), file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
+    if error_code == "pairing_recovery_unavailable":
+        print(i18n_t("remote_access.cli.recoveryUnavailable", language), file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
+        print("  vibe remote pair", file=sys.stderr)
+        return
+    if error_code in {
+        "pairing_recovery_not_ready", "pairing_superseded_after_redeem", "pairing_redeem_indeterminate",
+    }:
+        message_key = "recoveryNotReady" if error_code == "pairing_recovery_not_ready" else "recoveryIndeterminate"
+        print(i18n_t(f"remote_access.cli.{message_key}", language), file=sys.stderr)
+        print(i18n_t("remote_access.cli.replacePendingPairing", language), file=sys.stderr)
+        print("  vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL", file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
+    if error_code == "pairing_recovery_revoked":
+        print(i18n_t("remote_access.cli.recoveryRevoked", language), file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
+    if error_code == "pairing_retirement_failed":
+        pairing = result.get("pairing") or {}
+        if pairing.get("applied") is False:
+            key = "failedClaimCleanup" if pairing.get("retirement_pending") else "failedClaimUnrecorded"
+        else:
+            key = "retirementFailed"
+        print(i18n_t(f"remote_access.cli.{key}", language), file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        if pairing.get("applied") is not False or pairing.get("retirement_pending"):
+            print(i18n_t("remote_access.cli.retryPairCommand", language), file=sys.stderr)
+            print("  vibe remote pair", file=sys.stderr)
+        return
+    if error_code == "pairing_failure_retired":
+        print(i18n_t("remote_access.cli.failedClaimRetired", language), file=sys.stderr)
+        print("  vibe remote pair", file=sys.stderr)
         return
     if error_code == "invalid_pairing_response":
         print("Avibe Cloud returned incomplete pairing data.", file=sys.stderr)
@@ -13655,9 +13709,10 @@ def _print_remote_already_configured(result: dict) -> None:
 def _run_remote_pair(args, *, guided: bool) -> int:
     from vibe import remote_access
 
+    pending_operation_exists = remote_access.pending_pairing_record_exists()
     if guided:
         current = remote_access.status()
-        if current.get("paired"):
+        if current.get("paired") and not pending_operation_exists:
             _print_remote_already_configured(current)
             return 0
 
@@ -13680,15 +13735,19 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         )
         return 1
 
-    if guided:
+    if guided and not pending_operation_exists:
         _print_remote_setup_intro()
         if not _wait_for_pairing_key_ready():
             print("Remote access setup cancelled.")
             return 1
         _print_remote_pair_start()
 
-    pairing_key = _read_pairing_key_from_args(args)
-    if not pairing_key:
+    provided_pairing_key = (getattr(args, "pairing_key", None) or "").strip()
+    if provided_pairing_key or not pending_operation_exists:
+        pairing_key = _read_pairing_key_from_args(args)
+    else:
+        pairing_key = ""
+    if not pairing_key and not pending_operation_exists:
         payload = {"ok": False, "error": "missing_pairing_key", "hint": "Run 'vibe remote' to restart setup."}
         if getattr(args, "json", False):
             _print_json(payload)

@@ -1236,6 +1236,7 @@ def save_config(
         str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
     )
 
+    pairing_revocation_operation_id: str | None = None
     # Serialize the WHOLE read-merge-write cycle across processes
     # (#1458 stage ③): the base load, merge, validation, and write all
     # happen under the config file lock, so a controller commit between
@@ -1317,6 +1318,15 @@ def save_config(
                 ),
             )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
+        from vibe import remote_access
+
+        # Admit the pairing clear before publishing the separate settings
+        # store: an unreadable journal or failed fence must reject this
+        # request without already changing its Discord guild scope.
+        pairing_revocation_operation_id = remote_access.prepare_pairing_revocation(
+            base_config,
+            config,
+        )
         if guild_scope_update is not None:
             _save_discord_guild_scope_update(*guild_scope_update, user_context=context)
         elif base_config is not None:
@@ -1326,6 +1336,12 @@ def save_config(
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
         config.save()
+        if not remote_access.complete_pairing_revocation(pairing_revocation_operation_id):
+            logger.error(
+                "Pairing revocation committed but its pending record could not be retired; "
+                "the safety fence remains for operation %s",
+                pairing_revocation_operation_id,
+            )
         try:
             from core.message_mirror import reset_activity_flag_cache
 
