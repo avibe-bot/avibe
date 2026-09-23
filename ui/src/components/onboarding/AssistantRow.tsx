@@ -34,8 +34,10 @@ export interface AssistantRowProps {
   onConfigure: () => void;
   onAddKey?: () => void;
   onRefreshConnection?: () => void;
+  onRetryRoute?: () => void;
   connectionPending?: boolean;
   connectionError?: string;
+  routeError?: string;
   configuringDisabled?: boolean;
   /** Presentation only. The connection owner must supply confirmed state. */
   connection?: 'subscription' | 'api_key' | 'hub';
@@ -65,7 +67,7 @@ export interface AssistantRowProps {
  * which is what keeps that true as either step changes.
  */
 export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, upgrade, enabledControl,
-  onInstall, onDetect, onConfigure, configuringDisabled = false, connection, onAddKey, onRefreshConnection, connectionPending, connectionError,
+  onInstall, onDetect, onConfigure, configuringDisabled = false, connection, onAddKey, onRefreshConnection, onRetryRoute, connectionPending, connectionError, routeError,
   hubManaged = false, enabled = false, route }: AssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
@@ -213,6 +215,10 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
         {connectionError && <div className="onboarding-assistant-error" role="alert">
           {connectionError}
           {onRefreshConnection && <Button variant="link" size="xs" onClick={onRefreshConnection}>{t('common.retry')}</Button>}
+        </div>}
+        {routeError && <div className="onboarding-assistant-error" role="alert">
+          {routeError}
+          {onRetryRoute && <Button variant="link" size="xs" onClick={onRetryRoute}>{t('common.retry')}</Button>}
         </div>}
         {error && <div className="onboarding-assistant-error" role="alert">
           <p>{error.message}</p>

@@ -900,12 +900,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             enabled={agent.enabled}
             route={routeViewFor(name)}
             connectionPending={connectionPending[name]}
-            connectionError={connectionErrors[name] || (hubRoute && routeRead.failed
-              ? t('settings.models.routeDialog.fail.reconcileRead') : connections[name]?.message)}
-            onRefreshConnection={() => {
-              void refreshConnection(name, { acknowledge: true });
-              if (hubRoute && routeRead.failed) void readCardRoutes();
-            }}
+            connectionError={connectionErrors[name] || connections[name]?.message}
+            onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
+            routeError={hubRoute && routeRead.failed ? t('settings.models.routeDialog.fail.reconcileRead') : undefined}
+            onRetryRoute={() => void readCardRoutes()}
             configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
               || (hubRoute && routeRead.failed)
               || (hubRoute

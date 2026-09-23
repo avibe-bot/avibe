@@ -469,10 +469,12 @@ describe('Hub route refresh', () => {
     await waitFor(() => expect(row('Claude Code').getByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeTruthy());
     expect(row('Claude Code').queryByText(en.onboarding.setup.noteModelUnset)).toBeNull();
     expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.configureRoute })).toHaveProperty('disabled', true);
+    const connectionReads = mock.api.getBackendConnection.mock.calls.length;
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(row('Claude Code').getByText('model-a')).toBeTruthy());
     expect(row('Claude Code').queryByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeNull();
     expect(mock.models.getAgentChains).toHaveBeenCalledTimes(2);
+    expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(connectionReads);
   });
 
   it('shows a disabled builtin assistant its stored route without opening the editor', async () => {

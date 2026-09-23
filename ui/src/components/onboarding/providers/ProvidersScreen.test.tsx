@@ -27,6 +27,7 @@ import {
   type RegionRead,
 } from '@/components/settings/models/regionRead';
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
+import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import type {
   AgentSupply,
   MigrationItem,
@@ -1084,6 +1085,45 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     server.scan = [CODEX_KEY];
     renderScreen();
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+  });
+
+  it('keeps A dismissed when the review unchecks A and migrates only B', async () => {
+    serve({ scan: [CODEX_KEY, OPENCODE_KEY] });
+    writeMigrationDismissed([CODEX_KEY]);
+    const { handle } = renderScreen({ flow: {
+      providerSelection: { scan: { items: [CODEX_KEY, OPENCODE_KEY] }, selectedBackends: ['codex', 'opencode'] },
+    } });
+    await settled();
+    await activate(handle);
+    const dialog = await screen.findByRole('dialog');
+    const [a, b] = within(dialog).getAllByRole('checkbox');
+    expect(a.getAttribute('aria-checked')).toBe('true');
+    expect(b.getAttribute('aria-checked')).toBe('true');
+    await userEvent.setup().click(a);
+    expect(a.getAttribute('aria-checked')).toBe('false');
+    expect(b.getAttribute('aria-checked')).toBe('true');
+    await userEvent.setup().click(within(dialog).getByRole('button', { name: /Start migration/ }));
+    await waitFor(() => expect(applied).toEqual([[OPENCODE_KEY.id]]));
+    expect(isMigrationDismissed([CODEX_KEY])).toBe(true);
+    cleanup();
+
+    renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(isMigrationDismissed([CODEX_KEY])).toBe(true);
+  });
+
+  it('clears only the identities in a linked group when its card is explicitly selected', async () => {
+    const linkedA = { ...CODEX_KEY, required_backends: ['codex', 'opencode'] as AgentBackend[] };
+    const linkedB = { ...OPENCODE_KEY, required_backends: ['codex', 'opencode'] as AgentBackend[] };
+    serve({ scan: [linkedA, linkedB] });
+    writeMigrationDismissed([linkedA, linkedB]);
+    renderScreen();
+    await settled();
+    expect(cardFor('openai').getAttribute('aria-pressed')).toBe('false');
+    await userEvent.setup().click(cardFor('openai'));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 2 } }));
+    expect(isMigrationDismissed([linkedA])).toBe(false);
+    expect(isMigrationDismissed([linkedB])).toBe(false);
   });
 
   it('refuses a take-over the host cannot install an engine for, and still writes a key', async () => {
