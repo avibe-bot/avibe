@@ -53,12 +53,6 @@ _ENGINE_PROCESS_RECORD = "engine-process.json"
 class _EngineRecord:
     worker_fingerprint: str
     identity: PersistedProcessIdentity | None = None
-    # When the marker was created; no process born earlier can carry it.
-    launched_at: float | None = None
-
-    @property
-    def born_after(self) -> float | None:
-        return self.identity.create_time if self.identity is not None else self.launched_at
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
 
 
@@ -264,7 +258,7 @@ class EngineSupervisor:
         marker = new_process_identity_marker()
         environment = engine_subprocess_environment()
         environment[PROCESS_IDENTITY_ENV] = marker
-        launch = _EngineRecord(fingerprint_process_marker(marker), launched_at=time.time())
+        launch = _EngineRecord(fingerprint_process_marker(marker))
         if not self._store_engine_records_locked([launch]):
             # A launch no record names would become a permanent orphan if this
             # service died, so it never runs untracked.
@@ -410,10 +404,7 @@ class EngineSupervisor:
                 continue
             pid = entry.get("pid")
             identity = process_identity_from_payload(entry, pid) if isinstance(pid, int) else None
-            launched_at = entry.get("launched_at")
-            if isinstance(launched_at, bool) or not isinstance(launched_at, (int, float)) or not launched_at > 0:
-                launched_at = None
-            records.append(_EngineRecord(fingerprint, identity, launched_at))
+            records.append(_EngineRecord(fingerprint, identity))
         return records
 
     def _store_engine_records_locked(self, records: list[_EngineRecord]) -> bool:
@@ -452,8 +443,9 @@ class EngineSupervisor:
 
         A record with a pid is reaped by identity and group; every record is also
         swept by its marker, which finds a launch whose pid was never recorded and
-        members that left the group. An unreadable record is left untouched and
-        counts as unconfirmed; unconfirmed records stay for the next attempt.
+        members that left the group, and whose answer decides the record. An
+        unreadable record is left untouched and counts as unconfirmed; unconfirmed
+        records stay for the next attempt.
         """
 
         records = self._load_engine_records_locked()
@@ -471,10 +463,12 @@ class EngineSupervisor:
                     logger,
                     "Model Hub engine",
                     worker_fingerprint=record.worker_fingerprint,
-                    born_after=record.born_after,
                 )
             )
-            if "unconfirmed" in outcomes:
+            # The marker sweep is the authority: it sees every process of the tree,
+            # including members that left the group, so its conclusive answer
+            # retires the record even when the narrower pid/group path could not.
+            if outcomes[-1] == "unconfirmed":
                 survivors.append(record)
             elif "reaped" in outcomes:
                 logger.warning("Reaped a Model Hub engine left running by an earlier service")
@@ -488,10 +482,7 @@ class EngineSupervisor:
 def _serialize_engine_record(record: _EngineRecord) -> dict[str, Any]:
     if record.identity is not None:
         return serialize_process_identity(record.identity)
-    entry: dict[str, Any] = {"worker_fingerprint": record.worker_fingerprint}
-    if record.launched_at is not None:
-        entry["launched_at"] = record.launched_at
-    return entry
+    return {"worker_fingerprint": record.worker_fingerprint}
 
 
 def _allocate_loopback_port() -> int:

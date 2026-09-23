@@ -1774,11 +1774,16 @@ class CLIProxyEngineAdapter:
 
         async with self._routing_lock:
             await self._transports_idle.wait()
-            auth_name, payload, _prefix, _already_active = await run_owned_in_thread(
-                self.state_store.activate_oauth_auth_file,
-                credential_ref,
+            def publish_grant(running: EngineClient | None):
+                return (*self.state_store.activate_oauth_auth_file(credential_ref), running)
+
+            # Published under the lifecycle exclusion: an engine a previous service
+            # left running is reaped first, so none can load or rotate the new grant
+            # outside this service's reconcile below.
+            auth_name, payload, _prefix, _already_active, client = await run_owned_in_thread(
+                self.supervisor.with_engine_excluded,
+                publish_grant,
             )
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
             if client is None:
                 # The next ordered lifecycle step starts CPA. The atomically
                 # published watched file is the source of truth; no management

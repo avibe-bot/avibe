@@ -817,35 +817,21 @@ def reap_orphaned_process_tree(
     return "unconfirmed"
 
 
-# How much earlier than the marker an unreadable process must appear to be born
-# before it is dismissed. Generous, because create_time can drift on macOS; it
-# only ever decides about processes whose marker cannot be read at all.
-_MARKER_BIRTH_SLACK_SECONDS = 60.0
+def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process]:
+    """This user's live, inspectable processes whose marker hashes to ``worker_fingerprint``.
 
-
-def _processes_carrying_marker(
-    worker_fingerprint: str,
-    born_after: float | None = None,
-) -> list[psutil.Process] | None:
-    """This user's live processes whose inherited marker hashes to ``worker_fingerprint``.
-
-    ``None`` when a process that could carry the marker cannot be inspected: an
-    unreadable environment is unknown, not absent, and a caller that took it for
-    absent would forget a tree that may still be running. Only processes whose every
-    uid is this user's could have inherited the marker, so a setuid process (macOS
-    ``login``) or another user's process is skipped rather than blocking the scan.
-    The marker stays the authority for every readable process. Only when an
-    environment cannot be read does ``born_after`` (the marker's creation time)
-    decide: a process born well before it cannot have inherited the marker, so an
-    older unreadable process (a non-dumpable daemon on Linux) does not block every
-    scan.
+    Best effort by design. The marked tree is a same-user, non-setuid process
+    this service spawned, so its ownership and environment are readable; a process
+    whose ownership or environment cannot be read (another user's, a setuid
+    ``login``, a non-dumpable Linux daemon) is not one of ours and is skipped. No
+    birth-time heuristic is applied: create_time can drift, the marker cannot.
     """
 
     own_pid = os.getpid()
     own_uid = os.getuid() if hasattr(os, "getuid") else None
     own_user = None if own_uid is not None else psutil.Process(own_pid).username()
     found: list[psutil.Process] = []
-    for process in psutil.process_iter(["uids", "username", "create_time"]):
+    for process in psutil.process_iter(["uids", "username"]):
         if process.pid == own_pid:
             continue
         if own_uid is not None:
@@ -856,13 +842,9 @@ def _processes_carrying_marker(
             continue
         try:
             marker = process.environ().get(PROCESS_IDENTITY_ENV)
-        except psutil.NoSuchProcess:
-            # Exited: nothing left running to reap.
-            continue
         except (psutil.Error, OSError):
-            if _born_before_marker(process, born_after):
-                continue
-            return None
+            # Exited, or not inspectable and therefore not a tree this service spawned.
+            continue
         try:
             fingerprint = fingerprint_process_marker(marker) if isinstance(marker, str) and marker else None
         except UnicodeError:
@@ -872,21 +854,11 @@ def _processes_carrying_marker(
     return found
 
 
-def _born_before_marker(process: psutil.Process, born_after: float | None) -> bool:
-    create_time = process.info.get("create_time")
-    return (
-        born_after is not None
-        and isinstance(create_time, (int, float))
-        and create_time < born_after - _MARKER_BIRTH_SLACK_SECONDS
-    )
-
-
 def reap_marked_processes(
     logger: logging.Logger,
     label: str,
     *,
     worker_fingerprint: str,
-    born_after: float | None = None,
     terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
 ) -> ProcessReapOutcome:
     """Stop every process that inherited a managed tree's marker, wherever it is.
@@ -894,16 +866,13 @@ def reap_marked_processes(
     Needs no pid: this finds a tree whose owner died before recording one, and
     members that left the leader's process group. Each victim is signalled through
     its retained ``psutil.Process``, which refuses a pid reused since the scan.
-    ``born_after`` is the marker's creation time; older processes are not scanned.
+    ``unconfirmed`` only when a found process could not be confirmed stopped.
     """
 
     if not is_valid_worker_fingerprint(worker_fingerprint):
         return "gone"
     try:
-        victims = _processes_carrying_marker(worker_fingerprint, born_after)
-        if victims is None:
-            logger.warning("Could not inspect every process that may carry a %s marker", label)
-            return "unconfirmed"
+        victims = _processes_carrying_marker(worker_fingerprint)
         if not victims:
             return "gone"
         logger.warning("Reaping %d %s process(es) found by their identity marker", len(victims), label)
@@ -919,7 +888,7 @@ def reap_marked_processes(
             except psutil.NoSuchProcess:
                 continue
         _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
-        if not alive and _processes_carrying_marker(worker_fingerprint, born_after) == []:
+        if not alive and not _processes_carrying_marker(worker_fingerprint):
             return "reaped"
     except Exception:
         logger.warning("Could not confirm every %s process carrying its marker exited", label, exc_info=True)

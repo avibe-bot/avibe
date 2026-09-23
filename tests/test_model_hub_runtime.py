@@ -3004,8 +3004,8 @@ def test_supervisor_refuses_to_start_beside_an_unconfirmed_engine(
     from vibe.model_hub_runtime import supervisor as supervisor_module
 
     orphan = _orphan_engine(tmp_path)
-    real_reap = supervisor_module.reap_orphaned_process_tree
-    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
+    real_reap = supervisor_module.reap_marked_processes
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *a, **k: "unconfirmed")
     spawned: list[object] = []
     supervisor, store = _fixture_supervisor(
         tmp_path,
@@ -3019,7 +3019,7 @@ def test_supervisor_refuses_to_start_beside_an_unconfirmed_engine(
     assert raised.value.reason == "previous_engine_alive"
     assert spawned == []
     assert _recorded_engine_pids(record) == [orphan.pid]
-    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", real_reap)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", real_reap)
     supervisor.ensure_running()
     _wait_for(lambda: orphan.poll() is not None)
     assert _recorded_engine_pids(record) == [supervisor._process.pid]
@@ -3036,7 +3036,7 @@ def test_supervisor_does_not_report_stopped_while_an_engine_is_unconfirmed(
     from vibe.model_hub_runtime import supervisor as supervisor_module
 
     orphan = _orphan_engine(tmp_path)
-    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *a, **k: "unconfirmed")
     supervisor, store = _fixture_supervisor(tmp_path)
     cleared: list[bool] = []
     monkeypatch.setattr(store, "clear_runtime_configs", lambda: cleared.append(True))
@@ -3058,7 +3058,7 @@ def test_supervisor_shutdown_stop_keeps_an_unconfirmed_engine_recorded(
     from vibe.model_hub_runtime import supervisor as supervisor_module
 
     orphan = _orphan_engine(tmp_path)
-    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *a, **k: "unconfirmed")
     supervisor, store = _fixture_supervisor(tmp_path)
 
     supervisor.stop()
@@ -3197,8 +3197,7 @@ def test_supervisor_records_the_launch_before_spawning(tmp_path: Path) -> None:
     supervisor.ensure_running()
 
     [launch] = seen[0]
-    assert set(launch) == {"worker_fingerprint", "launched_at"}
-    assert launch["launched_at"] <= psutil.Process(supervisor._process.pid).create_time() + 1
+    assert set(launch) == {"worker_fingerprint"}
     assert launch["worker_fingerprint"] == fingerprint_process_marker(
         psutil.Process(supervisor._process.pid).environ()[PROCESS_IDENTITY_ENV]
     )
@@ -3359,25 +3358,18 @@ def test_orphaned_oauth_cleanup_keeps_the_grant_while_a_previous_engine_is_uncon
     asyncio.run(run())
 
 
-def test_supervisor_keeps_a_marker_only_record_when_the_scan_cannot_read_a_process(
+def test_supervisor_keeps_a_marker_only_record_while_the_sweep_is_unconfirmed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import psutil
+    from vibe.model_hub_runtime import supervisor as supervisor_module
 
     orphan = _orphan_engine(tmp_path)
     record = tmp_path / "state" / "engine-process.json"
     [entry] = json.loads(record.read_text(encoding="utf-8"))["engines"]
     marker_only = {"engines": [{"worker_fingerprint": entry["worker_fingerprint"]}]}
     record.write_text(json.dumps(marker_only), encoding="utf-8")
-    real_environ = psutil.Process.environ
-
-    def environ(process):
-        if process.pid == orphan.pid:
-            raise psutil.AccessDenied(process.pid)
-        return real_environ(process)
-
-    monkeypatch.setattr(psutil.Process, "environ", environ)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
     second, _store = _fixture_supervisor(tmp_path)
 
     with pytest.raises(EngineUnavailableError) as raised:
@@ -3386,10 +3378,27 @@ def test_supervisor_keeps_a_marker_only_record_when_the_scan_cannot_read_a_proce
     assert raised.value.reason == "previous_engine_alive"
     assert orphan.poll() is None
     assert json.loads(record.read_text(encoding="utf-8")) == marker_only
-    monkeypatch.setattr(psutil.Process, "environ", real_environ)
+    monkeypatch.undo()
     second.ensure_running()
     _wait_for(lambda: orphan.poll() is not None)
     second.stop()
+
+
+def test_supervisor_retires_a_record_the_marker_sweep_confirms_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An inconclusive pid/group path must not pin a record the authoritative sweep cleared.
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *_a, **_k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.stop()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not (store.root / "engine-process.json").exists()
 
 
 def test_supervisor_failed_tracking_reaps_a_descendant_that_ignores_sigterm(

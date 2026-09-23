@@ -541,28 +541,16 @@ def test_reap_marked_processes_finds_a_tree_by_marker_alone() -> None:
         child.wait(timeout=5)
 
 
-def test_marker_scan_trusts_a_readable_marker_over_a_drifted_birth_time(monkeypatch: pytest.MonkeyPatch) -> None:
-    # macOS create_time can drift, so a readable marker is never dismissed by age.
+def test_marker_scan_skips_processes_it_cannot_inspect(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A tree this service spawned is always inspectable; an unreadable or foreign
+    # process is not ours and must not block recovery forever (non-dumpable daemons).
     own_uid = os.getuid()
     marker = new_process_identity_marker()
-    engine = SimpleNamespace(
-        pid=4242,
-        info={
-            "uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid),
-            "username": "me",
-            "create_time": 1000.0,
-        },
+    ours = SimpleNamespace(
+        pid=4141,
+        info={"uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid), "username": "me"},
         environ=lambda: {PROCESS_IDENTITY_ENV: marker},
     )
-    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([engine]))
-
-    assert _processes_carrying_marker(fingerprint_process_marker(marker), born_after=5000.0) == [engine]
-
-
-def test_reap_marked_processes_is_unconfirmed_when_a_process_cannot_be_inspected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    own_uid = os.getuid()
     unreadable = SimpleNamespace(
         pid=4242,
         info={"uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid), "username": "me"},
@@ -573,37 +561,9 @@ def test_reap_marked_processes_is_unconfirmed_when_a_process_cannot_be_inspected
         info={"uids": SimpleNamespace(real=own_uid, effective=0, saved=0), "username": "me"},
         environ=lambda: pytest.fail("a setuid process cannot carry our marker"),
     )
-    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable]))
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable, ours]))
 
-    outcome = reap_marked_processes(
-        logging.getLogger(__name__),
-        "test process",
-        worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
-    )
-
-    assert outcome == "unconfirmed"
-    unreadable.info["create_time"] = 1000.0
-    # A process born before the marker existed cannot carry it, readable or not.
-    assert (
-        reap_marked_processes(
-            logging.getLogger(__name__),
-            "test process",
-            worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
-            born_after=2000.0,
-        )
-        == "gone"
-    )
-    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable]))
-    assert (
-        reap_marked_processes(
-            logging.getLogger(__name__),
-            "test process",
-            worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
-            born_after=1050.0,
-        )
-        == "unconfirmed"
-    )
-    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid]))
+    assert _processes_carrying_marker(fingerprint_process_marker(marker)) == [ours]
     assert (
         reap_marked_processes(
             logging.getLogger(__name__),
