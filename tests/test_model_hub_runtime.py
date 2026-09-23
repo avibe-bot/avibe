@@ -36,6 +36,7 @@ from core.handlers.model_hub.classification import (
     classify_outcome,
     terminal_outcome_category,
 )
+from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
@@ -6328,13 +6329,22 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
     [
         ("refresh failed: token=abc123opaque", "refresh failed: token=[redacted]"),
         ("bad secret: xyz", "bad secret: [redacted]"),
-        ('client_secret="two words" rejected', "client_secret=[redacted] rejected"),
-        ("session_key=s1, password='p w'", "session_key=[redacted], password=[redacted]"),
+        ('client_secret="two words" rejected', "client_secret=[redacted]"),
+        ("session_key=s1, password='p w'", "session_key=[redacted]"),
+        ("password: `correct horse battery staple`", "password: [redacted]"),
+        ('bad token=\\"a\\" b\\" c', "bad token=[redacted]"),
         ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
     ],
 )
 def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
     assert client_module._bounded_upstream_detail(message) == expected
+
+
+def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> None:
+    started = time.monotonic()
+    redact_untrusted_text("a-" * 8000 + "x")
+    redact_untrusted_text("key " * 4000 + "x")
+    assert time.monotonic() - started < 0.5
 
 
 def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() -> None:
