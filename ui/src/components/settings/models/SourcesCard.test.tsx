@@ -102,4 +102,21 @@ describe('SourcesCard footer', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
     expect(onRetry).toHaveBeenCalledOnce();
   });
+
+  it('disables the page retry while route reconciliation is pending', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourcesCard
+          read={failRegionRead(readyRegion([retained]))}
+          retryDisabled
+          onRetry={vi.fn()}
+          onOpenSource={vi.fn()}
+          onAddApiKey={vi.fn()}
+          onAddSubscription={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    expect((screen.getByRole('button', { name: /^Retry$|^重试$/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

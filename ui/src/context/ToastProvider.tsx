@@ -16,6 +16,9 @@ interface Toast {
   action?: ToastAction;
 }
 
+type ToastTimer = number;
+type RecentToast = { id: number; expiresAt: number; timer: ToastTimer };
+
 let toastId = 0;
 
 // Dedupe window — within this many ms, an identical message replaces the
@@ -30,7 +33,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [toasts, setToasts] = useState<Toast[]>([]);
   // Ref so dedupe lookups don't rerender. Maps message -> {id, expiresAt}
   // for currently-visible toasts; we evict on auto-dismiss.
-  const recentRef = useRef<Map<string, { id: number; expiresAt: number }>>(new Map());
+  const recentRef = useRef<Map<string, RecentToast>>(new Map());
 
   const showToast = useCallback(
     (message: string, type: ToastType = 'success', action?: ToastAction) => {
@@ -41,30 +44,51 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const now = Date.now();
       const existing = recentRef.current.get(message);
       if (shouldCoalesceToast(!!action, existing, now)) {
+        window.clearTimeout(existing!.timer);
         setToasts((prev) =>
           prev.map((t) => (t.id === existing!.id ? { ...t, repeats: t.repeats + 1, type } : t)),
         );
+        const timer = window.setTimeout(() => {
+          setToasts((prev) => prev.filter((t) => t.id !== existing!.id));
+          const tracked = recentRef.current.get(message);
+          if (tracked && tracked.id === existing!.id) recentRef.current.delete(message);
+        }, PLAIN_TOAST_MS);
+        recentRef.current.set(message, {
+          id: existing!.id,
+          expiresAt: now + DEDUPE_WINDOW_MS,
+          timer,
+        });
         return;
       }
       const id = ++toastId;
       // Only track plain toasts for dedupe; actionable ones are always distinct.
-      if (!action) recentRef.current.set(message, { id, expiresAt: now + DEDUPE_WINDOW_MS });
       setToasts((prev) => [...prev, { id, message, type, repeats: 0, action }]);
 
       // Auto dismiss (longer for actionable toasts so undo is reachable).
-      setTimeout(() => {
+      const timer = window.setTimeout(() => {
         setToasts((prev) => prev.filter((t) => t.id !== id));
         // Best-effort cleanup of the dedupe map — the entry may have been
         // re-issued under a different id during the window.
         const tracked = recentRef.current.get(message);
         if (tracked && tracked.id === id) recentRef.current.delete(message);
       }, action ? ACTION_TOAST_MS : PLAIN_TOAST_MS);
+      if (!action) recentRef.current.set(message, {
+        id,
+        expiresAt: now + DEDUPE_WINDOW_MS,
+        timer,
+      });
     },
     [],
   );
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+    for (const [message, tracked] of recentRef.current) {
+      if (tracked.id !== id) continue;
+      window.clearTimeout(tracked.timer);
+      recentRef.current.delete(message);
+      break;
+    }
   }, []);
 
   // Stable value identity so the ~34 consumers of useToast don't re-render every
@@ -80,6 +104,9 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         {toasts.map((toast) => (
           <div
             key={toast.id}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
             className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border animate-slide-in ${
               toast.type === 'success'
                 ? 'bg-mint/10 border-mint/30 text-mint-ink'
