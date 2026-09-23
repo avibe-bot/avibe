@@ -495,3 +495,40 @@ The line predates this PR — it arrived with #1983 — and the other lifecycle 
 (`exit_shell`, `stop_runtime`, the readiness-loss recovery, `return_to_bootstrap`
 and the removal flow) were audited against that one sentence and do not
 contradict it. None of them is changed here.
+
+## H9 — the lease check that could not pass on Windows
+
+The third TEST prerelease, `gh-v3.1.1rc7`, failed its Windows desktop package in
+the private-Runtime probe. The packaging observability added in H8 is what made
+it readable: the probe printed the service's own log, which said `Failed to
+start: Unsafe native lease file`, and the `RuntimeError` about the service lock
+that the job surfaced first was only the symptom of that.
+
+`NativeCredentialLease.acquire` verified the lease file with a POSIX permission
+mask, `info.st_mode & 0o077`. Windows synthesizes `st_mode` from file attributes,
+so any writable regular file reports `0o100666` there and the mask always yields
+`0o066`; the `0o600` passed to `os.open` cannot change it, because Windows honors
+only the read-only bit from that argument. The check therefore rejected every
+lease on Windows, deterministically, and the service could not finish starting.
+The clause is now POSIX-only, in the idiom the same expression already used twice
+within five lines — `hasattr(os, "getuid")` for the owner check and
+`getattr(os, "O_NOFOLLOW", 0)` for the open flag. The equivalent guarantee on
+Windows is an ACL check, not a mode mask, and is not attempted here.
+
+**This arrived from master, not from us.** The check came in with #2060
+(`162fda594`, 20 September); this PR does not touch `core/backend_restart.py` in
+any other respect. It stayed invisible because nothing had ever executed that
+line on Windows: unit tests run on Linux, the lease tests needed no platform
+skip, `desktop/scripts/build-runtime-bundle.py` does not exist on master, and no
+prior prerelease shipped a desktop installer at all. The Windows private-Runtime
+probe this PR introduces is the first caller to reach it on that platform, which
+is why a pre-existing defect surfaced as a release-path blocker here. It was
+fixed in this PR rather than deferred for exactly that reason: no number of
+re-runs produces a Windows installer while it stands.
+
+Whether an ordinary Windows service start also reaches `acquire()` — and has
+therefore been broken on master since 20 September — is deliberately not claimed
+here. It is tracked in issue #2132 with this evidence. The coverage added with
+the fix asserts both directions, so neither dropping the mask nor restoring it
+unguarded can pass: POSIX still refuses a group-accessible lease file, and the
+identical file acquires once `os.name` is not `posix`.

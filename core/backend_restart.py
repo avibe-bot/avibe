@@ -99,7 +99,12 @@ class NativeCredentialLease:
                     not stat.S_ISREG(info.st_mode)
                     or info.st_nlink != 1
                     or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-                    or info.st_mode & 0o077
+                    # POSIX-only: Windows synthesizes st_mode from file
+                    # attributes, so a writable file always reports 0o666 and the
+                    # 0o600 above cannot change it. Asserting it there would
+                    # reject every lease rather than describe one. The equivalent
+                    # guarantee on Windows is an ACL check, not a mode mask.
+                    or (os.name == "posix" and info.st_mode & 0o077)
                 ):
                     raise OSError("Unsafe native lease file")
                 if not _try_lock(handle):
