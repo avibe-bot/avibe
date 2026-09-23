@@ -56,6 +56,10 @@ do not load them routinely. They introduce no additional delivery gates.
 - Run focused tests and changed-file lint, plus required repository gates
   (`npm run build` for UI work). Self-review `git diff origin/<default>...HEAD`
   for scope drift, missing contracts, secrets, and temporary artifacts.
+- CI owns the full suite. Locally run only tests that exercise the change; never
+  run the whole suite locally as a pre-push gate. Push and let the Watch observe
+  CI. Diagnose a CI-only failure by running just the failing tests locally.
+  Remove any temporary test directories your runs leave behind.
 - Claims about another lane's code name the SHA actually read from its current
   remote branch. Findings belong to their reviewed head; reconcile them against
   the current head before making another edit.
