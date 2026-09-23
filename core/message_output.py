@@ -150,6 +150,24 @@ def neutralize_mentions(text: str) -> str:
     return _ID_MENTION_PATTERN.sub("<" + _MENTION_BREAK, neutralized)
 
 
+# Masked-link unmaskers for text an untrusted party wrote but Avibe republishes under
+# its own copy (an upstream provider's error message). Markdown ``[label](url)`` is a
+# clickable link on Discord, Telegram (``TelegramFormatter`` renders it to ``<a>``),
+# and the Web UI, and Slack resolves ``<url|label>`` the same way, so the label could
+# dress an attacker-chosen URL as Avibe's own call to action. Rewriting both forms to
+# ``label (url)`` keeps every word readable while leaving the destination in plain
+# sight; a bare URL may still autolink, but it can no longer hide behind other text.
+_MARKDOWN_MASKED_LINK_PATTERN = re.compile(r"\[([^\[\]]*)\]\(\s*([^()\s]+)\s*\)")
+_SLACK_MASKED_LINK_PATTERN = re.compile(r"<([^<>|\s]+)\|([^<>]*)>")
+
+
+def unmask_links(text: str) -> str:
+    """Rewrite every masked link in *text* so its destination is shown, not hidden."""
+
+    unmasked = _MARKDOWN_MASKED_LINK_PATTERN.sub(r"\1 (\2)", text or "")
+    return _SLACK_MASKED_LINK_PATTERN.sub(r"\2 (\1)", unmasked)
+
+
 def output_for_message(message_type: str, output: MessageOutput | None) -> MessageOutput:
     """Normalize output semantics at the legacy dispatcher boundary.
 

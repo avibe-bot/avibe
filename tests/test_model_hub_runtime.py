@@ -6348,6 +6348,22 @@ def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() ->
     assert detail.replace("\u200b", "") == "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "[Update required](https://attacker.example/fix) to continue",
+            "Update required (https://attacker.example/fix) to continue",
+        ),
+        ("see <https://attacker.example|the docs>", "see the docs (https://attacker.example)"),
+        ("[a]( https://x.example ) and [b](https://y.example)", "a (https://x.example) and b (https://y.example)"),
+        ("array[0] (index) is out of range", "array[0] (index) is out of range"),
+    ],
+)
+def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str, expected: str) -> None:
+    assert client_module._bounded_upstream_detail(message) == expected
+
+
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
     payload = json.dumps(
         {

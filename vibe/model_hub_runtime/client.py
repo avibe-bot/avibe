@@ -36,7 +36,7 @@ from core.handlers.model_hub.json_wire import (
     JSONScope,
     project_json_reader,
 )
-from core.message_output import neutralize_mentions
+from core.message_output import neutralize_mentions, unmask_links
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
@@ -1662,7 +1662,7 @@ def _bounded_upstream_detail(message: str) -> str | None:
     text = " ".join(message.split())
     if not text:
         return None
-    text = neutralize_mentions(redact_untrusted_text(text))
+    text = neutralize_mentions(unmask_links(redact_untrusted_text(text)))
     if len(text) > _UPSTREAM_DETAIL_CHARS:
         text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
     return text
