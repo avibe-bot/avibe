@@ -1370,8 +1370,22 @@
 
 /* C2/C3: persistent screens share one reservation and one shell-owned action pair. */
 .onboarding-step { max-width: var(--ob-content-w); }
-.onboarding-screens { position: relative; width: 100%; }
-.onboarding-screens [hidden], .onboarding-access[hidden] { display: none !important; }
+/* The three screens share one cell, so the region is always as tall as the tallest of
+   them and the action pair below it never moves between screens — the reference holds
+   its stage at one height for the same reason. A screen that is not the current one
+   keeps its `hidden` attribute, and with it its place outside the accessibility tree
+   and out of reach of a pointer; what it gives up is only the right to collapse the
+   region it shares. */
+.onboarding-screens { position: relative; width: 100%; display: grid; }
+.onboarding-screens > [data-setup-screen-root] { grid-area: 1 / 1; min-width: 0; }
+/* Inside the base layer, and important, because that is the weight the framework hides
+   `[hidden]` with: a screen keeps the attribute — and with it its place outside the
+   accessibility tree and out of tab order — while still holding its share of the cell. */
+@layer base {
+  .onboarding-screens > [data-setup-screen-root][hidden] { display: block !important; }
+}
+.onboarding-screens > [data-setup-screen-root][hidden] { visibility: hidden; pointer-events: none; }
+.onboarding-screens [hidden]:not([data-setup-screen-root]), .onboarding-access[hidden] { display: none !important; }
 .onboarding-handoff-layer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
 .onboarding-handoff-layer * { animation-play-state: paused !important; }
 .onboarding-handoff-card { position: absolute; pointer-events: none; }

@@ -168,7 +168,10 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
       host.current?.closest('.onboarding-shell')?.scrollTo({ top: 0, behavior: 'instant' });
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
-    const animated = !backwards && setupHandoffAllowed(paused) && target !== 'intro'
+    // Both directions fly, as the reference's do: the identities that grew into
+    // assistants shrink back into the diagram's destinations on the way out. Only the
+    // welcome screen has nothing to trade cards with, so it is the one arrival that cuts.
+    const animated = setupHandoffAllowed(paused) && target !== 'intro'
       && !!host.current && !!roots.current[previous.id] && !!roots.current[target];
     if (animated) {
       transitioning.current = true;

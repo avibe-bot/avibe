@@ -31,7 +31,13 @@
  * the story's `--ob-wire` family. Active and hover wear `--ob-active-shadow`.
  */
 
-.setup-provider-stage {
+/* The handoff layer holds clones of this stage's own parts, and it hangs off the
+   shared screens region rather than off the stage — so without this it resolves none
+   of the names below. A `width: var(--obp-logo) !important` that cannot resolve is not
+   ignored: it computes to `auto` and outranks the inline size the flight measured,
+   which is what drew a 32px mark at 200px mid-flight. */
+.setup-provider-stage,
+.onboarding-handoff-layer {
   /* Behind every `--ob-*` name L1 owns or may promote, the value this screen was
      measured at. Reading through the token first means a promotion upstream lands
      here automatically and a missing token never silently drops the diagram. */
@@ -55,7 +61,9 @@
   --obp-destination-h: var(--ob-destination-h, calc(76 * var(--ob-u)));
   --obp-summary-h: var(--ob-summary-h, calc(34 * var(--ob-u)));
   --obp-offer-gap: var(--ob-gap, calc(16 * var(--ob-u)));
+}
 
+.setup-provider-stage {
   width: 100%;
   display: flex;
   flex-direction: column;
