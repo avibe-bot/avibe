@@ -239,6 +239,9 @@ class NativeMigrationItem:
     file_snapshots: tuple[NativeFileEdit, ...] = field(default=(), repr=False)
     auth_scheme: str | None = field(default=None, repr=False)
     receipt_identity: str | None = field(default=None, repr=False)
+    # The native config file itself cannot be parsed, so the CLI fails before
+    # any Hub override applies; this row blocks Hub mode, not just import.
+    config_blocker: bool = field(default=False, repr=False)
 
     def to_payload(self) -> dict[str, object]:
         # Presentation metadata is additive: `vendor` and `display_name` let a
@@ -524,6 +527,7 @@ def _blocked_item(
     source_paths: tuple[str, ...] = (),
     shell_variables: tuple[str, ...] = (),
     shell_auth_variables: tuple[str, ...] = (),
+    config_blocker: bool = False,
 ) -> NativeMigrationItem:
     item_id, source_id = _ids(backend, "api_key", identity, "reauth")
     return NativeMigrationItem(
@@ -534,7 +538,7 @@ def _blocked_item(
         protocol="anthropic" if backend == "claude" else "openai_responses",
         display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
         source_paths=source_paths, shell_variables=shell_variables,
-        shell_auth_variables=shell_auth_variables,
+        shell_auth_variables=shell_auth_variables, config_blocker=config_blocker,
     )
 
 
@@ -559,6 +563,7 @@ def _claude_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "claude", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -566,7 +571,9 @@ def _claude_items(
             continue
         env = config.get("env", {})
         if not isinstance(env, dict):
-            items.append(_blocked_item("claude", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "claude", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         base_url = _oauth_text(env, "ANTHROPIC_BASE_URL")
         api_key = _oauth_text(env, "ANTHROPIC_API_KEY")
@@ -639,6 +646,7 @@ def _codex_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "codex", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -646,7 +654,9 @@ def _codex_items(
             continue
         providers = config.get("model_providers", {})
         if not isinstance(providers, dict):
-            items.append(_blocked_item("codex", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "codex", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         for provider_id, provider in providers.items():
             if not isinstance(provider, dict):
@@ -802,6 +812,7 @@ def _opencode_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "opencode", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -809,7 +820,9 @@ def _opencode_items(
             continue
         provider_configs = config.get("provider", {})
         if not isinstance(provider_configs, dict):
-            items.append(_blocked_item("opencode", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "opencode", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         seen_providers.update(provider_configs)
         relevant_auth = {key: value for key, value in auth_entries.items() if key in provider_configs}

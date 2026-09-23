@@ -612,3 +612,32 @@ def test_rejected_grant_terminal_decision_recovers_after_crash(monkeypatch, tmp_
     assert not service.migration_blocked_backends
     assert store.config.sources[0].state.status == "needs_action"
     assert adapter.revoked == []
+
+
+@pytest.mark.parametrize(("backend", "relative", "payload"), [
+    ("claude", ".claude/settings.json", "{not json"),
+    ("codex", ".codex/config.toml", "model_providers = ["),
+    ("opencode", ".config/opencode/opencode.json", '{"provider": []}'),
+])
+def test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse(
+    monkeypatch, tmp_path, backend, relative, payload,
+):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    service, store, _adapter = _service(tmp_path, migration_home=home)
+    store.config.agents[backend].mode = "direct"
+    _write(home / relative, payload)
+    # Nothing is importable, yet the CLI would fail before any Hub override.
+    assert not any(item["proposed_action"] == "import" for item in service.migration_scan()["items"])
+
+    @asynccontextmanager
+    async def guard(backends):
+        async def verify():
+            return None
+        yield verify
+
+    service.migration_guard = guard
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.set_agent_mode(backend, "hub"))
+    assert failure.value.code == "mode_switch_blocked"
+    assert store.config.agents[backend].mode == "direct"

@@ -14,6 +14,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import { modelsApi } from '../settings/models/modelsApi';
 import type { Source, TurnProvenance } from '../settings/models/types';
@@ -41,7 +42,10 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [detail, setDetail] = React.useState<Detail | null>(null);
-  const eligible = isRetryableFailureNotice(message);
+  // The record names Sources and routes, so it is Model Hub management data:
+  // a chat-only role gets the notice and its retry, not a read bound to fail.
+  const { capabilities } = useInstanceAuthorization();
+  const eligible = capabilities.can_manage_instance && isRetryableFailureNotice(message);
   const turnId = typeof message.metadata?.turn_id === 'string' ? message.metadata.turn_id : '';
 
   React.useEffect(() => {

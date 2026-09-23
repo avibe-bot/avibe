@@ -4634,8 +4634,13 @@ class ModelHubService:
                                     self.migration_journal.completed() or {}
                                 ).get("clean_native_stores"),
                             )
+                            # Retained auth stays native beside the Hub, but a
+                            # config the CLI cannot parse fails every launch.
                             if any(
-                                item.backend == backend and item.proposed_action == "import"
+                                item.backend == backend and (
+                                    item.proposed_action == "import"
+                                    or item.config_blocker
+                                )
                                 for item in available
                             ):
                                 raise ModelHubError("mode_switch_blocked", status=409)

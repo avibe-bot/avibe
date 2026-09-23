@@ -5,7 +5,9 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
+import { DENIED_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import zh from '../../i18n/zh.json';
 import { ApiCallError, modelsApi } from '../settings/models/modelsApi';
 import type { TurnProvenance } from '../settings/models/types';
@@ -46,14 +48,31 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-function mount(message: WorkbenchMessage = notice) {
-  render(<I18nextProvider i18n={i18n}><ToastProvider><FailureDetails message={message} /></ToastProvider></I18nextProvider>);
+function mount(message: WorkbenchMessage = notice, canManage = true) {
+  const authorization = {
+    remote: true, instanceKind: null, instanceRole: null,
+    capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_chat: true, can_manage_instance: canManage },
+  };
+  render(
+    <I18nextProvider i18n={i18n}><ToastProvider>
+      <InstanceAuthorizationContext.Provider value={authorization}>
+        <FailureDetails message={message} />
+      </InstanceAuthorizationContext.Provider>
+    </ToastProvider></I18nextProvider>,
+  );
 }
 
 describe('failed-turn upstream details', () => {
   it('stays hidden for a notice that is not a linked backend failure', () => {
     const read = vi.spyOn(modelsApi, 'getTurnProvenance');
     mount({ ...notice, metadata: { event: 'backend_failure' } } as WorkbenchMessage);
+    expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('does not read Model Hub provenance for a chat-only role', () => {
+    const read = vi.spyOn(modelsApi, 'getTurnProvenance');
+    mount(notice, false);
     expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
     expect(read).not.toHaveBeenCalled();
   });
