@@ -1197,18 +1197,27 @@ class CodexAgent(BaseAgent):
             self._turn_registry.clear_session(base_session_id)
             self._clear_thread_developer_instructions(base_session_id)
 
-    async def retire_unowned_session_transport(self, cwd: str) -> bool:
-        """Reclaim only the exact cwd generation after its last Session ends."""
+    async def retire_unowned_session_transport(
+        self, cwd: str, *, ending_session_id: str | None = None
+    ) -> bool:
+        """Reclaim the exact cwd generation while retaining the ending Session on failure."""
 
         async with self._transport_locks.setdefault(cwd, asyncio.Lock()):
             transport = self._transports.get(cwd)
-            if transport is None or self._session_mgr.sessions_for_cwd(cwd):
+
+            def has_other_sessions() -> bool:
+                return any(
+                    session_id != ending_session_id
+                    for session_id in self._session_mgr.sessions_for_cwd(cwd)
+                )
+
+            if transport is None or has_other_sessions():
                 return False
 
             async def still_unowned() -> bool:
                 return (
                     self._transports.get(cwd) is transport
-                    and not self._session_mgr.sessions_for_cwd(cwd)
+                    and not has_other_sessions()
                     and not self._has_active_turns_for_cwd(cwd)
                 )
 

@@ -667,17 +667,7 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         except Exception:  # noqa: BLE001
             logger.debug("end: codex turn/interrupt failed for %s", base_session_id, exc_info=True)
     try:
-        # Fully remove the session's mappings (thread + cwd + session_key), not
-        # just ``invalidate_thread`` (which preserves cwd/session_key) — otherwise
-        # ``_collect_codex``'s ``all_base_sessions()`` still enumerates it and the
-        # row never disappears from the Running tab.
-        session_mgr.clear(base_session_id)
         turn_registry.clear_session(base_session_id)
-        getattr(agent, "_session_locks", {}).pop(base_session_id, None)
-        getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
-        clear_thread_cache = getattr(agent, "_clear_thread_developer_instructions", None)
-        if callable(clear_thread_cache):
-            clear_thread_cache(base_session_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
         return {"ok": False, "error": "clear_failed", "detail": str(exc)}
@@ -686,12 +676,32 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     # lingers with zero sessions); if other sessions still use it, leave it up.
     process_killed = False
     retire_idle = getattr(agent, "retire_unowned_session_transport", None)
-    if cwd and callable(retire_idle):
+    other_sessions = (
+        set(session_mgr.sessions_for_cwd(cwd)) - {base_session_id}
+        if cwd else set()
+    )
+    if cwd and transport is not None and not other_sessions and callable(retire_idle):
         try:
-            process_killed = bool(await retire_idle(cwd))
+            process_killed = bool(
+                await retire_idle(cwd, ending_session_id=base_session_id)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("end: codex transport stop failed for %s", cwd, exc_info=True)
             return {"ok": False, "error": "transport_retire_failed", "detail": str(exc)}
+        if not process_killed:
+            return {"ok": False, "error": "transport_retire_failed"}
+    try:
+        # Keep the cwd mapping until transport retirement succeeds, so a failed
+        # close remains reachable by Session ID for a later End attempt.
+        session_mgr.clear(base_session_id)
+        getattr(agent, "_session_locks", {}).pop(base_session_id, None)
+        getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
+        clear_thread_cache = getattr(agent, "_clear_thread_developer_instructions", None)
+        if callable(clear_thread_cache):
+            clear_thread_cache(base_session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
+        return {"ok": False, "error": "clear_failed", "detail": str(exc)}
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.

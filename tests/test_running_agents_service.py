@@ -816,8 +816,9 @@ def test_end_codex_interrupts_clears_and_stops_last_transport():
         get_active_turn=lambda b: "turn1",
         clear_session=lambda b: cleared.__setitem__("clr", b),
     )
-    async def retire(cwd):
+    async def retire(cwd, *, ending_session_id=None):
         assert cwd == "/w"
+        assert ending_session_id == "b1"
         await transport.stop()
         transports.pop(cwd)
         return True
@@ -876,13 +877,16 @@ def test_end_codex_keeps_transport_when_other_sessions_share_cwd():
 
 
 def test_end_codex_reports_transport_retirement_failure():
-    async def retire(_cwd):
+    async def retire(_cwd, *, ending_session_id=None):
+        assert ending_session_id == "b1"
         raise RuntimeError("transport still alive")
 
+    cleared = []
     mgr = types.SimpleNamespace(
         get_cwd=lambda _base: "/w",
         get_thread_id=lambda _base: None,
-        clear=lambda _base: None,
+        clear=cleared.append,
+        sessions_for_cwd=lambda _cwd: ["b1"],
     )
     treg = types.SimpleNamespace(
         get_active_turn=lambda _base: None,
@@ -905,6 +909,50 @@ def test_end_codex_reports_transport_retirement_failure():
         "error": "transport_retire_failed",
         "detail": "transport still alive",
     }
+    assert cleared == []
+
+
+def test_end_codex_can_retry_failed_last_transport_retirement():
+    from modules.agents.codex.session import CodexSessionManager
+
+    mgr = CodexSessionManager()
+    mgr.set_cwd("b1", "/w")
+    mgr.set_session_key("b1", "session-key")
+    attempts = []
+
+    async def retire(cwd, *, ending_session_id=None):
+        attempts.append((cwd, ending_session_id))
+        if len(attempts) == 1:
+            raise RuntimeError("transport still alive")
+        return True
+
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=types.SimpleNamespace(
+            get_active_turn=lambda _base: None,
+            clear_session=lambda _base: None,
+        ),
+        _transports={"/w": object()},
+        retire_unowned_session_transport=retire,
+    )
+    controller = _make_controller(codex=codex)
+    first = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", base_session_id="b1"
+        )
+    )
+    assert first["error"] == "transport_retire_failed"
+    assert mgr.get_cwd("b1") == "/w"
+    assert mgr.get_session_key("b1") == "session-key"
+    second = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", base_session_id="b1"
+        )
+    )
+    assert second["ok"] is True
+    assert second["process_killed"] is True
+    assert mgr.get_cwd("b1") is None
+    assert attempts == [("/w", "b1"), ("/w", "b1")]
 
 
 def test_codex_idle_retirement_serializes_successor_transport_generation():
@@ -943,6 +991,48 @@ def test_codex_idle_retirement_serializes_successor_transport_generation():
         assert await asyncio.wait_for(retirement, timeout=1) is True
         await asyncio.wait_for(installation, timeout=1)
         assert agent._transports["/w"] is successor
+
+    asyncio.run(exercise())
+
+
+def test_codex_last_session_retirement_keeps_generation_on_failed_stop():
+    from modules.agents.codex.agent import CodexAgent
+    from modules.agents.codex.session import CodexSessionManager
+
+    async def exercise():
+        agent = object.__new__(CodexAgent)
+        agent._registered_runtime = False
+        agent._transport_locks = {}
+        agent._transport_last_activity = {"/w": 1.0}
+        agent._transport_cwd_inodes = {}
+        agent._retire_model_hub_process_scope = lambda _cwd: None
+        agent._session_mgr = CodexSessionManager()
+        agent._session_mgr.set_cwd("b1", "/w")
+        agent._has_active_turns_for_cwd = lambda _cwd: False
+
+        class Transport:
+            _process = None
+
+            def __init__(self):
+                self.attempts = 0
+
+            async def stop(self):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("stop failed")
+
+        transport = Transport()
+        agent._transports = {"/w": transport}
+        with pytest.raises(RuntimeError, match="stop failed"):
+            await agent.retire_unowned_session_transport(
+                "/w", ending_session_id="b1"
+            )
+        assert agent._transports["/w"] is transport
+        assert agent._session_mgr.get_cwd("b1") == "/w"
+        assert await agent.retire_unowned_session_transport(
+            "/w", ending_session_id="b1"
+        )
+        assert "/w" not in agent._transports
 
     asyncio.run(exercise())
 
@@ -1438,7 +1528,8 @@ def test_end_active_codex_frees_runtime_after_stop():
         _transport_last_activity={"/w": 0.0},
         _runtime_turn_key_for_base_session=lambda b: f"{b}:/w",
     )
-    async def retire(_cwd):
+    async def retire(_cwd, *, ending_session_id=None):
+        assert ending_session_id == "b1"
         await transport.stop()
         transports.pop("/w")
         return True

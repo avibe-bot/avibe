@@ -1829,6 +1829,27 @@ class ConsolidatedMessageDispatcher:
                             runtime_key,
                         )
                         return
+                manager = getattr(self.controller, "session_turns", None)
+                has_successor = getattr(manager, "has_close_after_successor", None)
+                if callable(has_successor):
+                    try:
+                        if has_successor(
+                            session_id,
+                            str(payload.get("turn_token") or "").strip(),
+                        ):
+                            logger.info(
+                                "Skipping close-after teardown for Agent Session %s: "
+                                "a durable successor owns the runtime",
+                                session_id,
+                            )
+                            return
+                    except Exception:
+                        logger.exception(
+                            "Skipping close-after teardown for Agent Session %s: "
+                            "durable successor check failed",
+                            session_id,
+                        )
+                        return
                 from core.services.running_agents import end_running_agent
 
                 result = await end_running_agent(

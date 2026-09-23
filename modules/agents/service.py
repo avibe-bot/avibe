@@ -1025,6 +1025,20 @@ class AgentService:
                 bind_terminal(context, outcome="terminal")
         except Exception:
             logger.exception("native terminal ownership reconciliation failed before close-after")
+            self.release_runtime_turn_key(runtime_key, runtime_token)
+            return False
+        has_successor = getattr(manager, "has_close_after_successor", None)
+        if callable(has_successor):
+            session_id = str(payload.get("agent_session_id") or "").strip()
+            completed_turn_id = str(payload.get("turn_token") or "").strip()
+            try:
+                if has_successor(session_id, completed_turn_id):
+                    self.release_runtime_turn_key(runtime_key, runtime_token)
+                    return False
+            except Exception:
+                logger.exception("durable successor check failed before close-after")
+                self.release_runtime_turn_key(runtime_key, runtime_token)
+                return False
         reservation = f"close-after:{uuid.uuid4().hex}"
         turn_task = gate.task
         self.release_runtime_turn_key(runtime_key, runtime_token, reserve_token=reservation)

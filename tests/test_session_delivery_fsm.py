@@ -230,6 +230,50 @@ def managers(tmp_path: Path, sqlite_db_factory, _fsm_schema_template):
     engine_b.dispose()
 
 
+def test_close_after_successor_probe_reads_durable_queue_and_owner(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    assert manager.has_close_after_successor("ses_fsm", "completed-turn") is False
+
+    timestamp = "2026-08-01T00:00:01+00:00"
+    with engine.begin() as conn:
+        conn.execute(
+            message_deliveries.insert().values(
+                id="queued-delivery",
+                session_id="ses_fsm",
+                priority="p3",
+                state="queued",
+                snapshot_sha256="snapshot",
+                dispatch_sha256="dispatch",
+                submitted_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+    assert manager.has_close_after_successor("ses_fsm", "completed-turn") is True
+
+    with engine.begin() as conn:
+        conn.execute(
+            update(message_deliveries)
+            .where(message_deliveries.c.id == "queued-delivery")
+            .values(state="claimed", turn_id="successor-turn", turn_role="initial", turn_position=0)
+        )
+        conn.execute(
+            session_turns.insert().values(
+                id="successor-turn",
+                session_id="ses_fsm",
+                initial_delivery_id="queued-delivery",
+                state="starting",
+                backend="codex",
+                start_attempt_id="attempt-1",
+                dispatch_text="next",
+                dispatch_sha256="dispatch",
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+    assert manager.has_close_after_successor("ses_fsm", "completed-turn") is True
+    assert manager.has_close_after_successor("ses_fsm", "successor-turn") is False
+
+
 def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template, sqlite_db_factory):
     reference = tmp_path / "reference.sqlite"
     engine = create_sqlite_engine(reference)

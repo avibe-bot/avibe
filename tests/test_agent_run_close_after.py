@@ -263,6 +263,150 @@ def test_close_after_does_not_close_when_successor_is_already_queued() -> None:
     asyncio.run(exercise())
 
 
+def test_close_after_does_not_reserve_over_durable_successor() -> None:
+    async def exercise() -> None:
+        successor_promoted = False
+
+        def on_native_terminal(_context, *, outcome):
+            nonlocal successor_promoted
+            assert outcome == "terminal"
+            successor_promoted = True
+
+        def has_successor(session_id, completed_turn_id):
+            assert (session_id, completed_turn_id) == ("session-1", "logical-1")
+            return successor_promoted
+
+        controller = SimpleNamespace(
+            session_turns=SimpleNamespace(
+                on_native_terminal=on_native_terminal,
+                has_close_after_successor=has_successor,
+            )
+        )
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "codex",
+                "close_after": True,
+                "turn_token": "logical-1",
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "native-1",
+                "agent_session_target": {
+                    "agent_backend": "codex",
+                    "session_anchor": "base-session-1",
+                },
+                "_close_after_runtime_pending": True,
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "native-1"
+        end_running_agent = AsyncMock(return_value={"ok": True})
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._release_runtime_turn(
+                context, MessageOutput(completes_turn=True)
+            )
+            assert successor_promoted
+            assert not gate.lock.locked()
+            await asyncio.sleep(0)
+            end_running_agent.assert_not_awaited()
+            assert dispatcher._close_after_runtime_tasks == set()
+
+    asyncio.run(exercise())
+
+
+def test_close_after_preserves_runtime_when_durable_probe_fails() -> None:
+    def unreadable_successor(_session_id, _completed_turn_id):
+        raise RuntimeError("database unavailable")
+
+    async def exercise() -> None:
+        controller = SimpleNamespace(
+            session_turns=SimpleNamespace(
+                on_native_terminal=lambda *_args, **_kwargs: None,
+                has_close_after_successor=unreadable_successor,
+            )
+        )
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "codex",
+                "close_after": True,
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "native-1",
+                "_close_after_runtime_pending": True,
+                "agent_session_target": {
+                    "agent_backend": "codex",
+                    "session_anchor": "base-session-1",
+                },
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "native-1"
+        end_running_agent = AsyncMock(return_value={"ok": True})
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._release_runtime_turn(
+                context, MessageOutput(completes_turn=True)
+            )
+            assert not gate.lock.locked()
+            await asyncio.sleep(0)
+            end_running_agent.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_deferred_close_after_skips_durable_successor() -> None:
+    controller = SimpleNamespace(
+        session_turns=SimpleNamespace(has_close_after_successor=lambda *_args: True)
+    )
+    controller.agent_service = AgentService(controller)
+    dispatcher = ConsolidatedMessageDispatcher(controller)
+    context = MessageContext(
+        user_id="user",
+        channel_id="session-1",
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": "session-1",
+            "agent_backend": "codex",
+            "close_after": True,
+            "agent_runtime_turn_key": "runtime-1",
+            "agent_session_target": {
+                "agent_backend": "codex",
+                "session_anchor": "base-session-1",
+            },
+        },
+    )
+    end_running_agent = AsyncMock(return_value={"ok": True})
+
+    async def exercise() -> None:
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._schedule_close_after_runtime(context)
+            await dispatcher.drain_close_after_runtime()
+
+    asyncio.run(exercise())
+    end_running_agent.assert_not_awaited()
+
+
 def test_detached_close_after_reserves_idle_gate_before_teardown() -> None:
     async def exercise() -> None:
         controller = SimpleNamespace()

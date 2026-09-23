@@ -5661,6 +5661,36 @@ class SessionTurnManager:
             )
         return None
 
+    def has_close_after_successor(self, session_id: str, completed_turn_id: str) -> bool:
+        """Read durable successor ownership before disposing a completed runtime.
+
+        Unlike the UI projection in ``turn_state``, a failed read must propagate:
+        uncertainty is not permission to stop a possibly active successor.
+        """
+        if not self._durable_schema_available():
+            return False
+        with self._sqlite_engine().connect() as conn:
+            queued = conn.execute(
+                select(delivery_rows.c.id)
+                .where(delivery_rows.c.session_id == session_id)
+                .where(delivery_rows.c.state == "queued")
+                .limit(1)
+            ).first()
+            if queued is not None:
+                return True
+            successor = conn.execute(
+                select(session_turn_rows.c.id)
+                .where(session_turn_rows.c.session_id == session_id)
+                .where(session_turn_rows.c.id != completed_turn_id)
+                .where(
+                    session_turn_rows.c.state.in_(
+                        ("waiting",) + delivery_store.TURN_OWNER_STATES
+                    )
+                )
+                .limit(1)
+            ).first()
+            return successor is not None
+
     def scan_runtime_delivery_recovery(
         self,
         *,
