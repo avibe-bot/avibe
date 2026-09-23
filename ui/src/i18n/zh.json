@@ -5412,6 +5412,7 @@
       "gatewayNotReady": "模型网关未就绪，请重试",
       "cardKeyDetected": "检测到 API Key {{mask}}",
       "cardKeyAdded": "API Key {{mask}}",
+      "cardImported": "已导入",
       "cardNotAdded": "待添加",
       "cardSelected": "已选中",
       "cardUseExistingNamed": "使用 {{name}} 的已有配置",

@@ -5412,6 +5412,7 @@
       "gatewayNotReady": "Model Hub is not ready. Try again.",
       "cardKeyDetected": "API key detected {{mask}}",
       "cardKeyAdded": "API Key {{mask}}",
+      "cardImported": "Imported",
       "cardNotAdded": "Not added yet",
       "cardSelected": "Selected",
       "cardUseExistingNamed": "Use existing {{name}} configuration",

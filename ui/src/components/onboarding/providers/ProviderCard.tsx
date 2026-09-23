@@ -66,7 +66,13 @@ export const ProviderCard: FC<{
   // unchecked key as a provider that is already supplying models. It is said in both
   // places the card is read, because `aria-label` replaces the text rather than
   // adding to it.
-  const note = slot.pending ? ` · ${t('settings.models.sourceDetail.status.saved')}` : '';
+  // A connected card says so in words as well as in colour: the check and the mint fill
+  // are the only other marks that it is already supplying models, and neither survives
+  // being read aloud or looked at quickly. An unverified key keeps its own word instead,
+  // because "saved" and "imported" are not the same claim.
+  const note = slot.pending
+    ? ` · ${t('settings.models.sourceDetail.status.saved')}`
+    : connected ? ` · ${t('onboarding.providers.cardImported')}` : '';
   const keyLine = [`${written}${note}`, reason].filter(Boolean).join(' · ');
 
   const label = connected
