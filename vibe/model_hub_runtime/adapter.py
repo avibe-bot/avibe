@@ -2036,6 +2036,9 @@ class CLIProxyEngineAdapter:
         )
         if auth_name:
             if metadata.get("activation_state") != "staged":
+                # Before deleting the grant: an engine a previous service left
+                # running would keep it loaded after the file is gone.
+                await asyncio.to_thread(self.supervisor.reap_untracked_engines)
                 client = await asyncio.to_thread(self.supervisor.client_if_running)
                 if client is not None:
                     try:

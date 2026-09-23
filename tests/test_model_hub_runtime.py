@@ -3217,6 +3217,71 @@ def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path)
     assert not record.exists()
 
 
+def test_supervisor_refresh_and_reap_stop_an_engine_a_previous_service_left_running(tmp_path: Path) -> None:
+    record = tmp_path / "state" / "engine-process.json"
+    for operation in ("restart_if_running", "reap_untracked_engines"):
+        orphan = _orphan_engine(tmp_path)
+        second, _store = _fixture_supervisor(tmp_path)
+
+        getattr(second, operation)()
+
+        _wait_for(lambda: orphan.poll() is not None)
+        assert second._process is None
+        assert not record.exists()
+
+
+def test_supervisor_refresh_refuses_while_a_previous_engine_is_unconfirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", lambda *_a, **_k: "unconfirmed")
+    second, _store = _fixture_supervisor(tmp_path)
+
+    for operation in ("restart_if_running", "reap_untracked_engines"):
+        with pytest.raises(EngineUnavailableError) as raised:
+            getattr(second, operation)()
+        assert raised.value.reason == "previous_engine_alive"
+    monkeypatch.undo()
+    second.stop()
+    _wait_for(lambda: orphan.poll() is not None)
+
+
+def test_oauth_revoke_keeps_the_grant_while_a_previous_engine_is_unconfirmed(tmp_path: Path) -> None:
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+        def reap_untracked_engines(self) -> None:
+            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+
+        def client_if_running(self):
+            raise AssertionError("the grant must not be touched before the reap is confirmed")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", auth_file.name)
+        store.sync_sources([])
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        with pytest.raises(EngineUnavailableError):
+            await adapter.revoke_credential(credential_ref)
+
+        assert auth_file.exists()
+        assert store.credential_metadata_if_present(credential_ref) is not None
+
+    asyncio.run(run())
+
+
 def test_supervisor_keeps_a_marker_only_record_when_the_scan_cannot_read_a_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -7416,6 +7481,9 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
 
         def client_if_running(self):
             return None
+
+        def reap_untracked_engines(self) -> None:
+            pass
 
         def invalidate_configs(self) -> None:
             self.state_store.clear_runtime_configs()

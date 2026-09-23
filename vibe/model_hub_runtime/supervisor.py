@@ -112,9 +112,27 @@ class EngineSupervisor:
     def restart_if_running(self) -> None:
         with self._lock:
             if not self._is_running_locked():
+                # Not running here, but a previous service may have left an engine
+                # serving the old config: a refresh must not succeed beside it.
+                self._require_no_untracked_engine_locked()
                 return
             self._stop_locked()
             self._start_locked()
+
+    def reap_untracked_engines(self) -> None:
+        """Confirm no engine a previous service left running remains, or raise.
+
+        For callers about to remove material such an engine may hold (an OAuth
+        grant): an engine this supervisor runs is left alone, since the caller
+        still reaches it through its handle.
+        """
+        with self._lock:
+            if not self._is_running_locked():
+                self._require_no_untracked_engine_locked()
+
+    def _require_no_untracked_engine_locked(self) -> None:
+        if not self._reap_recorded_engines_locked():
+            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
 
     def note_installation_settled(self) -> None:
         """Expose a newly verified binary as lazy-started, not previously down."""
