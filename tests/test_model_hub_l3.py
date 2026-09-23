@@ -5794,6 +5794,36 @@ def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disable
     }
 
 
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_responses"])
+@pytest.mark.parametrize("supports_reasoning", [None, True, False])
+@pytest.mark.parametrize("efforts", [[], ["none"], ["low", "medium", "custom-tier"], ["low", "none", "custom-tier"]])
+def test_opencode_public_model_projects_only_declared_efforts(
+    protocol: str, supports_reasoning: bool | None, efforts: list[str],
+) -> None:
+    model = ModelHubBackendModelConfig(
+        id="model-with-explicit-options",
+        native_protocol=protocol,
+        supports_reasoning=supports_reasoning,
+        reasoning_efforts=efforts,
+    )
+    before = list(model.reasoning_efforts)
+
+    projected = project_opencode_public_model(model)
+
+    expected = {}
+    if supports_reasoning is not False:
+        for effort in efforts:
+            if protocol == "anthropic" and effort == "none":
+                expected[effort] = {"thinking": {"type": "disabled"}}
+            else:
+                expected[effort] = {
+                    "effort" if protocol == "anthropic" else "reasoningEffort": effort,
+                }
+    assert projected.get("variants", {}) == expected
+    assert list(projected.get("variants", {})) == list(expected)
+    assert model.reasoning_efforts == before
+
+
 @pytest.mark.parametrize(
     ("input_modalities", "output_modalities", "expected"),
     [

@@ -243,6 +243,10 @@ def project_opencode_public_model(
         if model.supports_reasoning is not False
         else {}
     )
+    # Translate an explicitly declared Off variant, without inventing one or
+    # changing the existing payloads of ordinary/custom effort values.
+    if model.native_protocol == "anthropic" and "none" in variants:
+        variants["none"] = {"thinking": {"type": "disabled"}}
     if variants:
         projected["variants"] = variants
     return projected

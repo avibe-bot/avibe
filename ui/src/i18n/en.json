@@ -1035,7 +1035,7 @@
           "reasoningEfforts": "Reasoning effort",
           "customEffort": "Custom effort",
           "customEffortPlaceholder": "e.g. medium",
-          "effortNote": "Efforts are sent to the provider verbatim; with none selected, the request omits the effort parameter.",
+          "effortNote": "List only options this model supports. Selecting Off in an Agent disables extended thinking; an empty option list does not mean Off. Other effort values are forwarded unchanged.",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -4211,6 +4211,7 @@
       "searchModels": "Search models",
       "noModelMatch": "No matching models",
       "effortOptions": {
+        "none": "Off",
         "minimal": "Minimal",
         "low": "Low",
         "medium": "Medium",

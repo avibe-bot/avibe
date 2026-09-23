@@ -142,6 +142,25 @@ describe('AgentRoutePicker', () => {
     expect(highlighted('sonnet')).toBe(false);
   });
 
+  it('selects declared Off without changing the model or leaking it to another model', async () => {
+    catalogReasoning = {
+      sonnet: [{ value: 'low', label: 'Low' }, { value: 'none', label: 'Off' }],
+      opus: [{ value: 'low', label: 'Low' }],
+    };
+    const user = userEvent.setup();
+    const onWrite = vi.fn();
+    render(<OptimisticOwner onWrite={onWrite} />);
+    await openMenu(user);
+
+    await user.click(screen.getByRole('button', { name: 'chat.picker.effortOptions.none' }));
+    expect(onWrite).toHaveBeenCalledExactlyOnceWith({ reasoning_effort: 'none' });
+    expect(highlighted('chat.picker.effortOptions.none')).toBe(true);
+
+    await user.click(screen.getByRole('button', { name: 'opus' }));
+    expect(onWrite).toHaveBeenLastCalledWith({ model: 'opus', reasoning_effort: null });
+    expect(screen.queryByRole('button', { name: 'chat.picker.effortOptions.none' })).toBeNull();
+  });
+
   it('keeps the menu clickable while a write is in flight, so the next pick is not lost', async () => {
     const user = userEvent.setup();
     const onWrite = vi.fn();
