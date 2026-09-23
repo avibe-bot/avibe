@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vibe.claude_model_catalog import (
     FALLBACK_CLAUDE_MODELS,
+    RETIRED_CLAUDE_MODELS,
     infer_models_from_bundle,
     load_catalog_models,
     sort_catalog_models,
@@ -53,6 +54,13 @@ def test_retired_models_leave_the_tracked_catalog_and_fallback():
     ):
         assert model not in models, model
         assert model not in FALLBACK_CLAUDE_MODELS, model
+
+
+def test_bundle_inference_drops_retired_models(tmp_path):
+    bundle = tmp_path / "cli.js"
+    bundle.write_bytes(b";".join(f'"{model}"'.encode() for model in ("claude-opus-5", *RETIRED_CLAUDE_MODELS)))
+
+    assert infer_models_from_bundle(bundle) == ["claude-opus-5"]
 
 
 def test_live_legacy_models_survive_the_retirement_sweep():

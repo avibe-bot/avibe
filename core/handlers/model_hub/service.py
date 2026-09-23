@@ -4154,12 +4154,30 @@ class ModelHubService:
             "routeable": True,
         }
 
-    @classmethod
     def _catalog_models_payload(
-        cls,
+        self,
         agent: ModelHubAgentSupplyConfig,
     ) -> list[dict]:
-        return [cls._catalog_model_payload(model) for model in agent.models]
+        hidden = self._hidden_retired_model_ids(agent)
+        return [self._catalog_model_payload(model) for model in agent.models if model.id not in hidden]
+
+    def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
+        # A retired built-in stays persisted and routeable, so any session,
+        # channel, or Agent pin keeps working; it only leaves the picker. A row
+        # the current snapshot revives, or a manual route pins, stays visible.
+        backend = cast(BackendName, agent.backend)
+        retired = model_hub_retired_menu_ids(backend)
+        if not retired:
+            return set()
+        current = {item["id"] for item in self._current_builtin_models(backend)}
+        return {
+            model.id
+            for model in agent.models
+            if model.origin == "builtin"
+            and model.id in retired
+            and model.id not in current
+            and normalized_model_hub_override(agent.routes.get(model.id)) is None
+        }
 
     def backend_catalog_models(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -4747,31 +4765,9 @@ class ModelHubService:
                 if admitted is not None:
                     snapshot.append(admitted)
             builtin_order = tuple(model.id for model in snapshot)
-            # A retired built-in leaves the catalog unless a route or a Vibe Agent
-            # pins it. Only a backend with a fresh snapshot is pruned, so a
-            # single-backend reconcile never drops rows it did not evaluate.
-            retired = (
-                model_hub_retired_menu_ids(backend) - self._agent_pinned_model_ids(cast(BackendName, backend))
-                if backend in snapshots
-                else frozenset()
-            )
-            kept = [
-                model
-                for model in agent.models
-                if not (
-                    model.origin == "builtin"
-                    and model.id in retired
-                    and normalized_model_hub_override(agent.routes.get(model.id)) is None
-                )
-            ]
-            added = len(kept) != len(agent.models)
-            if added:
-                for model in agent.models:
-                    if model not in kept:
-                        agent.routes.pop(model.id, None)
-                agent.models = kept
             present = {model.id for model in agent.models}
             removed = set(agent.removed_model_ids)
+            added = False
             for model in snapshot:
                 model_id = model.id
                 if model_id in present or model_id in removed:
@@ -4786,16 +4782,6 @@ class ModelHubService:
             if added:
                 changed.append(cast(BackendName, backend))
         return changed
-
-    def _agent_pinned_model_ids(self, backend: BackendName) -> set[str]:
-        pinned: set[str] = set()
-        if self.named_agents_override is not None:
-            for _name, model_id in self.named_agents_override(backend):
-                pinned.add(str(model_id or "").strip())
-        if self.selected_agent_override is not None:
-            pinned.add(str(self.selected_agent_override(backend) or "").strip())
-        pinned.discard("")
-        return pinned
 
     def _builtin_snapshots(
         self,

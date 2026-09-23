@@ -125,7 +125,25 @@ def _dedupe_str_values(values: Iterable[str]) -> list[str]:
     return normalized
 
 
+# Anthropic retired these on 2026-06-15, or never shipped them under this id.
+# Claude bundles still mention them in compatibility tables, so the generator
+# must drop them rather than rely on hand-editing its output.
+RETIRED_CLAUDE_MODELS = frozenset(
+    {
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-20250514",
+        "claude-sonnet-3-7",
+        "claude-haiku-3-5",
+    }
+)
+
+
 def _is_public_catalog_model(model: str) -> bool:
+    if model in RETIRED_CLAUDE_MODELS:
+        return False
     parts = model.split("-")
     if len(parts) >= 4 and parts[-1].isdigit() and len(parts[-1]) == 8:
         major = _int_or_none(parts[2])

@@ -2856,10 +2856,7 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     assert refreshed == ["codex"]
 
 
-def test_builtin_reconcile_drops_retired_builtins_unless_a_route_pins_them(
-    monkeypatch,
-    tmp_path,
-):
+def test_retired_builtins_leave_the_picker_but_stay_routeable(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_pinned0001",
@@ -2883,39 +2880,7 @@ def test_builtin_reconcile_drops_retired_builtins_unless_a_route_pins_them(
         ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
         ModelHubBackendModelConfig(id="claude-haiku-4", origin="manual"),
     ]
-    agent.routes = {
-        "claude-opus-4": ModelHubRouteConfig(),
-        "claude-sonnet-4": ModelHubRouteConfig(hops=(pinned_hop,)),
-    }
-    monkeypatch.setattr(
-        service,
-        "_builtin_snapshots",
-        lambda _backends: {"claude": {"complete": True, "models": [{"id": "claude-opus-5"}]}},
-    )
-
-    changed = asyncio.run(service.reconcile_builtin_models(("claude",)))
-
-    agent = store.config.agents["claude"]
-    assert changed == ["claude"]
-    # The unpinned retired built-in leaves; a pinned route and a user-added row stay.
-    assert [model.id for model in agent.models] == [
-        "claude-opus-5",
-        "claude-sonnet-4",
-        "claude-haiku-4",
-    ]
-    assert "claude-opus-4" not in agent.routes
-    assert agent.routes["claude-sonnet-4"].hops == (pinned_hop,)
-    assert "claude-opus-4" not in {row["id"] for row in service.backend_catalog_models("claude")}
-
-
-def test_builtin_reconcile_keeps_a_retired_builtin_a_vibe_agent_pins(monkeypatch, tmp_path):
-    service, store, _adapter = _service(tmp_path)
-    service.named_agents_override = lambda backend: [("reviewer", "claude-opus-4")] if backend == "claude" else []
-    store.config.agents["claude"].models = [
-        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
-        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
-        ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
-    ]
+    agent.routes = {"claude-sonnet-4": ModelHubRouteConfig(hops=(pinned_hop,))}
     monkeypatch.setattr(
         service,
         "_builtin_snapshots",
@@ -2924,21 +2889,36 @@ def test_builtin_reconcile_keeps_a_retired_builtin_a_vibe_agent_pins(monkeypatch
 
     asyncio.run(service.reconcile_builtin_models(("claude",)))
 
-    assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-5", "claude-opus-4"]
+    # Every persisted row survives, so session, channel, and Agent pins still route.
+    assert [model.id for model in store.config.agents["claude"].models] == [
+        "claude-opus-5",
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    ]
+    # Only the unpinned retired built-in leaves the picker.
+    assert [row["id"] for row in service.backend_catalog_models("claude")] == [
+        "claude-opus-5",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    ]
 
 
-def test_single_backend_reconcile_never_prunes_another_backend(monkeypatch, tmp_path):
+def test_a_snapshot_revived_retired_builtin_stays_in_the_picker(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
-    store.config.agents["claude"].models = [ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin")]
+    store.config.agents["claude"].models = [
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin", display_name="Opus 4 (kept)"),
+    ]
     monkeypatch.setattr(
         service,
         "_builtin_snapshots",
-        lambda _backends: {"codex": {"complete": True, "models": [{"id": "gpt-6-astra"}]}},
+        lambda _backends: {"claude": {"complete": True, "models": [{"id": "claude-opus-4"}]}},
     )
 
-    asyncio.run(service.reconcile_builtin_models(("codex",)))
+    asyncio.run(service.reconcile_builtin_models(("claude",)))
 
-    assert [model.id for model in store.config.agents["claude"].models] == ["claude-opus-4"]
+    rows = service.backend_catalog_models("claude")
+    assert [(row["id"], row["display_name"]) for row in rows] == [("claude-opus-4", "Opus 4 (kept)")]
 
 
 def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp_path):
