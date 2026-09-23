@@ -617,20 +617,33 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.mark_turn_complete = mock.Mock()
         return controller
 
-    async def _emit_silent_terminal(self, controller, *, completes_run: bool, output=None):
+    async def _emit_silent_terminal(
+        self, controller, *, completes_run: bool, output=None, close_after: bool = False
+    ):
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()
         dispatcher._clear_consolidated_state = mock.AsyncMock()
         dispatcher._record_agent_run_terminal_result = mock.Mock()
+        platform_specific = {
+            "agent_runtime_turn_key": "runtime-1",
+            "agent_runtime_turn_token": "runtime-turn-1",
+            "turn_token": "turn-1",
+        }
+        if close_after:
+            platform_specific.update({
+                "close_after": True,
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+            })
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
             platform="slack",
-            platform_specific={
-                "agent_runtime_turn_key": "runtime-1",
-                "agent_runtime_turn_token": "runtime-turn-1",
-                "turn_token": "turn-1",
-            },
+            platform_specific=platform_specific,
         )
         await dispatcher.emit_agent_message(
             context,
@@ -653,7 +666,15 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         """
         controller = self._terminal_lifecycle_controller()
 
-        dispatcher, context = await self._emit_silent_terminal(controller, completes_run=False)
+        with mock.patch(
+            "core.services.running_agents.end_running_agent",
+            new_callable=mock.AsyncMock,
+        ) as end_running_agent:
+            dispatcher, context = await self._emit_silent_terminal(
+                controller, completes_run=False, close_after=True
+            )
+            await asyncio.sleep(0.01)
+            end_running_agent.assert_not_awaited()
 
         controller.mark_turn_complete.assert_called_once_with(
             context,
@@ -706,17 +727,24 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         """
         controller = self._terminal_lifecycle_controller()
 
-        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist, mock.patch(
+            "core.services.running_agents.end_running_agent",
+            new_callable=mock.AsyncMock,
+            return_value={"ok": True},
+        ) as end_running_agent:
             dispatcher, context = await self._emit_silent_terminal(
                 controller,
                 completes_run=False,
                 output=stop_output_for(None),
+                close_after=True,
             )
+            await asyncio.sleep(0.01)
 
         controller.mark_turn_complete.assert_called_once_with(
             context,
             settled_by=SETTLED_BY_STOPPED,
         )
+        end_running_agent.assert_awaited_once()
         # A settlement the lanes MAY act on — unlike ``turn_only_result``.
         self.assertIn(SETTLED_BY_STOPPED, SETTLEMENTS_WITHOUT_RESULT)
         self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_STOPPED], "canceled")

@@ -405,12 +405,22 @@ class ConsolidatedMessageDispatcher:
             else SETTLED_BY_TURN_ONLY_RESULT
         )
 
-    def _release_runtime_turn(self, context: MessageContext) -> None:
+    def _release_runtime_turn(
+        self, context: MessageContext, output_semantics: MessageOutput
+    ) -> None:
         service = getattr(self.controller, "agent_service", None)
         release = getattr(service, "release_runtime_turn", None)
         payload = getattr(context, "platform_specific", None) or {}
-        should_close = payload.pop("_close_after_runtime_pending", False) or bool(
-            payload.get("close_after")
+        settlement = self._turn_release_settlement(output_semantics)
+        # Turn-only Activity delivery failure leaves its Run with the retry
+        # owner. A stopped/refresh result is resultless but has a separate
+        # Run-settlement writer, so it still qualifies for close-after.
+        run_terminal = (
+            settlement == SETTLED_BY_TERMINAL_RESULT
+            or settlement in SETTLEMENTS_WITHOUT_RESULT
+        )
+        should_close = bool(payload.pop("_close_after_runtime_pending", False)) or bool(
+            payload.get("close_after") and run_terminal
         )
         lease = None
         try:
@@ -2465,7 +2475,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted
@@ -2603,7 +2613,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, accepted_output_semantics)
 
         if activity_batch_incomplete:
             raise ActivityOutputDeliveryError(
@@ -2727,7 +2737,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type == "notify":
             # Three steps, three error scopes — deliberately NOT one blanket ``try``.
@@ -3198,7 +3208,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"

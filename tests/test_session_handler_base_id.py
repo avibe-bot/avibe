@@ -593,6 +593,46 @@ def test_claude_resource_diagnostic_uses_failed_client_not_replacement(monkeypat
     assert not hasattr(replacement, "_vibe_resource_failure")
 
 
+def test_intentional_claude_exit_does_not_consume_shared_resource_pressure(monkeypatch) -> None:
+    controller = _Controller(platform="slack")
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    intentional = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    failed = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+    )
+    failure = AgentResourceFailure(kind="memory", message="shared cgroup memory event")
+    observations = []
+
+    def observe(_controller):
+        observations.append(True)
+        return failure
+
+    monkeypatch.setattr(
+        "core.handlers.session_handler.observe_agent_resource_pressure",
+        observe,
+    )
+
+    intentional_diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("intentional exit"),
+        client=intentional,
+    )
+    assert "Resource diagnosis" not in intentional_diagnostic
+    assert observations == []
+
+    failed_diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("unexpected exit"),
+        client=failed,
+    )
+    assert "shared cgroup memory event" in failed_diagnostic
+    assert observations == [True]
+
+
 def test_service_initiated_teardown_signal_is_not_reported_as_session_error() -> None:
     """A SIGKILL the service issued itself must not read as a backend crash.
 

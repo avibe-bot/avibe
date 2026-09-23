@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from modules.im import MessageContext
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_output import MessageOutput, stop_output_for
 from modules.agents.service import AgentService
 
 
@@ -77,7 +78,7 @@ def test_close_after_waits_until_runtime_turn_release() -> None:
             "core.services.running_agents.end_running_agent",
             new=end_running_agent,
         ):
-            dispatcher._release_runtime_turn(context)
+            dispatcher._release_runtime_turn(context, MessageOutput(completes_turn=True))
             assert release_order == ["release"]
             await asyncio.sleep(0.01)
 
@@ -147,7 +148,7 @@ def test_close_after_holds_runtime_gate_until_teardown_finishes() -> None:
             "core.services.running_agents.end_running_agent",
             new=end_running_agent,
         ):
-            dispatcher._release_runtime_turn(context)
+            dispatcher._release_runtime_turn(context, MessageOutput(completes_turn=True))
             assert gate.lock.locked()
             assert gate.token.startswith("close-after:")
             await asyncio.wait_for(closing.wait(), timeout=1)
@@ -196,7 +197,7 @@ def test_close_after_waits_for_backend_cleanup_after_terminal_delivery() -> None
             "core.services.running_agents.end_running_agent",
             new=end_running_agent,
         ):
-            dispatcher._release_runtime_turn(context)
+            dispatcher._release_runtime_turn(context, MessageOutput(completes_turn=True))
             await asyncio.sleep(0.01)
             assert gate.lock.locked()
             end_running_agent.assert_not_awaited()
@@ -242,7 +243,7 @@ def test_close_after_does_not_close_when_successor_is_already_queued() -> None:
             "core.services.running_agents.end_running_agent",
             new=end_running_agent,
         ):
-            dispatcher._release_runtime_turn(context)
+            dispatcher._release_runtime_turn(context, MessageOutput(completes_turn=True))
             await asyncio.wait_for(successor, timeout=1)
             assert dispatcher._close_after_runtime_tasks == set()
             end_running_agent.assert_not_awaited()
@@ -277,8 +278,53 @@ def test_resultless_close_after_stop_schedules_teardown() -> None:
             "core.services.running_agents.end_running_agent",
             new=end_running_agent,
         ):
-            dispatcher._release_runtime_turn(context)
+            dispatcher._release_runtime_turn(context, stop_output_for(None))
             await asyncio.sleep(0.01)
 
     asyncio.run(exercise())
     end_running_agent.assert_awaited_once()
+
+
+def test_turn_only_result_keeps_close_after_runtime_for_activity_retry() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "turn-1",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "claude"
+        end_running_agent = AsyncMock(return_value={"ok": True})
+
+        with patch(
+            "core.services.running_agents.end_running_agent",
+            new=end_running_agent,
+        ):
+            dispatcher._release_runtime_turn(
+                context,
+                MessageOutput(completes_turn=True, completes_run=False),
+            )
+            await asyncio.sleep(0)
+
+        assert not gate.lock.locked()
+        assert dispatcher._close_after_runtime_tasks == set()
+        end_running_agent.assert_not_awaited()
+
+    asyncio.run(exercise())
