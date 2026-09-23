@@ -564,6 +564,59 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in diagnostic
 
 
+def test_claude_resource_failure_is_in_im_termination_notice(monkeypatch) -> None:
+    for failure, expected in (
+        (
+            AgentResourceFailure(kind="memory", message="shared memory event"),
+            "shared Agent cgroup recorded a memory limit event",
+        ),
+        (
+            AgentResourceFailure(
+                kind="pids",
+                message="shared PID event",
+                pids_current=0,
+                pids_max=4096,
+            ),
+            "thread/process limit event (0/4096)",
+        ),
+    ):
+        controller = _Controller(platform="slack")
+        controller.im_client = _FakeIM()
+        handler = SessionHandler(controller)
+        client = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        )
+        composite_key = "slack_C123:/tmp/workdir"
+        controller.claude_sessions[composite_key] = client
+        observations = []
+
+        def observe(_controller):
+            observations.append(True)
+            return failure
+
+        async def cleanup(_key, **_kwargs):
+            return None
+
+        monkeypatch.setattr(
+            "core.handlers.session_handler.observe_agent_resource_pressure", observe
+        )
+        handler.cleanup_session = cleanup
+        context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+        asyncio.run(
+            handler.handle_session_error(
+                composite_key,
+                context,
+                RuntimeError("Claude process exited"),
+                client=client,
+            )
+        )
+
+        assert observations == [True]
+        assert client._vibe_resource_failure is failure
+        assert expected in controller.im_client.sent_messages[0][1]
+
+
 def test_claude_resource_diagnostic_uses_failed_client_not_replacement(monkeypatch) -> None:
     controller = _Controller(platform="slack")
     handler = SessionHandler(controller)

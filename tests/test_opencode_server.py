@@ -222,6 +222,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create_process.await_args.kwargs["env"]["AVIBE_OPENCODE_MODEL_HUB"], "0")
         self.assertIsNone(manager._process)
         self.assertIsNone(manager._process_loop)
+        self.assertIsNone(manager._last_start_failure_pid)
         self.assertEqual(
             json.loads(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]),
             {

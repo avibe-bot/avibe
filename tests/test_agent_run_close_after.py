@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from modules.im import MessageContext
 from core.message_dispatcher import ConsolidatedMessageDispatcher
@@ -137,6 +137,7 @@ def test_close_after_holds_runtime_gate_until_teardown_finishes() -> None:
                 },
                 "agent_runtime_turn_key": "runtime-1",
                 "agent_runtime_turn_token": "turn-1",
+                "_close_after_runtime_pending": True,
             },
         )
         gate = service._get_turn_gate("runtime-1")
@@ -189,6 +190,7 @@ def test_close_after_waits_for_backend_cleanup_after_terminal_delivery() -> None
                 },
                 "agent_runtime_turn_key": "runtime-1",
                 "agent_runtime_turn_token": "turn-1",
+                "_close_after_runtime_pending": True,
             },
         )
         gate = service._get_turn_gate("runtime-1")
@@ -237,6 +239,7 @@ def test_close_after_does_not_close_when_successor_is_already_queued() -> None:
                 },
                 "agent_runtime_turn_key": "runtime-1",
                 "agent_runtime_turn_token": "turn-1",
+                "_close_after_runtime_pending": True,
             },
         )
         gate = service._get_turn_gate("runtime-1")
@@ -321,6 +324,68 @@ def test_detached_close_after_reserves_idle_gate_before_teardown() -> None:
             gate.lock.release()
 
     asyncio.run(exercise())
+
+
+def test_failed_run_write_does_not_arm_close_after() -> None:
+    async def exercise(detached: bool) -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "turn-1",
+            },
+        )
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "claude"
+        output = MessageOutput(
+            completes_turn=not detached,
+            completes_run=True,
+            detached=detached,
+        )
+        end_running_agent = AsyncMock(return_value={"ok": True})
+
+        with (
+            patch("core.message_dispatcher.SQLiteBackgroundTaskStore"),
+            patch("core.services.running_agents.end_running_agent", new=end_running_agent),
+        ):
+            dispatcher._terminal_agent_run_ids = lambda *_args: ["run-1"]
+            dispatcher._record_agent_run_terminal_for_ids = Mock(
+                side_effect=RuntimeError("SQLite write failed")
+            )
+            dispatcher._record_agent_run_terminal_result(
+                context,
+                "done",
+                None,
+                is_error=False,
+                output_semantics=output,
+            )
+            if not detached:
+                dispatcher._release_runtime_turn(context, output)
+            await asyncio.sleep(0)
+
+        assert not context.platform_specific.get("_close_after_runtime_pending")
+        assert dispatcher._close_after_runtime_tasks == set()
+        end_running_agent.assert_not_awaited()
+        if detached:
+            gate.lock.release()
+
+    asyncio.run(exercise(detached=False))
+    asyncio.run(exercise(detached=True))
 
 
 def test_detached_close_after_does_not_stop_successor_that_won_gate() -> None:

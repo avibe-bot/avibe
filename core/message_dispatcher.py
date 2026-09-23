@@ -415,10 +415,9 @@ class ConsolidatedMessageDispatcher:
         # Turn-only Activity delivery failure leaves its Run with the retry
         # owner. A stopped/refresh result is resultless but has a separate
         # Run-settlement writer, so it still qualifies for close-after.
-        run_terminal = (
-            settlement == SETTLED_BY_TERMINAL_RESULT
-            or settlement in SETTLEMENTS_WITHOUT_RESULT
-        )
+        # Terminal results arm close-after only after their Run write succeeds.
+        # Resultless settlements have a separate writer before this release.
+        run_terminal = settlement in SETTLEMENTS_WITHOUT_RESULT
         should_close = bool(payload.pop("_close_after_runtime_pending", False)) or bool(
             payload.get("close_after") and run_terminal
         )
@@ -1627,6 +1626,7 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
             if require_confirmation:
                 raise
+            return
         finally:
             if store is not None:
                 store.close()

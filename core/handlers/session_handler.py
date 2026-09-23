@@ -52,6 +52,7 @@ from core.message_context import build_thread_session_anchor, resolve_context_th
 from core.resource_governance import (
     observe_agent_resource_pressure,
     governor_from_controller,
+    pids_failure_labels,
 )
 from core.runtime_activation import RuntimeActivationIdentity
 from core.services.session_fork import pending_native_fork_source
@@ -2790,11 +2791,20 @@ class SessionHandler(BaseHandler):
                 expected_client=client,
                 reason="process_terminated",
             )
+            message = self._t("error.claudeProcessTerminated", reason=reason)
+            resource_failure = getattr(client, "_vibe_resource_failure", None)
+            if resource_failure is not None:
+                if resource_failure.kind == "pids":
+                    language = str(getattr(self.controller.config, "language", "en") or "en")
+                    message = (
+                        f"{message} "
+                        f"{self._t('error.agentPidsLimit', **pids_failure_labels(resource_failure, language))}"
+                    )
+                elif resource_failure.kind == "memory":
+                    message = f"{message} {self._t('error.agentMemoryLimit')}"
             await self._get_im_client(context).send_message(
                 context,
-                self._get_formatter(context).format_error(
-                    self._t("error.claudeProcessTerminated", reason=reason)
-                ),
+                self._get_formatter(context).format_error(message),
             )
             return False
         if "read() called while another coroutine" in error_msg:

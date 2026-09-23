@@ -1996,7 +1996,11 @@ class OpenCodeServerManager:
 
         process = self._process
         exit_code = process.returncode
-        self._last_start_failure_pid = getattr(process, "pid", None)
+        # A live process below is terminated by Avibe for timeout. Only an
+        # independently exited process may consume shared pressure evidence.
+        self._last_start_failure_pid = (
+            getattr(process, "pid", None) if exit_code is not None else None
+        )
         if exit_code is None:
             # A late-starting process must not become a healthy but unmanaged
             # server after this call reports failure and clears its PID file.
