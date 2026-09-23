@@ -457,6 +457,24 @@ describe('assistant installation presentation', () => {
 });
 
 describe('Hub route refresh', () => {
+  it('keeps a failed route read visible and retries it without claiming the model is unset', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockRejectedValueOnce(new Error('offline')).mockResolvedValue([hubChain('model-a')]);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={INITIAL_SETUP_FLOW_STATE}
+      setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+
+    await waitFor(() => expect(row('Claude Code').getByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeTruthy());
+    expect(row('Claude Code').queryByText(en.onboarding.setup.noteModelUnset)).toBeNull();
+    expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.configureRoute })).toHaveProperty('disabled', true);
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(row('Claude Code').getByText('model-a')).toBeTruthy());
+    expect(row('Claude Code').queryByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeNull();
+    expect(mock.models.getAgentChains).toHaveBeenCalledTimes(2);
+  });
+
   it('shows a disabled builtin assistant its stored route without opening the editor', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.opencode.status = 'ok';

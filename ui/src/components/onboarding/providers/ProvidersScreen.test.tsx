@@ -1060,7 +1060,30 @@ describe('ProvidersScreen — what an import leaves behind', () => {
 
     server.scan = [CODEX_KEY, OPENCODE_KEY];
     renderScreen();
-    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 2 } }));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } }));
+  });
+
+  it('keeps a declined key dismissed when a different newly found key is selected', async () => {
+    serve({ scan: [CODEX_KEY] });
+    const first = renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(first.handle);
+    await userEvent.setup().click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    first.unmount();
+
+    server.scan = [CODEX_KEY, { ...OPENCODE_KEY, selected: false }];
+    const second = renderScreen();
+    await settled();
+    expect(cardFor('openai').getAttribute('aria-pressed')).not.toBe('true');
+    await waitFor(() => expect(cardFor('gemini').dataset.state).toBe('detected'));
+    await userEvent.setup().click(cardFor('gemini'));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } }));
+    second.unmount();
+
+    server.scan = [CODEX_KEY];
+    renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
   });
 
   it('refuses a take-over the host cannot install an engine for, and still writes a key', async () => {

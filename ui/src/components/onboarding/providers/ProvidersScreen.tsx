@@ -28,6 +28,7 @@ import {
 } from '@/components/settings/models/collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components/settings/models/gatewayAdoption';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
+import { requiredBackends } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
 import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { foldRegionRead } from '@/components/settings/models/regionRead';
@@ -321,10 +322,13 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
           const offer = offeredImportKeys({ scan: scanned, selectedBackends: [] });
           const priorDismissed = isMigrationDismissed(offeredImportKeys(previous.providerSelection));
           const dismissed = isMigrationDismissed(offer);
+          const defaults = defaultSelection(scanned).filter((backend) =>
+            !offer.some((item) => requiredBackends(scanned.items, [backend]).has(item.backend)
+              && isMigrationDismissed([item])));
           const selectedBackends = first && previous.providerSelection.scan === null
-            ? (dismissed ? [] : defaultSelection(scanned))
+            ? defaults
             : priorDismissed && !dismissed && previous.providerSelection.selectedBackends.length === 0
-              ? defaultSelection(scanned)
+              ? defaults
               : reconcileSelection(
                 { scan: scanned, selectedBackends: previous.providerSelection.selectedBackends },
                 previous.providerSelection.scan,
@@ -657,7 +661,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     }, [setFlowState, sourceReads]);
 
     const changeSelection = React.useCallback((selectedBackends: AgentBackend[]) => {
-      if (selectedBackends.length > 0) clearMigrationDismissed();
+      const newlySelected = selectedBackends.filter((backend) => !selection.selectedBackends.includes(backend));
+      clearMigrationDismissed(offeredImportKeys(selection).filter((item) => newlySelected.includes(item.backend)));
       // Editing the selection retires the verdict the server gave about the batch it
       // no longer describes.
       setImportFailed(false);
@@ -665,16 +670,11 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
         ...previous,
         providerSelection: { ...previous.providerSelection, selectedBackends },
       }));
-    }, [setFlowState]);
+    }, [selection, setFlowState]);
 
     const toggleSlot = React.useCallback((slot: ProviderSlot) => {
-      setImportFailed(false);
-      setFlowState((previous) => {
-        const selectedBackends = toggleSlotSelection(previous.providerSelection, slot);
-        if (selectedBackends.length > 0) clearMigrationDismissed();
-        return { ...previous, providerSelection: { ...previous.providerSelection, selectedBackends } };
-      });
-    }, [setFlowState]);
+      changeSelection(toggleSlotSelection(selection, slot));
+    }, [changeSelection, selection]);
 
     const declineImport = React.useCallback(() => {
       writeMigrationDismissed(offeredImportKeys(selection));

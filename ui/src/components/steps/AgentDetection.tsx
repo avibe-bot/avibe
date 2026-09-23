@@ -142,23 +142,25 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const canEditSetupRoute = Boolean(onNavigate && agentReads);
   const [routeRead, setRouteRead] = useState<{
     done: boolean;
+    failed: boolean;
     chains: Partial<Record<RuntimeBackendId, AgentChain | null>>;
     models: Partial<Record<RuntimeBackendId, string | null>>;
     sources: Source[];
     supplies: AgentSupply[];
-  }>({ done: false, chains: {}, models: {}, sources: [], supplies: [] });
+  }>({ done: false, failed: false, chains: {}, models: {}, sources: [], supplies: [] });
   const routeReadToken = useRef(0);
   const readCardRoutes = useCallback(async () => {
     if (!agentReads) return false;
     const token = ++routeReadToken.current;
     const epoch = activation.current;
+    setRouteRead((current) => ({ ...current, done: false, failed: false }));
     try {
       const [supplyRead, listed, vibeAgents] = await Promise.all([
         agentReads.read(),
         modelsApi.listSources(),
         api.listVibeAgents({ cache: false, includeDisabled: true }),
       ]);
-      if (supplyRead.kind !== 'current' || !vibeAgents.ok) return false;
+      if (supplyRead.kind !== 'current' || !vibeAgents.ok) throw new Error('Route inventory unreadable');
       const supplies = supplyRead.value;
       const fullAgents = await Promise.all(vibeAgents.agents.filter((row) =>
         !row.archived && ASSISTANT_ORDER.includes(row.backend as RuntimeBackendId))
@@ -177,11 +179,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         }
       }));
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead({ done: true, chains, models, sources: listed, supplies });
+      setRouteRead({ done: true, failed: false, chains, models, sources: listed, supplies });
       return true;
     } catch {
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead((current) => ({ ...current, done: true }));
+      setRouteRead((current) => ({ ...current, done: true, failed: true }));
       return false;
     }
   }, [agentReads, api]);
@@ -204,7 +206,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       loading,
       model: mine ? modelLabel(mine) : null,
       backups: Math.max(0, (chain?.chain.length ?? 0) - 1),
-      noModel: routeRead.done && !routeRead.models[backend],
+      noModel: routeRead.done && !routeRead.failed && !routeRead.models[backend],
     };
   };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
@@ -898,9 +900,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             enabled={agent.enabled}
             route={routeViewFor(name)}
             connectionPending={connectionPending[name]}
-            connectionError={connectionErrors[name] || connections[name]?.message}
-            onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
+            connectionError={connectionErrors[name] || (hubRoute && routeRead.failed
+              ? t('settings.models.routeDialog.fail.reconcileRead') : connections[name]?.message)}
+            onRefreshConnection={() => {
+              void refreshConnection(name, { acknowledge: true });
+              if (hubRoute && routeRead.failed) void readCardRoutes();
+            }}
             configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
+              || (hubRoute && routeRead.failed)
               || (hubRoute
                 ? agent.status !== 'ok'
                 : !agent.enabled || agent.status !== 'ok')}
