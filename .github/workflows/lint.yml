@@ -518,3 +518,14 @@ jobs:
       # all, and it needs neither a packaged Runtime nor an installer.
       - name: Verify the Windows service lock keeps its record readable
         run: python -m pytest tests/test_service_lock_record.py -q
+
+      # `vibe stop` walks every process on the machine before it signals
+      # anything. On Linux a process whose command line psutil cannot read
+      # costs a /proc read; on Windows it cost a `powershell` launch, and a
+      # second `pwsh` when the first said nothing. Only a real Windows process
+      # table holds enough unreadable processes to turn that into a stop that
+      # produces no output and never returns, which is how gh-v3.1.1rc10 died
+      # -- and like the two steps above, showing it needs neither a packaged
+      # Runtime nor an installer, so it does not have to cost a release.
+      - name: Verify the process scan stays off the external shell
+        run: python -m pytest tests/test_runtime_process_scan.py -q
