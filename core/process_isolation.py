@@ -810,23 +810,39 @@ def reap_orphaned_process_tree(
     return "unconfirmed"
 
 
-def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process]:
-    """This user's live processes whose inherited marker hashes to ``worker_fingerprint``."""
+def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process] | None:
+    """This user's live processes whose inherited marker hashes to ``worker_fingerprint``.
+
+    ``None`` when a process that could carry the marker cannot be inspected: an
+    unreadable environment is unknown, not absent, and a caller that took it for
+    absent would forget a tree that may still be running. Only processes whose every
+    uid is this user's could have inherited the marker, so a setuid process (macOS
+    ``login``) or another user's process is skipped rather than blocking the scan.
+    """
 
     own_pid = os.getpid()
     own_uid = os.getuid() if hasattr(os, "getuid") else None
+    own_user = None if own_uid is not None else psutil.Process(own_pid).username()
     found: list[psutil.Process] = []
-    for process in psutil.process_iter(["uids"]):
+    for process in psutil.process_iter(["uids", "username"]):
         if process.pid == own_pid:
             continue
-        uids = process.info.get("uids")
-        if own_uid is not None and (uids is None or uids.real != own_uid):
-            # Another user's process cannot have inherited a marker this service minted.
+        if own_uid is not None:
+            uids = process.info.get("uids")
+            if uids is None or {uids.real, uids.effective, uids.saved} != {own_uid}:
+                continue
+        elif process.info.get("username") != own_user:
             continue
         try:
             marker = process.environ().get(PROCESS_IDENTITY_ENV)
+        except psutil.NoSuchProcess:
+            # Exited: nothing left running to reap.
+            continue
+        except (psutil.Error, OSError):
+            return None
+        try:
             fingerprint = fingerprint_process_marker(marker) if isinstance(marker, str) and marker else None
-        except (psutil.Error, OSError, UnicodeError):
+        except UnicodeError:
             continue
         if fingerprint is not None and hmac.compare_digest(fingerprint, worker_fingerprint):
             found.append(process)
@@ -851,6 +867,9 @@ def reap_marked_processes(
         return "gone"
     try:
         victims = _processes_carrying_marker(worker_fingerprint)
+        if victims is None:
+            logger.warning("Could not inspect every process that may carry a %s marker", label)
+            return "unconfirmed"
         if not victims:
             return "gone"
         logger.warning("Reaping %d %s process(es) found by their identity marker", len(victims), label)
@@ -866,7 +885,7 @@ def reap_marked_processes(
             except psutil.NoSuchProcess:
                 continue
         _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
-        if not alive and not _processes_carrying_marker(worker_fingerprint):
+        if not alive and _processes_carrying_marker(worker_fingerprint) == []:
             return "reaped"
     except Exception:
         logger.warning("Could not confirm every %s process carrying its marker exited", label, exc_info=True)

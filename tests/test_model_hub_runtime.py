@@ -3217,6 +3217,39 @@ def test_supervisor_reaps_an_engine_whose_pid_was_never_recorded(tmp_path: Path)
     assert not record.exists()
 
 
+def test_supervisor_keeps_a_marker_only_record_when_the_scan_cannot_read_a_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    orphan = _orphan_engine(tmp_path)
+    record = tmp_path / "state" / "engine-process.json"
+    [entry] = json.loads(record.read_text(encoding="utf-8"))["engines"]
+    marker_only = {"engines": [{"worker_fingerprint": entry["worker_fingerprint"]}]}
+    record.write_text(json.dumps(marker_only), encoding="utf-8")
+    real_environ = psutil.Process.environ
+
+    def environ(process):
+        if process.pid == orphan.pid:
+            raise psutil.AccessDenied(process.pid)
+        return real_environ(process)
+
+    monkeypatch.setattr(psutil.Process, "environ", environ)
+    second, _store = _fixture_supervisor(tmp_path)
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        second.ensure_running()
+
+    assert raised.value.reason == "previous_engine_alive"
+    assert orphan.poll() is None
+    assert json.loads(record.read_text(encoding="utf-8")) == marker_only
+    monkeypatch.setattr(psutil.Process, "environ", real_environ)
+    second.ensure_running()
+    _wait_for(lambda: orphan.poll() is not None)
+    second.stop()
+
+
 def test_supervisor_failed_tracking_reaps_a_descendant_that_ignores_sigterm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

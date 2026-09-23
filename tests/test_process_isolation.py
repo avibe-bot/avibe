@@ -519,6 +519,40 @@ def test_reap_marked_processes_finds_a_tree_by_marker_alone() -> None:
         child.wait(timeout=5)
 
 
+def test_reap_marked_processes_is_unconfirmed_when_a_process_cannot_be_inspected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own_uid = os.getuid()
+    unreadable = SimpleNamespace(
+        pid=4242,
+        info={"uids": SimpleNamespace(real=own_uid, effective=own_uid, saved=own_uid), "username": "me"},
+        environ=lambda: (_ for _ in ()).throw(psutil.AccessDenied(4242)),
+    )
+    setuid = SimpleNamespace(
+        pid=4343,
+        info={"uids": SimpleNamespace(real=own_uid, effective=0, saved=0), "username": "me"},
+        environ=lambda: pytest.fail("a setuid process cannot carry our marker"),
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable]))
+
+    outcome = reap_marked_processes(
+        logging.getLogger(__name__),
+        "test process",
+        worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
+    )
+
+    assert outcome == "unconfirmed"
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid]))
+    assert (
+        reap_marked_processes(
+            logging.getLogger(__name__),
+            "test process",
+            worker_fingerprint=fingerprint_process_marker(new_process_identity_marker()),
+        )
+        == "gone"
+    )
+
+
 def test_terminate_process_tree_by_pid_refuses_changed_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     expected_identity = _persisted_identity()
     changed_identity = _live_identity(
