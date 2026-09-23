@@ -408,6 +408,15 @@ reopening/merging the closed PR, or restarting a local service.
    the release-only guard for owner review; it does not run on this closed PR.
 
 The approved exceptions contain only release compatibility artifacts.
+
+### Retained required CI context (2026-09-23)
+
+Branch protection still requires the historical check context
+`memory-insight-contract`, although the former Memory-specific job was removed.
+The owner authorized retaining this context as a real compatibility-contract
+job until repository administrators rename the requirement. It runs hermetic
+config removal, administrator routing, and native message classification tests;
+it does not restore Memory runtime, package, API, data, or processing behavior.
 Implementation evidence (owner-approved item 1): `scripts/build_retired_companion.py`
 creates a deterministic `avibe_memory-<version>-py3-none-any.whl` containing only
 valid METADATA, WHEEL and RECORD. It has no modules, dependencies, entry points,
