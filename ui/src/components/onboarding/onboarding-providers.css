@@ -60,7 +60,6 @@
   --obp-gateway-name: var(--ob-gateway-name, calc(var(--ob-card-name) + 2px));
   --obp-destination-h: var(--ob-destination-h, calc(76 * var(--ob-u)));
   --obp-summary-h: var(--ob-summary-h, calc(34 * var(--ob-u)));
-  --obp-offer-gap: var(--ob-gap, calc(16 * var(--ob-u)));
 }
 
 .setup-provider-stage {
@@ -381,7 +380,7 @@
   white-space: nowrap;
 }
 
-/* ---- Summary and the offer's reserved slot ------------------------------- */
+/* ---- Summary ------------------------------------------------------------- */
 
 .setup-provider-summary {
   height: var(--obp-summary-h);
@@ -395,17 +394,6 @@
   text-align: center;
 }
 .setup-provider-summary[data-tone='error'] { color: var(--destructive-ink); }
-
-/* The slot, not the capsule: it keeps its height whether the offer is showing, was
-   dismissed, or was never made, so the footer action cannot move under the hand of
-   someone who just declined it (C3, handoff §4). */
-.setup-provider-offer {
-  margin-top: var(--obp-offer-gap);
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
 
 /* ---- Add-source dialog --------------------------------------------------- */
 
@@ -650,7 +638,6 @@
   .setup-wires { display: none; }
   .setup-gateway { height: calc(64 * var(--ob-u)); }
   .setup-provider-summary { height: auto; min-height: var(--obp-summary-h); }
-  .setup-provider-offer { margin-top: 0; }
 
   /* Tighter insets and the phone's full width. The height stays one value and
      stays independent of the method — clamped harder against a short viewport,

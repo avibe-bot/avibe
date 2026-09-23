@@ -36,7 +36,6 @@ import {
 } from '@/components/settings/models/runtimeLifecycle';
 import type { AgentBackend, AgentSupply, RuntimeDependency, Source } from '@/components/settings/models/types';
 
-import { ImportKeysNotice } from '../ImportKeysNotice';
 import { useOnboardingMotion } from '../motion';
 import {
   setupCanAttemptInstall,
@@ -55,7 +54,6 @@ import {
   defaultSelection,
   gatewayEvidenceSettled,
   gatewayIntent,
-  offeredImportKeys,
   pendingImportRows,
   providerAction,
   providerSetupAction,
@@ -219,10 +217,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       [sources, selection.scan],
     );
     const pending = React.useMemo(() => pendingImportRows(selection), [selection]);
-    // The capsule counts through the same consent grouping the cards and the dialog
-    // use, so a key it advertises is always one the review can actually act on.
-    const offered = React.useMemo(() => offeredImportKeys(selection), [selection]);
-
     // ── Supply ──────────────────────────────────────────────────────────────
 
     // Whether the server's own row defaults have been honoured yet. A scan is nulled
@@ -808,18 +802,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
                 </Button>
               )}
             </p>
-
-            {/* The slot is always here; only the capsule inside it comes and goes. That
-                is what keeps the footer action still when someone dismisses the offer. */}
-            <div className="setup-provider-offer">
-              {active && (
-                <ImportKeysNotice
-                  candidates={offered}
-                  imported={flowState.importedCount}
-                  onReview={openImport}
-                />
-              )}
-            </div>
           </div>
         </div>
 
