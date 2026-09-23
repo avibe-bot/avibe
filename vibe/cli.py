@@ -7487,7 +7487,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             ),
             "controller_status_code": normalized_status_code,
             "controller_response": body,
-            "message": "Run was canceled without stopping the shared Session turn.",
+            "message": "Run was canceled before its input reached the live Session turn.",
         }
     if (
         normalized_status_code is not None

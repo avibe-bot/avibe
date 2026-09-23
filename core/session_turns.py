@@ -541,9 +541,10 @@ class DeliveryRequest:
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
     expected_turn_id: str | None = None
-    # Run-level cancellation may interrupt a backend only when this exact Run is
-    # still the Turn's sole initial input.  Checked under the P0 writer lock.
-    expected_exclusive_agent_run_id: str | None = None
+    # Run-level cancellation stops the live Turn whenever this Run's input may
+    # have reached it; an input still outside the Turn is canceled alone.
+    # Checked under the P0 writer lock.
+    cancel_agent_run_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -3489,8 +3490,8 @@ class SessionTurnManager:
                 )
             ).scalar_one_or_none()
             current = delivery_store.active_turn(conn, request.session_id)
-            expected_exclusive_run_id = str(
-                request.expected_exclusive_agent_run_id or ""
+            cancel_run_id = str(
+                request.cancel_agent_run_id or ""
             ).strip()
             if request.content is not None and session_status != "active":
                 existing = (
@@ -3510,10 +3511,10 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
-                    if expected_exclusive_run_id:
+                    if cancel_run_id:
                         cancellation = apply_live_agent_run_cancellation_in_connection(
                             conn,
-                            expected_exclusive_run_id,
+                            cancel_run_id,
                             session_id=request.session_id,
                             detach=True,
                         )
@@ -3555,7 +3556,7 @@ class SessionTurnManager:
                     request.content is None
                     and expected_turn_id
                     and current_id != expected_turn_id
-                    and not expected_exclusive_run_id
+                    and not cancel_run_id
                 ):
                     return DeliveryResult(
                         None,
@@ -3564,33 +3565,33 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
-                if request.content is None and expected_exclusive_run_id:
-                    exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
+                if request.content is None and cancel_run_id:
+                    stops_turn, reason = delivery_store.agent_run_input_reached_turn(
                         conn,
-                        run_id=expected_exclusive_run_id,
+                        run_id=cancel_run_id,
                         turn_id=str(current_id or ""),
                     )
                     replacement_terminalized = False
-                    if not exclusive:
+                    if not stops_turn:
                         replacement_terminalized = (
                             self._terminalize_detached_run_replacement(
                                 conn,
-                                run_id=expected_exclusive_run_id,
+                                run_id=cancel_run_id,
                                 session_id=request.session_id,
                                 current=current,
                             )
                         )
                     cancellation = apply_live_agent_run_cancellation_in_connection(
                         conn,
-                        expected_exclusive_run_id,
+                        cancel_run_id,
                         session_id=request.session_id,
-                        detach=not exclusive,
+                        detach=not stops_turn,
                     )
                     if replacement_terminalized and cancellation != "run_detached":
                         raise RuntimeError(
                             "replacement Run terminalized without cancellation ownership"
                         )
-                    if not exclusive:
+                    if not stops_turn:
                         return DeliveryResult(
                             None,
                             None,
@@ -8146,7 +8147,11 @@ class SessionTurnManager:
         *,
         agent_run_id: str | None = None,
     ) -> dict:
-        """Cancel a Session Turn or detach one exact Run from a shared Turn."""
+        """Cancel a Session Turn, or one exact Run.
+
+        A Run whose input may have reached the live Turn stops that whole Turn,
+        exactly like Session Stop; a Run still outside it is canceled alone.
+        """
         normalized_agent_run_id = (
             str(agent_run_id).strip() if agent_run_id is not None else None
         )
@@ -8256,7 +8261,7 @@ class SessionTurnManager:
                 priority="p0",
                 content=None,
                 expected_turn_id=(str(owner["id"]) if owner is not None else None),
-                expected_exclusive_agent_run_id=(
+                cancel_agent_run_id=(
                     normalized_agent_run_id
                 ),
             ),

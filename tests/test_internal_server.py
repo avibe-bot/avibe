@@ -7263,8 +7263,37 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     assert session_id not in app.state.in_flight_dispatches, "slot released after the scheduled run was stopped"
 
 
-def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
-    """A Run accepted as one Turn participant cannot issue Session-wide Stop."""
+def _cancel_run_through_live_turn(controller, session_id, turn_id, run_id):
+    """Cancel one Run while a live runtime owns the exact durable Turn."""
+
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+
+    async def _go():
+        holder = asyncio.create_task(asyncio.Event().wait())
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        try:
+            return await controller.session_turns.cancel(
+                session_id,
+                agent_run_id=run_id,
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+
+    return asyncio.run(_go()), context
+
+
+def test_hfr_476_run_cancel_stops_a_shared_turn(monkeypatch, tmp_path):
+    """Canceling a Run steered into a live Turn stops that Turn like Session Stop."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7277,17 +7306,27 @@ def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
     )
     session_id = session["id"]
     request_store = TaskExecutionStore()
-    run = request_store.enqueue_agent_run(
-        session_id=session_id,
-        message="steered participant",
-        agent_name="worker",
-        callback_session_id="ses_callback",
+    owner_run, steer_run = (
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+            callback_session_id="ses_callback",
+        )
+        for message in ("initial owner", "steered participant")
     )
-    assert request_store.claim(run.id) is not None
+    assert request_store.claim(owner_run.id) is not None
+    assert request_store.claim(steer_run.id) is not None
 
     with engine.begin() as conn:
         initial = message_deliveries.delivery_for_turn(conn, turn_id)
         assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
         steer_id = message_deliveries.new_delivery_id()
         values = dict(initial)
         values.update(
@@ -7303,53 +7342,48 @@ def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
         conn.execute(delivery_rows.insert().values(**values))
         assert attach_agent_run_delivery_in_connection(
             conn,
-            run.id,
+            steer_run.id,
             session_id=session_id,
             delivery_id=steer_id,
         )
+        for run in (owner_run, steer_run):
+            assert message_deliveries.agent_run_input_reached_turn(
+                conn,
+                run_id=run.id,
+                turn_id=turn_id,
+            ) == (True, "run_input_in_turn")
 
     controller = _build_controller_double()
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
+    internal_server.create_app(controller)
 
-    async def _go():
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
-            return await client.post(
-                f"/internal/cancel/{session_id}",
-                params={"run_id": run.id},
-            )
+    result, context = _cancel_run_through_live_turn(
+        controller,
+        session_id,
+        turn_id,
+        steer_run.id,
+    )
 
-    response = asyncio.run(_go())
-
-    assert response.status_code == 200
-    assert response.json() == {
+    assert result == {
         "ok": True,
         "session_id": session_id,
-        "status": "run_detached",
-        "reason": "run_is_steered_participant",
+        "status": "cancel_requested",
     }
-    controller.command_handler.handle_stop.assert_not_awaited()
+    controller.command_handler.handle_stop.assert_awaited_once_with(context)
+    saved = request_store.get_run(steer_run.id)
+    assert saved is not None
+    assert saved["cancel_requested"] is True
     with engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, turn_id)
     assert turn is not None
-    assert turn["state"] == "active"
-    assert turn["control_state"] is None
-    saved = request_store.get_run(run.id)
-    assert saved is not None
-    assert saved["status"] == "canceled"
-    assert saved["callback_status"] == "skipped"
-    assert saved["callback_completed_at"] is not None
-    assert request_store.list_pending_callbacks() == []
+    assert turn["control_mode"] == "stop_only"
+    assert turn["control_state"] == "waiting_terminal"
 
 
-def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
+def test_run_cancel_stops_a_turn_with_an_unresolved_steer(
     monkeypatch,
     tmp_path,
 ):
-    """A native steer in flight prevents the initial Run from stopping the Turn."""
+    """A native steer in flight cannot keep the initial Run's cancel from stopping."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7361,13 +7395,17 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
     )
     session_id = session["id"]
     request_store = TaskExecutionStore()
-    owner_run = request_store.enqueue_agent_run(
-        session_id=session_id,
-        message="initial owner",
-        agent_name="worker",
-        callback_session_id="ses_callback",
+    owner_run, steer_run = (
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+            callback_session_id="ses_callback",
+        )
+        for message in ("initial owner", "second input already steering")
     )
     assert request_store.claim(owner_run.id) is not None
+    assert request_store.claim(steer_run.id) is not None
 
     with engine.begin() as conn:
         turn = message_deliveries.get_turn(conn, turn_id)
@@ -7386,7 +7424,6 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
             session_id=session_id,
             text="second input already steering",
         )
-        steer_id = str(steer["id"])
         claimed = message_deliveries.open_steer_attempt(
             conn,
             steer["id"],
@@ -7397,44 +7434,43 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
         )
         assert claimed is not None
         assert claimed["state"] == "steering"
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            steer_run.id,
+            session_id=session_id,
+            delivery_id=str(claimed["id"]),
+        )
+        # A possibly-written steer is inside the Turn, so its own cancel stops too.
+        assert message_deliveries.agent_run_input_reached_turn(
+            conn,
+            run_id=steer_run.id,
+            turn_id=turn_id,
+        ) == (True, "run_input_in_turn")
 
     controller = _build_controller_double()
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
+    internal_server.create_app(controller)
 
-    async def _go():
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
-            return await client.post(
-                f"/internal/cancel/{session_id}",
-                params={"run_id": owner_run.id},
-            )
+    result, context = _cancel_run_through_live_turn(
+        controller,
+        session_id,
+        turn_id,
+        owner_run.id,
+    )
 
-    response = asyncio.run(_go())
-
-    assert response.status_code == 200
-    assert response.json() == {
+    assert result == {
         "ok": True,
         "session_id": session_id,
-        "status": "run_detached",
-        "reason": "turn_has_other_participants",
+        "status": "cancel_requested",
     }
-    controller.command_handler.handle_stop.assert_not_awaited()
+    controller.command_handler.handle_stop.assert_awaited_once_with(context)
     saved = request_store.get_run(owner_run.id)
     assert saved is not None
-    assert saved["status"] == "canceled"
-    assert saved["callback_status"] == "skipped"
-    assert request_store.list_pending_callbacks() == []
+    assert saved["cancel_requested"] is True
     with engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, turn_id)
-        steer = message_deliveries.get_delivery(conn, steer_id)
     assert turn is not None
-    assert turn["state"] == "active"
-    assert turn["control_state"] is None
-    assert steer is not None
-    assert steer["state"] == "steering"
+    assert turn["control_mode"] == "stop_only"
+    assert turn["control_state"] == "waiting_terminal"
 
 
 def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_path):
@@ -7764,7 +7800,7 @@ def test_run_cancel_keeps_a_sole_starting_owner_attached(monkeypatch, tmp_path):
 
 
 def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_path):
-    """Detaching one claimed Run replays every surviving batch participant."""
+    """Stopping an unwritten starting batch replays every surviving participant."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7811,11 +7847,11 @@ def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_pa
                 session_id=session["id"],
                 delivery_id=str(delivery["id"]),
             )
-        assert message_deliveries.agent_run_exclusively_owns_turn(
+        assert message_deliveries.agent_run_input_reached_turn(
             conn,
             run_id=runs[0].id,
             turn_id=turn_id,
-        ) == (False, "turn_has_other_participants")
+        ) == (True, "run_input_in_turn")
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -7851,7 +7887,7 @@ def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_pa
     response, started_original = asyncio.run(_go())
 
     assert response.status_code == 200
-    assert response.json()["status"] == "run_detached"
+    assert response.json()["status"] == "cancel_requested"
     assert started_original is False
     assert dispatched == ["surviving batch participant"]
     assert request_store.get_run(runs[0].id)["status"] == "canceled"
@@ -7924,7 +7960,7 @@ def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
                     priority="p0",
                     content=None,
                     expected_turn_id="trn_recovered_predecessor",
-                    expected_exclusive_agent_run_id=owner_run.id,
+                    cancel_agent_run_id=owner_run.id,
                 ),
                 context=context,
             )
@@ -8138,11 +8174,11 @@ def test_run_cancel_guard_allows_the_sole_initial_run_owner(monkeypatch, tmp_pat
             session_id=session["id"],
             delivery_id=initial["id"],
         )
-        assert message_deliveries.agent_run_exclusively_owns_turn(
+        assert message_deliveries.agent_run_input_reached_turn(
             conn,
             run_id=run.id,
             turn_id=turn_id,
-        ) == (True, "exclusive_run_owner")
+        ) == (True, "run_input_in_turn")
 
 
 # --- #84: scheduled provenance survives the merge-queue --------------------------
