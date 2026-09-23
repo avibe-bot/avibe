@@ -2118,7 +2118,7 @@ def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
         source_agent = agent_store.create(name="nightly", backend="claude")
     finally:
         agent_store.close()
-    assert source_agent.model == "claude-opus-5"
+    assert source_agent.model == "claude-opus-5-5"
     assert source_agent.reasoning_effort is None
 
     engine = create_sqlite_engine(db_path)

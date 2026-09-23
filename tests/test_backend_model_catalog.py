@@ -917,6 +917,21 @@ def test_remote_hidden_tombstone_overrides_stale_local_visible(monkeypatch, tmp_
     assert "retired-model" not in snapshot["models"]
 
 
+def test_gpt_6_sol_and_luna_follow_astra_in_the_bundled_catalog():
+    codex = {
+        entry["id"]: entry
+        for entry in backend_model_catalog.backend_model_entries(
+            "codex", backend_model_catalog.load_bundled_catalog()
+        )
+    }
+    ordered = sorted(codex.values(), key=lambda entry: entry["priority"])
+
+    assert [entry["id"] for entry in ordered[:3]] == ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
+    for model in ("gpt-6-sol", "gpt-6-luna"):
+        assert codex[model]["visibility"] == "list"
+        assert codex[model]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+
+
 def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp_path):
     refresh_started = threading.Event()
     release_refresh = threading.Event()
