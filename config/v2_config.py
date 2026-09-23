@@ -3261,11 +3261,12 @@ class V2Config:
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
         if (
             persist_migrations
-            and migrated
+            and (migrated or "memory" in payload)
             and not migration_warnings
             and not recovery_warnings
         ):
             persisted_payload = copy.deepcopy(payload)
+            persisted_payload.pop("memory", None)
             persisted_payload["model_hub"] = config.model_hub.to_payload()
             try:
                 backup, persistence_warning = _persist_migrated_config_payload(

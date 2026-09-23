@@ -314,6 +314,49 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     assert not consumer.get("if") and not consumer.get("continue-on-error")
 
 
+def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_pypi():
+    """MUC-004: released old wheels, built new wheels, Docker and pytest all gate publication."""
+    job = _job("publish.yml", "build")
+    bridge = _step(job, "Build and verify inert old-updater bridge")
+    consumer = _step(job, "Run release install and upgrade regressions")
+    upload = _step(job, "Upload GitHub release assets")
+    assert job["steps"].index(bridge) < job["steps"].index(consumer) < job["steps"].index(upload)
+    assert "build" in _job("publish.yml", "publish-avibe-os")["needs"]
+    assert "finalize-github-release" in _job("publish.yml", "publish-avibe-os")["needs"]
+    assert consumer["env"]["GH_TOKEN"] == "${{ github.token }}"
+    commands = consumer["run"]
+    for contract in (
+        "tests/e2e/test_retired_updater_bridge.py",
+        "AVIBE_RELEASE_GATE=1",
+        "AVIBE_CORE_WHEEL=",
+        "AVIBE_BRIDGE_WHEEL=",
+        "AVIBE_OLD_CORE_WHEEL=",
+        "AVIBE_OLD_COMPANION_WHEEL=",
+        "gh release download v3.1.0",
+        "7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924",
+        "ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0",
+        "sha256sum -c -",
+        "docker info",
+    ):
+        assert contract in commands
+    assert "dist/avibe_memory-*-py3-none-any.whl" in upload["run"]
+
+
+def test_muc_004_release_gate_cannot_skip_missing_artifacts_or_docker(monkeypatch):
+    from tests.e2e import test_retired_updater_bridge as upgrade_bridge
+
+    monkeypatch.setenv("AVIBE_RELEASE_GATE", "1")
+    for name in ("AVIBE_CORE_WHEEL", "AVIBE_BRIDGE_WHEEL", "AVIBE_OLD_CORE_WHEEL", "AVIBE_OLD_COMPANION_WHEEL"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(pytest.fail.Exception, match="requires all four"):
+        upgrade_bridge.test_released_updater_replaces_companion_without_touching_user_data(Path("/unused"))
+    for name in ("AVIBE_CORE_WHEEL", "AVIBE_BRIDGE_WHEEL", "AVIBE_OLD_CORE_WHEEL", "AVIBE_OLD_COMPANION_WHEEL"):
+        monkeypatch.setenv(name, "/unused")
+    monkeypatch.setattr(upgrade_bridge, "_docker_available", lambda: False)
+    with pytest.raises(pytest.fail.Exception, match="requires Docker"):
+        upgrade_bridge.test_released_updater_replaces_companion_without_touching_user_data(Path("/unused"))
+
+
 @pytest.mark.parametrize("workflow_name", ["publish.yml", "release_ai.yml"])
 @pytest.mark.parametrize(
     "state",

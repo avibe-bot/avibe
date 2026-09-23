@@ -322,13 +322,28 @@ jobs:
           fi
 
       - name: Run release install and upgrade regressions
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
+          export AVIBE_CORE_WHEEL="$VIBE_INSTALL_TEST_WHEEL"
+          export AVIBE_BRIDGE_WHEEL="$(ls dist/avibe_memory-*.whl)"
+          mkdir -p old-release
+          for asset in avibe_os-3.1.0-py3-none-any.whl avibe_memory-3.1.0-py3-none-any.whl; do
+            gh release download v3.1.0 --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir old-release
+          done
+          echo '7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924  old-release/avibe_os-3.1.0-py3-none-any.whl' | sha256sum -c -
+          echo 'ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0  old-release/avibe_memory-3.1.0-py3-none-any.whl' | sha256sum -c -
+          export AVIBE_OLD_CORE_WHEEL=old-release/avibe_os-3.1.0-py3-none-any.whl
+          export AVIBE_OLD_COMPANION_WHEEL=old-release/avibe_memory-3.1.0-py3-none-any.whl
+          export AVIBE_RELEASE_GATE=1
           pytest \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
+            tests/e2e/test_retired_updater_bridge.py \
             -v
 
       - name: Upload GitHub release assets
