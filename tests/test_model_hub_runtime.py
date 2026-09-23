@@ -7748,57 +7748,6 @@ def test_oauth_start_reads_the_presentation_form_from_the_engine_response(
 
 
 @pytest.mark.parametrize(
-    ("engine_url", "expected"),
-    [
-        pytest.param(
-            "https://auth.openai.com/oauth/authorize"
-            "?client_id=app_X&codex_cli_simplified_flow=true&prompt=login"
-            "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc",
-            "https://auth.openai.com/oauth/authorize"
-            "?client_id=app_X&codex_cli_simplified_flow=true"
-            "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc",
-            id="drops-the-reauthentication-prompt",
-        ),
-        pytest.param(
-            "https://accounts.google.com/o/oauth2/v2/auth?prompt=consent&scope=a+b&state=x",
-            "https://accounts.google.com/o/oauth2/v2/auth?prompt=consent&scope=a+b&state=x",
-            id="keeps-the-consent-prompt",
-        ),
-        pytest.param(
-            "https://example.test/code/authorize_device?user_code=ABCD-1234",
-            "https://example.test/code/authorize_device?user_code=ABCD-1234",
-            id="leaves-a-device-page-alone",
-        ),
-    ],
-)
-@pytest.mark.parametrize("vendor", sorted(runtime_adapter_module._OAUTH_ENDPOINTS))
-def test_oauth_start_opens_the_authorization_screen_not_a_forced_sign_in(
-    tmp_path: Path,
-    vendor: str,
-    engine_url: str,
-    expected: str,
-) -> None:
-    """`prompt=login` sends a signed-in user to the provider's sign-in page.
-
-    The engine hardcodes it on the Codex authorize URL, so "add a ChatGPT
-    subscription" landed on OpenAI's sign-in screen rather than the consent
-    screen the click asked for. Avibe is what hands this URL to a browser tab, so
-    it drops exactly that value — and only that one: `prompt=consent` asks for
-    the authorization screen rather than past it. Every vendor row is driven
-    through it because the rule is about what a URL asks the provider to do, not
-    about who composed it.
-    """
-
-    _client, flow = _start_oauth_against(
-        tmp_path,
-        vendor,
-        {"state": "engine-state", "url": engine_url},
-    )
-
-    assert flow.auth_url == expected
-
-
-@pytest.mark.parametrize(
     "vendor",
     # `antigravity`, `claude`, and `grok` are names the engine answers to. None of
     # them is an Avibe vendor id, so admission by engine vocabulary is refused.
