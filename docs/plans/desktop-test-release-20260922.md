@@ -623,7 +623,10 @@ loop once and buys a staleness question that the keyword does not.
 ## H13 — Banked: why the Windows service lock self-check fails
 
 Not fixed. Windows is shelved; this is recorded so the next attempt starts from
-a cause rather than from the logs again.
+a cause rather than from the logs again. Tracked in issue 2141, which is the
+layer underneath issue 2132: both are code that is correct on POSIX because
+POSIX file locks are advisory, and wrong on Windows because Windows byte-range
+locks are not.
 
 The rc8 Windows leg reported two symptoms that look separate and are one bug:
 the probe said pid 3176 had not acquired the service lock after 5s, and 47
