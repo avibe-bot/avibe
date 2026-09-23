@@ -156,7 +156,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       const [supplyRead, listed, vibeAgents] = await Promise.all([
         agentReads.read(),
         modelsApi.listSources(),
-        api.listVibeAgents({ cache: false }),
+        api.listVibeAgents({ cache: false, includeDisabled: true }),
       ]);
       if (supplyRead.kind !== 'current' || !vibeAgents.ok) return false;
       const supplies = supplyRead.value;

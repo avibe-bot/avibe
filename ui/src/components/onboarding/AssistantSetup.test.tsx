@@ -457,6 +457,51 @@ describe('assistant installation presentation', () => {
 });
 
 describe('Hub route refresh', () => {
+  it('shows a disabled builtin assistant its stored route without opening the editor', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.opencode.status = 'ok';
+    saved.agents.opencode.enabled = false;
+    const agent = { ...hubAgent(false), id: 'opencode-opencode', name: 'opencode',
+      display_name: 'opencode', backend: 'opencode' as const, model: 'gpt-5.6-sol' };
+    mock.api.listVibeAgents.mockImplementation(async ({ includeDisabled }) => ({
+      ok: true, agents: includeDisabled ? [agent] : [], default_agent_name: null,
+    }));
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
+    let opencodeEnabled = false;
+    mock.api.mutateConfig.mockImplementation(async () => {
+      opencodeEnabled = true;
+      return {};
+    });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: backend !== 'opencode' || opencodeEnabled, auth: 'api_key',
+      application: 'applied', ready: backend !== 'opencode' || opencodeEnabled,
+      entry_eligible: backend !== 'opencode' || opencodeEnabled, supply_mode: 'hub',
+    }));
+    mock.models.listSources.mockResolvedValue([{ id: 'src_a', models: [{ id: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol' }] }]);
+    mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('gpt-5.6-sol'), backend: 'opencode', model_id: 'gpt-5.6-sol',
+      chain: [
+        { source_id: 'src_a', model_id: 'gpt-5.6-sol', channel: 'hub', health: 'healthy', runnable: true },
+        { source_id: 'src_a', model_id: 'claude-opus-5-5', channel: 'hub', health: 'healthy', runnable: true },
+      ],
+    }]);
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'opencode' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'open' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={INITIAL_SETUP_FLOW_STATE}
+      setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    const choice = await row('OpenCode').findByRole('button', { name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'OpenCode') });
+    await waitFor(() => expect(row('OpenCode').getByText('GPT-5.6-Sol')).toBeTruthy());
+    expect(choice.textContent).toContain('1 backup');
+    expect(choice).toHaveProperty('disabled', true);
+    fireEvent.click(choice);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(mock.api.listVibeAgents).toHaveBeenCalledWith({ cache: false, includeDisabled: true });
+    fireEvent.click(row('OpenCode').getByRole('switch', { name: 'Enable OpenCode' }));
+    await waitFor(() => expect(row('OpenCode').getByRole('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'OpenCode'),
+    })).toHaveProperty('disabled', false));
+  });
+
   it('keeps an explicitly Direct assistant out of Hub routing', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.status = 'ok';
