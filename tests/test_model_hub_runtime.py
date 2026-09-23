@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import subprocess
+import signal
 import stat
 import sys
 import tarfile
@@ -48,6 +49,7 @@ from core.handlers.model_hub.stream_wire import (
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
+from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
@@ -1626,6 +1628,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
         {
             "name": "model-a",
             "alias": "model-a",
+            "display-name": "model-a #0",
             "thinking": {"levels": ["high", "low"]},
         }
     ]
@@ -1712,7 +1715,7 @@ def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
             "cloak": {"mode": "never"},
             "rebuild-mid-system-message": False,
             "models": [
-                {"name": "claude-api-model", "alias": "claude-api-model"}
+                {"name": "claude-api-model", "alias": "claude-api-model", "display-name": "claude-api-model #0"}
             ],
         }
     ]
@@ -2319,7 +2322,8 @@ def test_long_inventory_identity_reaches_runtime_config_and_http_consumer(
         )
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config[config_key][0]["models"] == [
-            {"name": identity, "alias": identity} for identity in (*identities, route_only)
+            {"name": identity, "alias": identity, "display-name": f"{identity} #0"}
+            for identity in (*identities, route_only)
         ]
         client = EngineClient(EngineConnection(base_url.removesuffix("/v1"), "management", "gateway"))
         for identity in (*identities, route_only):
@@ -2612,10 +2616,13 @@ def _write_mock_engine(
     startup_output_repeat: int = 1,
     echo_runtime_secrets: bool = False,
     exit_before_ready: int | None = None,
+    reload_delay: float = 0.0,
+    drop_reload_ack: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -2646,6 +2653,12 @@ if exit_before_ready is not None:
 time.sleep({startup_delay!r})
 health_surfaces = set()
 
+def configured_models():
+    for section in ('claude-api-key', 'codex-api-key', 'openai-compatibility'):
+        for entry in config.get(section) or ():
+            for model in entry.get('models') or ():
+                yield f"{{entry['prefix']}}/{{model['alias']}}", model.get('display-name')
+
 def mark_health_surface(surface):
     health_surfaces.add(surface)
     if len(health_surfaces) == 2:
@@ -2667,7 +2680,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/v1/models' and self.headers.get('Authorization') == f'Bearer {{gateway}}':
             mark_health_surface('gateway')
-            self._json(200, {{'object': 'list', 'data': []}})
+            self._json(200, {{'object': 'list', 'data': [{{'id': model, 'name': name}} for model, name in configured_models()]}})
             return
         if self.path == '/v0/management/config' and self.headers.get('X-Management-Key') == management:
             mark_health_surface('management')
@@ -2677,6 +2690,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {{'models': [{{'id': 'model-a'}}]}})
             return
         self._json(401, {{'error': {{'type': 'unauthorized'}}}})
+
+    def do_PUT(self):
+        global config
+        length = int(self.headers.get('Content-Length', '0'))
+        body = self.rfile.read(length)
+        if self.path != '/v0/management/config.yaml' or self.headers.get('X-Management-Key') != management:
+            self._json(401, {{'error': {{'type': 'unauthorized'}}}})
+            return
+        with open(config_path, 'wb') as handle:
+            handle.write(body)
+
+        def apply():
+            global config
+            config = yaml.safe_load(body)
+            with open('config-reloads', 'a', encoding='utf-8') as handle:
+                handle.write('reload\\n')
+
+        # CPA acknowledges the write and applies it from a debounced watcher.
+        threading.Timer({reload_delay!r}, apply).start()
+        if {drop_reload_ack!r}:
+            self.close_connection = True
+            return
+        self._json(200, {{'ok': True, 'changed': ['config']}})
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', '0'))
@@ -2803,6 +2839,8 @@ def _fixture_supervisor(
     startup_output_repeat: int = 1,
     echo_runtime_secrets: bool = False,
     exit_before_ready: int | None = None,
+    reload_delay: float = 0.0,
+    drop_reload_ack: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -2813,6 +2851,8 @@ def _fixture_supervisor(
         startup_output_repeat=startup_output_repeat,
         echo_runtime_secrets=echo_runtime_secrets,
         exit_before_ready=exit_before_ready,
+        reload_delay=reload_delay,
+        drop_reload_ack=drop_reload_ack,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -2825,6 +2865,184 @@ def _fixture_supervisor(
         ),
         store,
     )
+
+
+def test_source_sync_hot_reloads_a_running_engine_without_restart(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    process = supervisor._process
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+        client = EngineClient(connection)
+        prefix = store.get_source("src_fixture123").prefix
+        assert supervisor._process is process
+        assert supervisor._connection == connection
+        assert client.list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+        asyncio.run(adapter.sync_sources([_binding(credential_ref)]))
+        assert supervisor._process is process
+        assert client.list_model_ids() == {f"{prefix}/model-a"}
+        instance_dir = store.root / "instances" / "install-1"
+        assert (instance_dir / "config-reloads").read_text().count("reload") == 2
+        assert "model-b" not in (instance_dir / "config.yaml").read_text()
+    finally:
+        supervisor.stop()
+
+
+def test_source_sync_waits_for_an_id_preserving_reload_to_apply(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path, reload_delay=0.3)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    supervisor.ensure_running()
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    instance_dir = store.root / "instances" / "install-1"
+    try:
+        # A reasoning-only save renders new config yet leaves every routed ID
+        # listed; the save returns only once the engine has applied it.
+        asyncio.run(
+            adapter.sync_sources(
+                [_binding(credential_ref, model_reasoning_efforts=(("model-a", ("low", "high")),))]
+            )
+        )
+        assert (instance_dir / "config-reloads").read_text().count("reload") == 1
+    finally:
+        supervisor.stop()
+
+
+def test_source_sync_never_restarts_a_live_engine_that_lost_the_reload_ack(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path, drop_reload_ack=True)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    process = supervisor._process
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+        prefix = store.get_source("src_fixture123").prefix
+        assert supervisor._process is process
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+    finally:
+        supervisor.stop()
+
+
+def test_source_sync_fails_without_restarting_a_stalled_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 0.5)
+    supervisor, store = _fixture_supervisor(tmp_path)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    supervisor.ensure_running()
+    process = supervisor._process
+    original = store.list_sources()
+    process.send_signal(signal.SIGSTOP)
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        # A stalled management path does not prove its streams dead.
+        with pytest.raises(EngineStateError):
+            asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+        assert supervisor._process is process
+        assert process.poll() is None
+    finally:
+        process.send_signal(signal.SIGCONT)
+        supervisor.stop()
+    assert store.list_sources() == original
+
+
+def test_source_sync_of_an_exited_engine_is_applied_at_next_start(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    supervisor.ensure_running()
+    exited = supervisor._process
+    exited.kill()
+    exited.wait(timeout=3)
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+        prefix = store.get_source("src_fixture123").prefix
+        connection = supervisor.ensure_running()
+        assert supervisor._process is not exited
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+    finally:
+        supervisor.stop()
+
+
+def test_credential_revocation_hot_reloads_a_live_engine_without_restart(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    old_ref = store.store_api_key("old-upstream-secret", base_url="https://api.example.test/v1")
+    new_ref = store.store_api_key("new-upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(old_ref)])
+    connection = supervisor.ensure_running()
+    process = supervisor._process
+    stale_instance = store.root / "instances" / "install-0"
+    stale_instance.mkdir(mode=0o700)
+    stale_config = stale_instance / "config.yaml"
+    stale_config.write_text("api-key: old-upstream-secret\n", encoding="utf-8")
+    stale_config.chmod(0o600)
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        # Replacing a key rebinds first, then revokes the old credential.
+        asyncio.run(adapter.sync_sources([_binding(new_ref)]))
+        asyncio.run(adapter.revoke_api_key_credential(old_ref))
+        assert supervisor._process is process
+        live_config = (store.root / "instances" / "install-1" / "config.yaml").read_text()
+        assert "old-upstream-secret" not in live_config
+        assert "new-upstream-secret" in live_config
+        assert not stale_config.exists()
+        prefix = store.get_source("src_fixture123").prefix
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a"}
+    finally:
+        supervisor.stop()
+
+
+def test_credential_revocation_stays_pending_without_restarting_a_stalled_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 0.5)
+    supervisor, store = _fixture_supervisor(tmp_path)
+    old_ref = store.store_api_key("old-upstream-secret", base_url="https://api.example.test/v1")
+    new_ref = store.store_api_key("new-upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(old_ref)])
+    supervisor.ensure_running()
+    process = supervisor._process
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        asyncio.run(adapter.sync_sources([_binding(new_ref)]))
+        process.send_signal(signal.SIGSTOP)
+        try:
+            # An unverifiable reload must not truncate live streams; the
+            # caller keeps the revocation pending and retries it.
+            with pytest.raises(EngineUnavailableError):
+                asyncio.run(adapter.revoke_api_key_credential(old_ref))
+            assert supervisor._process is process
+            assert process.poll() is None
+        finally:
+            process.send_signal(signal.SIGCONT)
+        assert store.credential_metadata_if_present(old_ref) is not None
+        asyncio.run(adapter.revoke_api_key_credential(old_ref))
+        assert supervisor._process is process
+        assert store.credential_metadata_if_present(old_ref) is None
+    finally:
+        supervisor.stop()
+
+
+def test_source_sync_of_a_stopped_engine_is_applied_at_next_start(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+    assert supervisor._process is None
+    try:
+        connection = supervisor.ensure_running()
+        prefix = store.get_source("src_fixture123").prefix
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+    finally:
+        supervisor.stop()
 
 
 @pytest.mark.parametrize(
@@ -3865,6 +4083,7 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             request_protocol=None,
             request_headers=None,
             on_transport_done=None,
+            on_request_sent=None,
         ):
             self.request_protocol = request_protocol
             self.request_headers = request_headers
@@ -3917,20 +4136,16 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
     asyncio.run(run())
 
 
-def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -> None:
+def test_adapter_restores_source_projection_when_reload_fails(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self) -> None:
             self.restore_calls = 0
 
-        def client_if_running(self):
-            return object()
-
-        def restart_if_running(self) -> None:
-            raise EngineUnavailableError("models.engine.health_failed")
-
-        def ensure_running(self):
+        def reload_config_if_running(self, _previous=None) -> None:
+            if self.restore_calls == 0:
+                self.restore_calls += 1
+                raise EngineUnavailableError("models.engine.health_failed")
             self.restore_calls += 1
-            return object()
 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
@@ -3956,7 +4171,7 @@ def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -
         restored = store.get_source("src_fixture123")
         assert restored is not None
         assert restored.credential_ref == old_ref
-        assert supervisor.restore_calls == 1
+        assert supervisor.restore_calls == 2
 
     asyncio.run(run())
 
@@ -3977,6 +4192,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
             request_protocol=None,
             request_headers=None,
             on_transport_done=None,
+            on_request_sent=None,
         ):
             invoked_refs.append(source.credential_ref)
             on_transport_done()
@@ -3992,7 +4208,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
         def with_engine_excluded(self, operation):
             return operation(self._client)
 
-        def restart_if_running(self) -> None:
+        def reload_config_if_running(self, _previous=None) -> None:
             restart_started.set()
             assert allow_restart.wait(timeout=2)
 
