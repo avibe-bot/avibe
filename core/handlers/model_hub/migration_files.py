@@ -388,8 +388,22 @@ def plan_native_cleanup(
             before = json.dumps(config, sort_keys=True, default=str)
             removable = set(managed_ids)
             removable.update(item.native_provider_id for item in items if item.backend == "codex" and item.native_provider_id)
-            removable -= retained_ids
             providers = config.get("model_providers")
+            if isinstance(providers, dict):
+                # A retained provider keeps its selectors and whatever
+                # authentication was not carried, but a credential that WAS
+                # carried still leaves the layer that supplied it: the Hub now
+                # holds it, and a replay must not find it importable again.
+                for provider_id in sorted(removable & retained_ids):
+                    provider = providers.get(provider_id)
+                    if not isinstance(provider, dict):
+                        continue
+                    token = provider.get("experimental_bearer_token")
+                    if token and selected_api_key(token, "codex"):
+                        provider.pop("experimental_bearer_token")
+                    if provider.get("env_key") in carried_env_keys:
+                        provider.pop("env_key")
+            removable -= retained_ids
             if isinstance(providers, dict):
                 for provider_id in sorted(removable):
                     provider = providers.get(provider_id)
@@ -425,15 +439,21 @@ def plan_native_cleanup(
         vendors = {item.vendor for item in items if item.backend == "opencode"}
         shell_values = dict(pair for item in items for pair in item.shell_values)
 
+        absent = object()
+
         def auth_entry_retained(entry: object) -> bool:
-            # An entry the Hub could not carry (OAuth, or a key outside the
-            # selection) stays native, like every other unselected credential.
-            return isinstance(entry, dict) and not (
-                "type" in entry and entry["type"] == "api" and selected_api_key(entry.get("key"), "opencode")
+            # An entry the Hub could not carry (OAuth, a key outside the
+            # selection, or a value of no shape it reads) stays native, like
+            # every other unselected credential. Only an absent entry and the
+            # selected API key itself are free to go.
+            return entry is not absent and not (
+                isinstance(entry, dict)
+                and "type" in entry and entry["type"] == "api"
+                and selected_api_key(entry.get("key"), "opencode")
             )
 
         native_auth = read_native_config(opencode_auth_path(home)) or {}
-        retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor))}
+        retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor, absent))}
 
         # References a selected row read: bound to its saved assignment, or
         # proved empty before it selected the auth.json fallback. Any other
@@ -499,7 +519,7 @@ def plan_native_cleanup(
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
-                if auth_entry_retained(payload.get(vendor)):
+                if vendor not in payload or auth_entry_retained(payload[vendor]):
                     continue
                 payload.pop(vendor, None)
 

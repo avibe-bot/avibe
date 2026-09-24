@@ -8343,7 +8343,46 @@ def test_oauth_rejected_paste_keeps_flow_awaiting_a_corrected_value(tmp_path: Pa
             "http://localhost:1455/auth/callback?code=abc&state=browser-state",
         )
         assert corrected.state == "verifying"
-        assert len(submitted) == 2
+        # The code-less address never reached the engine.
+        assert len(submitted) == 1
+
+    asyncio.run(run())
+
+
+def test_oauth_engine_400_fails_the_flow_rather_than_claiming_it_retryable(tmp_path: Path) -> None:
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                return {"files": []}
+            if path == "/codex-auth-url":
+                return {"state": "browser-state", "url": "https://example.test/oauth"}
+            if path == "/oauth-callback":
+                raise EngineClientError("invalid state", status_code=400)
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, Client()),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        # A code the engine still refuses says nothing about what it wrote, so
+        # the flow fails closed instead of inviting another paste.
+        failed = await adapter.submit_oauth(
+            flow.flow_id,
+            "http://localhost:1455/auth/callback?code=abc&state=browser-state",
+        )
+        assert failed.state == "failed"
+        assert adapter._oauth_flows[flow.flow_id].grant_write_possible is True
 
     asyncio.run(run())
 

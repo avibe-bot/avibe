@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import threading
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -2548,15 +2549,31 @@ class CLIProxyEngineAdapter:
             submitted = value.strip()
             if not submitted:
                 raise EngineStateError("OAuth submission is empty")
-            # A transport failure after submission begins cannot prove whether
-            # the engine wrote grant material.
-            grant_write_possible = flow.grant_write_possible
+            is_redirect = submitted.startswith(("http://", "https://"))
+            if is_redirect and not any(
+                answer.strip()
+                for key, answer in urllib.parse.parse_qsl(urllib.parse.urlsplit(submitted).query)
+                if key in {"code", "error", "error_description"}
+            ):
+                # The one rejection that provably writes nothing and leaves the
+                # session waiting: an address carrying no answer at all, which
+                # the engine would refuse before reading its session. Decided
+                # here, where the value is known, not from an engine status
+                # that several different refusals share.
+                logger.info(
+                    "OAuth submission carries no code: flow=%s provider=%s",
+                    flow.flow_id,
+                    flow.callback_provider,
+                )
+                raise OAuthSubmissionRejectedError(flow_id)
+            # Any failure after submission begins cannot prove whether the
+            # engine wrote grant material.
             flow.grant_write_possible = True
             payload: dict[str, str] = {
                 "provider": flow.callback_provider,
                 "state": flow.engine_state,
             }
-            if submitted.startswith(("http://", "https://")):
+            if is_redirect:
                 payload["redirect_url"] = submitted
             else:
                 payload["code"] = submitted
@@ -2568,18 +2585,7 @@ class CLIProxyEngineAdapter:
                     "/oauth-callback",
                     payload=payload,
                 )
-            except EngineClientError as error:
-                if error.status_code == 400:
-                    # The engine validates the value before it touches the
-                    # session, so a 400 wrote nothing and its session still
-                    # waits: the user can paste the right address again.
-                    flow.grant_write_possible = grant_write_possible
-                    logger.info(
-                        "OAuth submission rejected by the engine (HTTP 400, no code in the value?): flow=%s provider=%s",
-                        flow.flow_id,
-                        flow.callback_provider,
-                    )
-                    raise OAuthSubmissionRejectedError(flow_id) from None
+            except EngineClientError:
                 self._fail_flow(flow, "models.oauth.submission_failed")
                 return flow.snapshot()
             except EngineUnavailableError:

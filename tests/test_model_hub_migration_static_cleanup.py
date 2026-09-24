@@ -278,6 +278,20 @@ def test_opencode_shell_key_leaves_a_same_vendor_oauth_entry_native(home, tmp_pa
     assert json.loads(auth.read_text())["openrouter"] == oauth
 
 
+@pytest.mark.parametrize("entry", ["legacy-or-malformed-value", 7, ["fixture"], None])
+def test_opencode_shell_key_leaves_a_non_object_auth_entry_native(home, tmp_path, entry):
+    auth = home / ".local/share/opencode/auth.json"
+    _write(auth, json.dumps({"openrouter": entry}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, ()) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    # Not carried, so not removed: direct mode finds what it left.
+    assert json.loads(auth.read_text()) == {"openrouter": entry}
+
+
 @pytest.mark.parametrize("field", ["http_headers", "env_http_headers"])
 def test_codex_retained_header_provider_keeps_its_configuration(home, tmp_path, field):
     path = home / ".codex/config.toml"
@@ -579,6 +593,10 @@ def test_codex_unresolved_env_key_in_one_layer_keeps_the_provider_native(home, t
     assert 'env_key = "FIXTURE_UNSET_KEY"' in user.read_text()
     assert 'model_provider = "relay"' in user.read_text()
     assert "relay.example" in project.read_text()
+    # The carried bearer still leaves the layer that supplied it, so a replay
+    # cannot rediscover it as importable.
+    assert KEY not in project.read_text()
+    assert "experimental_bearer_token" not in project.read_text()
 
 
 def test_unresolved_opencode_reference_in_another_layer_stays_with_its_endpoint(home, tmp_path):
