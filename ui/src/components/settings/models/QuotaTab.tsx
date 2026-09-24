@@ -323,7 +323,9 @@ export const QuotaTab: React.FC<{
                           resetAt !== null && resetAt > now ? t('settings.models.quota.stat.resetsIn', { duration: text.duration(resetAt - now) }) : null,
                         ].filter(Boolean).join(' · ');
                       })()
-                    : t(exhausted.length ? 'settings.models.quota.stat.tightestAllSpent' : 'settings.models.quota.stat.tightestUnread')}
+                    // Like 「every account is usable」 below, 「every limit is used up」 is a
+                    // claim about all accounts: make it only when each has a current reading.
+                    : t(exhausted.length && sources.every(quotaIsLive) ? 'settings.models.quota.stat.tightestAllSpent' : 'settings.models.quota.stat.tightestUnread')}
                 />
                 <StatCard
                   label={t('settings.models.quota.stat.exhausted')}

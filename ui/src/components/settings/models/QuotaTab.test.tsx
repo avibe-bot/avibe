@@ -168,7 +168,7 @@ describe('QuotaTab', () => {
     expect(card.classList.contains('model-hub-quota-card--retained')).toBe(true);
     // A retained reading is not current, so it cannot fill the page summary,
     // and an account that must sign in again is not called usable.
-    expect(screen.getByText('没有已用完的额度')).toBeTruthy();
+    expect(screen.getByText('已读到的额度都没用完')).toBeTruthy();
     expect(screen.queryByText('所有账号都能正常使用')).toBeNull();
 
     await userEvent.click(within(card).getByRole('button', { name: '重新登录' }));
@@ -200,7 +200,19 @@ describe('QuotaTab', () => {
     expect(within(empty).getByText('暂时读不到额度，稍后会自动重试')).toBeTruthy();
     expect(within(empty).getByText('暂停更新')).toBeTruthy();
     expect(screen.queryByText('所有账号都能正常使用')).toBeNull();
-    expect(screen.getByText('没有已用完的额度')).toBeTruthy();
+    expect(screen.getByText('已读到的额度都没用完')).toBeTruthy();
+  });
+
+  it('keeps universal summary claims to the case where every account has a current reading', () => {
+    const spent = claude({ windows: [window({ used_pct: 100, resets_at: iso(NOW + HOUR) })] });
+    const expired = codex({ state: 'auth_expired', error_key: 'models.quota.error.auth_expired', fetched_at: null, windows: [] });
+    const mixed = draw(readyRegion(summary([spent, expired])));
+    expect(screen.getByText('暂时没有可读的额度')).toBeTruthy();
+    expect(screen.queryByText('所有额度都已用完')).toBeNull();
+    mixed.unmount();
+
+    draw(readyRegion(summary([spent])));
+    expect(screen.getByText('所有额度都已用完')).toBeTruthy();
   });
 
   it('keeps the last page under the failure strip and offers the empty state honestly', async () => {

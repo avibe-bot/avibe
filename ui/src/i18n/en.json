@@ -1403,7 +1403,7 @@
           "exhausted": "Used up",
           "exhaustedUnit": "limits",
           "exhaustedNone": "Every account is usable",
-          "exhaustedNoneObserved": "No limit is used up",
+          "exhaustedNoneObserved": "None used up in current readings",
           "exhaustedNote": "{{name}} · back {{time}}",
           "resetsIn": "resets in {{duration}}"
         },
