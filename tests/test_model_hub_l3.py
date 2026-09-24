@@ -8708,7 +8708,7 @@ def test_protocol_observation_classifies_from_the_body_not_the_status(status) ->
 
     for evidence in asyncio.run(scenario()):
         assert evidence.protocol is _ProtocolProof.UNPROVEN
-        assert evidence.authentication is not _AuthenticationEvidence.ACCEPTED
+        assert evidence.authentication is _AuthenticationEvidence.UNKNOWN
 
 
 def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:

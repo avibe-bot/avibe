@@ -4494,6 +4494,13 @@ def _catalog_without(service, model_id):
     return baseline, [model for model in baseline if model["id"] != model_id]
 
 
+async def _delete_seeded_custom_model(service):
+    service.store.config.sources[0].models.append(
+        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+    )
+    return await service.delete_custom_model("src_first0001", "claude-extra-model")
+
+
 _PROJECTION_MODEL = "claude-opus-4-6"
 _PROJECTION_MUTATIONS = {
     "rename_source": (
@@ -4539,6 +4546,10 @@ _PROJECTION_MUTATIONS = {
             "src_first0001", {"model_id": "claude-extra-model", "reasoning_efforts": []},
         ),
         lambda bindings: "claude-extra-model" in bindings["src_first0001"].model_ids,
+    ),
+    "delete_custom_model": (
+        _delete_seeded_custom_model,
+        lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL,),
     ),
     "set_reasoning_efforts": (
         lambda service: service.update_model_reasoning_efforts(
