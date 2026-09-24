@@ -35,6 +35,8 @@
     {"method": "GET", "path": "/api/models/agents/<backend>/provenance?model=<id>", "response_schema": "LatestProvenanceResponse", "exercises": [{"path": "/api/models/agents/claude/provenance?model=claude-opus-4-6", "status": 200}, {"path": "/api/models/agents/claude/provenance?model=claude-sonnet-4-6", "status": 200}]},
     {"method": "GET", "path": "/api/models/events?limit=<n>&before=<id>", "response_schema": "EventsResponse", "exercise": {"path": "/api/models/events?limit=20", "status": 200}},
     {"method": "GET", "path": "/api/models/usage?days=<n>", "response_schema": "UsageResponse", "exercise": {"path": "/api/models/usage?days=30", "status": 200}},
+    {"method": "GET", "path": "/api/models/quota", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota", "status": 200}},
+    {"method": "POST", "path": "/api/models/quota/refresh", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota/refresh", "status": 200}},
     {"method": "POST", "path": "/api/models/oauth/start", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/oauth/start", "status": 200, "json": {"vendor": "anthropic", "channel": "hub"}}},
     {"method": "GET", "path": "/api/models/oauth/status/<flow_id>", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/status/oaf_00000001", "status": 200}},
     {"method": "POST", "path": "/api/models/oauth/submit", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/submit", "status": 200, "json": {"flow_id": "oaf_00000001", "value": "contract-code"}}},
@@ -483,6 +485,16 @@
         "ok": {"const": true},
         "contract_version": {"const": 10},
         "usage": {"$ref": "model-hub/usage-summary.schema.json"}
+      }
+    },
+    "QuotaResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "quota"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 10},
+        "quota": {"$ref": "model-hub/quota-summary.schema.json"}
       }
     },
     "OAuthFlowResponse": {

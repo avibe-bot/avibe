@@ -62,6 +62,8 @@ remain readable; ephemeral envelopes use only the terminal version.
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary}` | Bounded metered token report over a trailing local-day window. `days` is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. |
+| GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline. Never starts the engine. |
+| POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. A value the provider refuses before writing anything (not a callback address, no `code`) is the non-terminal `422 submission_rejected`: the flow stays `awaiting_action` and accepts another submission until its `expires_at`. |
@@ -1325,6 +1327,46 @@ when emitted.
 `to_source: null`, and reason `upstream_tiers` or `catalog_tiers`. It records that a
 successful refresh replaced a non-empty user declaration; it contains neither the old
 tiers, new tiers, nor credential material.
+
+## Subscription quota
+
+Quota is a report, never a control input, exactly like usage metering: nothing in
+resolution, admission, or cooldown reads it. It covers hub-held subscription
+Sources (`kind: subscription`, `supply_channel: hub`, bound credential). Native-CLI
+subscriptions and API-key Sources are absent.
+
+The engine that holds the grant makes one model-free account call per Source
+through its management `api-call`, so Avibe never handles the token:
+
+| Vendor | Upstream | Extra header |
+| --- | --- | --- |
+| `anthropic` | `GET https://api.anthropic.com/api/oauth/usage` | `anthropic-beta: oauth-2025-04-20` |
+| `openai` / `codex` | `GET https://chatgpt.com/backend-api/wham/usage` | `ChatGPT-Account-ID` when the grant carries one |
+
+Only parsed fields cross the adapter boundary (`EngineAdapter.subscription_quota`);
+the raw body, headers, and grant never reach the service, a log line, or a
+response. Parsing is defensive: a null or unreadable window is skipped, a window
+the parser does not recognise is returned as `kind: other` with its bounded
+upstream name, and a body that is not the report shape is a per-Source
+`malformed` failure. Claude's `limits[]` rows are classified on `kind`
+(`session`, `weekly_all`, `weekly_scoped` with `scope.model.display_name`) and
+fall back to the fixed top-level keys (`five_hour`, `seven_day`,
+`seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`). Codex
+primary/secondary windows are classified by `limit_window_seconds`, and each
+`additional_rate_limits` entry is named by its metered feature (`codex_bengalfox`
+is Spark) or `limit_name`.
+
+The service caches the last good snapshot per Source. A read re-fetches a Source
+whose last attempt is older than `refresh_interval_seconds` (300); a forced
+refresh lowers that to 30 seconds. A vendor 429 starts a cooldown of
+`Retry-After` bounded to 5–60 minutes, after which the next read retries. A
+failure keeps the last good windows and reports `stale`; a 401/403 reports
+`auth_expired`; a Source with no good read yet reports `error`. A
+re-authenticated Source is a different grant and starts with no snapshot.
+
+`quota-summary.schema.json` reserves no monetary field. A later contract version
+may add an optional `value` block per Source; consumers must treat its absence as
+"not reported", never as zero.
 
 ## Usage metering
 

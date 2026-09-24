@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/quota-summary.schema.json",
+  "title": "Model Hub subscription quota",
+  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report only: no consumer may feed it back into resolution, admission, or cooldown. It carries parsed fields only, never a grant, token, or raw upstream body. Quota only: a monetary `value` block is reserved for a later contract version and is absent here.",
+  "type": "object",
+  "required": ["refresh_interval_seconds", "sources"],
+  "additionalProperties": false,
+  "properties": {
+    "refresh_interval_seconds": {
+      "description": "How often the server re-reads one Source without a forced refresh.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "sources": {
+      "description": "One entry per hub-held subscription Source, in Source order.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/SourceQuota" }
+    }
+  },
+  "definitions": {
+    "SourceQuota": {
+      "type": "object",
+      "required": ["source_id", "vendor", "display_name", "account_label", "plan", "fetched_at", "state", "windows"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": { "type": "string", "minLength": 1 },
+        "vendor": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string" },
+        "account_label": { "type": ["string", "null"] },
+        "plan": {
+          "description": "Plan name the vendor reported, when it reports one.",
+          "type": ["string", "null"],
+          "maxLength": 64
+        },
+        "fetched_at": {
+          "description": "When `windows` was read. Null until the first good read.",
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "state": {
+          "description": "ok: fresh windows. stale: the latest read failed and `windows` is the last good snapshot. auth_expired: the vendor refused the grant; `windows` may be the last good snapshot. unsupported: this vendor has no quota report. error: no good read exists yet.",
+          "enum": ["ok", "stale", "auth_expired", "unsupported", "error"]
+        },
+        "error_key": {
+          "description": "Present whenever `state` is not ok.",
+          "enum": [
+            "models.quota.error.auth_expired",
+            "models.quota.error.rate_limited",
+            "models.quota.error.unsupported",
+            "models.quota.error.unavailable",
+            "models.quota.error.malformed"
+          ]
+        },
+        "windows": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/definitions/QuotaWindow" }
+        }
+      }
+    },
+    "QuotaWindow": {
+      "type": "object",
+      "required": ["id", "kind", "label", "used_pct", "window_seconds", "resets_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": {
+          "description": "session: the shared short window. weekly: the shared weekly window. model_weekly: a weekly window only one model draws on, named by `scope_model`. other: any window the server does not recognise, rendered from `label`.",
+          "enum": ["session", "weekly", "model_weekly", "other"]
+        },
+        "label": {
+          "description": "Upstream name, whitespace-collapsed and bounded. Display copy for `other`; the UI composes its own copy for the known kinds.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "scope_model": {
+          "description": "Present exactly for model_weekly: the upstream model name.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "used_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "window_seconds": { "type": ["integer", "null"], "minimum": 1 },
+        "resets_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}
