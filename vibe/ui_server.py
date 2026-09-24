@@ -4924,8 +4924,9 @@ async def model_hub_usage_get(starlette_request: FastAPIRequest):
             if has_days and has_window:
                 raise ModelHubError("invalid_parameter", status=400)
             if has_window:
-                window = query.get("window")
-                if window not in USAGE_WINDOW_KEYS:
+                windows = query.getlist("window")
+                window = windows[0]
+                if window not in USAGE_WINDOW_KEYS or any(value != window for value in windows):
                     raise ModelHubError("invalid_parameter", status=400)
                 usage = await _model_hub_service().usage_summary(window=window)
             else:

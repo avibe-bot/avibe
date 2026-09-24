@@ -208,9 +208,16 @@ def test_e2_usage_reports_reconcile_across_http_ipc_and_restart(
             for key in expected:
                 assert sum(model[key] for model in source["models"]) == source[key]
 
-    for query in ("window=1d", "window=", "window=24h&days=7"):
+    for query in (
+        "window=1d", "window=", "window=24h&days=7",
+        "window=24h&window=7d", "window=7d&window=24h",
+        "window=invalid&window=24h", "window=24h&window=invalid",
+    ):
         response = model_hub_app.client.get(f"/api/models/usage?{query}")
         assert response.status == 400, response.json()
+    repeated = model_hub_app.client.get("/api/models/usage?window=24h&window=24h")
+    assert repeated.status == 200, repeated.json()
+    assert repeated.json()["usage"]["totals"] == expected_hourly
     legacy = model_hub_app.client.get("/api/models/usage?days=7").json()["usage"]
     assert legacy["totals"] == expected_daily
     assert "buckets" not in legacy

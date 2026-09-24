@@ -664,9 +664,11 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
             continue
         key, start = parts
         instant = start.astimezone(timezone.utc)
-        if instant > measured.astimezone(timezone.utc):
+        metered = _instant(item.get("last_metered_at"))
+        if instant > measured or (metered is not None and metered > measured):
             # Future slices cannot be evidence of usage and must not occupy the
-            # bounded recent history.
+            # bounded recent history. A current-hour aggregate may also contain
+            # future-stamped calls; its counters cannot be split retrospectively.
             incomplete = True
             continue
         if instant < oldest_start:
@@ -1203,7 +1205,6 @@ class BoundedUsageLedger:
             for index, start in enumerate(starts)
         }
         first_start = starts[0]
-        last_start = starts[-1]
         report_local = _local(now)
         first_day = first_start.astimezone().date()
         last_day = report_local.date()
@@ -1216,6 +1217,9 @@ class BoundedUsageLedger:
         incomplete: set[int] = set()
 
         for row in rows:
+            # Read-only projection must apply the same temporal evidence policy
+            # as persistence, including future slices in an otherwise valid day.
+            row = _retain_hour_slices(row, report_instant)
             if row["requests"] <= 0:
                 continue
             row_day = _calendar_day(row["day"])
@@ -1239,11 +1243,6 @@ class BoundedUsageLedger:
                 if bucket is None:
                     continue
                 _start_utc, index = bucket
-                if start < first_start or start > last_start:
-                    continue
-                if start > report_instant:
-                    incomplete.add(index)
-                    continue
                 key = (row["source_id"], row["model_id"])
                 projected = measured_by_bucket[index].get(key)
                 if projected is None:
@@ -1405,17 +1404,19 @@ class UsageCall:
     requests: int = 1
 
     @property
-    def fold_key(self) -> tuple[str, str, str, bool]:
+    def fold_key(self) -> tuple[str, str, str, str, bool]:
         """What makes two calls one daily row and one hourly slice.
 
         The ledger's own row key plus whether tokens were reported, which is the
         part that keeps a fold arithmetically identical to the calls it replaces.
         The hour is part of the queue key so a flush cannot merge calls from
-        different hours before the ledger sees their temporal identity. The ledger
-        still folds their daily totals together in one atomic write.
+        different hours before the ledger sees their temporal identity. The local
+        date must also remain: a UTC hour can cross local midnight, and folding
+        those calls would move the earlier day's counts into the later day.
         """
 
         return (
+            local_usage_day(self.at).isoformat(),
             _hour_key(self.at),
             self.source_id,
             self.model_id,
@@ -1481,7 +1482,7 @@ class UsageWriter:
     def __init__(self, ledger: BoundedUsageLedger, *, durability_wait: float = _DURABILITY_WAIT_SECONDS):
         self.ledger = ledger
         self._durability_wait = durability_wait
-        self._pending: dict[tuple[str, str, str, bool], _QueuedRow] = {}
+        self._pending: dict[tuple[str, str, str, str, bool], _QueuedRow] = {}
         # The batch on its way to disk, kept visible so a drain that times out
         # can count it: in the executor is not the same as persisted.
         self._writing: tuple[_QueuedRow, ...] = ()

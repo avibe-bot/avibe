@@ -113,7 +113,8 @@ daily reports and include pre-upgrade usage; hourly slices are never added to
 those totals a second time. Retain only the hourly slices needed for the
 24-hour view, with explicit capacity and corruption handling. Existing
 batching must not combine calls from different hours before the ledger sees
-their temporal identity.
+their temporal identity. It must also retain distinct local-day owners when a
+UTC hour spans midnight; a fold is valid only within both temporal boundaries.
 
 The backend lane owns Python, the JSON schema/API documentation, and Python
 tests. The UI lane owns frontend code, localizations, frontend tests, and
@@ -137,6 +138,27 @@ Interface deviations must be agreed with the orchestrator before integration.
    local Incus environment; never modify the running personal Avibe instance.
 7. Current-head Codex review, CI, and resolved-thread gates are required.
    Opening the implementation PR is authorized; merging/deploying is not.
+
+## Temporal boundary review decision
+
+The September 24 integration reproductions exposed repeated temporal-ownership
+defects, so further lane-level patching was paused for an orchestrator review of
+the entire write/coalesce/read path. The independent local review covered head
+`124b5e4a5` and reported three findings. At this decision there is one formal
+findings-bearing local review head and no implementation PR review head.
+Companion docs PR #47 has one findings-bearing head (`1cbc090010`), solely for
+publication ordering; its unresolved release-order thread remains a separate gate.
+
+| Root cause | Scope decision | Consuming evidence |
+| --- | --- | --- |
+| Queue coalescing lost the local-day owner when UTC hours span midnight | A fold must share both the local calendar date and UTC hour, as well as source/model and report presence. Daily storage stays authoritative; hourly projection joins owners. | Queue two same-hour calls across Nepal midnight and compare persisted daily/hourly reports with separate writes. |
+| Read projection bypassed time-dependent slice validity | Reuse the existing recent-slice policy at report time; future evidence makes the owning day's intersecting intervals incomplete, while ordinary expired slices do not. Never move rejected counts into another hour. | Future-hour and future-stamped current-hour fixtures, before and after a subsequent write, alongside ordinary-expiry coverage. |
+| HTTP scalar lookup hid conflicting selector values | Validate every modern `window` value; allow identical valid repeats, reject conflicting or invalid repeats, and preserve legacy `days` parsing. | Actual HTTP selector tests in both parameter orders and through controller IPC. |
+
+These changes preserve the wire and storage contracts and do not justify a new
+ledger, migration, or time-zone subsystem. Tests passing on earlier heads did not
+close these gaps: verification must exercise the queue and read/write boundaries,
+not only direct ledger recording.
 
 ## Known by design
 

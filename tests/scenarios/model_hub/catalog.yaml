@@ -717,6 +717,18 @@ scenarios:
     test: tests/test_model_hub_usage.py::test_hourly_report_joins_every_local_day_owner_across_midnight
     related_tests:
       - tests/test_model_hub_usage.py::test_legacy_usage_after_local_midnight_marks_the_overlapping_hour_incomplete
+  - id: MH-USAGE-BACKEND-007
+    name: Queued same-hour calls preserve their distinct local-day owners through persistence
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_usage_writer_preserves_daily_owners_inside_one_utc_hour
+  - id: MH-USAGE-BACKEND-008
+    name: Read and write boundaries exclude future hourly evidence without claiming complete zero usage
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write
   - id: MH-USAGE-E2E-001
     name: Measured hourly and daily reports reconcile through HTTP and IPC after a controller restart
     status: covered

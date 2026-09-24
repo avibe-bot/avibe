@@ -670,6 +670,115 @@ def test_usage_writer_never_coalesces_different_hours_before_persistence(tmp_pat
     assert sum(bucket["rows"][0]["input_tokens"] for bucket in nonempty) == 7
 
 
+@pytest.mark.parametrize("reported", [False, True])
+def test_usage_writer_preserves_daily_owners_inside_one_utc_hour(
+    tmp_path: Path, reported: bool,
+) -> None:
+    """MH-USAGE-BACKEND-007: queue folds retain both daily and hourly ownership."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 23, 18, 30, tzinfo=timezone.utc)
+    calls = tuple(
+        datetime(2026, 9, 23, 18, minute, tzinfo=timezone.utc)
+        for minute in (13, 14, 20, 21)
+    )
+    usage = (
+        ProtocolUsageReport(input_tokens=10, cached_input_tokens=3, output_tokens=2)
+        if reported else None
+    )
+
+    async def exercise() -> None:
+        queued = _ledger(tmp_path / "queued", now=_Clock(now))
+        separate = _ledger(tmp_path / "separate", now=_Clock(now))
+        writer = UsageWriter(queued)
+        for at in calls:
+            writer.record(source_id="src_a", model_id="model-x", usage=usage, at=at)
+            separate.record(source_id="src_a", model_id="model-x", usage=usage, at=at)
+        pending_rows = len(writer._pending)
+        assert await writer.drain(timeout=5) == 0
+        assert pending_rows == 2
+
+        fresh = _ledger(tmp_path / "queued", now=_Clock(now))
+        assert fresh.summary(days=1, now=now) == separate.summary(days=1, now=now)
+        assert fresh.summary(days=1, now=now)["totals"]["requests"] == 2
+        assert fresh.summary(days=7, now=now) == separate.summary(days=7, now=now)
+        assert [day["requests"] for day in fresh.summary(days=7, now=now)["days"]] == [2, 2]
+        for window in ("24h", "7d"):
+            assert fresh.report(window=window, now=now) == separate.report(window=window, now=now)
+        [bucket] = [
+            bucket for bucket in fresh.report(window="24h", now=now)["buckets"]
+            if bucket["rows"]
+        ]
+        assert bucket["rows"][0]["requests"] == 4
+
+    try:
+        os.environ["TZ"] = "Asia/Kathmandu"
+        time.tzset()
+        asyncio.run(exercise())
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
+@pytest.mark.parametrize("future_minute", [45, 75], ids=["current-hour", "next-hour"])
+def test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write(
+    tmp_path: Path, future_minute: int,
+) -> None:
+    """MH-USAGE-BACKEND-008: future evidence cannot masquerade as complete history."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 24, 12, 15, tzinfo=timezone.utc)
+    future = now.replace(minute=0) + timedelta(minutes=future_minute)
+    counts = {
+        "requests": 1, "token_reports": 1, "input_tokens": 10,
+        "cached_input_tokens": 3, "output_tokens": 2,
+    }
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(json.dumps([{
+            "day": "2026-09-24", "source_id": "src_future", "model_id": "model-x",
+            **counts,
+            "last_metered_at": future.isoformat(),
+            "hourly_history_complete": True,
+            "hours": [{
+                "key": future.replace(minute=0).isoformat(), **counts,
+                "last_metered_at": future.isoformat(),
+            }],
+        }]), encoding="utf-8")
+        before = ledger.path.read_bytes()
+        report = ledger.report(window="24h", now=now)
+        assert ledger.path.read_bytes() == before
+        assert report["totals"]["requests"] == 0
+        assert all(
+            bucket["history_complete"] == (bucket["start_at"][:10] != "2026-09-24")
+            for bucket in report["buckets"]
+        )
+        assert ledger.summary(days=1, now=now)["totals"] == counts
+
+        # A real call triggers persistence; read and write use the same policy.
+        ledger.record(
+            source_id="src_real", model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=5), at=now,
+        )
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+        assert report["totals"]["requests"] == 1
+        assert report["totals"]["input_tokens"] == 5
+        assert any(not bucket["history_complete"] for bucket in report["buckets"])
+        assert ledger.summary(days=1, now=now)["totals"]["requests"] == 2
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
 def test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour(
     tmp_path: Path,
 ) -> None:

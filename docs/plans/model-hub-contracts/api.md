@@ -87,6 +87,8 @@ the released defaulting behavior.
 
 `GET /api/models/usage?window=<key>` is the modern form. Its `window` is one of
 `24h`, `7d`, `30d`, or `60d`, and it is mutually exclusive with `days`. The response
+rejects invalid or conflicting repeated `window` values with HTTP 400; identical
+valid repeats are equivalent to one selector. The successful response
 keeps the legacy `UsageSummary` fields and adds `window_key`, `granularity`,
 `from_at`, `to_at`, and a dense chronological `buckets` matrix. The 24-hour report
 has 24 actual consecutive hourly buckets, including the current partial hour. The
