@@ -198,7 +198,7 @@ const PortaledWindowOwner = ({ handoffRef }: { handoffRef: { current: boolean } 
   return createPortal(
     <button
       type="button"
-      data-settings-navigation-owner="true"
+      data-settings-interaction-owner="true"
       onClick={() => {
         if (!origin) return;
         handoffRef.current = true;
@@ -211,10 +211,25 @@ const PortaledWindowOwner = ({ handoffRef }: { handoffRef: { current: boolean } 
   );
 };
 
+const PortaledModalProbe = () => {
+  const [open, setOpen] = useState(false);
+  return createPortal(
+    <>
+      <button type="button" onClick={() => setOpen(true)}>open-shell-modal</button>
+      {open ? (
+        <div role="dialog" aria-modal="true">
+          <input aria-label="shell modal input" autoFocus />
+        </div>
+      ) : null}
+    </>,
+    document.body,
+  );
+};
+
 const AgentationEscapeProbe = () => {
   const [active, setActive] = useState(true);
   return createPortal(
-    <div data-agentation-root="">
+    <div data-agentation-root="" data-settings-interaction-owner="true">
       <div data-agentation-toolbar>
         <div tabIndex={active ? -1 : 0}>
           <button
@@ -328,6 +343,7 @@ const Harness = ({ desktop }: { desktop: boolean }) => {
         context, so they belong to the sidebar without descending from it. */}
     <PortaledShellControl />
     <PortaledWindowOwner handoffRef={handoffRef} />
+    <PortaledModalProbe />
     <button type="button">shell-elsewhere</button>
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/setup" element={<SetupProbe />} />
@@ -848,6 +864,37 @@ describe('SettingsOverlayRouteSurface', () => {
 
     await user.keyboard('{Escape}');
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+  });
+
+  it('keeps inline Settings open while feedback owns the outside interaction', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+        <AgentationEscapeProbe />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    await user.click(screen.getByRole('button', { name: 'feedback-toolbar' }));
+    expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
+  });
+
+  it('does not steal focus from a modal opened by an inline outside action', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    await user.click(screen.getByRole('button', { name: 'open-shell-modal' }));
+    const input = await screen.findByRole('textbox', { name: 'shell modal input' });
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(input));
   });
 
   // Some shells draw no app sidebar at all — the setup wizard, a single-app tab.

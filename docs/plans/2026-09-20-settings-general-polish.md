@@ -156,11 +156,12 @@ the publisher, feeds the rule directly.
   sidebar is dragged. It publishes `data-settings-menu-placement` for tests.
 
   It also decides what an interaction *outside* the surface means. Inline
-  dismisses when a non-owning shell control is clicked, while navigation and
-  window-handoff controls declare `data-settings-navigation-owner` (or use an
-  anchor / the Settings toggle) so Radix does not perform a second exit. The
-  owner then performs the only navigation or handoff itself; this keeps sidebar
-  links and Dock tiles from racing `closeSettingsOverlay`'s history traversal.
+  dismisses when a non-owning shell control is clicked, while controls that own
+  their outside interaction declare `data-settings-interaction-owner` (or use
+  an anchor / the Settings toggle) so Radix does not perform a second exit. The
+  owner then performs the only navigation, handoff, or overlay action itself;
+  this keeps sidebar links, Dock tiles, and global feedback/toast controls from
+  racing `closeSettingsOverlay`'s history traversal.
   A real outside dismissal records the control that caused it and returns focus
   there instead of stealing focus back to the Settings opener.
 
@@ -169,7 +170,8 @@ the publisher, feeds the rule directly.
   the Dock publishes the ownership marker at its own root and all of its window
   controls inherit it. Standalone Settings keeps the whole viewport live and
   never dismisses from outside interaction; its Settings toggle remains an
-  explicit close path.
+  explicit close path. When a non-owning outside action opens a modal, the
+  foreground modal keeps focus ahead of the dismissed panel's return target.
 - **`SettingsLayout`**'s rail is `var(--app-sidebar-w)` when standalone (so it
   tracks even a dragged sidebar) and stays 196px inline, where spending a second
   full-width column on a secondary nav would cost 496px of left chrome.
@@ -248,9 +250,9 @@ edited into `design.pen`.
 - `SettingsOverlayRouteSurface.test.tsx` — the surface's left edge and border per
   placement, standalone where the shell draws no sidebar, inline dismissal of
   non-owning outside controls with focus retention, and exactly-one navigation
-  for sidebar links and a portaled window owner. Standalone remains open when an
-  outside control is clicked, and the portal case is the one an ancestry test
-  cannot pass.
+  for sidebar links and a portaled window owner. Feedback ownership, modal
+  focus precedence, and standalone remaining open for outside controls are
+  covered too; the portal case is the one an ancestry test cannot pass.
 - `e2e/workbench-general/geometry.spec.ts` — measured in a browser: the 248 rail,
   the card's background matching a neighbouring page's card, and inline actually
   putting a live sidebar beside Settings at the sidebar's own width. It also

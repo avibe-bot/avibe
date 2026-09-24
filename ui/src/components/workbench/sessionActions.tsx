@@ -226,6 +226,7 @@ export const SessionActionMenuContent: React.FC<{
   return (
     <PopoverContent
       align={align}
+      data-settings-interaction-owner="true"
       className={clsx('w-[176px] p-1', className)}
       onCloseAutoFocus={(event) => {
         if (!transferredFocus.current) return;

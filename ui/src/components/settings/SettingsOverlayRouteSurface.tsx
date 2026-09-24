@@ -60,10 +60,10 @@ const getOutsideFocusTarget = (target: EventTarget | null): HTMLElement | null =
   return candidate instanceof HTMLElement && candidate.isConnected ? candidate : null;
 };
 
-const isNavigationOwner = (target: EventTarget | null): boolean => (
+const isInteractionOwner = (target: EventTarget | null): boolean => (
   target instanceof Element
   && target.closest(
-    'a[href], [data-settings-toggle="true"], [data-settings-navigation-owner="true"]',
+    'a[href], [data-settings-toggle="true"], [data-settings-interaction-owner="true"]',
   ) !== null
 );
 
@@ -197,11 +197,12 @@ export const SettingsOverlayRouteSurface = ({
                 if (!standaloneMenu || isToggle) {
                   outsideFocusRef.current = getOutsideFocusTarget(target);
                 }
-                // Navigation-owning controls must perform the only navigation:
-                // a sidebar Link pushes its destination, while the Settings
-                // toggle calls closeSettingsOverlay itself. Preventing Radix's
-                // automatic dismissal keeps it from racing either path.
-                if (isToggle || standaloneMenu || isNavigationOwner(target)) {
+                // Controls that own their outside interaction must decide what
+                // happens next: a sidebar Link pushes its destination, the
+                // Settings toggle closes explicitly, Dock/window controls hand
+                // focus to a window, and global overlays remain usable. Prevent
+                // Radix's generic dismissal from racing those owners.
+                if (standaloneMenu || isInteractionOwner(target)) {
                   event.preventDefault();
                 }
               }}
@@ -250,6 +251,7 @@ export const SettingsOverlayRouteSurface = ({
                     || expectedOrigin === null
                     || locationPath(locationRef.current) !== locationPath(expectedOrigin.location)
                   ) return;
+                  if (isForegroundFocusOwner(document.activeElement)) return;
                   if (outsideTarget?.isConnected && !outsideTarget.closest('[inert]')) {
                     outsideTarget.focus({ preventScroll: true });
                     return;
@@ -258,7 +260,6 @@ export const SettingsOverlayRouteSurface = ({
                     returnTarget.focus({ preventScroll: true });
                     return;
                   }
-                  if (isForegroundFocusOwner(document.activeElement)) return;
                   const fallback = Array.from(
                     document.querySelectorAll<HTMLElement>('[data-settings-toggle="true"]'),
                   ).find((candidate) => !candidate.closest('[inert]'));
