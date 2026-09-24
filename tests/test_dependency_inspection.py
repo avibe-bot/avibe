@@ -73,7 +73,11 @@ def test_selective_checks_preserve_complete_rows_and_only_probe_their_owners(pro
 
     result = api.dependencies_status(dependency_ids=requested)
 
-    assert result == {"ok": True, "deps": [row for row in complete["deps"] if row["id"] in requested]}
+    assert result["ok"] is True
+    assert result["deps"] == [row for row in complete["deps"] if row["id"] in requested]
+    assert result["reconciling"] is False
+    assert result["reconciling_dependencies"] == []
+    assert set(result) == {"ok", "deps", "reconciling", "reconciling_dependencies"}
     assert [group for group, _ in probes] == [group for group in GROUPS if set(group).intersection(requested)]
 
 

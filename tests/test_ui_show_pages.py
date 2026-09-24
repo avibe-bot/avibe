@@ -296,6 +296,43 @@ def test_set_show_runtime_manager_stops_previous_manager():
     assert second.stopped is True
 
 
+def test_get_show_runtime_manager_initializes_once_across_threads(monkeypatch):
+    import core.show_runtime as srt
+
+    srt.set_show_runtime_manager_for_tests(None)
+    constructor_entered = threading.Event()
+    release_constructor = threading.Event()
+    constructor_calls = 0
+
+    class _Manager:
+        def __init__(self):
+            nonlocal constructor_calls
+            constructor_calls += 1
+            constructor_entered.set()
+            assert release_constructor.wait(timeout=2)
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(srt, "ShowRuntimeManager", _Manager)
+    managers = []
+    threads = [threading.Thread(target=lambda: managers.append(srt.get_show_runtime_manager())) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    assert constructor_entered.wait(timeout=2)
+    release_constructor.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    try:
+        assert all(not thread.is_alive() for thread in threads)
+        assert constructor_calls == 1
+        assert len(managers) == 2
+        assert managers[0] is managers[1]
+    finally:
+        srt.set_show_runtime_manager_for_tests(None)
+
+
 def _create_show_page(session_id: str, visibility: str) -> str | None:
     page_dir = ensure_show_page_dir(session_id)
     (page_dir / "index.html").write_text("<!doctype html><title>Show</title><h1>Show Page</h1>", encoding="utf-8")
@@ -11926,6 +11963,49 @@ def test_show_runtime_manager_status_does_not_read_manifest_for_legacy_sources(t
     assert status["provider"] == "npm"
     assert status["manifest"] is None
     assert status["reason"] is None
+
+
+def test_show_runtime_retired_github_source_uses_manifest_prepare_contract(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="github",
+    )
+    command = ["/bin/node", str(tmp_path / "runtime.js")]
+    installs = []
+
+    def install(*, force, offline):
+        installs.append((force, offline))
+        return command
+
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
+
+    assert manager.runtime_source == "manifest-cache"
+    assert manager.prepare()["command"] == command
+    assert installs == [(False, False)]
+
+    assert manager.prepare(force=True)["command"] == command
+    assert installs == [(False, False), (True, False)]
+
+
+def test_show_runtime_prepare_uses_current_archive_install_contract(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+    )
+    command = ["/bin/node", str(tmp_path / "runtime.js")]
+    installs = []
+
+    def install(*, force, offline):
+        installs.append((force, offline))
+        return command
+
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
+
+    assert manager.prepare()["command"] == command
+    assert asyncio.run(manager._resolve_managed_command()) == command
+    assert installs == [(False, False)]
 
 
 def test_show_runtime_manager_can_disable_auto_install(tmp_path):

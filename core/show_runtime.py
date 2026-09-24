@@ -4273,18 +4273,23 @@ class ShowRuntimeManager:
 
 
 _manager: ShowRuntimeManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_show_runtime_manager() -> ShowRuntimeManager:
     global _manager
     if _manager is None:
-        _manager = ShowRuntimeManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = ShowRuntimeManager()
     return _manager
 
 
 def stop_show_runtime_manager() -> None:
-    if _manager is not None:
-        _manager.stop()
+    with _manager_lock:
+        manager = _manager
+    if manager is not None:
+        manager.stop()
 
 
 def _is_runtime_server_cmdline(cmdline: list[str], workspace_root: str) -> bool:
@@ -4392,7 +4397,9 @@ def _show_runtime_app_session_part(path: str) -> str | None:
 
 def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> None:
     global _manager
-    previous = _manager
+    with _manager_lock:
+        previous = _manager
+        _manager = manager
     # Stop the manager we are replacing before dropping the reference. Serving-path
     # tests that never install a fake cause get_show_runtime_manager() to lazily
     # create the real manager, which spawns a Node cli.js + esbuild subprocess tree
@@ -4404,7 +4411,6 @@ def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> No
             previous.stop()
         except Exception:  # pragma: no cover - defensive cleanup
             logger.debug("failed to stop previous show runtime manager", exc_info=True)
-    _manager = manager
 
 
 def _show_runtime_prewarm_import_paths(

@@ -90,6 +90,39 @@ def test_partial_multi_backend_acquire_releases_earlier_locks(tmp_path):
             pass
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the rejected half needs real POSIX permission bits")
+def test_lease_permission_mask_is_posix_only(tmp_path, monkeypatch):
+    """The 0o077 mask describes POSIX permissions; elsewhere it describes nothing.
+
+    Windows synthesizes st_mode from file attributes, so a lease file there
+    always reports 0o666 and the mask would reject every acquire rather than
+    describe one -- the failure that kept the Windows desktop package from
+    building (see issue #2132). Both directions are asserted: POSIX still
+    refuses a group-accessible lease file, and the identical file acquires once
+    os.name is not posix.
+    """
+    directory = tmp_path / "native-takeover"
+    directory.mkdir(mode=0o700)
+    (directory / "codex.lock").touch(mode=0o600)
+    (directory / "codex.lock").chmod(0o660)
+
+    with pytest.raises(OSError, match="Unsafe native lease file"):
+        NativeCredentialLease(("codex",), state_dir=tmp_path).acquire()
+
+    class _NonPosixOs:
+        """Scoped to the module under test, so storage.lock keeps using this
+        host's real locking primitive instead of importing msvcrt."""
+
+        name = "nt"
+
+        def __getattr__(self, attr):
+            return getattr(os, attr)
+
+    monkeypatch.setattr("core.backend_restart.os", _NonPosixOs())
+    with NativeCredentialLease(("codex",), state_dir=tmp_path):
+        pass
+
+
 @pytest.mark.parametrize("data", [
     None, [], {}, {"version": 1, "phase": "prepared", "backends": [{}]},
     {"version": 2, "phase": "prepared", "backends": ["codex"]},

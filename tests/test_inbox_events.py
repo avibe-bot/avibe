@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.inbox_events import InboxEventBus
+from storage.background import EXECUTION_RUN_TYPES, RUN_STATUS_ALIASES, TERMINAL_RUN_STATUSES
 
 
 def test_publish_delivers_to_subscriber():
@@ -106,7 +107,64 @@ def test_synchronous_callback_failure_does_not_break_queue_delivery():
     assert asyncio.run(scenario()) == ("turn.end", {"session_id": "s1"})
 
 
-def test_sqlite_background_store_publishes_run_updates(tmp_path):
+@pytest.mark.parametrize("started_at", [None, "2026-07-04T00:00:01+00:00"])
+@pytest.mark.parametrize("completed_at", [None, "2026-07-04T00:00:02+00:00"])
+def test_run_updated_publisher_preserves_available_timestamps(monkeypatch, started_at, completed_at):
+    from core import inbox_events
+
+    published = []
+    monkeypatch.setattr(inbox_events.bus, "publish", lambda *event: published.append(event))
+    inbox_events.publish_run_updated(
+        run_id="run_stamps",
+        status="succeeded",
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+    expected = {"run_id": "run_stamps", "status": "succeeded"}
+    expected.update(
+        (key, value)
+        for key, value in {"started_at": started_at, "completed_at": completed_at}.items()
+        if value is not None
+    )
+    assert published == [(inbox_events.RUNS_UPDATED_EVENT, expected)]
+
+
+@pytest.mark.parametrize("stored_status, status", RUN_STATUS_ALIASES.items())
+@pytest.mark.parametrize("started_at", [None, "2026-07-04T00:00:01+00:00"])
+@pytest.mark.parametrize("completed_at", [None, "2026-07-04T00:00:02+00:00"])
+def test_run_row_events_only_add_available_terminal_timestamps(
+    monkeypatch, stored_status, status, started_at, completed_at
+):
+    from core import inbox_events
+    from storage.background import _publish_run_rows_updated
+
+    published = []
+    bridged = []
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", False)
+    monkeypatch.setattr(inbox_events.bus, "publish", lambda *event: published.append(event))
+    monkeypatch.setattr(
+        "vibe.internal_client.publish_event_sync",
+        lambda event_type, data, **kwargs: bridged.append((event_type, data)),
+    )
+    _publish_run_rows_updated(
+        [{"id": "run_stamps", "status": stored_status, "started_at": started_at, "completed_at": completed_at}]
+    )
+
+    expected = {"run_id": "run_stamps", "status": status, "cancel_requested": False}
+    if status in TERMINAL_RUN_STATUSES:
+        expected.update(
+            (key, value)
+            for key, value in {"started_at": started_at, "completed_at": completed_at}.items()
+            if value is not None
+        )
+    assert published == [(inbox_events.RUNS_UPDATED_EVENT, expected)]
+    assert bridged == published
+
+
+@pytest.mark.parametrize("terminal_status", sorted(TERMINAL_RUN_STATUSES))
+@pytest.mark.parametrize("run_type", sorted(EXECUTION_RUN_TYPES | {"watch_runtime", "future_run_type"}))
+def test_sqlite_background_store_publishes_run_updates(tmp_path, run_type, terminal_status):
     async def scenario():
         from core import inbox_events
         from storage.background import SQLiteBackgroundTaskStore
@@ -117,7 +175,7 @@ def test_sqlite_background_store_publishes_run_updates(tmp_path):
             store.enqueue_run(
                 {
                     "id": "run_evt_1",
-                    "request_type": "agent_run",
+                    "request_type": run_type,
                     "status": "queued",
                     "message": "hello",
                     "created_at": "2026-07-04T00:00:00+00:00",
@@ -133,35 +191,44 @@ def test_sqlite_background_store_publishes_run_updates(tmp_path):
 
             store.update_run_status(
                 "run_evt_1",
-                status="failed",
-                updated_at="2026-07-04T00:00:02+00:00",
+                status=terminal_status,
+                updated_at="2026-07-04T00:01:02+00:00",
                 completed_at="2026-07-04T00:00:02+00:00",
-                error="boom",
             )
-            failed = await asyncio.wait_for(queue.get(), timeout=1.0)
-            return queued, running, failed
+            terminal = await asyncio.wait_for(queue.get(), timeout=1.0)
+            return queued, running, terminal, store.get_run("run_evt_1")
         finally:
             store.close()
             inbox_events.bus.unsubscribe(sub_id)
 
-    queued, running, failed = asyncio.run(scenario())
+    queued, running, terminal, persisted = asyncio.run(scenario())
     assert queued == (
         "runs.updated",
         {
             "run_id": "run_evt_1",
             "status": "queued",
-            "run_type": "agent_run",
+            "run_type": run_type,
             "session_id": "ses_evt",
             "updated_at": "2026-07-04T00:00:00+00:00",
             "cancel_requested": False,
         },
     )
-    assert running[0] == "runs.updated"
-    assert running[1]["run_id"] == "run_evt_1"
-    assert running[1]["status"] == "running"
-    assert failed[0] == "runs.updated"
-    assert failed[1]["run_id"] == "run_evt_1"
-    assert failed[1]["status"] == "failed"
+    assert running == (
+        "runs.updated",
+        {**queued[1], "status": "running", "updated_at": "2026-07-04T00:00:01+00:00"},
+    )
+    assert persisted["started_at"] == "2026-07-04T00:00:01+00:00"
+    assert persisted["completed_at"] == "2026-07-04T00:00:02+00:00"
+    assert terminal == (
+        "runs.updated",
+        {
+            **queued[1],
+            "status": terminal_status,
+            "started_at": persisted["started_at"],
+            "completed_at": persisted["completed_at"],
+            "updated_at": "2026-07-04T00:01:02+00:00",
+        },
+    )
 
 
 def test_hfr_156_sqlite_commit_bridges_run_update_to_controller(tmp_path, monkeypatch):

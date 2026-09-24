@@ -1,0 +1,499 @@
+//! Readiness probing against the Avibe Web UI server.
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+
+use crate::origin::LoopbackOrigin;
+
+const MAX_READINESS_BYTES: usize = 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeReadiness {
+    /// Identity of the Controller Runtime, when it is desktop-managed.
+    pub desktop_runtime_id: Option<String>,
+    /// Identity of the UI Runtime serving an external Controller, when the UI
+    /// is known to come from a bundled private tree.
+    pub desktop_ui_runtime_id: Option<String>,
+}
+
+/// Answers whether the Avibe UI and Controller serve this origin and, for an
+/// app-private Runtime, which immutable archive is running.
+///
+/// Transport errors and raw response bodies stay inside the probe so nothing
+/// from the network reaches the bootstrap UI.
+#[async_trait]
+pub trait HealthProbe: Send + Sync {
+    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness>;
+
+    /// Returns the Controller identity from an explicit UI/Controller mismatch.
+    ///
+    /// This is not readiness: callers may use it only to hand a superseded
+    /// desktop-managed Runtime over to its bundled successor.
+    async fn mismatched_runtime_identity(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        None
+    }
+
+    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
+        self.readiness(origin).await.is_some()
+    }
+}
+
+/// `GET <origin>/ready`, requiring UI, service ownership, and Controller IPC.
+pub struct HttpHealthProbe {
+    client: reqwest::Client,
+}
+
+impl HttpHealthProbe {
+    pub fn new(timeout: Duration) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            // Readiness must be proved by this exact loopback listener. Following
+            // a redirect would let an unrelated local service delegate trust to
+            // arbitrary remote content.
+            .redirect(reqwest::redirect::Policy::none())
+            // A proxy configured for the wider machine must never sit between the
+            // shell and a loopback Runtime.
+            .no_proxy()
+            .build()?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait]
+impl HealthProbe for HttpHealthProbe {
+    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
+            return None;
+        };
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = bounded_response_body(response).await?;
+        parse_avibe_readiness_body(&body)
+    }
+
+    async fn mismatched_runtime_identity(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
+            return None;
+        };
+        if response.status() != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return None;
+        }
+        let body = bounded_response_body(response).await?;
+        parse_runtime_identity_mismatch_body(&body)
+    }
+}
+
+async fn bounded_response_body(mut response: reqwest::Response) -> Option<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_READINESS_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        let length = body.len().checked_add(chunk.len())?;
+        if length > MAX_READINESS_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
+}
+
+/// Whether a `/ready` body proves both the UI and Controller are ready.
+///
+/// The Python endpoint performs the authoritative service-lock and internal IPC
+/// checks. Rust accepts only its exact affirmative payload.
+pub fn is_avibe_readiness_body(body: &str) -> bool {
+    parse_avibe_readiness_body(body).is_some()
+}
+
+pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
+        return None;
+    };
+    let object = payload.as_object()?;
+    let controller_runtime_id = match object.get("desktop_runtime_id") {
+        Some(value) => Some(value.as_str()?),
+        None => None,
+    };
+    let ui_runtime_id = match object.get("desktop_ui_runtime_id") {
+        Some(value) => Some(value.as_str()?),
+        None => None,
+    };
+    let expected_len = 3 + usize::from(controller_runtime_id.is_some() || ui_runtime_id.is_some());
+    let keys_valid = object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "schema_version" | "product" | "ready" | "desktop_runtime_id" | "desktop_ui_runtime_id"
+        )
+    });
+    if (controller_runtime_id.is_some() && ui_runtime_id.is_some())
+        || object.len() != expected_len
+        || !keys_valid
+        || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+        || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
+        || object.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+        || controller_runtime_id.or(ui_runtime_id).is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return None;
+    }
+    Some(RuntimeReadiness {
+        desktop_runtime_id: controller_runtime_id.map(str::to_owned),
+        desktop_ui_runtime_id: ui_runtime_id.map(str::to_owned),
+    })
+}
+
+fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
+        return None;
+    };
+    let object = payload.as_object()?;
+    let runtime_id = object.get("desktop_runtime_id")?.as_str()?;
+    if object.len() != 5
+        || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+        || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
+        || object.get("ready").and_then(serde_json::Value::as_bool) != Some(false)
+        || object.get("code").and_then(serde_json::Value::as_str) != Some("runtime_identity_mismatch")
+        || runtime_id.len() != 64
+        || !runtime_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    Some(RuntimeReadiness {
+        desktop_runtime_id: Some(runtime_id.to_owned()),
+        desktop_ui_runtime_id: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    const READY_BODY: &str = r#"{"schema_version":1,"product":"avibe","ready":true}"#;
+    const EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY: &str =
+        include_str!("../../../tests/fixtures/desktop_ready_external_controller_bundled_ui.json");
+
+    struct TestServer {
+        origin: LoopbackOrigin,
+        contacted: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn start(response: Vec<u8>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("test listener binds");
+            listener.set_nonblocking(true).expect("listener is nonblocking");
+            let address = listener.local_addr().expect("listener has an address");
+            let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("test origin is loopback");
+            let contacted = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_contacted = contacted.clone();
+            let thread_stop = stop.clone();
+            let handle = std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            thread_contacted.store(true, Ordering::SeqCst);
+                            stream.set_nonblocking(false).expect("test request stream is blocking");
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .expect("test request reads are bounded");
+                            let mut request = Vec::new();
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                let mut chunk = [0_u8; 1024];
+                                let read = stream.read(&mut chunk).expect("test request reads");
+                                assert!(read > 0, "test request contains complete headers");
+                                request.extend_from_slice(&chunk[..read]);
+                                assert!(request.len() <= 16 * 1024, "test request headers are bounded");
+                            }
+                            stream.write_all(&response).expect("test response writes");
+                            break;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("test listener failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                origin,
+                contacted,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn finish(mut self) -> bool {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test server exits");
+            }
+            self.contacted.load(Ordering::SeqCst)
+        }
+    }
+
+    fn response(status: &str, headers: &[(&str, String)], body: &[u8]) -> Vec<u8> {
+        let mut bytes = format!("HTTP/1.1 {status}\r\nConnection: close\r\n").into_bytes();
+        for (name, value) in headers {
+            bytes.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn test_server_waits_for_complete_request_headers() {
+        let expected_response = response("200 OK", &[], READY_BODY.as_bytes());
+        let server = TestServer::start(expected_response.clone());
+        let mut client =
+            TcpStream::connect(server.origin.as_str().trim_start_matches("http://")).expect("test client connects");
+        client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("test client reads are bounded");
+
+        for fragment in [b"".as_slice(), b"GET /ready HTTP/1.1\r\nHost: localhost\r\n".as_slice()] {
+            client.write_all(fragment).expect("test request fragment writes");
+            let mut pending_response = [0_u8; 1];
+            let error = client
+                .read(&mut pending_response)
+                .expect_err("test server waits until the headers are complete");
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+        }
+
+        client.write_all(b"\r\n").expect("test request headers complete");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("test response reads are bounded");
+        let mut actual_response = Vec::new();
+        client.read_to_end(&mut actual_response).expect("test response reads");
+        assert_eq!(actual_response, expected_response);
+        assert!(server.finish());
+    }
+
+    #[test]
+    fn test_server_rejects_truncated_request_headers() {
+        let mut server = TestServer::start(Vec::new());
+        let mut client =
+            TcpStream::connect(server.origin.as_str().trim_start_matches("http://")).expect("test client connects");
+        client
+            .write_all(b"GET /ready HTTP/1.1\r\n")
+            .expect("test request writes");
+        client.shutdown(Shutdown::Write).expect("test request ends");
+        let failure = server
+            .handle
+            .take()
+            .expect("test server has a thread")
+            .join()
+            .expect_err("truncated headers fail the test server");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"test request contains complete headers")
+        );
+    }
+
+    #[test]
+    fn test_server_rejects_oversized_request_headers() {
+        let mut server = TestServer::start(Vec::new());
+        let mut client =
+            TcpStream::connect(server.origin.as_str().trim_start_matches("http://")).expect("test client connects");
+        client
+            .write_all(&vec![b'x'; 16 * 1024 + 1])
+            .expect("test request writes");
+        let failure = server
+            .handle
+            .take()
+            .expect("test server has a thread")
+            .join()
+            .expect_err("oversized headers fail the test server");
+        assert_eq!(
+            failure.downcast_ref::<&str>(),
+            Some(&"test request headers are bounded")
+        );
+    }
+
+    #[test]
+    fn accepts_the_exact_runtime_readiness_payload() {
+        assert!(is_avibe_readiness_body(
+            r#"{"schema_version":1,"product":"avibe","ready":true}"#
+        ));
+        assert_eq!(
+            parse_avibe_readiness_body(EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None,
+                desktop_ui_runtime_id: Some("a".repeat(64)),
+            })
+        );
+        assert_eq!(
+            parse_avibe_readiness_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"{}"}}"#,
+                "a".repeat(64)
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some("a".repeat(64)),
+                desktop_ui_runtime_id: None,
+            })
+        );
+        assert_eq!(
+            parse_avibe_readiness_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"{}"}}"#,
+                "b".repeat(64)
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None,
+                desktop_ui_runtime_id: Some("b".repeat(64)),
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_only_the_exact_runtime_identity_mismatch_payload() {
+        let runtime_id = "a".repeat(64);
+        assert_eq!(
+            parse_runtime_identity_mismatch_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some(runtime_id),
+                desktop_ui_runtime_id: None,
+            })
+        );
+        assert_eq!(
+            parse_runtime_identity_mismatch_body(
+                r#"{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch"}"#
+            ),
+            None
+        );
+        for invalid in ["", "bad", &"A".repeat(64)] {
+            assert!(parse_runtime_identity_mismatch_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{invalid}"}}"#
+            )).is_none());
+        }
+        assert!(parse_runtime_identity_mismatch_body(
+            r#"{"schema_version":1,"product":"avibe","ready":false,"code":"controller_unavailable"}"#
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_ui_only_starting_stale_and_unrelated_bodies() {
+        let bodies = [
+            "",
+            "ok",
+            "<html><body>hello</body></html>",
+            "{}",
+            r#"{"status":"ok"}"#,
+            r#"{"ready":true}"#,
+            r#"{"schema_version":1,"product":"other","ready":true}"#,
+            r#"{"schema_version":2,"product":"avibe","ready":true}"#,
+            r#"{"ready":false,"code":"controller_unavailable"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"extra":1}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"short"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"short"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":null}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","extra":1}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","desktop_ui_runtime_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            r#"{"ready":"true"}"#,
+            "[]",
+        ];
+        for body in bodies {
+            assert!(!is_avibe_readiness_body(body), "body {body:?} must not be adopted");
+        }
+    }
+
+    #[test]
+    fn probe_construction_does_not_need_a_server() {
+        HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+    }
+
+    #[tokio::test]
+    async fn the_probe_accepts_the_exact_body_from_its_loopback_listener() {
+        let server = TestServer::start(response(
+            "200 OK",
+            &[("Content-Length", READY_BODY.len().to_string())],
+            READY_BODY.as_bytes(),
+        ));
+        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+
+        assert!(probe.is_healthy(&server.origin).await);
+        assert!(server.finish());
+    }
+
+    #[tokio::test]
+    async fn the_probe_recovers_identity_from_an_explicit_mismatch() {
+        let runtime_id = "a".repeat(64);
+        let body = format!(
+            r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
+        );
+        let server = TestServer::start(response(
+            "503 Service Unavailable",
+            &[("Content-Length", body.len().to_string())],
+            body.as_bytes(),
+        ));
+        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+
+        assert_eq!(
+            probe.mismatched_runtime_identity(&server.origin).await,
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some(runtime_id),
+                desktop_ui_runtime_id: None,
+            })
+        );
+        assert!(server.finish());
+    }
+
+    #[tokio::test]
+    async fn the_probe_does_not_follow_redirects() {
+        let target = TestServer::start(response(
+            "200 OK",
+            &[("Content-Length", READY_BODY.len().to_string())],
+            READY_BODY.as_bytes(),
+        ));
+        let redirect = TestServer::start(response(
+            "302 Found",
+            &[("Location", format!("{}/ready", target.origin.as_str()))],
+            &[],
+        ));
+        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+
+        assert!(!probe.is_healthy(&redirect.origin).await);
+        assert!(redirect.finish());
+        assert!(!target.finish(), "the redirected listener must never be contacted");
+    }
+
+    #[tokio::test]
+    async fn the_probe_rejects_an_oversized_streamed_body() {
+        let body = vec![b'x'; MAX_READINESS_BYTES + 1];
+        let server = TestServer::start(response("200 OK", &[], &body));
+        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+
+        assert!(!probe.is_healthy(&server.origin).await);
+        assert!(server.finish());
+    }
+}

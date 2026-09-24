@@ -1,0 +1,2457 @@
+//! The Avibe desktop shell.
+//!
+//! The shell is deliberately thin. It owns one window, runs the bootstrap state
+//! machine from [`avibe_runtime_host`], and navigates that window to the
+//! Workbench once the Runtime answers the combined readiness endpoint.
+//!
+//! Two boundaries are load-bearing:
+//!
+//! * **Normal lifecycle does not stop the Runtime.** Closing or recreating a
+//!   window leaves it running. Only confirmed lifecycle actions invoke
+//!   the Runtime's own graceful stop command.
+//! * **The Workbench is not privileged.** `capabilities/bootstrap.json` grants
+//!   the two bootstrap commands to the shell's own local page only. Once the
+//!   window navigates to the Workbench origin the capability no longer matches,
+//!   and [`ensure_shell_ui`] rejects the call a second time regardless.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+mod native_frame;
+mod notifications;
+
+#[cfg(target_os = "macos")]
+mod macos_deep_link;
+
+use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
+#[cfg(not(feature = "bundled-runtime"))]
+use avibe_runtime_host::default_runtime_host;
+#[cfg(feature = "bundled-runtime")]
+use avibe_runtime_host::{bundled_runtime_host, BootstrapLog, BOOTSTRAP_LOG_NAME};
+use avibe_runtime_host::{
+    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LaunchError,
+    LoopbackOrigin, RuntimeHost, StatusSink,
+};
+use serde::Deserialize;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
+use tauri::plugin::Builder as PluginBuilder;
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder};
+use tauri::{RunEvent, WindowEvent};
+use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+use url::Url;
+
+/// The shell's only window. Matches `app.windows[0].label` in `tauri.conf.json`
+/// and the `windows` list in `capabilities/bootstrap.json`.
+const MAIN_WINDOW: &str = "main";
+
+/// Event carrying a [`BootstrapStatus`] to the bootstrap page.
+const STATUS_EVENT: &str = "bootstrap-status";
+
+/// Fixed destination for the bootstrap's missing-Runtime help action.
+const INSTALL_DOCS_URL: &str = "https://docs.avibe.bot/get-started/install";
+
+/// How often the shell checks a Runtime after handing the window to it.
+const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A single missed probe may be a reload or a short scheduler pause. Requiring
+/// three misses avoids replacing a healthy Workbench on transient failure.
+const READINESS_FAILURE_THRESHOLD: u8 = 3;
+
+const ACTIVITY_IDLE: u8 = 0;
+const ACTIVITY_BOOTSTRAP: u8 = 1;
+const ACTIVITY_MONITOR: u8 = 2;
+const ACTIVITY_STOP: u8 = 4;
+
+const TRAY_ID: &str = "avibe-runtime";
+const OPEN_MENU_ID: &str = "open-avibe";
+const STOP_MENU_ID: &str = "stop-runtime";
+const QUIT_MENU_ID: &str = "quit-avibe";
+const LOGIN_MENU_ID: &str = "start-at-login";
+const SETTINGS_MENU_ID: &str = "open-settings";
+/// What Settings opens: the Workbench deep link, whose destination
+/// `parse_deep_link` owns, delivered the way an external link is.
+const SETTINGS_DEEP_LINK: &str = "avibe://settings";
+#[cfg(feature = "bundled-runtime")]
+const ACTIVITY_UNINSTALL: u8 = 3;
+
+#[cfg(feature = "bundled-runtime")]
+const UNINSTALL_MENU_ID: &str = "uninstall-private-runtime";
+
+const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
+const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductCatalog {
+    desktop_bootstrap: DesktopBootstrapCatalog,
+}
+
+#[derive(Deserialize)]
+struct DesktopBootstrapCatalog {
+    tray: NativeTrayCatalog,
+    notifications: notifications::NativeNotificationCatalog,
+    #[cfg(feature = "bundled-runtime")]
+    uninstall: NativeUninstallCatalog,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeTrayCatalog {
+    open: String,
+    starting: String,
+    serving: String,
+    unreachable: String,
+    stopped: String,
+    stopping: String,
+    stop: String,
+    quit: String,
+    login: String,
+    settings: String,
+    stop_title: String,
+    stop_message: String,
+    stop_action: String,
+    quit_title: String,
+    quit_message: String,
+    quit_stop: String,
+    quit_keep: String,
+    cancel: String,
+    busy_title: String,
+    busy_message: String,
+    failure_title: String,
+    stop_failure: String,
+    login_failure: String,
+}
+
+#[cfg(feature = "bundled-runtime")]
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeUninstallCatalog {
+    menu_label: String,
+    confirm_title: String,
+    confirm_message: String,
+    confirm_action: String,
+    cancel_action: String,
+    busy_title: String,
+    busy_message: String,
+    success_title: String,
+    success_message: String,
+    failure_title: String,
+    failure_message: String,
+}
+
+fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> DesktopBootstrapCatalog {
+    let use_chinese = locales
+        .into_iter()
+        .find_map(|locale| {
+            let normalized = locale.to_lowercase();
+            if normalized.starts_with("zh") {
+                Some(true)
+            } else if normalized.starts_with("en") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
+    let source = if use_chinese {
+        ZH_PRODUCT_CATALOG
+    } else {
+        EN_PRODUCT_CATALOG
+    };
+    serde_json::from_str::<ProductCatalog>(source)
+        .expect("the checked product locale catalog must be valid")
+        .desktop_bootstrap
+}
+
+fn native_tray_catalog() -> NativeTrayCatalog {
+    native_catalog_for_locales(sys_locale::get_locales()).tray
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn native_uninstall_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> NativeUninstallCatalog {
+    native_catalog_for_locales(locales).uninstall
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn native_uninstall_catalog() -> NativeUninstallCatalog {
+    native_uninstall_catalog_for_locales(sys_locale::get_locales())
+}
+
+/// Shared shell state. Everything is an `Arc` so a bootstrap run can hold what it
+/// needs without borrowing from the managed state across an await point.
+struct Shell {
+    host: Arc<RuntimeHost>,
+    latest: Arc<Mutex<Option<BootstrapStatus>>>,
+    activity: Arc<AtomicU8>,
+    active_origin: Arc<Mutex<Option<LoopbackOrigin>>>,
+    window_generation: Arc<AtomicU64>,
+    monitor_generation: Arc<AtomicU64>,
+    dialog_pending: AtomicBool,
+    exit_authorized: AtomicBool,
+    bootstrap_url: Url,
+}
+
+impl Shell {
+    fn new(host: RuntimeHost, bootstrap_url: Url) -> Self {
+        Self {
+            host: Arc::new(host),
+            latest: Arc::new(Mutex::new(None)),
+            activity: Arc::new(AtomicU8::new(ACTIVITY_IDLE)),
+            active_origin: Arc::new(Mutex::new(None)),
+            window_generation: Arc::new(AtomicU64::new(0)),
+            monitor_generation: Arc::new(AtomicU64::new(0)),
+            dialog_pending: AtomicBool::new(false),
+            exit_authorized: AtomicBool::new(false),
+            bootstrap_url,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrayRuntimeState {
+    Starting,
+    Serving(LoopbackOrigin),
+    Unreachable,
+    Stopped,
+    Stopping,
+}
+
+impl TrayRuntimeState {
+    fn from_status(status: &BootstrapStatus) -> Self {
+        match status.phase {
+            BootstrapPhase::Probing | BootstrapPhase::Starting => Self::Starting,
+            BootstrapPhase::Ready => LoopbackOrigin::parse(&status.origin)
+                .map(Self::Serving)
+                .unwrap_or(Self::Unreachable),
+            BootstrapPhase::Failed if status.notice.code == BootstrapNoticeCode::RuntimeStopped => Self::Stopped,
+            BootstrapPhase::Failed => Self::Unreachable,
+        }
+    }
+
+    fn label(&self, catalog: &NativeTrayCatalog) -> String {
+        match self {
+            Self::Starting => catalog.starting.clone(),
+            Self::Serving(origin) => catalog
+                .serving
+                .replace("{{address}}", origin.as_str().trim_start_matches("http://")),
+            Self::Unreachable => catalog.unreachable.clone(),
+            Self::Stopped => catalog.stopped.clone(),
+            Self::Stopping => catalog.stopping.clone(),
+        }
+    }
+
+    fn icon(&self) -> tauri::image::Image<'static> {
+        let color = match self {
+            Self::Starting | Self::Stopping => [210, 135, 10, 255],
+            Self::Serving(_) => [28, 160, 90, 255],
+            Self::Unreachable => [216, 64, 64, 255],
+            Self::Stopped => [125, 125, 125, 255],
+        };
+        let mut pixels = vec![0; 32 * 32 * 4];
+        for row in 0..32_i32 {
+            for column in 0..32_i32 {
+                let distance = (row - 16).pow(2) + (column - 16).pow(2);
+                let ring = (110..=210).contains(&distance);
+                let mark = match self {
+                    Self::Serving(_) => distance < 38,
+                    Self::Starting | Self::Stopping => (14..=17).contains(&column) && (7..=17).contains(&row),
+                    Self::Unreachable => (column - row).abs() <= 2 && (9..=23).contains(&row),
+                    Self::Stopped => (12..=20).contains(&row) && (12..=20).contains(&column),
+                };
+                if ring || mark {
+                    let offset = ((row * 32 + column) * 4) as usize;
+                    pixels[offset..offset + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        tauri::image::Image::new_owned(pixels, 32, 32)
+    }
+}
+
+struct NativeMenus {
+    tray: Menu<tauri::Wry>,
+    application: Option<Submenu<tauri::Wry>>,
+    status: MenuItem<tauri::Wry>,
+    stop: MenuItem<tauri::Wry>,
+    settings: MenuItem<tauri::Wry>,
+    login: CheckMenuItem<tauri::Wry>,
+    notifications: CheckMenuItem<tauri::Wry>,
+    stop_present: AtomicBool,
+    displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
+}
+
+fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
+    let catalog = native_tray_catalog();
+    let open = MenuItem::with_id(app, OPEN_MENU_ID, &catalog.open, true, None::<&str>)?;
+    let status = MenuItem::with_id(app, "runtime-status", &catalog.starting, false, None::<&str>)?;
+    let stop = MenuItem::with_id(app, STOP_MENU_ID, &catalog.stop, true, None::<&str>)?;
+    // Enabled by `refresh_runtime_tray` once the window shows a Workbench.
+    let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, &catalog.settings, false, Some("CmdOrCtrl+,"))?;
+    let login_state = app.autolaunch().is_enabled();
+    let login_unavailable = login_state.is_err();
+    let login = CheckMenuItem::with_id(
+        app,
+        LOGIN_MENU_ID,
+        &catalog.login,
+        true,
+        login_state.unwrap_or(false),
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, QUIT_MENU_ID, &catalog.quit, true, None::<&str>)?;
+    let notifications = CheckMenuItem::with_id(
+        app,
+        notifications::MENU_ID,
+        native_catalog_for_locales(sys_locale::get_locales())
+            .notifications
+            .toggle,
+        true,
+        app.state::<notifications::Notifications>().enabled(),
+        None::<&str>,
+    )?;
+    let tray = Menu::with_items(
+        app,
+        &[
+            &open,
+            &status,
+            &PredefinedMenuItem::separator(app)?,
+            &settings,
+            &login,
+            &notifications,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+    let application_menu = application_menu(app)?;
+    let application = application_menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(submenu) => Some(submenu),
+        _ => None,
+    });
+    if let Some(submenu) = &application {
+        // `Menu::default` opens the macOS app submenu with About and a separator;
+        // Settings takes its own group right below, where the platform puts it.
+        // Elsewhere the first submenu is File, and Settings leads it.
+        let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
+        submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
+        submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
+    }
+    app.set_menu(application_menu)?;
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(TrayRuntimeState::Starting.icon())
+        .tooltip(&catalog.starting)
+        .menu(&tray)
+        .build(app)?;
+    app.manage(NativeMenus {
+        tray,
+        application,
+        status,
+        stop,
+        settings,
+        login,
+        notifications,
+        stop_present: AtomicBool::new(false),
+        displayed: Mutex::new(None),
+    });
+    if login_unavailable {
+        app.dialog()
+            .message(catalog.login_failure)
+            .title(catalog.failure_title)
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    }
+    Ok(())
+}
+
+fn stop_is_available(owned: bool, activity: u8) -> bool {
+    owned && matches!(activity, ACTIVITY_IDLE | ACTIVITY_MONITOR)
+}
+
+/// Settings live in the Workbench, so they open only while the window shows one:
+/// the shell is monitoring the listener it navigated to. During bootstrap, stop,
+/// or removal there is nothing to open, and a queued request would land later.
+fn settings_is_available(activity: u8, workbench_origin: bool) -> bool {
+    activity == ACTIVITY_MONITOR && workbench_origin
+}
+
+fn open_workbench_settings(app: &AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    let workbench_origin = shell.active_origin.lock().is_ok_and(|origin| origin.is_some());
+    if !settings_is_available(shell.activity.load(Ordering::SeqCst), workbench_origin) {
+        return;
+    }
+    receive_native_deep_link(app, [SETTINGS_DEEP_LINK]);
+}
+
+fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
+    refresh_native_controls(app, Some(state));
+}
+
+/// The Runtime status the native controls show next. `None` keeps the status
+/// already shown: a page load says what the window shows, not whether the
+/// Runtime is healthy. With nothing shown yet there is nothing to keep, and the
+/// first status refresh sets every control.
+fn next_tray_state(
+    requested: Option<TrayRuntimeState>,
+    shown: Option<&TrayRuntimeState>,
+    activity: u8,
+) -> Option<TrayRuntimeState> {
+    let state = requested.or_else(|| shown.cloned())?;
+    Some(if activity == ACTIVITY_STOP {
+        TrayRuntimeState::Stopping
+    } else {
+        state
+    })
+}
+
+/// Brings every native control in line with the shell's current activity and
+/// window, so availability is decided in one place whoever asks.
+fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(menus) = handle.try_state::<NativeMenus>() else {
+            return;
+        };
+        let shell = handle.state::<Shell>();
+        let activity = shell.activity.load(Ordering::SeqCst);
+        let owned = stop_is_available(shell.host.has_owned_runtime(), activity);
+        let workbench_origin = shell.active_origin.lock().is_ok_and(|origin| origin.is_some());
+        let settings = settings_is_available(activity, workbench_origin);
+        let mut displayed = menus.displayed.lock().expect("native tray state lock");
+        let Some(state) = next_tray_state(requested, displayed.as_ref().map(|(shown, _, _)| shown), activity) else {
+            return;
+        };
+        if displayed.as_ref() == Some(&(state.clone(), owned, settings)) {
+            return;
+        }
+        let update = || -> tauri::Result<()> {
+            let label = state.label(&native_tray_catalog());
+            menus.status.set_text(&label)?;
+            menus.settings.set_enabled(settings)?;
+            if owned != menus.stop_present.load(Ordering::SeqCst) {
+                if owned {
+                    menus.tray.insert(&menus.stop, 2)?;
+                    if let Some(submenu) = &menus.application {
+                        submenu.insert(&menus.stop, 2)?;
+                    }
+                } else {
+                    menus.tray.remove(&menus.stop)?;
+                    if let Some(submenu) = &menus.application {
+                        submenu.remove(&menus.stop)?;
+                    }
+                }
+                menus.stop_present.store(owned, Ordering::SeqCst);
+            }
+            if let Some(tray) = handle.tray_by_id(TRAY_ID) {
+                tray.set_tooltip(Some(&label))?;
+                tray.set_icon(Some(state.icon()))?;
+            }
+            Ok(())
+        };
+        if update().is_ok() {
+            *displayed = Some((state, owned, settings));
+        } else {
+            eprintln!("failed to refresh native Runtime controls");
+        }
+    });
+}
+
+fn refresh_latest_tray(app: &AppHandle) {
+    let state = app
+        .state::<Shell>()
+        .latest
+        .lock()
+        .ok()
+        .and_then(|latest| latest.as_ref().map(TrayRuntimeState::from_status))
+        .unwrap_or(TrayRuntimeState::Starting);
+    refresh_runtime_tray(app, state);
+}
+
+fn show_lifecycle_busy(app: &AppHandle) {
+    let catalog = native_tray_catalog();
+    app.dialog()
+        .message(catalog.busy_message)
+        .title(catalog.busy_title)
+        .show(|_| {});
+}
+
+fn claim_runtime_stop(activity: &AtomicU8) -> bool {
+    loop {
+        let current = activity.load(Ordering::SeqCst);
+        if !matches!(current, ACTIVITY_IDLE | ACTIVITY_MONITOR) {
+            return false;
+        }
+        if activity
+            .compare_exchange(current, ACTIVITY_STOP, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QuitChoice {
+    Stop,
+    Keep,
+    Cancel,
+}
+
+fn quit_choice(result: MessageDialogResult, catalog: &NativeTrayCatalog) -> QuitChoice {
+    match result {
+        MessageDialogResult::Yes => QuitChoice::Stop,
+        MessageDialogResult::No => QuitChoice::Keep,
+        MessageDialogResult::Custom(label) if label == catalog.quit_stop => QuitChoice::Stop,
+        MessageDialogResult::Custom(label) if label == catalog.quit_keep => QuitChoice::Keep,
+        _ => QuitChoice::Cancel,
+    }
+}
+
+fn exit_shell(app: &AppHandle) {
+    notifications::stop(app);
+    app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
+    let shell = app.state::<Shell>();
+    if !matches!(shell.activity.load(Ordering::SeqCst), ACTIVITY_IDLE | ACTIVITY_MONITOR) {
+        show_lifecycle_busy(&app);
+        return;
+    }
+    if shell.dialog_pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if quit && !shell.host.has_owned_runtime() {
+        if claim_runtime_stop(&shell.activity) {
+            exit_shell(&app);
+        } else {
+            shell.dialog_pending.store(false, Ordering::SeqCst);
+            show_lifecycle_busy(&app);
+        }
+        return;
+    }
+    if !shell.host.has_owned_runtime() {
+        shell.dialog_pending.store(false, Ordering::SeqCst);
+        return;
+    }
+    let catalog = native_tray_catalog();
+    if quit {
+        let callback_app = app.clone();
+        app.dialog()
+            .message(catalog.quit_message.clone())
+            .title(catalog.quit_title.clone())
+            .buttons(MessageDialogButtons::YesNoCancelCustom(
+                catalog.quit_stop.clone(),
+                catalog.quit_keep.clone(),
+                catalog.cancel.clone(),
+            ))
+            .show_with_result(move |result| {
+                match quit_choice(result, &catalog) {
+                    QuitChoice::Stop => stop_runtime(callback_app.clone(), true),
+                    QuitChoice::Keep => {
+                        if claim_runtime_stop(&callback_app.state::<Shell>().activity) {
+                            exit_shell(&callback_app);
+                        } else {
+                            show_lifecycle_busy(&callback_app);
+                        }
+                    }
+                    QuitChoice::Cancel => {}
+                }
+                callback_app
+                    .state::<Shell>()
+                    .dialog_pending
+                    .store(false, Ordering::SeqCst);
+            });
+    } else {
+        let callback_app = app.clone();
+        app.dialog()
+            .message(catalog.stop_message)
+            .title(catalog.stop_title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                catalog.stop_action,
+                catalog.cancel,
+            ))
+            .show(move |confirmed| {
+                if confirmed {
+                    stop_runtime(callback_app.clone(), false);
+                }
+                callback_app
+                    .state::<Shell>()
+                    .dialog_pending
+                    .store(false, Ordering::SeqCst);
+            });
+    }
+}
+
+fn stop_runtime(app: AppHandle, quit: bool) {
+    let (host, activity, origin, previous_status) = {
+        let shell = app.state::<Shell>();
+        (
+            shell.host.clone(),
+            shell.activity.clone(),
+            shell.active_origin.lock().ok().and_then(|origin| origin.clone()),
+            shell.latest.lock().ok().and_then(|latest| latest.clone()),
+        )
+    };
+    if !claim_runtime_stop(&activity) {
+        show_lifecycle_busy(&app);
+        return;
+    }
+    refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
+    notifications::stop(&app);
+    tauri::async_runtime::spawn(async move {
+        match host.stop_owned_runtime().await {
+            Ok(()) if quit => exit_shell(&app),
+            Ok(()) => {
+                let _ = return_to_bootstrap(&app);
+                let mut stopped = BootstrapStatus::rejected(BootstrapNoticeCode::RuntimeStopped, true);
+                if let Some(previous) = previous_status {
+                    stopped.origin = previous.origin;
+                }
+                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                WindowSink {
+                    app: app.clone(),
+                    latest: app.state::<Shell>().latest.clone(),
+                }
+                .publish(stopped);
+            }
+            Err(LaunchError::OwnershipLost | LaunchError::NotOwned) => {
+                let _ = return_to_bootstrap(&app);
+                let mut lost = BootstrapStatus::rejected(BootstrapNoticeCode::RuntimeOwnershipLost, true);
+                if let Some(previous) = previous_status {
+                    lost.origin = previous.origin;
+                }
+                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                WindowSink {
+                    app: app.clone(),
+                    latest: app.state::<Shell>().latest.clone(),
+                }
+                .publish(lost);
+                focus_or_restore_main_window(&app);
+            }
+            Err(_) => {
+                if let Some(origin) = origin {
+                    activity.store(ACTIVITY_MONITOR, Ordering::SeqCst);
+                    start_runtime_monitor(app.clone(), origin, activity);
+                } else {
+                    activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                }
+                refresh_latest_tray(&app);
+                let catalog = native_tray_catalog();
+                app.dialog()
+                    .message(catalog.stop_failure)
+                    .title(catalog.failure_title)
+                    .kind(MessageDialogKind::Error)
+                    .show(|_| {});
+            }
+        }
+    });
+}
+
+fn toggle_start_at_login(app: &AppHandle) {
+    let requested = app
+        .autolaunch()
+        .is_enabled()
+        .map(|enabled| !enabled)
+        .map_err(|error| error.to_string());
+    set_start_at_login(app, requested);
+}
+
+/// Writes Start at Login under the policy below. The menu toggle and an
+/// uninstall putting back the registration it cleared both come here; the
+/// uninstall's own disable does not, because its failure already fails that
+/// uninstall closed. Returns whether the requested state now holds.
+fn set_start_at_login(app: &AppHandle, requested: Result<bool, String>) -> bool {
+    let manager = app.autolaunch();
+    settle_start_at_login(
+        requested,
+        |enabled| {
+            let written = if enabled { manager.enable() } else { manager.disable() };
+            written.map_err(|error| error.to_string())
+        },
+        || manager.is_enabled().map_err(|error| error.to_string()),
+        |checked| {
+            if let Some(menus) = app.try_state::<NativeMenus>() {
+                let _ = menus.login.set_checked(checked);
+            }
+        },
+        || {
+            let catalog = native_tray_catalog();
+            app.dialog()
+                .message(catalog.login_failure)
+                .title(catalog.failure_title)
+                .kind(MessageDialogKind::Error)
+                .show(|_| {});
+        },
+    )
+}
+
+/// Start at Login's terminal policy. The requested state is written once and
+/// read back, and the checkbox is drawn from what was read, so the menu shows
+/// the registration the OS actually holds. A failed write, a failed read, or a
+/// read that disagrees with the request is reported with the one login failure
+/// message. Nothing is retried: the checkbox already shows what the OS holds,
+/// so the user can act on it.
+fn settle_start_at_login(
+    requested: Result<bool, String>,
+    write: impl FnOnce(bool) -> Result<(), String>,
+    observe: impl FnOnce() -> Result<bool, String>,
+    render: impl FnOnce(bool),
+    report_failure: impl FnOnce(),
+) -> bool {
+    let written = requested.and_then(|enabled| write(enabled).map(|()| enabled));
+    let observed = observe();
+    render(observed.as_ref().copied().unwrap_or(false));
+    let settled = matches!((&written, &observed), (Ok(requested), Ok(observed)) if requested == observed);
+    if !settled {
+        report_failure();
+    }
+    settled
+}
+
+#[derive(Default)]
+struct ReadinessLoss {
+    consecutive_failures: u8,
+}
+
+impl ReadinessLoss {
+    fn observe(&mut self, ready: bool) -> bool {
+        if ready {
+            self.consecutive_failures = 0;
+            return false;
+        }
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.consecutive_failures >= READINESS_FAILURE_THRESHOLD
+    }
+
+    fn begin_recovery(
+        &mut self,
+        ready: bool,
+        host: &RuntimeHost,
+        activity: &AtomicU8,
+        generation: &AtomicU64,
+        observed_generation: u64,
+    ) -> bool {
+        if generation.load(Ordering::SeqCst) != observed_generation
+            || activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR
+            || !self.observe(ready)
+            || activity
+                .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return false;
+        }
+        // A window recreation can advance the generation between the initial
+        // fence and the activity claim. Leave recovery ownership with the new
+        // bootstrap instead of mutating the host for the stale monitor.
+        if generation.load(Ordering::SeqCst) != observed_generation {
+            return false;
+        }
+        // Three readiness misses do not prove process exit or revoke a receipt.
+        host.release_after_readiness_loss();
+        true
+    }
+}
+
+/// Publishes bootstrap progress to the bootstrap page, and keeps the latest value
+/// so a page that loads mid-run can catch up.
+struct WindowSink {
+    app: AppHandle,
+    latest: Arc<Mutex<Option<BootstrapStatus>>>,
+}
+
+impl StatusSink for WindowSink {
+    fn publish(&self, status: BootstrapStatus) {
+        if let Ok(mut links) = self.app.state::<Mutex<DeepLinks>>().lock() {
+            links.observe_bootstrap(&status);
+        }
+        if let Ok(mut latest) = self.latest.lock() {
+            *latest = Some(status.clone());
+        }
+        refresh_runtime_tray(&self.app, TrayRuntimeState::from_status(&status));
+        // Addressed to the shell's window specifically: a broadcast would also
+        // reach the Workbench after navigation.
+        let _ = self.app.emit_to(MAIN_WINDOW, STATUS_EVENT, status);
+    }
+}
+
+/// Rejects any caller that is not the shell's own bootstrap page.
+///
+/// The capability file is the enforcing boundary. This is the second layer, so
+/// that widening a capability by mistake cannot alone expose the shell to a page
+/// served by the Runtime.
+fn ensure_shell_ui(window: &WebviewWindow) -> Result<(), String> {
+    match window.url() {
+        Ok(url) if is_shell_ui_url(&url) => Ok(()),
+        _ => Err("This command is only available to the Avibe desktop shell.".to_owned()),
+    }
+}
+
+/// The bundled bootstrap may always navigate within its own origin. Once the
+/// Runtime is ready, unprivileged pages may route only below the exact listener
+/// that proved readiness; a settings rebind or hostile link cannot move the
+/// shell onto another local or remote service.
+fn navigation_is_allowed(url: &Url, active_origin: Option<&LoopbackOrigin>) -> bool {
+    is_shell_ui_url(url) || active_origin.is_some_and(|origin| origin.matches_url_origin(url))
+}
+
+/// The Console settings page expresses a UI rebind as a navigation to a bare
+/// HTTP origin. The desktop shell must rediscover the Python-owned companion
+/// listener instead of following that configured LAN address.
+fn is_runtime_rebind_target(url: &Url) -> bool {
+    url.scheme() == "http"
+        && url.host().is_some()
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(url.path(), "" | "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn set_active_origin(app: &AppHandle, origin: Option<LoopbackOrigin>) -> bool {
+    app.state::<Shell>()
+        .active_origin
+        .lock()
+        .map(|mut active| *active = origin)
+        .is_ok()
+}
+
+/// The current bootstrap status, or `null` before the first one is published.
+#[tauri::command]
+fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<BootstrapStatus>, String> {
+    ensure_shell_ui(&window)?;
+    let latest = app.state::<Shell>().latest.clone();
+    let status = latest
+        .lock()
+        .map_err(|_| "Bootstrap state is unavailable.".to_owned())?;
+    Ok(status.clone())
+}
+
+/// Starts another bootstrap run after a failure. Returns as soon as the run is
+/// scheduled; progress arrives through [`STATUS_EVENT`].
+#[tauri::command]
+fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
+    ensure_shell_ui(&window)?;
+    Ok(spawn_bootstrap(app))
+}
+
+/// Opens installation guidance in the system browser.
+///
+/// The URL is deliberately not an argument: even the privileged bootstrap page
+/// cannot turn this into an arbitrary protocol or URL opener.
+#[tauri::command]
+fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
+    ensure_shell_ui(&window)?;
+    tauri_plugin_opener::open_url(INSTALL_DOCS_URL, None::<&str>)
+        .map_err(|_| "Installation help could not be opened.".to_owned())
+}
+
+/// Runs the bootstrap state machine once, unless one is already running.
+///
+/// The return value is part of the retry contract: the bootstrap page must not
+/// hide its Retry action when another run still owns the activity.
+fn spawn_bootstrap(app: AppHandle) -> bool {
+    let activity = app.state::<Shell>().activity.clone();
+    if activity
+        .compare_exchange(ACTIVITY_IDLE, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+    spawn_owned_bootstrap(app);
+    true
+}
+
+/// Runs bootstrap after the caller has atomically acquired bootstrap activity.
+fn spawn_owned_bootstrap(app: AppHandle) {
+    let (host, latest, activity) = {
+        let shell = app.state::<Shell>();
+        (shell.host.clone(), shell.latest.clone(), shell.activity.clone())
+    };
+
+    tauri::async_runtime::spawn(async move {
+        let sink = WindowSink {
+            app: app.clone(),
+            latest,
+        };
+        let status = host.bootstrap(&sink).await;
+
+        if status.phase == BootstrapPhase::Ready {
+            open_workbench(&app, &status, activity);
+        } else {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        refresh_latest_tray(&app);
+    });
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WorkbenchHandoff {
+    Monitor,
+    RetryCurrentWindow,
+    LostOwnership,
+}
+
+/// Promotes a ready bootstrap to monitoring only if the window it navigated is
+/// still the current generation. A recreation that happened during the handoff
+/// returns ownership to bootstrap so the caller can navigate the replacement.
+fn complete_workbench_handoff(
+    activity: &AtomicU8,
+    window_generation: &AtomicU64,
+    observed_generation: u64,
+) -> WorkbenchHandoff {
+    if activity
+        .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return WorkbenchHandoff::LostOwnership;
+    }
+    if window_generation.load(Ordering::SeqCst) == observed_generation {
+        return WorkbenchHandoff::Monitor;
+    }
+    if activity
+        .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        WorkbenchHandoff::RetryCurrentWindow
+    } else {
+        WorkbenchHandoff::LostOwnership
+    }
+}
+
+/// Hands the window to the Workbench. Reached only from a `Ready` status, so the
+/// Runtime has already proved both UI and Controller readiness at this origin.
+fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<AtomicU8>) {
+    // Validated once more at the point of use: navigation is the one irreversible
+    // step, and it must never be reachable with an unvalidated string.
+    let Ok(origin) = LoopbackOrigin::parse(&ready.origin) else {
+        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+        return;
+    };
+    let window_generation = app.state::<Shell>().window_generation.clone();
+    loop {
+        let observed_generation = window_generation.load(Ordering::SeqCst);
+        let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            if app.get_webview_window(MAIN_WINDOW).is_some() {
+                let _ = spawn_bootstrap(app.clone());
+            }
+            return;
+        };
+        if window_generation.load(Ordering::SeqCst) != observed_generation {
+            continue;
+        }
+        let Some(navigation) = app
+            .state::<Mutex<DeepLinks>>()
+            .lock()
+            .ok()
+            .and_then(|mut links| links.bootstrap_navigation(ready))
+        else {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            return;
+        };
+        // A recreated window clears the previous navigation grant. Restore the
+        // exact ready origin for each generation immediately before navigating
+        // that generation's window.
+        if !set_active_origin(app, Some(origin.clone())) {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            return;
+        }
+        if window.navigate(navigation.url().clone()).is_err() {
+            if window_generation.load(Ordering::SeqCst) != observed_generation {
+                continue;
+            }
+            let _ = set_active_origin(app, None);
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            WindowSink {
+                app: app.clone(),
+                latest: app.state::<Shell>().latest.clone(),
+            }
+            .publish(workbench_navigation_failure_status(ready, &origin));
+            return;
+        }
+        match complete_workbench_handoff(&activity, &window_generation, observed_generation) {
+            WorkbenchHandoff::Monitor => {
+                commit_deep_link_navigation(app, &navigation, true, observed_generation);
+                apply_pending_deep_link(app);
+                start_runtime_monitor(app.clone(), origin, activity);
+                return;
+            }
+            WorkbenchHandoff::RetryCurrentWindow => continue,
+            WorkbenchHandoff::LostOwnership => return,
+        }
+    }
+}
+
+fn workbench_navigation_failure_status(ready: &BootstrapStatus, origin: &LoopbackOrigin) -> BootstrapStatus {
+    BootstrapStatus::failed(
+        origin,
+        ready.attempt,
+        BootstrapNotice::new(BootstrapNoticeCode::WorkbenchNavigationFailed),
+        true,
+    )
+}
+
+/// Watches the exact origin that bootstrap proved ready. The caller owns the
+/// shell's single monitor activity until this task exits or begins recovery.
+///
+/// This is also the notification connection's only opener, and it is the rule
+/// the whole lifetime hangs off: every caller arrives holding monitor ownership
+/// of a navigation that actually happened, and the stop sites give the
+/// connection up only where a hand-off away actually happened. Opening it
+/// anywhere earlier — before a navigation is known to have succeeded — leaves a
+/// live connection behind on every path that then fails.
+fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<AtomicU8>) {
+    notifications::start(&app, origin.clone());
+    let host = app.state::<Shell>().host.clone();
+    let generation = app.state::<Shell>().monitor_generation.clone();
+    let observed_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    tauri::async_runtime::spawn(async move {
+        let mut readiness_loss = ReadinessLoss::default();
+
+        loop {
+            tokio::time::sleep(MONITOR_INTERVAL).await;
+            if activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR
+                || generation.load(Ordering::SeqCst) != observed_generation
+            {
+                break;
+            }
+            let ready = host.is_ready(&origin).await;
+            // Window recreation can transfer ownership while the network probe
+            // is pending. The superseded monitor must not mutate the new
+            // bootstrap run's launch ownership after the await point.
+            if activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR
+                || generation.load(Ordering::SeqCst) != observed_generation
+            {
+                break;
+            }
+            refresh_runtime_tray(
+                &app,
+                if ready {
+                    TrayRuntimeState::Serving(origin.clone())
+                } else {
+                    TrayRuntimeState::Unreachable
+                },
+            );
+            if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation)
+                && recover_after_readiness_loss(
+                    || restore_bootstrap_view(&app),
+                    || notifications::stop(&app),
+                    || spawn_owned_bootstrap(app.clone()),
+                    || {
+                        activity
+                            .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    },
+                )
+            {
+                break;
+            }
+        }
+    });
+}
+
+/// Readiness loss has one decision: the notification connection is given up
+/// only on the branch where the hand-off back to bootstrap actually happened. A
+/// native navigation failure keeps the connection, so the monitor that retains
+/// ownership still has one to recover with instead of running mute for the rest
+/// of the session. Answers whether the monitor should stop.
+fn recover_after_readiness_loss(
+    hand_off: impl FnOnce() -> bool,
+    stop_notifications: impl FnOnce(),
+    spawn_bootstrap: impl FnOnce(),
+    retain_ownership: impl FnOnce() -> bool,
+) -> bool {
+    if hand_off() {
+        stop_notifications();
+        spawn_bootstrap();
+        return true;
+    }
+    // A transient native navigation failure must not silently abandon
+    // recovery. Keep the monitor ownership and try again.
+    !retain_ownership()
+}
+
+/// Hands the shell back to bootstrap and, only once that succeeded, gives up
+/// the notification connection the abandoned origin owned.
+fn return_to_bootstrap(app: &AppHandle) -> bool {
+    if !restore_bootstrap_view(app) {
+        return false;
+    }
+    notifications::stop(app);
+    true
+}
+
+/// Restores the exact bootstrap URL captured before the first navigation. It is
+/// a bundled Tauri page in production and the fixed Vite dev URL in development.
+fn restore_bootstrap_view(app: &AppHandle) -> bool {
+    let (bootstrap_url, latest) = {
+        let shell = app.state::<Shell>();
+        (shell.bootstrap_url.clone(), shell.latest.clone())
+    };
+    if !is_shell_ui_url(&bootstrap_url) {
+        return false;
+    }
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return false;
+    };
+    if let Ok(mut latest) = latest.lock() {
+        *latest = None;
+    }
+    if window.navigate(bootstrap_url).is_err() {
+        return false;
+    }
+    let _ = set_active_origin(app, None);
+    true
+}
+
+/// Re-enters endpoint discovery after the Workbench asks to move to a newly
+/// configured UI origin. The requested URL itself is never loaded.
+fn rediscover_after_runtime_rebind(app: AppHandle, origin: LoopbackOrigin) {
+    let activity = app.state::<Shell>().activity.clone();
+    if activity
+        .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        if return_to_bootstrap(&app) {
+            spawn_owned_bootstrap(app);
+            return;
+        }
+        if activity
+            .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            start_runtime_monitor(app, origin, activity);
+        }
+    });
+}
+
+/// Returns the shell's window, building it when there is none. This is the only
+/// place the window is built: its `tauri.conf.json` entry is `create: false`, so
+/// the window at startup and every recreated one carry the same new-window rule.
+fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        return Some(window);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == MAIN_WINDOW)?
+        .clone();
+    WebviewWindowBuilder::from_config(app, &config)
+        .ok()?
+        .initialization_script(DESKTOP_SHELL_MARKER)
+        .on_new_window(|url, _features| handle_new_window_request(url))
+        .build()
+        .ok()
+}
+
+/// Tells the Workbench, before any of its scripts run, that it is rendered by
+/// this shell rather than a browser tab or a PWA: it hides what the shell cannot
+/// do (a pre-opened `about:blank` tab never exists here). Top-level document only;
+/// WebView2 runs initialization scripts in subframes too, hence the frame check.
+const DESKTOP_SHELL_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });";
+
+/// What happens to a browsing context the page asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum NewWindowDecision {
+    OpenInSystemBrowser,
+    Deny,
+}
+
+/// A web destination the page wanted in a new context (a `target="_blank"` link
+/// or `window.open(url)`) is read in the user's own browser. Anything else,
+/// `about:blank` included, has no destination the shell can hand over and is
+/// dropped, which is also what the platform does when no handler is registered.
+fn new_window_decision(url: &Url) -> NewWindowDecision {
+    match url.scheme() {
+        "http" | "https" => NewWindowDecision::OpenInSystemBrowser,
+        _ => NewWindowDecision::Deny,
+    }
+}
+
+/// The page never gets a second webview. On macOS a returned webview must share
+/// the opener's `WKWebViewConfiguration`, and wry registers each webview's init
+/// scripts and IPC handler on that shared content controller: every such window
+/// would add a copy of the scripts to this one and, when dropped, remove this
+/// window's IPC handler, leaving the bootstrap page unable to reach the shell.
+fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
+        // Off the main thread: this runs inside the webview's own delegate callback.
+        tauri::async_runtime::spawn_blocking(move || {
+            if tauri_plugin_opener::open_url(url.as_str(), None::<&str>).is_err() {
+                eprintln!("failed to open a Workbench link in the system browser");
+            }
+        });
+    }
+    tauri::webview::NewWindowResponse::Deny
+}
+
+/// Transfers a recreated window from an idle or stale monitor owner to a fresh
+/// bootstrap run. An already-running bootstrap will publish into the new page.
+fn claim_recreated_window_bootstrap(activity: &AtomicU8) -> bool {
+    loop {
+        let current = activity.load(Ordering::SeqCst);
+        match current {
+            ACTIVITY_BOOTSTRAP => return false,
+            ACTIVITY_IDLE | ACTIVITY_MONITOR => {
+                if activity
+                    .compare_exchange(current, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Brings the existing window forward, or recreates it and re-enters bootstrap.
+fn focus_or_restore_main_window(app: &AppHandle) {
+    let created = app.get_webview_window(MAIN_WINDOW).is_none();
+    let Some(window) = ensure_main_window(app) else {
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = native_frame::clamp(&window.as_ref().window());
+    let _ = window.show();
+    let _ = window.set_focus();
+    let stopped = app
+        .state::<Shell>()
+        .latest
+        .lock()
+        .ok()
+        .and_then(|latest| latest.clone())
+        .filter(|status| {
+            matches!(
+                status.notice.code,
+                BootstrapNoticeCode::RuntimeStopped | BootstrapNoticeCode::RuntimeOwnershipLost
+            )
+        });
+    if let Some(status) = stopped {
+        if window.url().is_ok_and(|url| !is_shell_ui_url(&url)) {
+            let _ = return_to_bootstrap(app);
+        }
+        WindowSink {
+            app: app.clone(),
+            latest: app.state::<Shell>().latest.clone(),
+        }
+        .publish(status);
+        return;
+    }
+    if created {
+        let (activity, latest, window_generation) = {
+            let shell = app.state::<Shell>();
+            (
+                shell.activity.clone(),
+                shell.latest.clone(),
+                shell.window_generation.clone(),
+            )
+        };
+        // Increment before inspecting activity. A bootstrap-to-monitor handoff
+        // that races this recreation will observe the generation change and
+        // navigate this replacement window before it starts monitoring.
+        window_generation.fetch_add(1, Ordering::SeqCst);
+        let _ = set_active_origin(app, None);
+        if claim_recreated_window_bootstrap(&activity) {
+            if let Ok(mut latest) = latest.lock() {
+                *latest = None;
+            }
+            spawn_owned_bootstrap(app.clone());
+        }
+    }
+}
+
+fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.receive(arguments);
+    }
+    if app.try_state::<Shell>().is_none() {
+        return;
+    }
+    focus_or_restore_main_window(app);
+    apply_pending_deep_link(app);
+}
+
+fn apply_pending_deep_link(app: &AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    if shell.activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR {
+        return;
+    }
+    let observed_generation = shell.window_generation.load(Ordering::SeqCst);
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let Some(origin) = shell.active_origin.lock().ok().and_then(|origin| origin.clone()) else {
+        return;
+    };
+    let Ok(current_url) = window.url() else {
+        return;
+    };
+    let navigation = app
+        .state::<Mutex<DeepLinks>>()
+        .lock()
+        .ok()
+        .and_then(|links| links.workbench_navigation(&origin, &current_url));
+    if let Some(navigation) = navigation {
+        if shell.window_generation.load(Ordering::SeqCst) != observed_generation {
+            return;
+        }
+        let succeeded = window.navigate(navigation.url().clone()).is_ok();
+        commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+    }
+}
+
+fn commit_deep_link_navigation(
+    app: &AppHandle,
+    navigation: &DeepLinkNavigation,
+    navigation_succeeded: bool,
+    issuing_generation: u64,
+) {
+    let shell = app.state::<Shell>();
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.commit_navigation(
+            navigation,
+            navigation_succeeded,
+            issuing_generation,
+            shell.window_generation.load(Ordering::SeqCst),
+        );
+    }
+}
+
+fn application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    #[cfg(feature = "bundled-runtime")]
+    {
+        use tauri::menu::{MenuItem, PredefinedMenuItem};
+
+        let first_submenu = menu.items()?.into_iter().find_map(|item| match item {
+            MenuItemKind::Submenu(submenu) => Some(submenu),
+            _ => None,
+        });
+        if let Some(submenu) = first_submenu {
+            let catalog = native_uninstall_catalog();
+            let separator = PredefinedMenuItem::separator(app)?;
+            let uninstall = MenuItem::with_id(app, UNINSTALL_MENU_ID, catalog.menu_label, true, None::<&str>)?;
+            let position = submenu.items()?.len().saturating_sub(1);
+            submenu.insert_items(&[&separator, &uninstall], position)?;
+        }
+    }
+    Ok(menu)
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn claim_runtime_removal(activity: &AtomicU8) -> bool {
+    loop {
+        let current = activity.load(Ordering::SeqCst);
+        match current {
+            ACTIVITY_IDLE | ACTIVITY_MONITOR => {
+                if activity
+                    .compare_exchange(current, ACTIVITY_UNINSTALL, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+            ACTIVITY_BOOTSTRAP | ACTIVITY_UNINSTALL => return false,
+            _ => return false,
+        }
+    }
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn recover_after_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>) {
+    let _ = activity.compare_exchange(ACTIVITY_UNINSTALL, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+    if return_to_bootstrap(app) {
+        let _ = spawn_bootstrap(app.clone());
+    }
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn report_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>, catalog: &NativeUninstallCatalog) {
+    recover_after_runtime_removal_failure(app, activity);
+    app.dialog()
+        .message(catalog.failure_message.clone())
+        .title(catalog.failure_title.clone())
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
+}
+
+/// The confirmed uninstall's one decision: an opt-in login registration is
+/// cleared before the private Runtime is deleted, so the OS never keeps
+/// launching an application the user just removed. Failing to inspect or to
+/// clear that registration is an uninstall failure — the Runtime stays and the
+/// caller reports it — rather than a silently stale entry. Clearing it is also
+/// undone when the removal it authorized does not happen: the application is
+/// still installed, so it must keep launching the way the user configured it.
+/// That restore goes through Start at Login's one write policy; when it fails,
+/// the outcome says so and both failures are reported, never an uninstall that
+/// quietly finished with the registration gone.
+#[cfg(feature = "bundled-runtime")]
+async fn remove_runtime_after_login_cleanup<Removal>(
+    login_enabled: Result<bool, String>,
+    disable_login: impl FnOnce() -> Result<(), String>,
+    remove_runtime: impl FnOnce() -> Removal,
+    restore_login: impl FnOnce() -> bool,
+    report_failure: impl FnOnce(),
+) -> UninstallOutcome
+where
+    Removal: std::future::Future<Output = bool>,
+{
+    let cleared = match login_enabled {
+        Ok(true) => disable_login().map(|()| true),
+        Ok(false) => Ok(false),
+        Err(error) => Err(error),
+    };
+    let Ok(cleared) = cleared else {
+        report_failure();
+        return UninstallOutcome::Kept;
+    };
+    if remove_runtime().await {
+        return UninstallOutcome::Removed;
+    }
+    let outcome = if cleared && !restore_login() {
+        UninstallOutcome::KeptWithoutLogin
+    } else {
+        UninstallOutcome::Kept
+    };
+    report_failure();
+    outcome
+}
+
+/// How a confirmed uninstall ended. Only `Removed` reached the success dialog
+/// and the shell exit; the other two left the installation in place and
+/// reported the failure.
+#[cfg(feature = "bundled-runtime")]
+#[derive(Debug, PartialEq, Eq)]
+enum UninstallOutcome {
+    Removed,
+    Kept,
+    /// The login registration this uninstall cleared could not be put back.
+    KeptWithoutLogin,
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn request_private_runtime_removal(app: AppHandle) {
+    if app.state::<Shell>().dialog_pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let catalog = native_uninstall_catalog();
+    let confirmation_app = app.clone();
+    app.dialog()
+        .message(catalog.confirm_message.clone())
+        .title(catalog.confirm_title.clone())
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            catalog.confirm_action.clone(),
+            catalog.cancel_action.clone(),
+        ))
+        .show(move |confirmed| {
+            confirmation_app
+                .state::<Shell>()
+                .dialog_pending
+                .store(false, Ordering::SeqCst);
+            if !confirmed {
+                return;
+            }
+            let (host, activity, active_origin) = {
+                let shell = confirmation_app.state::<Shell>();
+                (
+                    shell.host.clone(),
+                    shell.activity.clone(),
+                    shell.active_origin.lock().ok().and_then(|origin| origin.clone()),
+                )
+            };
+            if !claim_runtime_removal(&activity) {
+                confirmation_app
+                    .dialog()
+                    .message(catalog.busy_message.clone())
+                    .title(catalog.busy_title.clone())
+                    .kind(MessageDialogKind::Info)
+                    .show(|_| {});
+                return;
+            }
+
+            let removal_catalog = catalog.clone();
+            let login_app = confirmation_app.clone();
+            let restore_app = confirmation_app.clone();
+            let failure_app = confirmation_app.clone();
+            tauri::async_runtime::spawn(async move {
+                remove_runtime_after_login_cleanup(
+                    login_app.autolaunch().is_enabled().map_err(|error| error.to_string()),
+                    || login_app.autolaunch().disable().map_err(|error| error.to_string()),
+                    || async move {
+                        notifications::stop(&confirmation_app);
+                        match host.remove_private_runtime(active_origin.as_ref()).await {
+                            Ok(true) => {
+                                let exit_app = confirmation_app.clone();
+                                confirmation_app
+                                    .dialog()
+                                    .message(removal_catalog.success_message.clone())
+                                    .title(removal_catalog.success_title.clone())
+                                    .kind(MessageDialogKind::Info)
+                                    .show(move |_| exit_shell(&exit_app));
+                                true
+                            }
+                            Ok(false) | Err(_) => false,
+                        }
+                    },
+                    || set_start_at_login(&restore_app, Ok(true)),
+                    || report_runtime_removal_failure(&failure_app, activity, &catalog),
+                )
+                .await;
+            });
+        });
+}
+
+pub fn run() {
+    let builder = tauri::Builder::default()
+        .manage(Mutex::new(DeepLinks::default()))
+        // Registered first, as the plugin documents: a second launch is handed to
+        // the running shell instead of starting a competing Runtime.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            receive_native_deep_link(app, argv.iter().skip(1));
+        }))
+        .plugin(tauri_plugin_deep_link::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(macos_deep_link::init());
+    builder
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(native_frame::state_flags())
+                .with_filter(|label| label == MAIN_WINDOW)
+                .build(),
+        )
+        .plugin(native_frame::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .on_menu_event(|app, event| {
+            match event.id().as_ref() {
+                OPEN_MENU_ID => focus_or_restore_main_window(app),
+                SETTINGS_MENU_ID => open_workbench_settings(app),
+                STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
+                QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
+                LOGIN_MENU_ID => toggle_start_at_login(app),
+                notifications::MENU_ID => {
+                    let notifications = app.state::<notifications::Notifications>();
+                    notifications.toggle();
+                    if let Some(menus) = app.try_state::<NativeMenus>() {
+                        let _ = menus.notifications.set_checked(notifications.enabled());
+                    }
+                }
+                _ => {}
+            }
+            #[cfg(feature = "bundled-runtime")]
+            if event.id() == UNINSTALL_MENU_ID {
+                request_private_runtime_removal(app.clone());
+            }
+        })
+        .plugin(
+            PluginBuilder::<_, ()>::new("shell-run-events")
+                .on_page_load(|webview, payload| {
+                    if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                        apply_pending_deep_link(webview.app_handle());
+                        // Settings become available the moment a Workbench is on
+                        // screen, not at the monitor's first tick. The shared
+                        // rule still decides, so a bootstrap page enables nothing.
+                        refresh_native_controls(webview.app_handle(), None);
+                    }
+                })
+                .on_navigation(|webview, url| {
+                    let active_origin = webview
+                        .try_state::<Shell>()
+                        .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
+                    if navigation_is_allowed(url, active_origin.as_ref()) {
+                        return true;
+                    }
+                    if is_runtime_rebind_target(url) {
+                        if let Some(origin) = active_origin {
+                            rediscover_after_runtime_rebind(webview.app_handle().clone(), origin);
+                        }
+                    }
+                    false
+                })
+                .on_event(|app, event| {
+                    if let RunEvent::WindowEvent {
+                        label,
+                        event: WindowEvent::CloseRequested { api, .. },
+                        ..
+                    } = event
+                    {
+                        if label == MAIN_WINDOW {
+                            api.prevent_close();
+                            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                                let _ = window.hide();
+                            }
+                        }
+                    }
+                    if let RunEvent::ExitRequested { api, .. } = event {
+                        if let Some(shell) = app.try_state::<Shell>() {
+                            if !shell.exit_authorized.load(Ordering::SeqCst) {
+                                api.prevent_exit();
+                                request_runtime_lifecycle(app.clone(), true);
+                            }
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    if let RunEvent::Reopen {
+                        has_visible_windows: false,
+                        ..
+                    } = event
+                    {
+                        focus_or_restore_main_window(app);
+                    }
+                })
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![
+            bootstrap_status,
+            bootstrap_retry,
+            open_install_docs
+        ])
+        .setup(|app| {
+            let window = ensure_main_window(app.handle()).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "the Avibe desktop window is missing")
+            })?;
+            let bootstrap_url = window.url()?;
+            if !is_shell_ui_url(&bootstrap_url) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the Avibe desktop window did not load its bundled bootstrap page",
+                )
+                .into());
+            }
+            let host = {
+                #[cfg(feature = "bundled-runtime")]
+                {
+                    bundled_runtime_host(
+                        app.path().resource_dir()?.join("runtime"),
+                        app.path().app_local_data_dir()?.join("runtime"),
+                        app.path().app_local_data_dir()?.join("backends"),
+                        // Beside the Runtime it describes, so a user asked for
+                        // "the log next to your Avibe runtime folder" finds it.
+                        BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME)),
+                    )?
+                }
+                #[cfg(not(feature = "bundled-runtime"))]
+                {
+                    default_runtime_host()?
+                }
+            };
+            app.manage(Shell::new(host, bootstrap_url));
+            app.manage(notifications::Notifications::new(
+                app.path().app_local_data_dir()?.join("notifications.json"),
+            ));
+            if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+                links.receive(
+                    std::env::args_os()
+                        .skip(1)
+                        .filter_map(|argument| argument.into_string().ok()),
+                );
+            }
+            install_native_tray(app.handle())?;
+            let _ = spawn_bootstrap(app.handle().clone());
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("failed to start the Avibe desktop shell");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use avibe_runtime_host::{HealthProbe, LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn settings_open_only_while_the_window_shows_a_workbench() {
+        for activity in 0..=u8::MAX {
+            assert!(!settings_is_available(activity, false));
+            assert_eq!(settings_is_available(activity, true), activity == ACTIVITY_MONITOR);
+        }
+        assert!(avibe_runtime_host::deep_link::parse_deep_link(SETTINGS_DEEP_LINK).is_some());
+    }
+
+    #[test]
+    fn a_control_refresh_without_a_status_keeps_the_status_already_shown() {
+        let unreachable = TrayRuntimeState::Unreachable;
+        // A page load must not turn an unreachable Runtime back into a serving one.
+        assert_eq!(
+            next_tray_state(None, Some(&unreachable), ACTIVITY_MONITOR),
+            Some(TrayRuntimeState::Unreachable)
+        );
+        assert_eq!(next_tray_state(None, None, ACTIVITY_MONITOR), None);
+        assert_eq!(
+            next_tray_state(Some(TrayRuntimeState::Starting), Some(&unreachable), ACTIVITY_BOOTSTRAP),
+            Some(TrayRuntimeState::Starting)
+        );
+        for requested in [None, Some(TrayRuntimeState::Starting)] {
+            assert_eq!(
+                next_tray_state(requested, Some(&unreachable), ACTIVITY_STOP),
+                Some(TrayRuntimeState::Stopping)
+            );
+        }
+    }
+
+    #[test]
+    fn stop_authority_requires_ownership_and_exclusive_idle_or_monitor_activity() {
+        for activity in 0..=u8::MAX {
+            assert!(!stop_is_available(false, activity));
+            let expected = matches!(activity, ACTIVITY_IDLE | ACTIVITY_MONITOR);
+            assert_eq!(stop_is_available(true, activity), expected);
+            let state = AtomicU8::new(activity);
+            assert_eq!(claim_runtime_stop(&state), expected);
+            assert_eq!(
+                state.load(Ordering::SeqCst),
+                if expected { ACTIVITY_STOP } else { activity }
+            );
+            assert!(!claim_runtime_stop(&state));
+            assert!(!claim_recreated_window_bootstrap(&AtomicU8::new(ACTIVITY_STOP)));
+        }
+    }
+
+    #[test]
+    fn quit_results_require_an_explicit_stop_or_keep_choice_in_each_locale() {
+        for locale in ["en-US", "zh-CN"] {
+            let catalog = native_catalog_for_locales([locale.to_owned()]).tray;
+            assert_eq!(
+                quit_choice(MessageDialogResult::Custom(catalog.quit_stop.clone()), &catalog),
+                QuitChoice::Stop
+            );
+            assert_eq!(
+                quit_choice(MessageDialogResult::Custom(catalog.quit_keep.clone()), &catalog),
+                QuitChoice::Keep
+            );
+            for result in [
+                MessageDialogResult::Cancel,
+                MessageDialogResult::Ok,
+                MessageDialogResult::Custom(catalog.cancel.clone()),
+                MessageDialogResult::Custom("unknown".to_owned()),
+            ] {
+                assert_eq!(quit_choice(result, &catalog), QuitChoice::Cancel);
+            }
+        }
+    }
+
+    #[test]
+    fn tray_status_is_a_projection_of_bootstrap_and_the_proved_listener() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:6123").expect("test listener");
+        let catalog = native_catalog_for_locales(["en".to_owned()]).tray;
+        for code in [BootstrapNoticeCode::Ready, BootstrapNoticeCode::Adopted] {
+            let status = BootstrapStatus::ready(&origin, 1, code);
+            let state = TrayRuntimeState::from_status(&status);
+            assert_eq!(state, TrayRuntimeState::Serving(origin.clone()));
+            assert_eq!(state.label(&catalog), "Runtime: serving on 127.0.0.1:6123");
+        }
+        assert_eq!(
+            TrayRuntimeState::from_status(&BootstrapStatus::probing(&origin, 1)),
+            TrayRuntimeState::Starting
+        );
+        assert_eq!(
+            TrayRuntimeState::from_status(&BootstrapStatus::rejected(BootstrapNoticeCode::RuntimeStopped, true)),
+            TrayRuntimeState::Stopped
+        );
+        assert_eq!(
+            TrayRuntimeState::from_status(&BootstrapStatus::rejected(BootstrapNoticeCode::ReadyTimeout, true)),
+            TrayRuntimeState::Unreachable
+        );
+        assert_ne!(
+            TrayRuntimeState::Unreachable.icon().rgba(),
+            TrayRuntimeState::Stopped.icon().rgba()
+        );
+    }
+
+    #[test]
+    fn readiness_recovers_only_after_consecutive_failures() {
+        let mut loss = ReadinessLoss::default();
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(false));
+        assert!(loss.observe(false));
+    }
+
+    struct RecoveryProbe(Mutex<std::collections::VecDeque<bool>>);
+
+    #[async_trait]
+    impl HealthProbe for RecoveryProbe {
+        async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<avibe_runtime_host::RuntimeReadiness> {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(false)
+                .then_some(avibe_runtime_host::RuntimeReadiness {
+                    desktop_runtime_id: None,
+                    desktop_ui_runtime_id: None,
+                })
+        }
+    }
+
+    struct RecoveryLauncher {
+        watches: Mutex<std::collections::VecDeque<LaunchWatch>>,
+        launches: Arc<AtomicUsize>,
+        stops: Arc<Mutex<Vec<avibe_runtime_host::launcher::StartupReceipt>>>,
+    }
+
+    struct RecoveryExecutable {
+        watch: LaunchWatch,
+        launches: Arc<AtomicUsize>,
+        stops: Arc<Mutex<Vec<avibe_runtime_host::launcher::StartupReceipt>>>,
+    }
+
+    impl RuntimeLauncher for RecoveryLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            Ok(Arc::new(RecoveryExecutable {
+                watch: self.watches.lock().unwrap().pop_front().expect("expected resolution"),
+                launches: self.launches.clone(),
+                stops: self.stops.clone(),
+            }))
+        }
+    }
+
+    impl ResolvedRuntimeLauncher for RecoveryExecutable {
+        fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+            Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap())
+        }
+
+        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            Ok(LaunchedRuntime {
+                pid: 1,
+                watch: self.watch.clone(),
+            })
+        }
+
+        fn stop(&self, receipt: &avibe_runtime_host::launcher::StartupReceipt) -> Result<(), LaunchError> {
+            self.stops.lock().unwrap().push(receipt.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn monitor_recovery_preserves_started_authority_and_pending_helper_exclusion() {
+        use avibe_runtime_host::launcher::StartupReceipt;
+        use avibe_runtime_host::{DiscardStatus, RuntimeHostSettings};
+
+        let receipt: StartupReceipt = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "outcome": "started", "service_pid": 1234, "ui_pid": 5678,
+            "service_create_unix_ms": 1789010100123.5, "ui_create_unix_ms": 1789010100456.5,
+        }))
+        .unwrap();
+        let mut reused_json = serde_json::to_value(&receipt).unwrap();
+        reused_json["outcome"] = serde_json::json!("reused");
+        let reused: StartupReceipt = serde_json::from_value(reused_json).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+
+        for pending in [false, true] {
+            // Start -> ready -> three monitor misses -> recovery helper -> ready.
+            let probe = Arc::new(RecoveryProbe(Mutex::new(
+                [false, true, false, false, false, false, true].into(),
+            )));
+            let launcher = Arc::new(RecoveryLauncher {
+                watches: Mutex::new(
+                    [
+                        if pending {
+                            LaunchWatch::default()
+                        } else {
+                            LaunchWatch::exited_with_receipt(true, receipt.clone())
+                        },
+                        LaunchWatch::exited_with_receipt(true, reused.clone()),
+                    ]
+                    .into(),
+                ),
+                launches: Arc::default(),
+                stops: Arc::default(),
+            });
+            let host = RuntimeHost::new(
+                probe,
+                launcher.clone(),
+                RuntimeHostSettings {
+                    poll_interval: Duration::from_millis(1),
+                    ready_timeout: Duration::from_secs(1),
+                    ..RuntimeHostSettings::default()
+                },
+            );
+            runtime.block_on(async {
+                let ready = host.bootstrap(&DiscardStatus).await;
+                assert_eq!(ready.phase, BootstrapPhase::Ready);
+                let origin = LoopbackOrigin::parse(&ready.origin).unwrap();
+                let activity = AtomicU8::new(ACTIVITY_MONITOR);
+                let generation = AtomicU64::new(7);
+                let mut loss = ReadinessLoss::default();
+                // A stale monitor or a stop activity cannot release this helper.
+                for current in [ACTIVITY_MONITOR, ACTIVITY_STOP] {
+                    activity.store(current, Ordering::SeqCst);
+                    for _ in 0..3 {
+                        assert!(!loss.begin_recovery(
+                            false,
+                            &host,
+                            &activity,
+                            &generation,
+                            if current == ACTIVITY_MONITOR { 6 } else { 7 }
+                        ));
+                    }
+                    assert!(host.has_launched());
+                }
+                activity.store(ACTIVITY_MONITOR, Ordering::SeqCst);
+                let mut loss = ReadinessLoss::default();
+                for miss in 1..=3 {
+                    let ready = host.is_ready(&origin).await;
+                    assert!(!ready);
+                    assert_eq!(loss.begin_recovery(ready, &host, &activity, &generation, 7), miss == 3);
+                }
+                assert_eq!(host.has_launched(), pending);
+                assert_eq!(host.has_owned_runtime(), !pending);
+                assert!(!stop_is_available(
+                    host.has_owned_runtime(),
+                    activity.load(Ordering::SeqCst)
+                ));
+                let recovered = host.bootstrap(&DiscardStatus).await;
+                assert_eq!(recovered.phase, BootstrapPhase::Ready);
+                let window_generation = AtomicU64::new(1);
+                assert_eq!(
+                    complete_workbench_handoff(&activity, &window_generation, 1),
+                    WorkbenchHandoff::Monitor
+                );
+                assert_eq!(
+                    stop_is_available(host.has_owned_runtime(), activity.load(Ordering::SeqCst)),
+                    !pending
+                );
+                assert_eq!(launcher.launches.load(Ordering::SeqCst), if pending { 1 } else { 2 });
+                if pending {
+                    assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+                    assert!(launcher.stops.lock().unwrap().is_empty());
+                } else {
+                    host.stop_owned_runtime()
+                        .await
+                        .expect("original receipt survives reused recovery");
+                    assert_eq!(
+                        launcher.stops.lock().unwrap().as_slice(),
+                        std::slice::from_ref(&receipt)
+                    );
+                    assert!(!host.has_owned_runtime());
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn a_successful_probe_resets_the_failure_streak() {
+        let mut loss = ReadinessLoss::default();
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(true));
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(false));
+        assert!(loss.observe(false));
+    }
+
+    #[test]
+    fn a_recreated_window_transfers_monitor_ownership_to_bootstrap() {
+        let activity = AtomicU8::new(ACTIVITY_MONITOR);
+
+        assert!(claim_recreated_window_bootstrap(&activity));
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[test]
+    fn a_recreated_window_does_not_duplicate_an_active_bootstrap() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+
+        assert!(!claim_recreated_window_bootstrap(&activity));
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_claims_idle_or_monitor_activity_exclusively() {
+        for current in [ACTIVITY_IDLE, ACTIVITY_MONITOR] {
+            let activity = AtomicU8::new(current);
+            assert!(claim_runtime_removal(&activity));
+            assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_UNINSTALL);
+            assert!(!claim_runtime_removal(&activity));
+        }
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_waits_for_an_active_bootstrap() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+
+        assert!(!claim_runtime_removal(&activity));
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    /// Every effect the confirmed uninstall can produce. `RemoveRuntime` stands
+    /// for the whole success branch the shell wires into it — stopping
+    /// notifications, deleting the private Runtime, the success dialog and the
+    /// shell exit — so a run without it is a run that reported failure and left
+    /// the installation intact. `RestoreLogin`, `RenderLogin` and
+    /// `ReportLoginFailure` are the restore's write, checkbox and login failure
+    /// message, produced by the real `settle_start_at_login` policy.
+    #[cfg(feature = "bundled-runtime")]
+    #[derive(Debug, PartialEq, Eq)]
+    enum UninstallEffect {
+        DisableLogin,
+        RemoveRuntime,
+        RestoreLogin,
+        RenderLogin(bool),
+        ReportLoginFailure,
+        ReportFailure,
+    }
+
+    /// A confirmed uninstall whose restore, when it runs, writes `restore_write`
+    /// and then reads `restore_observed` back.
+    #[cfg(feature = "bundled-runtime")]
+    fn uninstall_run(
+        login_enabled: Result<bool, String>,
+        disable_login: Result<(), String>,
+        removed: bool,
+        restore_write: Result<(), String>,
+        restore_observed: Result<bool, String>,
+    ) -> (UninstallOutcome, Vec<UninstallEffect>) {
+        let effects = std::cell::RefCell::new(Vec::new());
+        let outcome = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(
+            remove_runtime_after_login_cleanup(
+                login_enabled,
+                || {
+                    effects.borrow_mut().push(UninstallEffect::DisableLogin);
+                    disable_login
+                },
+                || async {
+                    effects.borrow_mut().push(UninstallEffect::RemoveRuntime);
+                    removed
+                },
+                || {
+                    settle_start_at_login(
+                        Ok(true),
+                        |enabled| {
+                            assert!(enabled, "a restore only ever puts the registration back");
+                            effects.borrow_mut().push(UninstallEffect::RestoreLogin);
+                            restore_write
+                        },
+                        || restore_observed,
+                        |checked| effects.borrow_mut().push(UninstallEffect::RenderLogin(checked)),
+                        || effects.borrow_mut().push(UninstallEffect::ReportLoginFailure),
+                    )
+                },
+                || effects.borrow_mut().push(UninstallEffect::ReportFailure),
+            ),
+        );
+        (outcome, effects.into_inner())
+    }
+
+    /// The same uninstall with a restore that succeeds.
+    #[cfg(feature = "bundled-runtime")]
+    fn uninstall_effects(
+        login_enabled: Result<bool, String>,
+        disable_login: Result<(), String>,
+        removed: bool,
+    ) -> Vec<UninstallEffect> {
+        uninstall_run(login_enabled, disable_login, removed, Ok(()), Ok(true)).1
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_clears_an_enabled_login_item_before_removing_the_private_runtime() {
+        assert_eq!(
+            uninstall_run(Ok(true), Ok(()), true, Ok(()), Ok(true)),
+            (
+                UninstallOutcome::Removed,
+                vec![UninstallEffect::DisableLogin, UninstallEffect::RemoveRuntime],
+            ),
+        );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_leaves_an_already_disabled_login_item_alone() {
+        assert_eq!(
+            uninstall_effects(Ok(false), Ok(()), true),
+            vec![UninstallEffect::RemoveRuntime]
+        );
+        // The removal failed, but this uninstall never disabled anything, so
+        // there is no registration of its own to put back.
+        assert_eq!(
+            uninstall_effects(Ok(false), Ok(()), false),
+            vec![UninstallEffect::RemoveRuntime, UninstallEffect::ReportFailure],
+        );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_restores_the_login_item_it_cleared_when_the_removal_does_not_happen() {
+        // The application is still installed, so the login registration this
+        // uninstall cleared has to come back before the failure is reported.
+        assert_eq!(
+            uninstall_run(Ok(true), Ok(()), false, Ok(()), Ok(true)),
+            (
+                UninstallOutcome::Kept,
+                vec![
+                    UninstallEffect::DisableLogin,
+                    UninstallEffect::RemoveRuntime,
+                    UninstallEffect::RestoreLogin,
+                    UninstallEffect::RenderLogin(true),
+                    UninstallEffect::ReportFailure,
+                ],
+            ),
+        );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_reports_a_login_item_it_could_not_restore() {
+        // Clearing succeeded, the removal did not happen, and putting the
+        // registration back failed too. The checkbox shows what the OS now
+        // holds, the login failure is reported, the uninstall failure is still
+        // reported, and nothing reaches the success dialog or the exit.
+        let lost = vec![
+            UninstallEffect::DisableLogin,
+            UninstallEffect::RemoveRuntime,
+            UninstallEffect::RestoreLogin,
+            UninstallEffect::RenderLogin(false),
+            UninstallEffect::ReportLoginFailure,
+            UninstallEffect::ReportFailure,
+        ];
+        assert_eq!(
+            uninstall_run(Ok(true), Ok(()), false, Err("enable failed".to_owned()), Ok(false)),
+            (UninstallOutcome::KeptWithoutLogin, lost),
+        );
+        // A write that claims success but reads back disabled is the same loss.
+        assert_eq!(
+            uninstall_run(Ok(true), Ok(()), false, Ok(()), Ok(false)).0,
+            UninstallOutcome::KeptWithoutLogin,
+        );
+        // So is a write whose result cannot be read back; the checkbox then
+        // falls back to unchecked.
+        let (outcome, effects) = uninstall_run(Ok(true), Ok(()), false, Ok(()), Err("state unavailable".to_owned()));
+        assert_eq!(outcome, UninstallOutcome::KeptWithoutLogin);
+        assert!(effects.contains(&UninstallEffect::RenderLogin(false)));
+        assert!(effects.ends_with(&[UninstallEffect::ReportLoginFailure, UninstallEffect::ReportFailure]));
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_fails_closed_when_the_login_item_cannot_be_cleared() {
+        // Clearing failed, so the Runtime is never touched: no success dialog,
+        // no exit, and the user is told the uninstall failed. Nothing was
+        // disabled, so nothing is restored either.
+        assert_eq!(
+            uninstall_effects(Ok(true), Err("disable failed".to_owned()), true),
+            vec![UninstallEffect::DisableLogin, UninstallEffect::ReportFailure],
+        );
+        // The registration could not even be inspected — same answer, and
+        // nothing is disabled on a state the shell could not read.
+        assert_eq!(
+            uninstall_effects(Err("state unavailable".to_owned()), Ok(()), true),
+            vec![UninstallEffect::ReportFailure],
+        );
+        assert_eq!(
+            uninstall_run(Ok(true), Err("disable failed".to_owned()), true, Ok(()), Ok(true)).0,
+            UninstallOutcome::Kept,
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum LoginEffect {
+        Write(bool),
+        Render(bool),
+        ReportFailure,
+    }
+
+    fn settle_login(
+        requested: Result<bool, String>,
+        write: Result<(), String>,
+        observed: Result<bool, String>,
+    ) -> (bool, Vec<LoginEffect>) {
+        let effects = std::cell::RefCell::new(Vec::new());
+        let settled = settle_start_at_login(
+            requested,
+            |enabled| {
+                effects.borrow_mut().push(LoginEffect::Write(enabled));
+                write
+            },
+            || observed,
+            |checked| effects.borrow_mut().push(LoginEffect::Render(checked)),
+            || effects.borrow_mut().push(LoginEffect::ReportFailure),
+        );
+        (settled, effects.into_inner())
+    }
+
+    #[test]
+    fn start_at_login_writes_once_and_draws_the_state_it_reads_back() {
+        for enabled in [true, false] {
+            assert_eq!(
+                settle_login(Ok(enabled), Ok(()), Ok(enabled)),
+                (true, vec![LoginEffect::Write(enabled), LoginEffect::Render(enabled)]),
+            );
+        }
+    }
+
+    #[test]
+    fn start_at_login_reports_every_unsettled_write_once_without_retrying() {
+        // The write failed: the checkbox shows the registration that remains.
+        assert_eq!(
+            settle_login(Ok(true), Err("enable failed".to_owned()), Ok(false)),
+            (
+                false,
+                vec![
+                    LoginEffect::Write(true),
+                    LoginEffect::Render(false),
+                    LoginEffect::ReportFailure,
+                ],
+            ),
+        );
+        // The write claimed success but the OS reads back the other state.
+        assert_eq!(
+            settle_login(Ok(false), Ok(()), Ok(true)),
+            (
+                false,
+                vec![
+                    LoginEffect::Write(false),
+                    LoginEffect::Render(true),
+                    LoginEffect::ReportFailure,
+                ],
+            ),
+        );
+        // The state cannot be read back, so the checkbox falls back to unchecked.
+        assert_eq!(
+            settle_login(Ok(true), Ok(()), Err("state unavailable".to_owned())),
+            (
+                false,
+                vec![
+                    LoginEffect::Write(true),
+                    LoginEffect::Render(false),
+                    LoginEffect::ReportFailure,
+                ],
+            ),
+        );
+        // The toggle could not learn what to request: nothing is written, and
+        // the checkbox is still redrawn from a fresh read.
+        assert_eq!(
+            settle_login(Err("state unavailable".to_owned()), Ok(()), Ok(true)),
+            (false, vec![LoginEffect::Render(true), LoginEffect::ReportFailure]),
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecoveryEffect {
+        HandOff,
+        StopNotifications,
+        SpawnBootstrap,
+        RetainOwnership,
+    }
+
+    fn readiness_recovery_effects(handed_off: bool, retained: bool) -> (bool, Vec<RecoveryEffect>) {
+        let effects = std::cell::RefCell::new(Vec::new());
+        let stop = recover_after_readiness_loss(
+            || {
+                effects.borrow_mut().push(RecoveryEffect::HandOff);
+                handed_off
+            },
+            || effects.borrow_mut().push(RecoveryEffect::StopNotifications),
+            || effects.borrow_mut().push(RecoveryEffect::SpawnBootstrap),
+            || {
+                effects.borrow_mut().push(RecoveryEffect::RetainOwnership);
+                retained
+            },
+        );
+        (stop, effects.into_inner())
+    }
+
+    #[test]
+    fn readiness_recovery_gives_up_notifications_only_after_the_hand_off_succeeds() {
+        assert_eq!(
+            readiness_recovery_effects(true, false),
+            (
+                true,
+                vec![
+                    RecoveryEffect::HandOff,
+                    RecoveryEffect::StopNotifications,
+                    RecoveryEffect::SpawnBootstrap,
+                ]
+            ),
+        );
+    }
+
+    #[test]
+    fn a_failed_hand_off_keeps_the_notification_connection_and_the_monitor() {
+        // Navigation failed, so the shell is still on the abandoned origin. The
+        // monitor takes its ownership back and keeps watching with a live
+        // connection instead of running mute for the rest of the session.
+        let (stop, effects) = readiness_recovery_effects(false, true);
+        assert!(!stop);
+        assert_eq!(effects, vec![RecoveryEffect::HandOff, RecoveryEffect::RetainOwnership]);
+        // Ownership that cannot be retaken belongs to another run, so this
+        // monitor exits — still without tearing down that run's connection.
+        let (stop, effects) = readiness_recovery_effects(false, false);
+        assert!(stop);
+        assert_eq!(effects, vec![RecoveryEffect::HandOff, RecoveryEffect::RetainOwnership]);
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn native_uninstall_copy_uses_the_first_supported_system_locale() {
+        let chinese =
+            native_uninstall_catalog_for_locales(["fr-FR", "zh-Hant-TW", "en-US"].into_iter().map(str::to_owned));
+        let english =
+            native_uninstall_catalog_for_locales(["fr-FR", "en-US", "zh-Hans-CN"].into_iter().map(str::to_owned));
+
+        assert_ne!(chinese.menu_label, english.menu_label);
+        assert_ne!(chinese.confirm_message, english.confirm_message);
+        assert!(!chinese.failure_message.is_empty());
+        assert!(!english.failure_message.is_empty());
+    }
+
+    #[test]
+    fn a_navigation_failure_is_retryable_without_losing_the_ready_origin() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
+        let ready = BootstrapStatus::ready(&origin, 4, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive(["avibe://session/retry"]);
+        let navigation = links.bootstrap_navigation(&ready).unwrap();
+
+        let failed = workbench_navigation_failure_status(&ready, &origin);
+        links.observe_bootstrap(&failed);
+
+        assert_eq!(failed.phase, BootstrapPhase::Failed);
+        assert_eq!(failed.origin, origin.as_str());
+        assert_eq!(failed.attempt, ready.attempt);
+        assert_eq!(failed.notice.code, BootstrapNoticeCode::WorkbenchNavigationFailed);
+        assert!(failed.retryable);
+        assert_eq!(links.bootstrap_navigation(&ready).unwrap().url(), navigation.url());
+    }
+
+    #[test]
+    fn a_recreated_window_keeps_bootstrap_ownership_during_handoff() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+        let generation = AtomicU64::new(2);
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+        let ready = BootstrapStatus::ready(&origin, 1, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive(["avibe://session/recreated"]);
+        let navigation = links.bootstrap_navigation(&ready).unwrap();
+
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 1),
+            WorkbenchHandoff::RetryCurrentWindow
+        );
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+        assert!(!links.commit_navigation(&navigation, true, 1, generation.load(Ordering::SeqCst)));
+        let replacement = links.bootstrap_navigation(&ready).unwrap();
+        assert_eq!(replacement.url(), navigation.url());
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 2),
+            WorkbenchHandoff::Monitor
+        );
+        assert!(links.commit_navigation(&replacement, true, 2, generation.load(Ordering::SeqCst)));
+        assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
+    }
+
+    #[test]
+    fn an_unchanged_window_enters_monitoring_after_handoff() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+        let generation = AtomicU64::new(2);
+
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 2),
+            WorkbenchHandoff::Monitor
+        );
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_MONITOR);
+    }
+
+    #[test]
+    fn navigation_is_confined_to_the_shell_or_the_active_runtime_listener() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
+
+        assert!(navigation_is_allowed(
+            &Url::parse("tauri://localhost/index.html").expect("shell URL"),
+            None
+        ));
+        assert!(navigation_is_allowed(
+            &Url::parse("http://127.0.0.1:5123/show/session/").expect("Workbench URL"),
+            Some(&origin)
+        ));
+        for raw in [
+            "http://127.0.0.1:5124/",
+            "http://192.168.1.10:5123/",
+            "https://avibe.bot/",
+        ] {
+            assert!(
+                !navigation_is_allowed(&Url::parse(raw).expect("test URL"), Some(&origin)),
+                "{raw} must not leave the active listener"
+            );
+        }
+    }
+
+    #[test]
+    fn only_bare_http_origins_are_treated_as_runtime_rebinds() {
+        for raw in [
+            "http://192.168.1.10:5123/",
+            "http://localhost:5123",
+            "http://[2001:db8::1]:5123/",
+        ] {
+            assert!(is_runtime_rebind_target(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
+        for raw in [
+            "https://192.168.1.10:5123/",
+            "http://192.168.1.10/",
+            "http://192.168.1.10:5123/settings",
+            "http://user@192.168.1.10:5123/",
+            "http://192.168.1.10:5123/?next=remote",
+        ] {
+            assert!(!is_runtime_rebind_target(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
+    }
+
+    #[test]
+    fn only_web_destinations_leave_for_the_system_browser() {
+        for raw in [
+            "https://auth.openai.com/oauth/authorize?client_id=avibe&state=s",
+            "http://127.0.0.1:5123/show/page",
+        ] {
+            assert_eq!(
+                new_window_decision(&Url::parse(raw).expect("test URL")),
+                NewWindowDecision::OpenInSystemBrowser,
+                "{raw}"
+            );
+        }
+        for raw in [
+            "about:blank",
+            "javascript:alert(1)",
+            "data:text/html,<p>hi</p>",
+            "blob:http://127.0.0.1:5123/7f1c",
+            "file:///etc/hosts",
+            "mailto:someone@example.com",
+            "avibe://open",
+            "tauri://localhost/index.html",
+        ] {
+            assert_eq!(
+                new_window_decision(&Url::parse(raw).expect("test URL")),
+                NewWindowDecision::Deny,
+                "{raw}"
+            );
+        }
+    }
+}

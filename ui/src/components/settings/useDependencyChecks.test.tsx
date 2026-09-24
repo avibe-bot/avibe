@@ -89,6 +89,35 @@ describe('independent dependency checks', () => {
     },
   );
 
+  it('refreshes a startup repair until settled without waiting on another group', async () => {
+    vi.useFakeTimers();
+    try {
+      const slow = deferred();
+      let repairing = true;
+      const read = vi.fn(async (options: DependencyReadOptions = {}) => (
+        options.ids?.includes('askill') ? slow.promise : {
+          ...ready(options), reconciling: repairing,
+          reconciling_dependencies: repairing ? ['show-runtime'] : [],
+        }
+      ));
+      const { result, unmount } = renderHook(() => useDependencyChecks(read));
+      act(() => { void result.current.refresh(); });
+      await act(async () => { await Promise.resolve(); });
+      expect(result.current.checks.askill.checking).toBe(true);
+      expect(result.current.checks['show-runtime'].reconciling).toBe(true);
+      repairing = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500); });
+      expect(result.current.checks['show-runtime'].reconciling).toBe(false);
+      const calls = read.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      expect(read).toHaveBeenCalledTimes(calls);
+      unmount();
+      await act(async () => slow.resolve(ready({ ids: ['askill'] })));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels every owned request on unmount', async () => {
     const slow = deferred();
     const read = vi.fn((_options?: DependencyReadOptions) => slow.promise);

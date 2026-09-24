@@ -27,7 +27,39 @@ permissions:
   pull-requests: read
 
 jobs:
+  resolve-desktop-release:
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # Resolve the requested tag with the tooling that tag carries. An
+          # unpinned checkout would run a dispatched branch's resolver against a
+          # tag it never belonged to. fetch-depth keeps the tag history the
+          # resolver walks.
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - name: Resolve exact TEST source and versions
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --output "$GITHUB_OUTPUT"
+
+  desktop-packages:
+    needs: resolve-desktop-release
+    uses: ./.github/workflows/desktop-package.yml
+    with:
+      source_sha: ${{ needs.resolve-desktop-release.outputs.source_sha }}
+      version: ${{ needs.resolve-desktop-release.outputs.version }}
+      release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
+    # Deliberately no secrets: TEST signing is independent of repository identities.
+
   resolve-show-runtime-ref:
+    needs: resolve-desktop-release
     if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ubuntu-latest
     outputs:
@@ -111,13 +143,14 @@ jobs:
 
   build-assets:
     needs:
+      - resolve-desktop-release
       - show-runtime-bundles
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.resolve-desktop-release.outputs.source_sha }}
 
       - name: Checkout release verification
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -228,17 +261,28 @@ jobs:
           path: dist/
 
   release:
-    needs: build-assets
+    needs: [build-assets, resolve-desktop-release, desktop-packages]
+    concurrency:
+      group: avibe-gh-release-${{ github.event.inputs.tag || github.ref_name }}
+      cancel-in-progress: false
     # Official assets belong to publish.yml; only previews require this build.
     if: >-
       ${{ !cancelled() && (needs.build-assets.result == 'success' ||
           (needs.build-assets.result == 'skipped' &&
-           !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) }}
+           !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) &&
+          (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
+           (needs.resolve-desktop-release.result == 'success' && needs.desktop-packages.result == 'success')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
+          # Publish with the release tooling and installation guidance the
+          # released source carries. resolve-desktop-release is skipped on the
+          # official v* path, so its output is empty there and the requested tag
+          # is the pin. fetch-depth keeps the tag and commit history that notes
+          # generation and the tag/source equality check walk.
+          ref: ${{ needs.resolve-desktop-release.outputs.source_sha || github.event.inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Resolve tag
@@ -579,14 +623,36 @@ jobs:
           name: release-dist
           path: dist/
 
+      - name: Download desktop TEST artifacts
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          pattern: avibe-desktop-${{ needs.resolve-desktop-release.outputs.version }}-*
+          path: desktop-dist/
+          merge-multiple: true
+
+      - name: Validate desktop TEST assets and append installation guidance
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          SOURCE_SHA: ${{ needs.resolve-desktop-release.outputs.source_sha }}
+        run: |
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_SHA"
+          python scripts/desktop_release.py verify \
+            --directory desktop-dist --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
+          cat docs/desktop-test-installation.md >> release.md
+
       - name: Create GitHub-only Release
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.resolve-desktop-release.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
+          python scripts/desktop_release.py check-remote \
+            --directory desktop-dist --tag "$TAG" --source-sha "$SOURCE_SHA" --repo "$GITHUB_REPOSITORY"
           python scripts/github_release.py update-notes \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
@@ -603,6 +669,7 @@ jobs:
             dist/show-runtime-manifest.json
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
             dist/avibe_memory-*-py3-none-any.whl
+            desktop-dist/*
           )
           # Packages and runtimes share the same immutable publication boundary.
           # Validate every existing byte before uploading even a missing asset.
@@ -637,6 +704,9 @@ jobs:
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_to_upload[@]}"
           fi
 
+          python scripts/desktop_release.py check-remote \
+            --directory desktop-dist --tag "$TAG" --source-sha "$SOURCE_SHA" \
+            --repo "$GITHUB_REPOSITORY" --complete
           python scripts/github_release.py finalize \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$TAG" \

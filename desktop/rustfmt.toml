@@ -1,0 +1,3 @@
+# Wide enough that the shell's descriptive names and doc comments do not force
+# awkward wrapping; everything else stays at rustfmt defaults.
+max_width = 120

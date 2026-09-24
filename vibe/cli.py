@@ -86,6 +86,7 @@ from vibe.upgrade import (
     defer_upgrade_activation,
     get_latest_version_info,
     get_safe_cwd,
+    is_desktop_managed_runtime,
     _launcher_generation,
     _candidate_python,
     launcher_is_current_process,
@@ -138,6 +139,17 @@ DOCTOR_REPAIR_TARGETS = (
 )
 DOCTOR_DEFAULT_REPAIR_TARGETS = DOCTOR_REPAIR_TARGETS[:4]
 DOCTOR_DEPENDENCY_REPAIR_TARGETS = frozenset(DOCTOR_REPAIR_TARGETS[4:])
+
+
+def _doctor_repair_target(value: str) -> str:
+    """Validate one repair target without argparse's empty-list choices bug."""
+
+    if value not in DOCTOR_REPAIR_TARGETS:
+        choices = ", ".join(repr(target) for target in DOCTOR_REPAIR_TARGETS)
+        raise argparse.ArgumentTypeError(f"invalid choice: {value!r} (choose from {choices})")
+    return value
+
+
 DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
     "home-migration": "doctor.repair.dryHomeMigration",
     "stale-install-runtime": "doctor.repair.dryStaleInstall",
@@ -13316,10 +13328,35 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def cmd_start():
+def _handover_superseded_desktop_runtime() -> None:
+    """Replace a different desktop-managed Controller before service reuse."""
+
+    from vibe import internal_client
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    expected_runtime_id = desktop_runtime_id()
+    if expected_runtime_id is None:
+        return
+    controller_identity = internal_client.health_identity_sync()
+    if controller_identity is None:
+        return
+    actual_runtime_id = controller_identity.get("desktop_runtime_id")
+    if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
+        return
+
+    service_was_running = runtime.resolve_service_owner_pid(include_starting=True) is not None
+    ui_was_running = runtime.ui_pid_file_points_to_running_ui()
+    if service_was_running and runtime.stop_service() is not True:
+        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe service")
+    if ui_was_running and runtime.stop_ui(stop_remote_access=False) is not True:
+        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe UI")
+
+
+def cmd_start(*, open_browser: bool | None = None):
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
+    _handover_superseded_desktop_runtime()
 
     has_configured_platform_credentials = getattr(config, "has_configured_platform_credentials", None)
     if callable(has_configured_platform_credentials):
@@ -13332,67 +13369,169 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
-    service_pid = runtime.start_service(
-        wait_for_ready=False,
-    )
-    service_reused = live_service_pid is not None and service_pid == live_service_pid
-    bind_host = runtime.effective_ui_bind_host(config)
-    ui_pid = runtime.start_ui(
-        bind_host,
-        config.ui.setup_port,
-    )
-    # The WAIT below is asked unconditionally. The predicate that used to guard
-    # it is the lock, which is taken before the database is migrated -- so it is
-    # already true of a process that has not finished starting and may never, and
-    # guarding with it skipped the wait in exactly the case the wait exists for.
-    # Nothing is paid for asking: a service that is up answers on the first probe.
+    service_start = runtime.ProcessStartInfo()
+    ui_start = runtime.ProcessStartInfo()
+    # Everything from here to the receipt line is one region under one invariant:
+    # nothing THIS invocation created may survive a start that never printed a
+    # receipt. Both processes count. An unreceipted service is adopted as
+    # `reused` on the next attempt, so the desktop shell never owns its stop
+    # again; an unreceipted UI keeps its pid file and its listener, which the
+    # next attempt then has to fight. Every failure in the region produces those
+    # orphans, whichever line raised.
     #
-    # The provisional "starting" WRITE is guarded, and the difference is the
-    # point: `write_status` carries `started_at` forward only across consecutive
-    # `running` writes, so announcing a transition for a service this command did
-    # not start resets its recorded uptime to now and briefly shows a starting
-    # service to every status consumer. `vibe start` against a live instance is
-    # idempotent and must stay observably so.
-    if not service_reused:
-        runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
-    # The wait resolves the authoritative service.lock holder rather than waiting
-    # on the raw pid start_service handed back: under a delegated user scope that
-    # pid can be a launcher that never takes the lock, so wait_for_service_ready
-    # adopts and returns the real owner instead of stalling the full timeout.
-    resolved_pid = runtime.wait_for_service_ready(
-        service_pid,
-        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-    )
-    service_ready = resolved_pid is not None
-    if resolved_pid is not None:
-        service_pid = resolved_pid
-    if service_ready:
-        runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
-    elif runtime.pid_alive(service_pid):
-        runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
-    else:
-        runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
-        raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
+    # The guard is regional on purpose. Undoing one named failure inside its own
+    # branch -- which is what the `ui_pid is None` refusal below used to do --
+    # leaves every other failure in the same region to be discovered one at a
+    # time, because the invariant belongs to the region, not to the branch a
+    # reviewer happened to name first.
+    #
+    # `BaseException`, not `Exception`: a Ctrl-C during the readiness wait, the
+    # longest thing in here, orphans the service exactly like a crash does.
+    # `SystemExit` is included deliberately -- nothing in the region exits on
+    # purpose, and an exit before the receipt is indistinguishable, to the next
+    # launch, from any other start that never finished. The bare `raise` keeps
+    # the original failure and its traceback unchanged.
+    #
+    # The region opens before `start_service`, not after it: that call spawns
+    # the service and then waits for it to take the lock, and a Ctrl-C in that
+    # wait left a live, reserved service that no rollback had been asked about.
+    try:
+        service_pid = runtime.start_service(
+            wait_for_ready=False,
+            start_info=service_start,
+        )
+        service_reused = service_start.reused
+        bind_host = runtime.effective_ui_bind_host(config)
+        ui_pid = runtime.start_ui(
+            bind_host,
+            config.ui.setup_port,
+            start_info=ui_start,
+        )
+        if ui_pid is None:
+            # No pid means start_ui found a stale UI it could not stop and refused
+            # to start a replacement that would only die on bind. Nothing below can
+            # complete without that pid: the status writes carry it and
+            # validate_start_receipt rejects a receipt missing it. Fail here rather
+            # than further down in the receipt builder, and let the region's guard
+            # undo the start.
+            raise RuntimeError("Vibe UI could not be started because a stale UI process could not be stopped")
+        # The WAIT below is asked unconditionally. The predicate that used to guard
+        # it is the lock, which is taken before the database is migrated -- so it is
+        # already true of a process that has not finished starting and may never, and
+        # guarding with it skipped the wait in exactly the case the wait exists for.
+        # Nothing is paid for asking: a service that is up answers on the first probe.
+        #
+        # The provisional "starting" WRITE is guarded, and the difference is the
+        # point: `write_status` carries `started_at` forward only across consecutive
+        # `running` writes, so announcing a transition for a service this command did
+        # not start resets its recorded uptime to now and briefly shows a starting
+        # service to every status consumer. `vibe start` against a live instance is
+        # idempotent and must stay observably so.
+        if not service_reused:
+            runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
+        # The wait resolves the authoritative service.lock holder rather than waiting
+        # on the raw pid start_service handed back: under a delegated user scope that
+        # pid can be a launcher that never takes the lock, so wait_for_service_ready
+        # adopts and returns the real owner instead of stalling the full timeout.
+        resolved_pid = runtime.wait_for_service_ready(
+            service_pid,
+            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+        )
+        service_ready = resolved_pid is not None
+        if resolved_pid is not None:
+            service_pid = resolved_pid
+            service_start.capture(service_pid, reused=service_reused)
+        if service_ready:
+            runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
+        elif runtime.pid_alive(service_pid):
+            runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
+        else:
+            runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
+            raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
-    ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
+        from vibe.desktop_runtime import start_receipt_line
 
-    # Always print Web UI access instructions.
-    print("Web UI:")
-    print(f"  {ui_url}")
-    print("")
-    print("Want to open this Web UI from another device or a remote server?")
-    print("  Run: vibe remote")
-    print("  Avibe will guide you through creating a private avibe.bot URL.")
-    print("")
+        receipt_line = start_receipt_line(
+            {
+                "schema_version": 1,
+                "outcome": "reused" if service_reused else "started",
+                "service_pid": service_pid,
+                "ui_pid": ui_pid,
+                "service_create_unix_ms": service_start.create_unix_ms,
+                "ui_create_unix_ms": ui_start.create_unix_ms,
+            }
+        )
+        ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
 
-    # If running over SSH, avoid trying to open a browser on the server.
-    if config.ui.open_browser and not _in_ssh_session():
-        opened = _open_browser(ui_url)
-        if not opened:
-            print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
-            print("")
+        # Always print Web UI access instructions.
+        print("Web UI:")
+        print(f"  {ui_url}")
+        print("")
+        print("Want to open this Web UI from another device or a remote server?")
+        print("  Run: vibe remote")
+        print("  Avibe will guide you through creating a private avibe.bot URL.")
+        print("")
 
+        # If running over SSH, avoid trying to open a browser on the server.
+        should_open_browser = config.ui.open_browser if open_browser is None else open_browser
+        if should_open_browser and not _in_ssh_session():
+            opened = _open_browser(ui_url)
+            if not opened:
+                print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
+                print("")
+
+        print(receipt_line, flush=True)
+    except BaseException:
+        # The invariant is that this invocation leaves running nothing it
+        # created -- not just the service. The region starts two processes, and
+        # a guard that undid one left the other exactly as orphaned: a UI this
+        # command spawned kept its pid file and its listener after the service
+        # beneath it was stopped.
+        #
+        # The set does not need a new mechanism to be known. `start_service` and
+        # `start_ui` already record what they did in their `ProcessStartInfo`:
+        # a process adopted from a previous launch comes back as `reused`, and a
+        # refusal that returned no pid captured nothing. So "what did this
+        # invocation create" is exactly `pid is not None and not reused`, and
+        # the undo runs in reverse order of creation -- the UI, then the service
+        # it was pointed at.
+        #
+        # Both undos find their process through its pid record rather than the
+        # captured pid, and that is sound by construction, not by luck: the
+        # spawn primitives write the record and then capture the child, both
+        # inside the region that kills the child if either step fails. So every
+        # live process this sees as created has a record naming it, and no
+        # child that missed the capture is still alive.
+        if ui_start.pid is not None and not ui_start.reused:
+            # `stop_remote_access=False`, the same distinction the stale-UI
+            # restart above makes, and for the same reason: `vibe start` never
+            # brings a tunnel up. `remote_access.start()` is reached only from
+            # the UI's explicit endpoint and from `vibe remote`; UI startup only
+            # starts monitors. Any tunnel alive here therefore predates this
+            # command, and tearing it down would destroy a remote URL this
+            # invocation did not create -- the one irreversible mistake
+            # available to a rollback.
+            runtime.stop_ui(stop_remote_access=False)
+        if service_start.pid is not None and not service_start.reused:
+            # A service that was already running is not ours to stop, and against
+            # one this command has then changed nothing to undo. stop_service()
+            # logs any pid it could not stop, so a rollback that itself fails
+            # still leaves evidence; either way the start has failed.
+            runtime.stop_service()
+        raise
+    return 0
+
+
+def cmd_desktop_endpoint() -> int:
+    """Print the desktop shell's loopback endpoint descriptor."""
+
+    from vibe.desktop_runtime import desktop_endpoint_payload
+
+    _guard_cli_default_state_migration()
+    config = _ensure_config()
+    bind_host = runtime.effective_ui_bind_host(config)
+    payload = desktop_endpoint_payload(bind_host, config.ui.setup_port)
+    print(json.dumps(payload, separators=(",", ":")))
     return 0
 
 
@@ -13450,7 +13589,35 @@ def _runtime_process_was_running() -> bool:
     return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
-def cmd_stop():
+def _stop_receipt_refusal(receipt_json: str) -> str | None:
+    from vibe.desktop_runtime import START_RECEIPT_TIME_TOLERANCE_MS, validate_start_receipt
+
+    try:
+        receipt = validate_start_receipt(json.loads(receipt_json))
+    except (ValueError, RecursionError):
+        return "invalid_receipt"
+    try:
+        recorded_pid = int(paths.get_runtime_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return "service_pid_mismatch"
+    if recorded_pid != receipt["service_pid"]:
+        return "service_pid_mismatch"
+    if not runtime.pid_alive(recorded_pid):
+        return "service_identity_unavailable"
+    created = runtime.process_create_time(recorded_pid)
+    if created is None:
+        return "service_identity_unavailable"
+    if not abs(created * 1000 - receipt["service_create_unix_ms"]) <= START_RECEIPT_TIME_TOLERANCE_MS:
+        return "service_create_time_mismatch"
+    return None
+
+
+def cmd_stop(*, receipt: str | None = None):
+    if receipt is not None:
+        reason = _stop_receipt_refusal(receipt)
+        if reason is not None:
+            print(json.dumps({"reason": reason}, separators=(",", ":")), file=sys.stderr)
+            return 3
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
@@ -15156,6 +15323,9 @@ def get_latest_version() -> dict:
 def cmd_check_update():
     """Check for available updates."""
     print(f"Current version: {__version__}")
+    if is_desktop_managed_runtime():
+        print(i18n_t("desktopRuntime.checkUpdate", V2Config.load().language))
+        return 0
     print("Checking for updates...")
 
     info = get_latest_version()
@@ -15176,6 +15346,9 @@ def cmd_check_update():
 def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
     print(f"Current version: {__version__}")
+    if is_desktop_managed_runtime():
+        print(i18n_t("desktopRuntime.upgrade", V2Config.load().language))
+        return 0
     print("Checking for updates...")
 
     info = get_latest_version()
@@ -16001,8 +16174,23 @@ def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("stop", help="Stop all services")
-    subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    stop_parser = subparsers.add_parser("stop", help="Stop all services")
+    stop_parser.add_argument(
+        "--receipt",
+        help="Stop only if the service identity matches this startup receipt JSON.",
+    )
+    start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    start_parser.add_argument(
+        "--no-open-browser",
+        dest="open_browser",
+        action="store_false",
+        default=None,
+        help="Start services without opening the Web UI in the system browser.",
+    )
+    desktop_parser = subparsers.add_parser("desktop", help=argparse.SUPPRESS)
+    desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
+    desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint", help=argparse.SUPPRESS)
+    desktop_endpoint_parser.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
     restart_parser = subparsers.add_parser("restart", help="Restart all services")
     restart_parser.add_argument(
         "--delay-seconds",
@@ -16030,7 +16218,7 @@ def build_parser():
     doctor_parser.add_argument(
         "doctor_repair_targets",
         nargs="*",
-        choices=DOCTOR_REPAIR_TARGETS,
+        type=_doctor_repair_target,
         help="Repair target(s). Defaults to all safe first-phase repair targets.",
     )
     doctor_depth_group = doctor_parser.add_mutually_exclusive_group()
@@ -17856,6 +18044,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("version",): None,
     ("check-update",): None,
     ("status",): None,
+    ("desktop", "endpoint"): "member",
     # Host scope, not instance scope: these act on this machine's screen and on
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
@@ -18092,9 +18281,11 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
-        sys.exit(cmd_stop())
+        sys.exit(cmd_stop(receipt=args.receipt) if args.receipt is not None else cmd_stop())
     if args.command == "start":
-        sys.exit(cmd_start())
+        sys.exit(cmd_start(open_browser=args.open_browser))
+    if args.command == "desktop" and args.desktop_command == "endpoint":
+        sys.exit(cmd_desktop_endpoint())
     if args.command == "restart":
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
     if args.command == "status":
