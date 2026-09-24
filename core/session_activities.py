@@ -1512,6 +1512,11 @@ class SessionActivityRegistry:
                 return []
         now = time.monotonic()
         with self._lock:
+            # Provenance classification is published to memory before its
+            # durable snapshot. Any later receipt claim is a valid recovery
+            # boundary for retrying that snapshot; recovery must not depend on
+            # another Result or a receiver EOF.
+            self._retry_provenance_persistence_locked(key)
             queue = self._completed_outputs.get(key)
             if not queue:
                 return []
