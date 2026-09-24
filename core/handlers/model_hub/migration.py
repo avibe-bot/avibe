@@ -2097,6 +2097,8 @@ async def _resume_takeover(
                     record["clean_native_stores"][edit["backend"]] = snapshot.revision
         await verify_idle()
         if terminal:
+            # Every terminal path binds kept keys before its receipt.
+            await _record_retained_store_revisions(host, record)
             return _finish_rejected_takeover(host, record)
         for credential in record["credentials"]:
             if credential["kind"] == "oauth":

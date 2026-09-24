@@ -179,9 +179,9 @@ def test_empty_codex_container_never_authorizes_deleting_dormant_file_grant(
     store.config.agents["codex"].mode = "direct"
     ids = [row["id"] for row in service.migration_scan()["items"]]
     if with_api_key:
-        # The key migrates (removed only on request); the dormant file grant is never deleted.
+        # The key migrates; the dormant file (and equal bytes it holds) is never touched.
         asyncio.run(service.migration_apply(ids, clean_api_keys=True))
-        assert json.loads(dormant.read_bytes()) == {"tokens": payload["tokens"]}
+        assert dormant.read_bytes() == before
         assert store.config.agents["codex"].mode == "hub"
         assert len(adapter.provisioned) == len(store.config.sources) == 1
         assert not adapter.oauth_provisioned
@@ -716,3 +716,138 @@ def test_retained_receipt_binds_only_the_verified_store_revision(monkeypatch, tm
     keychain.mdates[locator] += 1
     asyncio.run(_record_retained_store_revisions(service, record))
     assert "store_revision" not in record["retained_native_ids"]["key_fixture"]
+
+
+_RELAY_AND_OTHER = (
+    'cli_auth_credentials_store = "file"\nmodel_provider = "Relay"\n\n[model_providers.Relay]\n'
+    'base_url = "ftp://relay.example/v1"\nwire_api = "responses"\n\n'
+    '[model_providers.Other]\nbase_url = "https://other.example/v1"\nwire_api = "responses"\n'
+    'experimental_bearer_token = "{token}"\n'
+)
+
+
+def _clean_importable(service):
+    scan = service.migration_scan()["items"]
+    assert any(row["proposed_action"] == "reauth" for row in scan)
+    ids = [row["id"] for row in scan if row["proposed_action"] == "import"]
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == len(ids)
+
+
+@pytest.mark.parametrize("with_login", [False, True])
+def test_cleanup_keeps_routing_and_store_of_an_uncarried_codex_key(monkeypatch, tmp_path, with_login):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    auth = {"OPENAI_API_KEY": "fixture-store-key-123456"}
+    if with_login:
+        auth["tokens"] = {
+            "access_token": "fixture-access", "refresh_token": "fixture-refresh", "account_id": "acct",
+        }
+    _write(home / ".codex/auth.json", json.dumps(auth))
+    config = home / ".codex/config.toml"
+    _write(config, _RELAY_AND_OTHER.format(token="fixture-other-key-654321"))
+    service, _store, _adapter = _service(tmp_path, migration_home=home)
+    _clean_importable(service)
+    assert json.loads((home / ".codex/auth.json").read_text()) == {"OPENAI_API_KEY": "fixture-store-key-123456"}
+    text = config.read_text()
+    assert 'model_provider = "Relay"' in text
+    assert "ftp://relay.example/v1" in text
+    assert 'cli_auth_credentials_store = "file"' in text
+    assert "fixture-other-key-654321" not in text
+
+
+def test_cleanup_keeps_a_codex_store_key_equal_to_a_carried_provider_key(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    shared = "fixture-shared-key-123456"
+    _write(home / ".codex/auth.json", json.dumps({"OPENAI_API_KEY": shared}))
+    _write(home / ".codex/config.toml", _RELAY_AND_OTHER.format(token=shared))
+    service, _store, _adapter = _service(tmp_path, migration_home=home)
+    _clean_importable(service)
+    assert json.loads((home / ".codex/auth.json").read_text()) == {"OPENAI_API_KEY": shared}
+
+
+def test_cleanup_keeps_a_claude_layer_key_equal_to_a_carried_one(monkeypatch, tmp_path):
+    home, project = tmp_path / "native", tmp_path / "project"
+    _isolate_native_home(monkeypatch, home)
+    shared = "fixture-shared-anthropic-key"
+    _write(home / ".claude/settings.json", json.dumps({"env": {"ANTHROPIC_API_KEY": shared}}))
+    project_settings = project / ".claude/settings.json"
+    _write(project_settings, json.dumps({
+        "env": {"ANTHROPIC_API_KEY": shared, "ANTHROPIC_BASE_URL": "ftp://relay.example"},
+    }))
+    before = project_settings.read_bytes()
+    service, _store, _adapter = _service(tmp_path, migration_home=home)
+    service.migration_project_roots = lambda: (project,)
+    _clean_importable(service)
+    assert project_settings.read_bytes() == before
+    assert "ANTHROPIC_API_KEY" not in (home / ".claude/settings.json").read_text()
+
+
+def test_cleanup_keeps_an_opencode_layer_key_equal_to_a_carried_one(monkeypatch, tmp_path):
+    home, project = tmp_path / "native", tmp_path / "project"
+    _isolate_native_home(monkeypatch, home)
+    shared = "fixture-shared-opencode-key"
+    global_path = home / ".config/opencode/opencode.jsonc"
+    _write(global_path, json.dumps({"provider": {"openai": {"options": {"apiKey": shared}}}}))
+    project_path = project / ".opencode/opencode.json"
+    _write(project_path, json.dumps({"provider": {"openai": {
+        "options": {"apiKey": shared, "baseURL": "ftp://relay.example/v1"},
+    }}}))
+    before = project_path.read_bytes()
+    service, _store, _adapter = _service(tmp_path, migration_home=home)
+    service.migration_project_roots = lambda: (project,)
+    _clean_importable(service)
+    assert project_path.read_bytes() == before
+
+
+def test_reauth_terminal_completion_still_binds_a_kept_keychain_key(monkeypatch, tmp_path):
+    from core.handlers.model_hub.oauth import OAuthFlowState
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    _write(home / ".codex/config.toml", 'cli_auth_credentials_store = "keyring"\n')
+    account = "cli|" + hashlib.sha256(str((home / ".codex").resolve()).encode()).hexdigest()[:16]
+    locator = ("Codex Auth", account)
+    keychain.items[locator] = (json.dumps({
+        "OPENAI_API_KEY": "fixture-key-123456",
+        "tokens": {
+            "access_token": "fixture-access", "refresh_token": "fixture-refresh",
+            "account_id": "acct_fixture",
+        },
+    }), "fixture-original")
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+
+    async def inconclusive(ref):
+        raise RuntimeError("fixture inconclusive")
+
+    adapter.validate_oauth_credential = inconclusive
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    assert service.migration_journal.load()["phase"] == "exposed"
+    oauth_source = next(source for source in store.config.sources if source.kind == "subscription")
+
+    async def start(source_id, vendor):
+        return OAuthFlowState(
+            flow_id="oaf_fixture123", source_id=source_id, vendor=vendor,
+            state="awaiting_action", auth_url="https://fixture.example/authorize", device_code=None,
+            expects=None, instructions_key=None, error_key=None,
+            expires_at_iso="2099-01-01T00:00:00+00:00", credential_ref=None,
+        )
+
+    adapter.start_oauth = start
+    asyncio.run(service.reauth_source(oauth_source.id, {"acknowledge_irreversible": True}))
+    assert json.loads(keychain.items[locator][0]) == {"OPENAI_API_KEY": "fixture-key-123456"}
+    [copy] = service.migration_journal.completed()["retained_native_ids"].values()
+    payload = store.config.to_payload()
+    payload["sources"] = [source for source in payload["sources"] if source["id"] != copy["source_id"]]
+    for agent in payload["agents"].values():
+        agent["sources"]["order"] = [value for value in agent["sources"]["order"] if value != copy["source_id"]]
+        agent["routes"] = {}
+    store.config = ModelHubConfig.from_payload(payload)
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["codex"]

@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -207,9 +208,11 @@ def native_store_items(
     store left unchanged becomes a compare-only guard so a change during the
     migration is still detected.
     """
+    # Only a key carried from the store itself withdraws it; equal bytes
+    # carried from a provider entry never authorize removing the store's key.
     withdrawn = frozenset(
         item.secret.strip() for item in items
-        if clean_api_keys and item.backend == "codex" and item.kind != "oauth_native" and item.secret
+        if clean_api_keys and _codex_store_key_item(item)
     )
     withdraw_login = clean_api_keys or any(
         item.backend == "codex" and item.kind == "oauth_native" for item in items
@@ -221,6 +224,14 @@ def native_store_items(
         if item.backend == "codex" and item.native_store_edit else item
         for item in items
     ]
+
+
+def _codex_store_key_item(item: NativeMigrationItem) -> bool:
+    """Whether the item carries the static key held in the Codex credential store."""
+    return (
+        item.backend == "codex" and item.kind == "api_key"
+        and item.native_store_revision is not None and bool(item.secret)
+    )
 
 
 def _codex_store_holds_api_key(
@@ -337,17 +348,21 @@ def plan_native_cleanup(
 
     if "claude" in backends:
         claude_keys = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
-        # Consent is per field too: equal bytes carried from one Claude field
-        # never authorize removing another field the scan kept native.
-        selected_by_field: dict[str, set[str]] = {}
+        # Consent is per layer and field: equal bytes carried from another
+        # layer or field never authorize removing a credential the scan kept
+        # native (for example one bound to an endpoint the Hub cannot reach).
+        selected_by_field: dict[tuple[str, str], set[str]] = {}
         for item in items:
-            if item.backend == "claude" and item.secret:
-                for field in (item.native_field, *item.shell_auth_variables):
-                    if field:
-                        selected_by_field.setdefault(field, set()).add(item.secret)
+            if item.backend == "claude" and item.secret and item.native_field:
+                for source in item.source_paths:
+                    selected_by_field.setdefault(
+                        (str(Path(source).absolute()), item.native_field), set(),
+                    ).add(item.secret)
 
-        def claude_retained(key: str, value: object) -> bool:
-            selected = isinstance(value, str) and value.strip() in selected_by_field.get(key, set())
+        def claude_retained(path: Path, key: str, value: object) -> bool:
+            selected = isinstance(value, str) and value.strip() in selected_by_field.get(
+                (str(path.absolute()), key), set(),
+            )
             return bool(value) and not selected
 
         # Claude merges its settings layers, so a credential kept native in any
@@ -361,11 +376,11 @@ def plan_native_cleanup(
             layer = _object(raw)
             env = layer.get("env")
             if layer.get("apiKeyHelper") or (
-                isinstance(env, dict) and any(claude_retained(key, env.get(key)) for key in claude_keys)
+                isinstance(env, dict) and any(claude_retained(path, key, env.get(key)) for key in claude_keys)
             ):
                 claude_auth_retained = True
 
-        def clear_settings(payload: dict) -> None:
+        def clear_settings(path: Path, payload: dict) -> None:
             env = payload.get("env")
             if env is not None and not isinstance(env, dict):
                 raise TakeoverStateError("native configuration cannot be parsed")
@@ -373,13 +388,15 @@ def plan_native_cleanup(
             # URL it may depend on. Hub launches pin their own connection.
             if isinstance(env, dict):
                 for key in claude_keys:
-                    if not claude_retained(key, env.get(key)):
+                    if not claude_retained(path, key, env.get(key)):
                         env.pop(key, None)
                 if not claude_auth_retained:
                     env.pop("ANTHROPIC_BASE_URL", None)
 
         for path in claude_settings_paths(home, project_roots):
-            edit_json(path, clear_settings if clean_api_keys else _keep, guard_unchanged=True)
+            edit_json(
+                path, partial(clear_settings, path) if clean_api_keys else _keep, guard_unchanged=True,
+            )
         backup_path = get_claude_oauth_settings_backup_path(home).absolute()
         backup_edit = edits.get(backup_path)
         if backup_edit and backup_edit.before != backup_edit.after and backup_edit.after is not None:
@@ -389,12 +406,21 @@ def plan_native_cleanup(
 
     if "codex" in backends:
         config_path, auth_path = get_codex_config_paths(home)
+        store_keys = {item.secret.strip() for item in items if _codex_store_key_item(item)}
+        # Provider credentials are carried per layer and provider entry.
+        carried_provider_keys = {
+            (str(Path(item.source_paths[0]).absolute()), item.native_provider_id, item.secret.strip())
+            for item in items
+            if item.backend == "codex" and item.kind == "api_key" and item.secret
+            and item.native_provider_id and item.native_store_revision is None and item.source_paths
+        }
 
         def clear_auth(payload: dict) -> None:
             # Credentials outside the selection stay native (see Claude above);
             # without cleanup a selected key is copied and stays native too.
             if clean_api_keys and (
-                not payload.get("OPENAI_API_KEY") or selected_api_key(payload["OPENAI_API_KEY"], "codex")
+                not payload.get("OPENAI_API_KEY")
+                or (isinstance(payload["OPENAI_API_KEY"], str) and payload["OPENAI_API_KEY"].strip() in store_keys)
             ):
                 payload.pop("OPENAI_API_KEY", None)
             if not payload.get("tokens") or any(
@@ -412,9 +438,11 @@ def plan_native_cleanup(
             auth_path, clear_auth if clean_api_keys or "codex" in oauth_backends else _keep,
             guard_unchanged=True,
         )
-        # A key kept beside the withdrawn login (selected or not) still routes
-        # through the login's provider, so that routing stays too.
-        codex_key_kept = not clean_api_keys and _codex_store_holds_api_key(items, auth_path, edits)
+        # A key kept in the store (copied, or never carried) still routes
+        # through the store's provider, so that routing and selector stay too.
+        codex_key_kept = (not clean_api_keys or not store_keys) and _codex_store_holds_api_key(
+            items, auth_path, edits,
+        )
         managed_ids = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
         # An env_key is carried only when a selected row resolved it to a
         # selected key; an unresolved or unselected one stays native.
@@ -424,13 +452,18 @@ def plan_native_cleanup(
             if value.strip() in selected_by_backend.get("codex", set())
         }
 
-        def codex_auth_retained(provider_id: str, provider: dict) -> bool:
+        def provider_key_carried(config_path: Path, provider_id: str, token: object) -> bool:
+            return isinstance(token, str) and (
+                str(config_path.absolute()), provider_id, token.strip(),
+            ) in carried_provider_keys
+
+        def codex_auth_retained(config_path: Path, provider_id: str, provider: dict) -> bool:
             env_key = provider.get("env_key")
             # A managed provider is Avibe-owned routing, but a key the batch did
             # not carry (e.g. an unimportable endpoint) still keeps it native.
             uncarried_key = bool(
                 (provider.get("experimental_bearer_token")
-                    and not selected_api_key(provider["experimental_bearer_token"], "codex"))
+                    and not provider_key_carried(config_path, provider_id, provider["experimental_bearer_token"]))
                 or (env_key and env_key not in carried_env_keys)
             )
             if provider_id in managed_ids:
@@ -457,11 +490,11 @@ def plan_native_cleanup(
         # selectors included, or direct mode would stop using what was kept.
         retained_ids = {
             provider_id
-            for _, _, config in layers if config is not None
+            for layer_path, _, config in layers if config is not None
             for provider_id, provider in (
                 config["model_providers"].items() if isinstance(config.get("model_providers"), dict) else ()
             )
-            if isinstance(provider, dict) and codex_auth_retained(provider_id, provider)
+            if isinstance(provider, dict) and codex_auth_retained(layer_path, provider_id, provider)
         }
         for config_path, content, config in layers:
             if config is None:
@@ -478,7 +511,12 @@ def plan_native_cleanup(
             if not clean_api_keys:
                 removable -= {
                     item.native_provider_id for item in items
-                    if item.backend == "codex" and (item.kind != "oauth_native" or codex_key_kept)
+                    if item.backend == "codex" and item.kind != "oauth_native"
+                }
+            if codex_key_kept:
+                removable -= {
+                    item.native_provider_id for item in items
+                    if item.backend == "codex" and item.kind == "oauth_native"
                 }
             providers = config.get("model_providers")
             if isinstance(providers, dict):
@@ -491,7 +529,7 @@ def plan_native_cleanup(
                     if not isinstance(provider, dict):
                         continue
                     token = provider.get("experimental_bearer_token")
-                    if token and selected_api_key(token, "codex"):
+                    if token and provider_key_carried(config_path, provider_id, token):
                         provider.pop("experimental_bearer_token")
                     if provider.get("env_key") in carried_env_keys:
                         provider.pop("env_key")
@@ -523,7 +561,7 @@ def plan_native_cleanup(
             # authentication. Keep its selector so the recorded clean revision
             # remains observable (and a later native login is not hidden).
             # A kept key may live in the selected store, so only cleanup drops it.
-            if clean_api_keys and not any(
+            if clean_api_keys and not codex_key_kept and not any(
                 item.backend == "codex" and item.native_store_placeholder for item in items
             ):
                 config.pop(CREDENTIALS_STORE_KEY, None)
@@ -535,8 +573,20 @@ def plan_native_cleanup(
         shell_values = dict(pair for item in items for pair in item.shell_values)
 
         absent = object()
+        # A key is carried per file and vendor it was read from: equal bytes
+        # read elsewhere never authorize removing this copy.
+        carried_opencode = {
+            (str(Path(source).absolute()), item.vendor, item.secret.strip())
+            for item in items if item.backend == "opencode" and item.secret
+            for source in item.source_paths
+        }
 
-        def auth_entry_retained(entry: object) -> bool:
+        def opencode_carried(path: Path, vendor: str, value: object) -> bool:
+            return isinstance(value, str) and (
+                str(path.absolute()), vendor, value.strip(),
+            ) in carried_opencode
+
+        def auth_entry_retained(vendor: str, entry: object) -> bool:
             # An entry the Hub could not carry (OAuth, a key outside the
             # selection, or a value of no shape it reads) stays native, like
             # every other unselected credential. Only an absent entry and the
@@ -544,11 +594,13 @@ def plan_native_cleanup(
             return entry is not absent and not (
                 isinstance(entry, dict)
                 and "type" in entry and entry["type"] == "api"
-                and selected_api_key(entry.get("key"), "opencode")
+                and opencode_carried(opencode_auth_path(home), vendor, entry.get("key"))
             )
 
         native_auth = read_native_config(opencode_auth_path(home)) or {}
-        retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor, absent))}
+        retained_auth = {
+            vendor for vendor in vendors if auth_entry_retained(vendor, native_auth.get(vendor, absent))
+        }
 
         # References a selected row read: bound to its saved assignment, or
         # proved empty before it selected the auth.json fallback. Any other
@@ -557,8 +609,8 @@ def plan_native_cleanup(
             name for item in items if item.backend == "opencode" for name in item.shell_variables
         }
 
-        def api_key_retained(value: object) -> bool:
-            if not value or selected_api_key(value, "opencode"):
+        def api_key_retained(path: Path, vendor: str, value: object) -> bool:
+            if not value or opencode_carried(path, vendor, value):
                 return False
             return not (
                 isinstance(value, str)
@@ -584,10 +636,12 @@ def plan_native_cleanup(
             for vendor in vendors:
                 provider = providers.get(vendor)
                 options = provider.get("options") if isinstance(provider, dict) else None
-                if isinstance(options, dict) and (options.get("headers") or api_key_retained(options.get("apiKey"))):
+                if isinstance(options, dict) and (
+                    options.get("headers") or api_key_retained(path, vendor, options.get("apiKey"))
+                ):
                     retained_auth.add(vendor)
 
-        def clear_providers(payload: dict) -> None:
+        def clear_providers(path: Path, payload: dict) -> None:
             providers = payload.get("provider")
             if providers is None:
                 return
@@ -599,7 +653,7 @@ def plan_native_cleanup(
                     continue
                 options = provider.get("options")
                 if isinstance(options, dict):
-                    if api_key_retained(options.get("apiKey")):
+                    if api_key_retained(path, vendor, options.get("apiKey")):
                         continue
                     options.pop("apiKey", None)
                     if vendor not in retained_auth:
@@ -610,11 +664,14 @@ def plan_native_cleanup(
                         provider.pop("options", None)
 
         for path in opencode_config_paths(home, project_roots):
-            edit_json(path, clear_providers if clean_api_keys else _keep, jsonc=True, guard_unchanged=True)
+            edit_json(
+                path, partial(clear_providers, path) if clean_api_keys else _keep,
+                jsonc=True, guard_unchanged=True,
+            )
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
-                if vendor not in payload or auth_entry_retained(payload[vendor]):
+                if vendor not in payload or auth_entry_retained(vendor, payload[vendor]):
                     continue
                 payload.pop(vendor, None)
 
