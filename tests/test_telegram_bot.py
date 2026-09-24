@@ -901,6 +901,23 @@ def test_pending_cwd_prompt_bypasses_slash_command_with_args() -> None:
     assert bot._interaction_scope_key(context) in bot._cwd_prompts
 
 
+def test_pending_cwd_prompt_does_not_treat_retired_command_as_path() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(
+        user_id="42",
+        channel_id="-100123",
+        thread_id="1",
+        platform="telegram",
+        platform_specific={"is_dm": False},
+    )
+    bot._cwd_prompts[bot._interaction_scope_key(context)] = SimpleNamespace(message_id="10", current_cwd="/tmp")
+
+    handled = asyncio.run(bot._consume_cwd_prompt(context, "/memory status"))
+
+    assert handled is False
+    assert bot._interaction_scope_key(context) in bot._cwd_prompts
+
+
 def test_send_message_uses_html_parse_mode() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")

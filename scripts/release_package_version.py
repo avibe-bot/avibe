@@ -41,7 +41,7 @@ def package_version_from_release_tag(tag: str) -> str:
     if normalized.startswith("v") and normalized != f"v{result}":
         raise ValueError(
             f"official release tag must use canonical spelling v{result}; "
-            "index-installed core resolves its Memory companion by that exact tag"
+            "release artifacts must match that exact version"
         )
     return result
 
