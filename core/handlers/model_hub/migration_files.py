@@ -417,14 +417,18 @@ def plan_native_cleanup(
         }
 
         def codex_auth_retained(provider_id: str, provider: dict) -> bool:
-            if provider_id in managed_ids:
-                return False
             env_key = provider.get("env_key")
-            return bool(
-                any(provider.get(field) for field in ("http_headers", "env_http_headers"))
-                or (provider.get("experimental_bearer_token")
+            # A managed provider is Avibe-owned routing, but a key the batch did
+            # not carry (e.g. an unimportable endpoint) still keeps it native.
+            uncarried_key = bool(
+                (provider.get("experimental_bearer_token")
                     and not selected_api_key(provider["experimental_bearer_token"], "codex"))
                 or (env_key and env_key not in carried_env_keys)
+            )
+            if provider_id in managed_ids:
+                return uncarried_key
+            return uncarried_key or any(
+                provider.get(field) for field in ("http_headers", "env_http_headers")
             )
 
         layers: list[tuple[Path, bytes | None, dict | None]] = []

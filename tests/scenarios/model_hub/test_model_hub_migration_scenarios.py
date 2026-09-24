@@ -963,6 +963,10 @@ def test_mh_mig_007_later_cleanup_also_withdraws_a_kept_key(
     assert json.loads(settings.read_text(encoding="utf-8"))["env"] == {}
     assert "ANTHROPIC_API_KEY" not in profile.read_text(encoding="utf-8")
     assert service.migration_scan()["items"] == []
+    assert service.migration_journal.completed()["retained_native_ids"] == {}
+    # A native restore of the withdrawn key is reported, not hidden by its old receipt.
+    _write(profile, "export ANTHROPIC_API_KEY=sk-ant-shell-123456\n")
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["claude"]
 
 
 def test_mh_mig_007_retained_key_identity_includes_provider() -> None:
@@ -1801,3 +1805,32 @@ def test_mh_mig_007_default_oauth_withdrawal_keeps_routing_of_an_excluded_key(
     assert config_path.read_text(encoding="utf-8") == config
     auth = json.loads((native_home / ".codex" / "auth.json").read_text(encoding="utf-8"))
     assert auth["OPENAI_API_KEY"] == "sk-openai-test-123456" and "tokens" not in auth
+
+
+def test_mh_mig_007_managed_provider_keeps_an_excluded_key_beside_the_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: withdrawing a login keeps a managed provider's unimported key."""
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".codex" / "auth.json",
+        json.dumps({"tokens": {
+            "access_token": "codex-access-123456",
+            "refresh_token": "codex-refresh-123456",
+            "account_id": "acct_codex_test",
+        }}),
+    )
+    config_path = native_home / ".codex" / "config.toml"
+    config = (
+        'cli_auth_credentials_store = "file"\nmodel_provider = "openai-managed"\n\n'
+        '[model_providers.openai-managed]\nbase_url = "ftp://relay.example/v1"\n'
+        'wire_api = "responses"\nexperimental_bearer_token = "sk-openai-managed-123456"\n'
+    )
+    _write(config_path, config)
+    _isolate_native_home(monkeypatch, native_home)
+    service, _store, _adapter = _service(tmp_path)
+    scan = service.migration_scan()["items"]
+    assert "reauth" in [item["proposed_action"] for item in scan if item["kind"] == "api_key"]
+    oauth = [item["id"] for item in scan if item["kind"] == "oauth_native"]
+    assert asyncio.run(service.migration_apply(oauth))["applied"] == 1
+    assert config_path.read_text(encoding="utf-8") == config

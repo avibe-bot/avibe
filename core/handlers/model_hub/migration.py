@@ -1894,6 +1894,11 @@ async def _prepare_takeover(
             "retained_native_ids": {} if clean_api_keys else {
                 identity: copy for identity, copy in item_sources.items()
             },
+            # A cleanup batch withdraws these kept keys, retiring their receipts.
+            "withdrawn_native_ids": sorted({
+                _retained_key_identity(item) for item in [*selected, *retained_keys]
+                if clean_api_keys and item.kind != "oauth_native"
+            }),
         }
         seen_stores: set[str] = set()
         for item in native_store_items([*selected, *retained_keys], clean_api_keys=clean_api_keys):
