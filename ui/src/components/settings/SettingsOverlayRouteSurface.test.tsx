@@ -881,6 +881,27 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
   });
 
+  it('does not reuse an owner interaction as Escape return focus', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+        <AgentationEscapeProbe />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    await user.click(screen.getByRole('button', { name: 'feedback-toolbar' }));
+    await user.keyboard('{Escape}');
+    expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('link', { name: 'shell-settings' }),
+    ));
+  });
+
   it('does not steal focus from a modal opened by an inline outside action', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');

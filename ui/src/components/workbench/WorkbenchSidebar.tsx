@@ -407,6 +407,7 @@ export const SessionRow: React.FC<{
     <Popover open={canManageMetadata && menuOpen} onOpenChange={(open) => canManageMetadata && setMenuOpen(open)}>
       <PopoverAnchor asChild>
         <div
+          data-settings-interaction-owner="true"
           onContextMenu={(e) => {
             if (!canManageMetadata) return;
             e.preventDefault();
@@ -617,6 +618,7 @@ const ProjectRow: React.FC<{
               <PopoverTrigger asChild>
                 <button
                   type="button"
+                  data-settings-interaction-owner="true"
                   aria-label={t('workbench.projectActions')}
                   className={clsx(
                     'flex size-5 shrink-0 items-center justify-center rounded-md text-muted transition',

@@ -57,6 +57,7 @@ export const SessionActionsTrigger = React.forwardRef<HTMLButtonElement, Session
     <Button
       ref={ref}
       type="button"
+      data-settings-interaction-owner="true"
       variant="ghost"
       size="icon"
       aria-label={label}

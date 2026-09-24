@@ -190,19 +190,22 @@ export const SettingsOverlayRouteSurface = ({
                 const target = event.target;
                 const isToggle = target instanceof Element
                   && target.closest('[data-settings-toggle="true"]') !== null;
+                const interactionOwner = isInteractionOwner(target);
                 // Keep focus on the control that caused an inline dismissal.
                 // The toggle is the same handoff for standalone's explicit
                 // close; other standalone interactions do not close Settings
                 // and must not leave a stale target for a later close.
-                if (!standaloneMenu || isToggle) {
+                if (isToggle || (!standaloneMenu && !interactionOwner)) {
                   outsideFocusRef.current = getOutsideFocusTarget(target);
+                } else {
+                  outsideFocusRef.current = null;
                 }
                 // Controls that own their outside interaction must decide what
                 // happens next: a sidebar Link pushes its destination, the
                 // Settings toggle closes explicitly, Dock/window controls hand
                 // focus to a window, and global overlays remain usable. Prevent
                 // Radix's generic dismissal from racing those owners.
-                if (standaloneMenu || isInteractionOwner(target)) {
+                if (standaloneMenu || interactionOwner) {
                   event.preventDefault();
                 }
               }}
