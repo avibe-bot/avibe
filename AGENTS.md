@@ -253,6 +253,12 @@ Source-of-truth rule:
 - add tests when an existing test pattern already exists
 - do not introduce a brand-new test framework unless requested
 - use pytest-style tests (`test_<feature>.py`) colocated or under `tests/`
+- before adding or changing a test, name the observable behavior or contract it protects, the credible regression that makes it fail, and why existing coverage misses it; without all three, do not add it
+- give each contract one primary test at its owning boundary; add another layer only for a distinct risk that owner cannot reach, and extend table-driven cases or shared fixtures instead of near-duplicates
+- a bug regression test must fail on the pre-fix code for the intended reason; one regression at the owner boundary covers the bug
+- do not add production seams (exports, flags, hooks) that only tests use; test through the real boundary, and delete dead code whose only callers are tests
+- reject tests whose expected values come from the code under test, whose mocks implement the asserted behavior, whose fixtures supply what the owner should produce, or whose negative case passes for an unrelated reason
+- source-text or `inspect.getsource` assertions are allowed only when they are the cheapest guard of a user-facing key, byte, or path contract and survive identifier-only refactors
 - for IM integrations, stub/mock platform clients and validate outbound payload/schema behavior
 - for reusable capability-first testing guidance, use `standards/scenario-testing/AGENTS.md` as the entrypoint; project-specific scenario metadata lives under `tests/scenarios/`
 - when a scenario catalog exists, make the scenario ID visible in the automated test and in the PR description
