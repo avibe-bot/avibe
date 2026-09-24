@@ -16,6 +16,7 @@ const source: Source = {
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   vi.useRealTimers();
 });
 
@@ -38,7 +39,7 @@ describe('SourceRow', () => {
     await userEvent.click(opener);
     expect(onOpen).toHaveBeenCalledWith(source, opener);
     expect(screen.queryByText(/latency/i)).toBeNull();
-    expect(screen.getByText('Anthropic · Anthropic Messages')).toBeTruthy();
+    expect(screen.getByText('Anthropic Messages')).toBeTruthy();
   });
 
   it('explains that a healthy source is not currently supplying a route', () => {
@@ -46,8 +47,8 @@ describe('SourceRow', () => {
     expect(screen.getByText(/Available · not currently supplying|可用 · 当前未使用/i)).toBeTruthy();
   });
 
-  it('labels a custom upstream by host and protocol', () => {
-    render(
+  it('puts the highlighted API key badge before the neutral protocol without a host prefix', () => {
+    const { container } = render(
       <I18nextProvider i18n={i18n}>
         <SourceRow
           source={{ ...source, vendor: 'custom', base_url: 'https://relay.example/v1' }}
@@ -55,7 +56,72 @@ describe('SourceRow', () => {
         />
       </I18nextProvider>,
     );
-    expect(screen.getByText('relay.example · Anthropic Messages')).toBeTruthy();
+    const pills = container.querySelectorAll('.model-hub-pill');
+    expect(pills).toHaveLength(2);
+    expect(pills[0].textContent).toMatch(/API key|API Key/);
+    expect(pills[0].classList.contains('model-hub-accent-pill--cyan')).toBe(true);
+    expect(pills[1].textContent).toBe('Anthropic Messages');
+    expect(pills[1].getAttribute('title')).toBe('Anthropic Messages');
+    // The endpoint remains in the independent connection-detail line.
+    expect(screen.getByText('relay.example/v1 · sk-ant-…1234')).toBeTruthy();
+  });
+
+  it.each(['en', 'zh'])('hides accounts across cards without opening them, and remembers the preference in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    const onOpen = vi.fn();
+    const subscription: Source = {
+      ...source, kind: 'subscription', display_name: 'OpenAI 2', vendor: 'openai',
+      account_label: '账号@example.com', masked_credential: null,
+    };
+    const tree = <I18nextProvider i18n={locale}>
+      <SourceRow source={subscription} onOpen={onOpen} />
+      <SourceRow source={{ ...subscription, id: 'src_b', display_name: 'OpenAI 3', account_label: 'second@example.com' }} onOpen={onOpen} />
+    </I18nextProvider>;
+    const { container, unmount } = render(tree);
+    const user = userEvent.setup();
+    expect(container.querySelector('button button')).toBeNull();
+    expect(container.querySelector('[data-source-account]')?.textContent).toBe('账号@example.com');
+    expect(container.querySelector('.model-hub-pill')?.textContent).toBe(locale.t('settings.models.upstream.kind.subscription'));
+    await user.click(screen.getAllByRole('button', { name: locale.t('settings.models.upstream.hideAccount') })[0]);
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(container.innerHTML).not.toContain('账号@example.com');
+    expect(container.innerHTML).not.toContain('second@example.com');
+    unmount();
+    const remounted = render(tree);
+    expect(remounted.container.innerHTML).not.toContain('账号@example.com');
+    const reveal = screen.getAllByRole('button', { name: locale.t('settings.models.upstream.showAccount') })[0];
+    reveal.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByText('账号@example.com')).toBeTruthy();
+    expect(onOpen).not.toHaveBeenCalled();
+    const opener = screen.getByRole('button', { name: 'OpenAI 2' });
+    await user.click(opener);
+    expect(onOpen).toHaveBeenCalledWith(subscription, opener);
+  });
+
+  it('does not invent an account or eye control when the provider has no identity metadata', () => {
+    const { container } = render(<I18nextProvider i18n={i18n}>
+      <SourceRow source={{ ...source, kind: 'subscription', account_label: null }} onOpen={vi.fn()} />
+    </I18nextProvider>);
+    expect(container.querySelector('[data-source-account]')).toBeNull();
+    expect(screen.getAllByRole('button')).toHaveLength(1);
+  });
+
+  it('still hides the account when browser storage rejects the preference', async () => {
+    const { container } = render(<I18nextProvider i18n={i18n}>
+      <SourceRow source={{ ...source, kind: 'subscription', account_label: 'private@example.com' }} onOpen={vi.fn()} />
+    </I18nextProvider>);
+    const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage unavailable', 'QuotaExceededError');
+    });
+    try {
+      await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.models.upstream.hideAccount') }));
+      expect(container.innerHTML).not.toContain('private@example.com');
+    } finally {
+      storage.mockRestore();
+      await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.models.upstream.showAccount') }));
+    }
+    expect(screen.getByText('private@example.com')).toBeTruthy();
   });
 
   it('uses the authoritative Source adoption to name an active supplying source', () => {

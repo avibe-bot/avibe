@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
+from core.handlers.model_hub.events import contains_credential_material
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from vibe.model_hub_runtime.api_key_vendors import (
     official_api_key_base_url,
@@ -958,6 +959,39 @@ class EngineStateStore:
         value = payload.get("auth_name") if payload.get("kind") == "oauth" else None
         return str(value) if value else None
 
+    def oauth_account_label(
+        self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
+    ) -> str | None:
+        """Project optional identity without changing custody or repairing files."""
+        try:
+            with self._lock:
+                _validated_source_id(source_id)
+                metadata = self._read_replacement_credential_document(credential_ref)
+                if (
+                    metadata is None
+                    or metadata.get("kind") != "oauth"
+                    or metadata.get("source_id") != source_id
+                    or metadata.get("vendor") != vendor
+                    or metadata.get("activation_state") not in {None, "active"}
+                    or not self._private_credential_directory_present(self.auth_dir)
+                ):
+                    return None
+                auth_name = metadata.get("auth_name")
+                if not isinstance(auth_name, str):
+                    return None
+                auth_name = _validated_oauth_auth_name(auth_name)
+                payload = json.loads(self._read_private_bytes(
+                    self.auth_dir / auth_name, "engine auth credential path is unsafe",
+                ))
+                if not isinstance(payload, dict):
+                    return None
+                self._assert_oauth_payload_identity(metadata, auth_name, payload, auth_provider=auth_provider)
+                return _oauth_account_label(payload)
+        except (EngineStateError, OSError, ValueError, TypeError):
+            # Display metadata is optional. A missing/unsafe grant stays under
+            # its existing auth recovery policy; listing must not repair it.
+            return None
+
     def oauth_credential_ref(self, auth_name: str) -> str | None:
         normalized = auth_name.strip()
         with self._lock:
@@ -1302,8 +1336,10 @@ class EngineStateStore:
         metadata: dict[str, Any],
         auth_name: str,
         payload: dict[str, Any],
+        *,
+        auth_provider: str | None = None,
     ) -> dict[str, str]:
-        expected_provider = _oauth_provider_for_vendor(str(metadata.get("vendor") or ""))
+        expected_provider = auth_provider or _oauth_provider_for_vendor(str(metadata.get("vendor") or ""))
         actual_provider = str(payload.get("type") or "").strip().lower()
         expected_prefix = str(metadata.get("prefix") or "").strip()
         actual_prefix = str(payload.get("prefix") or "").strip().strip("/")
@@ -1339,6 +1375,27 @@ class EngineStateStore:
             return
         if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
             raise EngineStateError(message)
+
+
+def _oauth_account_label(payload: dict[str, Any]) -> str | None:
+    """Only provider-declared public identity fields can become UI metadata."""
+    secrets = [payload.get(key) for key in ("access_token", "refresh_token", "id_token")]
+    for key in ("email", "username"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip()
+        if (
+            not candidate
+            or len(candidate) > 254
+            or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+            or contains_credential_material(candidate)
+            or candidate in secrets
+            or (key == "email" and re.fullmatch(r"[^@\s]+@[^@\s]+", candidate) is None)
+        ):
+            continue
+        return candidate
+    return None
 
 
 def _credential_ref_auth_scheme(credential_ref: str) -> str | None:

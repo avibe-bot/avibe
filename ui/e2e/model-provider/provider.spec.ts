@@ -2,6 +2,42 @@ import { expect, test } from '@playwright/test';
 import { hub } from '../support/copy';
 
 for (const lang of ['en', 'zh'] as const) {
+  for (const theme of ['light', 'dark']) {
+    test(`source identity, badge hierarchy and privacy: ${lang} ${theme}`, async ({ page }, info) => {
+      const text = (key: string) => hub(key, undefined, lang);
+      await page.route('**/api/**', (route) => route.abort());
+      await page.goto(`/e2e/model-provider/fixture.html?identity=1&lang=${lang}&theme=${theme}`);
+      const cards = page.getByTestId('identity-cards');
+      const detail = page.getByTestId('identity-detail');
+      const pills = cards.locator('.model-hub-pill');
+      await expect(pills).toHaveText([
+        text('upstream.kind.subscription'), 'OpenAI Responses',
+        text('upstream.kind.subscription'), 'OpenAI Responses',
+        text('upstream.kind.apiKey'), 'OpenAI Chat Completions',
+      ]);
+      await expect(cards.getByText('first@example.com', { exact: true })).toBeVisible();
+      await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
+      await cards.screenshot({ path: info.outputPath('identity-visible.png') });
+      // The eye is its own control, even when it sits inside the clickable card.
+      await cards.getByRole('button', { name: text('upstream.hideAccount') }).nth(1).click();
+      await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
+      await expect(page.getByText('first@example.com', { exact: true })).toHaveCount(0);
+      await expect(page.locator('[title*="@example.com"]')).toHaveCount(0);
+      await page.reload();
+      await expect(page.getByText('first@example.com', { exact: true })).toHaveCount(0);
+      await cards.getByRole('button', { name: 'OpenAI 2', exact: true }).click();
+      await expect(detail.getByRole('heading', { name: 'OpenAI 2', exact: true })).toBeVisible();
+      const show = detail.getByRole('button', { name: text('upstream.showAccount') });
+      await show.focus();
+      await page.keyboard.press('Enter');
+      await expect(cards.getByText('first@example.com', { exact: true })).toBeVisible();
+      await expect(detail.getByText('long-account-name-for-overflow-check@example.com', { exact: true })).toBeVisible();
+      await cards.getByRole('button', { name: text('upstream.hideAccount') }).first().click();
+      await cards.screenshot({ path: info.outputPath('identity-hidden.png') });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    });
+  }
+
   test('save, optional selected-model test and manual inventory: ' + lang, async ({ page }, info) => {
     const text = (key: string) => hub(key, undefined, lang);
     await page.route('**/api/**', (route) => route.abort());

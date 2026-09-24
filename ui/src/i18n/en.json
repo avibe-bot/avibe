@@ -1176,6 +1176,9 @@
         "retry": "Retry",
         "addSubscription": "Add subscription",
         "addApiKey": "Add API key",
+        "showAccount": "Show account information",
+        "hideAccount": "Hide account information",
+        "hiddenAccount": "Account hidden",
         "state": {
           "supplyingNative": "Supplying {{backend}} (native)",
           "supplying": "Supplying {{backends}}",

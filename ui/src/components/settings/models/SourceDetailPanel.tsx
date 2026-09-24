@@ -15,6 +15,7 @@ import { classifyModelHubFailure } from './asyncLifetime';
 import { Field } from './dialogFields';
 import { GuardImpact } from './GuardImpact';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
+import { SourceAccountLabel } from './SourceAccountLabel';
 import {
   assessSourceEdit,
   canEditSourceEndpoint,
@@ -683,7 +684,9 @@ export const SourceDetailPanel: React.FC<{
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono" title={endpoint as string}>{endpoint}</dd></div>
-        <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="truncate font-mono" title={credentialValue}>{credentialValue}</dd></div>
+        <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{source.kind === 'subscription' && source.account_label
+          ? <SourceAccountLabel label={source.account_label} />
+          : <span className="block truncate" title={credentialValue}>{credentialValue}</span>}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.type')}</dt><dd className="truncate" title={interfaceLabel}>{interfaceLabel}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.lastFetched')}</dt><dd className="truncate">{lastFetched}</dd></div>
       </dl>

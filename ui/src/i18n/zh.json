@@ -1176,6 +1176,9 @@
         "retry": "重试",
         "addSubscription": "添加订阅",
         "addApiKey": "添加 API Key",
+        "showAccount": "显示账号信息",
+        "hideAccount": "隐藏账号信息",
+        "hiddenAccount": "账号已隐藏",
         "state": {
           "supplyingNative": "{{backend}} 正在使用（Agent 管理）",
           "supplying": "{{backends}} 正在使用",

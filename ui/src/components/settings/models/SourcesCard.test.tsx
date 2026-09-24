@@ -39,7 +39,7 @@ describe('SourcesCard footer', () => {
     expect(panel?.children.item(1)?.className).not.toContain('overflow-y-auto');
   });
 
-  it('keeps the source title on its own line above the interface and kind tags', () => {
+  it('keeps the source title on its own line above the kind and protocol tags', () => {
     render(
       <I18nextProvider i18n={i18n}>
         <SourcesCard read={readyRegion([retained])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
@@ -49,7 +49,7 @@ describe('SourcesCard footer', () => {
     const title = screen.getByText('Retained source');
     expect(title.className).toContain('block');
     expect(title.nextElementSibling?.className).toContain('flex');
-    expect(title.closest('button')?.className).toContain('min-h-[96px]');
+    expect(screen.getByRole('button', { name: 'Retained source' }).parentElement?.parentElement?.className).toContain('min-h-[96px]');
   });
 
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {

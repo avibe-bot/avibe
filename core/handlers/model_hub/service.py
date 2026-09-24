@@ -443,6 +443,9 @@ class UnavailableEngineAdapter:
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         raise EngineUnavailableError
 
+    def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        return None
+
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
         *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
@@ -2170,6 +2173,14 @@ class ModelHubService:
         config = self._clone_config(previous)
         if any(item.id == source.id for item in config.sources):
             raise ModelHubError("migration_item_conflict", status=409)
+        if source.kind == "subscription" and source.display_name == seeded_source_name(source.vendor):
+            names = {item.display_name for item in config.sources}
+            seed = source.display_name
+            number = 2
+            while source.display_name in names:
+                suffix = f" {number}"
+                source.display_name = f"{seed[:64 - len(suffix)]}{suffix}"
+                number += 1
         config.sources.append(source)
         self._apply_source_placement(config, source)
         await self._commit_synced(previous, config)
@@ -2257,6 +2268,20 @@ class ModelHubService:
         for model in payload["models"]:
             model.setdefault("retired", False)
         payload["adopted_by"] = self._adopted_by(source.id, config)
+        return self._source_account_payload(payload)
+
+    def _source_account_payload(self, payload: dict) -> dict:
+        # Resolve from the current binding on every presentation, including
+        # pre-existing subscriptions and grants changed by re-authentication.
+        # Adapters without this optional metadata surface retain persisted labels.
+        reader = getattr(self.adapter, "subscription_account_label", None)
+        if (
+            callable(reader)
+            and payload["kind"] == "subscription"
+            and payload["supply_channel"] == "hub"
+            and payload.get("credential_ref")
+        ):
+            payload["account_label"] = reader(payload["id"], payload["vendor"], payload["credential_ref"])
         return payload
 
     def _source_creation_result(self, source: dict) -> dict:
@@ -2268,7 +2293,7 @@ class ModelHubService:
             "adopted_by": self._adopted_by(source["id"]),
         }
         return {
-            "source": source,
+            "source": self._source_account_payload(source),
             "added_to": self._added_to(source["id"]),
             "adopted_by": self._adopted_by(source["id"]),
         }
