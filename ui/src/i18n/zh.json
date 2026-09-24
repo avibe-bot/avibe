@@ -1484,6 +1484,7 @@
           "modelId": "模型 ID",
           "sourceLabel": "供应商",
           "modelLabel": "模型",
+          "tokenReports": "Token 报告数",
           "inputTokens": "输入 token",
           "nonCachedInputTokens": "非缓存输入 token",
           "cachedInputTokens": "缓存输入 token",

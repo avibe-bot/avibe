@@ -100,8 +100,9 @@ describe('UsageTab', () => {
       to_at: '2026-08-18T03:00:00+08:00',
     }), { windowKey: '7d' });
 
-    expect(container.textContent).toContain('Aug 18, 2026');
-    expect(container.textContent).not.toContain('Sep 24, 2026');
+    const heading = container.querySelector('.model-hub-usage-heading');
+    expect(heading?.textContent).toContain('Aug 18, 2026');
+    expect(heading?.textContent).not.toContain('Sep 24, 2026');
   });
 
   it('MH-USAGE-017: keeps a vanished Source identifiable and a vanished model unnamed', () => {
@@ -371,6 +372,8 @@ describe('UsageTab', () => {
         bucket('00', [row({
           source_id: 'source-formula',
           model_id: 'model-formula',
+          requests: 4,
+          token_reports: 1,
           input_tokens: 148230,
           cached_input_tokens: 96010,
           output_tokens: 4120,
@@ -388,6 +391,7 @@ describe('UsageTab', () => {
       sourceLabel: 'source_label',
       modelLabel: 'model_label',
       requests: 'requests',
+      tokenReports: 'token_reports',
       inputTokens: 'input_tokens',
       nonCachedInputTokens: 'non_cached_input_tokens',
       cachedInputTokens: 'cached_input_tokens',
@@ -400,6 +404,7 @@ describe('UsageTab', () => {
     expect(csv).toContain('source-formula,model-formula');
     expect(csv).toContain("'=supplier");
     expect(csv).toContain("'@model");
+    expect(csv).toContain('4,1,148230');
     expect(csv).toContain('148230');
     expect(csv).not.toContain('148,230');
     expect(csv).toContain('152350');
@@ -416,12 +421,14 @@ describe('UsageTab', () => {
       sourceLabel: 'source_label',
       modelLabel: 'model_label',
       requests: 'requests',
+      tokenReports: 'token_reports',
       inputTokens: 'input_tokens',
       nonCachedInputTokens: 'non_cached_input_tokens',
       cachedInputTokens: 'cached_input_tokens',
       outputTokens: 'output_tokens',
       totalTokens: 'total_tokens',
     }, 'Unknown model');
-    expect(unknownCsv.split('\r\n')[1]?.split(',').slice(-6)).toEqual(['2', '', '', '', '', '']);
+    expect(unknownCsv.split('\r\n')[0]).toContain('token_reports');
+    expect(unknownCsv.split('\r\n')[1]?.split(',').slice(-7)).toEqual(['2', '0', '', '', '', '', '']);
   });
 });

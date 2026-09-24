@@ -30,6 +30,7 @@ export type UsageCsvHeaders = {
   sourceLabel: string;
   modelLabel: string;
   requests: string;
+  tokenReports: string;
   inputTokens: string;
   nonCachedInputTokens: string;
   cachedInputTokens: string;
@@ -70,6 +71,7 @@ export function buildUsageCsv(
         row === null ? '' : sourceIdentityLabel(report, row.source_id, labelContext),
         row === null ? '' : identity?.modelLabel || unknownModel,
         row?.requests ?? (bucket.history_complete ? 0 : ''),
+        row?.token_reports ?? (bucket.history_complete ? 0 : ''),
         knownTokens ? row.input_tokens : '',
         knownTokens ? usageNonCachedInput(row) : '',
         knownTokens ? row.cached_input_tokens : '',
@@ -88,6 +90,7 @@ export function buildUsageCsv(
     headers.sourceLabel,
     headers.modelLabel,
     headers.requests,
+    headers.tokenReports,
     headers.inputTokens,
     headers.nonCachedInputTokens,
     headers.cachedInputTokens,

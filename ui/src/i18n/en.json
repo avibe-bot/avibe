@@ -1484,6 +1484,7 @@
           "modelId": "Model ID",
           "sourceLabel": "Source",
           "modelLabel": "Model",
+          "tokenReports": "Token reports",
           "inputTokens": "Input tokens",
           "nonCachedInputTokens": "Non-cache input tokens",
           "cachedInputTokens": "Cached input tokens",

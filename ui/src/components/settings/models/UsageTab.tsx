@@ -464,26 +464,11 @@ function UsageChart({
           ref={svgRef}
           className="model-hub-usage-svg"
           viewBox={`0 0 ${width} ${height}`}
-          role="img"
-          aria-label={t('settings.models.usage.chart.aria', {
-            kind: bars ? t('settings.models.usage.chart.bars') : t('settings.models.usage.chart.lines'),
-          }) as string}
-          tabIndex={0}
+          aria-hidden="true"
           onPointerMove={(event) => {
             if (event.pointerType !== 'touch') setHover(svgIndexFromPointer(event));
           }}
           onPointerLeave={scheduleHoverClear}
-          onKeyDown={(event) => {
-            if (pinnedKey !== null) return;
-            if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-              event.preventDefault();
-              setHover((hovered ?? inspected ?? 0) + (event.key === 'ArrowRight' ? 1 : -1));
-            }
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              openDetail(hovered ?? inspected ?? 0);
-            }
-          }}
         >
           <defs>
             <pattern id="usage-unknown-pattern" width="6" height="6" patternUnits="userSpaceOnUse">
@@ -555,9 +540,6 @@ function UsageChart({
             <rect
               key={`hit-${currentBucket.key}`}
               className="model-hub-usage-hit-area"
-              role="button"
-              tabIndex={0}
-              aria-label={t('settings.models.usage.chart.bucket', { bucket: formatBucketLabel(currentBucket, i18n.language) }) as string}
               x={bars ? x(index) - plotWidth / report.buckets.length / 2 : x(index) - lineHitWidth / 2}
               y={top}
               width={bars ? plotWidth / report.buckets.length : lineHitWidth}
@@ -566,14 +548,7 @@ function UsageChart({
                 setEscapeDismissed(false);
                 setHover(index);
               }}
-              onFocus={() => setHover(index)}
               onClick={() => openDetail(index)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  openDetail(index);
-                }
-              }}
             />
           ))}
           {tickIndexes.map((index) => (
@@ -588,6 +563,29 @@ function UsageChart({
             </text>
           ))}
         </svg>
+        <div
+          className="sr-only"
+          role="group"
+          aria-label={t('settings.models.usage.chart.detail') as string}
+        >
+          {report.buckets.map((currentBucket, index) => (
+            <button
+              type="button"
+              key={`accessible-${currentBucket.key}`}
+              aria-label={t('settings.models.usage.chart.bucket', {
+                bucket: formatBucketLabel(currentBucket, i18n.language),
+              }) as string}
+              onPointerEnter={() => {
+                setEscapeDismissed(false);
+                setHover(index);
+              }}
+              onFocus={() => setHover(index)}
+              onClick={() => openDetail(index)}
+            >
+              {formatBucketRange(currentBucket, i18n.language, true)}
+            </button>
+          ))}
+        </div>
         {bucket && (
           <div
             className={cn('model-hub-usage-tooltip', pinnedKey !== null && 'is-pinned')}
@@ -824,6 +822,7 @@ export const UsageTab: React.FC<{
       sourceLabel: t('settings.models.usage.csv.sourceLabel') as string,
       modelLabel: t('settings.models.usage.csv.modelLabel') as string,
       requests: t('settings.models.usage.table.requests') as string,
+      tokenReports: t('settings.models.usage.csv.tokenReports') as string,
       inputTokens: t('settings.models.usage.csv.inputTokens') as string,
       nonCachedInputTokens: t('settings.models.usage.csv.nonCachedInputTokens') as string,
       cachedInputTokens: t('settings.models.usage.csv.cachedInputTokens') as string,
@@ -833,7 +832,7 @@ export const UsageTab: React.FC<{
     const url = URL.createObjectURL(new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }));
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `model-usage-${windowKey}.csv`;
+    anchor.download = `model-usage-${report.window_key}.csv`;
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };

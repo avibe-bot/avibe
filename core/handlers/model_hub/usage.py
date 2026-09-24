@@ -691,6 +691,24 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
             _row_key(row),
         )
         incomplete = True
+    row_day = _calendar_day(row.get("day", ""))
+    if not incomplete and row_day is not None:
+        try:
+            day_start = _local_midnight(row_day).astimezone(timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            day_start = None
+        if day_start is not None and oldest_start <= day_start <= measured:
+            nested_totals = _empty_totals()
+            for item in retained.values():
+                _accumulate(nested_totals, item)
+            if any(nested_totals[key] != row[key] for key in _COUNTER_KEYS):
+                logger.warning(
+                    "Model Hub usage ledger row %s has hourly counters that do "
+                    "not cover its complete in-horizon day; publishing it as "
+                    "incomplete",
+                    _row_key(row),
+                )
+                incomplete = True
     if len(retained) > USAGE_HOURLY_RETENTION_HOURS:
         retained = dict(
             sorted(

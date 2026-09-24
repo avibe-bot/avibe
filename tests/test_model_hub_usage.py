@@ -980,6 +980,70 @@ def test_recent_usage_without_its_hour_cannot_claim_complete_hourly_history(
         time.tzset()
 
 
+def test_missing_in_horizon_hour_cannot_be_hidden_by_a_present_latest_hour(
+    tmp_path: Path,
+) -> None:
+    """A present latest slice does not prove earlier same-day slices exist."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 24, 12, 15, tzinfo=timezone.utc)
+    counts = {
+        "requests": 2,
+        "token_reports": 2,
+        "input_tokens": 8,
+        "cached_input_tokens": 2,
+        "output_tokens": 4,
+    }
+    latest = now - timedelta(minutes=30)
+    latest_key = latest.replace(minute=0, second=0, microsecond=0)
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps(
+                [
+                    {
+                        "day": "2026-09-24",
+                        "source_id": "src_missing_earlier",
+                        "model_id": "model-missing-earlier",
+                        **counts,
+                        "last_metered_at": latest.isoformat(),
+                        "hourly_history_complete": True,
+                        "hours": [
+                            {
+                                "key": latest_key.isoformat(),
+                                **{**counts, "requests": 1, "token_reports": 1,
+                                   "input_tokens": 4, "cached_input_tokens": 1,
+                                   "output_tokens": 2},
+                                "last_metered_at": latest.isoformat(),
+                            }
+                        ],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        report = ledger.report(window="24h", now=now)
+
+        assert report["totals"]["requests"] == 1
+        assert any(
+            row["requests"] == 1
+            for bucket in report["buckets"]
+            for row in bucket["rows"]
+        )
+        assert any(not bucket["history_complete"] for bucket in report["buckets"])
+        assert ledger.summary(days=1, now=now)["totals"] == counts
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
 def test_daily_midnight_uses_the_date_specific_local_offset() -> None:
     from core.handlers.model_hub.usage import _local_midnight
 
