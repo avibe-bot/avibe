@@ -553,6 +553,14 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        """Read optional public account metadata from this source's bound grant.
+
+        This local presentation read never starts the engine, refreshes a grant,
+        or exports credential material. Missing/unsafe metadata returns None.
+        """
+        ...
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,

@@ -108,6 +108,71 @@ def test_auth_setup_catalog_priorities_reference_live_scenarios():
     assert set(catalog.get("next_priority", [])) <= live_ids
 
 
+@pytest.mark.parametrize("vendor", ["openai", "anthropic", "gemini", "kimi", "xai"])
+@pytest.mark.parametrize("identity_case", ["valid", "invalid_utf8", "token_whitespace"])
+def test_subscription_identity_survives_oauth_completion_and_http_replay(monkeypatch, tmp_path, vendor, identity_case):
+    """Scenario: AUTH-SETUP-124 — HTTP completion, custody, projection and replay."""
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    harness = HubOAuthScenarioHarness(tmp_path)
+    harness.adapter.observation = replace(
+        engine_served_observation("gemini", models=("identity-model",)),
+        protocol={"openai": "openai_responses", "anthropic": "anthropic"}.get(vendor, "openai_chat"),
+    )
+    engine = EngineStateStore(tmp_path / "engine")
+    runtime = CLIProxyEngineAdapter(supervisor=object(), state_store=engine)
+    harness.adapter.subscription_account_label = runtime.subscription_account_label
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: harness.service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    created = []
+    for index, email in enumerate(("first@example.com", "用户@example.com"), start=1):
+        started = client.post(
+            "/api/models/oauth/start", json={"vendor": vendor, "channel": "hub"},
+            headers=headers, base_url=base_url,
+        )
+        assert started.status_code == 200
+        flow = started.get_json()["flow"]
+        ref = engine.bind_oauth_credential(flow["source_id"], vendor, f"account-{index}.json")
+        identity = {"email": email}
+        if identity_case == "invalid_utf8":
+            identity = {"email": "\ud800@example.com"}
+        elif identity_case == "token_whitespace":
+            identity = {"username": "opaque-secret", "refresh_token": " opaque-secret "}
+        engine.write_oauth_auth_file(f"account-{index}.json", {
+            "type": _OAUTH_ENDPOINTS[vendor][2],
+            "prefix": engine.credential_metadata(ref)["prefix"],
+            # The pinned Kimi grant has a device ID, not an account label.
+            **({"device_id": f"device-{index}"} if vendor == "kimi" else identity),
+            "access_token": f"private-access-fixture-{index}",
+        })
+        harness.adapter.flows[flow["flow_id"]] = replace(
+            harness.adapter.flows[flow["flow_id"]], state="success", credential_ref=ref,
+        )
+        endpoint = f"/api/models/oauth/status/{flow['flow_id']}"
+        completed = client.get(endpoint, base_url=base_url)
+        assert completed.status_code == 200
+        source = completed.get_json()["source"]
+        seed = seeded_source_name(vendor)
+        assert source["display_name"] == (seed if index == 1 else f"{seed} {index}")
+        assert source["account_label"] == (email if vendor != "kimi" and identity_case == "valid" else None)
+        assert "private-access-fixture" not in json.dumps(completed.get_json())
+        assert "opaque-secret" not in json.dumps(completed.get_json())
+        assert client.get(endpoint, base_url=base_url).get_json()["source"] == source
+        created.append(source)
+    sources = client.get("/api/models/sources", base_url=base_url)
+    assert sources.status_code == 200
+    assert sources.get_json()["sources"] == created
+    assert len(harness.store.config.sources) == 2
+    assert len({source["id"] for source in created}) == 2
+    assert [row["account_label"] for row in sources.get_json()["sources"]] == (
+        ["first@example.com", "用户@example.com"] if vendor != "kimi" and identity_case == "valid" else [None, None]
+    )
+    assert harness.adapter.revoked == []
+
+
 @pytest.mark.parametrize(
     ("access", "role"),
     [("local", "owner"), ("personal", "owner"), ("organization", "owner"), ("organization", "member")],

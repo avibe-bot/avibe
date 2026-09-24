@@ -2538,6 +2538,14 @@ class CLIProxyEngineAdapter:
             self._oauth_flows[flow.flow_id] = flow
         return flow.snapshot()
 
+    def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        endpoint = _OAUTH_ENDPOINTS.get(vendor)
+        if endpoint is None:
+            return None
+        return self.state_store.oauth_account_label(
+            credential_ref, source_id=source_id, vendor=vendor, auth_provider=endpoint[2],
+        )
+
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
