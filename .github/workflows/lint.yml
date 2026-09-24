@@ -440,7 +440,15 @@ jobs:
             & .\install.ps1
             if ($LASTEXITCODE -ne 0) { throw "Repeated installer failed" }
             $generations = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations" -Directory)
-            if ($generations.Count -ne 2) { throw "Expected two managed generations, found $($generations.Count)" }
+            if ($generations.Count -ne 2) {
+              $names = ($generations | ForEach-Object { $_.Name }) -join ", "
+              $logPath = Join-Path $env:USERPROFILE ".avibe\logs\vibe_remote.log"
+              if (Test-Path -LiteralPath $logPath) {
+                Write-Host "Retention log tail:"
+                Get-Content -LiteralPath $logPath -Tail 120
+              }
+              throw "Expected two managed generations, found $($generations.Count): $names"
+            }
           }
 
       - name: Verify vibe in fresh PowerShell session
