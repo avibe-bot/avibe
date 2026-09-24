@@ -191,10 +191,10 @@ def test_shared_consent_is_public_and_partial_selection_stops_before_provision(h
     assert all(row["required_backends"] == ["codex", "opencode"] for row in rows)
     before = shell.read_bytes(), path.read_bytes()
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([rows[0]["id"]]))
+        asyncio.run(service.migration_apply([rows[0]["id"]], clean_api_keys=True))
     assert not adapter.provisioned and not adapter.transient_refs
     assert (shell.read_bytes(), path.read_bytes()) == before
-    assert asyncio.run(service.migration_apply([row["id"] for row in rows]))["applied"] == 2
+    assert asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))["applied"] == 2
     assert len(adapter.provisioned) == 1
     assert len(store.config.sources) == 1
     assert shell.read_bytes() == b""
@@ -215,7 +215,7 @@ def test_new_shared_consumer_during_provision_preserves_original_sources(home, t
 
     adapter.provision_credential = race
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert shell.read_bytes() == before
     assert not store.config.sources
     assert len(adapter.revoked) == len(adapter.provisioned) == 1
@@ -227,7 +227,7 @@ def test_consumer_added_after_scan_invalidates_old_consent(home, tmp_path):
     [row] = service.migration_scan()["items"]
     config(home, "opencode", {"openai": {"options": {"apiKey": "{env:OPENAI_API_KEY}"}}})
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert not adapter.provisioned
 
 
@@ -327,12 +327,12 @@ def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, 
     }))
     rows = service.migration_scan()["items"]
     ids = [row["id"] for row in rows]
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert proof_schemes == ["bearer"]
     assert set(schemes.values()) == {None, "bearer"}
     assert len(store.config.sources) == len(adapter.provisioned) == 2
     assert "auth_scheme" not in json.dumps(store.config.to_payload())
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert len(adapter.provisioned) == 2
 
 
@@ -396,7 +396,7 @@ def test_absent_profile_created_during_native_key_proof_blocks_cleanup(home, tmp
 
     adapter.provision_credential = race
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert path.read_bytes() == before
     assert not store.config.sources
     assert len(adapter.revoked) == len(adapter.provisioned) == 1
@@ -421,7 +421,7 @@ def test_live_base_reference_survives_actual_planned_cleanup(home, tmp_path, sel
     assert len(rows) == 1 + selected_opencode_vendor
     assert all(row["proposed_action"] == "import" for row in rows)
     assert all("shell_auth_variables" not in row for row in rows)
-    assert asyncio.run(service.migration_apply([row["id"] for row in rows]))["applied"] == len(rows)
+    assert asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))["applied"] == len(rows)
     assert shell.read_bytes() == base_line
     after = json.loads(path.read_bytes())
     assert after["provider"]["openai"] == providers["openai"]
@@ -433,7 +433,7 @@ def test_live_base_reference_survives_actual_planned_cleanup(home, tmp_path, sel
 
 
 @pytest.mark.parametrize("root_reference", [False, True])
-def test_live_auth_reference_without_a_row_blocks_before_any_write(home, tmp_path, root_reference):
+def test_live_auth_reference_without_a_row_blocks_only_cleanup(home, tmp_path, root_reference):
     shell = home / ".profile"
     shell.write_text("export OPENAI_API_KEY=fixture-codex\n")
     if root_reference:
@@ -445,10 +445,11 @@ def test_live_auth_reference_without_a_row_blocks_before_any_write(home, tmp_pat
     service, store, adapter = _service(tmp_path, migration_home=home)
     [row] = service.migration_scan()["items"]
     assert row["backend"] == "codex"
-    assert row["notes_key"].endswith(".reference")
-    assert str(path) in row["source_paths"]
+    # Copy-only leaves both the assignment and its consumer, so the row stays
+    # selectable. Only the requested cleanup is refused before any write.
+    assert row["proposed_action"] == "import"
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert (shell.read_bytes(), path.read_bytes()) == original
     assert not adapter.provisioned and not adapter.transient_refs
     assert not store.config.sources
@@ -467,12 +468,14 @@ def test_same_backend_surviving_reference_uses_auth_role_over_base_role(home, sa
     })
     [row] = scan(home)
     assert row.shell_auth_variables == ("CUSTOM_FIXTURE_KEY",)
-    assert row.notes_key.endswith(".reference")
+    assert row.proposed_action == "import"
     original = shell.read_bytes(), path.read_bytes()
+    for edit in plan_native_cleanup([row], home=home, clean_api_keys=False):
+        assert edit.after == edit.before
     # Planner enforcement is independent of scan presentation and backend
     # selection: selecting OpenCode does not remove the orphan provider.
     with pytest.raises(NativeReferenceError) as error:
-        plan_native_cleanup([replace(row, proposed_action="import", selected=True)], home=home)
+        plan_native_cleanup([row], home=home)
     assert error.value.references == {"CUSTOM_FIXTURE_KEY": (str(path),)}
     assert (shell.read_bytes(), path.read_bytes()) == original
 
@@ -519,3 +522,23 @@ def test_cross_project_reference_with_no_row_is_also_preserved(home, tmp_path):
         edit.apply()
     assert shell.read_text() == "export OPENAI_BASE_URL=https://fixture.example/v1\n"
     assert path.read_bytes() == original
+
+
+def test_later_cleanup_spans_the_backends_of_a_kept_shared_key(home, tmp_path):
+    shell, _path = shared(home)
+    service, _store, adapter = _service(tmp_path, migration_home=home)
+    rows = service.migration_scan()["items"]
+    assert asyncio.run(service.migration_apply([row["id"] for row in rows]))["applied"] == len(rows)
+    assert service.migration_scan()["items"] == []
+    copied = len(adapter.provisioned)
+    auth = home / ".codex" / "auth.json"
+    auth.parent.mkdir(parents=True, exist_ok=True)
+    auth.write_text('{"OPENAI_API_KEY": "fixture-codex-new"}')
+    added = service.migration_scan()["items"]
+    assert {row["backend"] for row in added} == {"codex"}
+    applied = asyncio.run(service.migration_apply([row["id"] for row in added], clean_api_keys=True))
+    assert applied["applied"] == len(added)
+    assert "OPENAI_API_KEY" not in shell.read_text()
+    # The kept shared key is withdrawn for both consumers, not copied again.
+    assert len(adapter.provisioned) == copied + 1
+    assert service.migration_scan()["items"] == []

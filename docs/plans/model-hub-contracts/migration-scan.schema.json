@@ -42,6 +42,10 @@
           "config_blocker": {
             "type": "boolean",
             "description": "The backend's native config cannot be parsed, so Hub mode would fail every launch. Blocks the row's whole consent group; apply refuses it."
+          },
+          "may_hold_api_key": {
+            "type": "boolean",
+            "description": "Whether applying this row may copy a native API key, including an opaque Codex credential store that resolves only after consent. Clients offer the optional API key cleanup only when a selected row sets it."
           }
         }
       }

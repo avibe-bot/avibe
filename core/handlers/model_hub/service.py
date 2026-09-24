@@ -920,7 +920,7 @@ class ModelHubService:
         self.migration_reconcile_auth = migration_reconcile_auth
         self._migration_lock = asyncio.Lock()
         self._migration_task: asyncio.Task | None = None
-        self._migration_item_ids: tuple[str, ...] | None = None
+        self._migration_item_ids: tuple[tuple[str, ...], bool] | None = None
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
@@ -4666,6 +4666,9 @@ class ModelHubService:
                                 clean_native_stores=(
                                     self.migration_journal.completed() or {}
                                 ).get("clean_native_stores"),
+                                retained_native_ids=(
+                                    self.migration_journal.completed() or {}
+                                ).get("retained_native_ids"),
                             )
                             # Retained auth stays native beside the Hub, but a
                             # config the CLI cannot parse fails every launch.
@@ -6688,6 +6691,7 @@ class ModelHubService:
                     validate_base_url=_validated_base_url,
                     project_roots=self.migration_project_roots(),
                     clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
+                    retained_native_ids=(self.migration_journal.completed() or {}).get("retained_native_ids"),
                     legacy_auth=(
                         self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
                         if isinstance(self.store, V2ModelHubConfigStore) else None
@@ -6696,13 +6700,15 @@ class ModelHubService:
             ]
         }
 
-    async def migration_apply(self, item_ids: object) -> dict:
+    async def migration_apply(self, item_ids: object, clean_api_keys: object = False) -> dict:
         from core.backend_restart import NativeMigrationBlockedError
         from vibe.native_oauth_store import NativeOAuthError, NativeOAuthPermissionError
 
         try:
+            if not isinstance(clean_api_keys, bool):
+                raise MigrationConflictError
             selection = (
-                tuple(sorted(item_ids))
+                (tuple(sorted(item_ids)), clean_api_keys)
                 if isinstance(item_ids, list) and all(isinstance(value, str) for value in item_ids)
                 else None
             )
@@ -6714,6 +6720,7 @@ class ModelHubService:
                 task = asyncio.create_task(apply_native_migration(
                     self, item_ids, mask_credential=_mask_credential,
                     validate_base_url=_validated_base_url,
+                    clean_api_keys=clean_api_keys,
                 ), name="model-hub-native-takeover")
                 self._migration_task = task
                 self._migration_item_ids = selection

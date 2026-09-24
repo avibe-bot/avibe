@@ -70,7 +70,7 @@ def test_reused_credential_remains_available_to_consented_backend(
     before = store.config.to_payload()
     ids = [row["id"] for row in service.migration_scan()["items"]]
 
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
 
     after = store.config.to_payload()
     assert after["sources"] == before["sources"]
@@ -129,7 +129,7 @@ def test_shared_auth_is_one_source_per_credential_target_not_config_path(
     rows = service.migration_scan()["items"]
     assert len(rows) == expected
     assert rows == service.migration_scan()["items"]
-    assert asyncio.run(service.migration_apply([row["id"] for row in rows]))["applied"] == expected
+    assert asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))["applied"] == expected
     assert len(adapter.provisioned) == expected
     assert len(store.config.sources) == expected
     assert len(store.config.agents["opencode"].sources.order) == expected
@@ -148,7 +148,7 @@ def test_shared_auth_is_one_source_per_credential_target_not_config_path(
         assert result["mcp"] == {"unrelated": True}
     assert json.loads(auth.read_text()) == {}
     assert service.migration_scan()["items"] == []
-    assert asyncio.run(service.migration_apply([row["id"] for row in rows]))["applied"] == expected
+    assert asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))["applied"] == expected
     assert len(adapter.provisioned) == expected
 
 
@@ -168,7 +168,7 @@ def test_shared_credential_consent_binds_every_contributing_config(monkeypatch, 
     paths[1].write_text(json.dumps(payload))
     before = {path: path.read_bytes() for path in [*paths, auth]}
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert error.value.code == "migration_item_conflict"
     assert not adapter.provisioned
     assert {path: path.read_bytes() for path in before} == before
@@ -196,7 +196,7 @@ def test_existing_native_source_conversion_also_restores_missing_placement(
     before = service._clone_config(store.config).to_payload()
     ids = [row["id"] for row in service.migration_scan()["items"]]
 
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
 
     source, = store.config.sources
     assert source.id == "src_existingnative"
@@ -226,7 +226,7 @@ def test_deduplicated_auth_reversal_restores_every_physical_config(monkeypatch, 
 
     monkeypatch.setattr(NativeFileEdit, "apply", fail_second)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert len(adapter.provisioned) == 1
     assert len(adapter.revoked) == 1
     assert store.config.to_payload() == previous
@@ -327,7 +327,7 @@ def test_async_provision_cannot_hide_changed_model_only_layer(monkeypatch, tmp_p
 
     adapter.provision_credential = change_after_plan
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert error.value.code == "migration_configuration_blocked"
     assert store.config.to_payload() == before
     assert auth.read_bytes() == original_auth

@@ -122,6 +122,12 @@ afterEach(() => {
   showToast.mockReset();
 });
 
+/** Import rows only; the API key cleanup opt-in is a checkbox too, but not a row. */
+const rowCheckboxes = (root: HTMLElement) =>
+  within(root).getAllByRole('checkbox').filter(
+    (box) => !/native CLI configuration|原生 CLI 中的 API Key/.test(box.getAttribute('aria-label') ?? ''),
+  );
+
 describe('MigrationDialog — the settings default', () => {
   it('hides rows the Hub cannot carry and keeps every backend actionable', async () => {
     serve();
@@ -148,6 +154,62 @@ describe('MigrationDialog — the settings default', () => {
     expect(applied[0]).toEqual(['mig_claude_oauth', 'mig_codex_key', 'mig_opencode_legacy']);
   });
 
+  it('keeps native API keys unless their cleanup is explicitly checked', async () => {
+    serve();
+    const calls = vi.mocked(modelsApi.applyMigration).mock.calls;
+    renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
+    const clean = within(dialog).getByRole('checkbox', { name: 'Also remove the API keys from the native CLI configuration' });
+    expect(clean.getAttribute('aria-checked')).toBe('false');
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual([['mig_claude_oauth', 'mig_codex_key', 'mig_opencode_legacy'], false]);
+
+    cleanup();
+    renderDialog();
+    const reopened = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(reopened).getByText('OpenAI')).toBeTruthy());
+    await user.click(within(reopened).getByRole('checkbox', { name: 'Also remove the API keys from the native CLI configuration' }));
+    await user.click(within(reopened).getByRole('button', { name: 'Start migration' }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual([['mig_claude_oauth', 'mig_codex_key', 'mig_opencode_legacy'], true]);
+  });
+
+  it('offers no API key cleanup when only subscription logins move', async () => {
+    serve([SUBSCRIPTION]);
+    const calls = vi.mocked(modelsApi.applyMigration).mock.calls;
+    renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy());
+    expect(within(dialog).queryByRole('checkbox', { name: 'Also remove the API keys from the native CLI configuration' })).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual([['mig_claude_oauth'], false]);
+  });
+
+  it('offers API key cleanup for an opaque native store that may hold a key', async () => {
+    const opaque: MigrationItem = {
+      ...SUBSCRIPTION, id: 'mig_codex_store', backend: 'codex', vendor: 'openai',
+      display_name: 'ChatGPT', masked_detail: '', may_hold_api_key: true,
+    };
+    serve([opaque]);
+    const calls = vi.mocked(modelsApi.applyMigration).mock.calls;
+    renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    const cleanup = await within(dialog).findByRole('checkbox', { name: 'Also remove the API keys from the native CLI configuration' });
+    await user.click(cleanup);
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual([['mig_codex_store'], true]);
+  });
+
   it('selects and submits every import candidate for a backend as one group', async () => {
     serve([SUBSCRIPTION, SUBSCRIPTION_2, CODEX_KEY, LEGACY]);
     renderDialog();
@@ -155,7 +217,7 @@ describe('MigrationDialog — the settings default', () => {
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    const claudeRows = within(dialog).getAllByRole('checkbox').slice(0, 2);
+    const claudeRows = rowCheckboxes(dialog).slice(0, 2);
     expect(claudeRows).toHaveLength(2);
     await user.click(claudeRows[0]);
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
@@ -287,7 +349,7 @@ describe('MigrationDialog — the settings default', () => {
       'error',
     ));
     expect(onClose).not.toHaveBeenCalled();
-    expect(within(dialog).getByRole('checkbox').getAttribute('aria-checked')).toBe('true');
+    expect(rowCheckboxes(dialog)[0].getAttribute('aria-checked')).toBe('true');
     expect((within(dialog).getByRole('button', { name: '开始迁移' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -357,14 +419,14 @@ describe('MigrationDialog — the settings default', () => {
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     expect(within(dialog).queryByRole('status')).toBeNull();
-    expect(within(dialog).getAllByRole('checkbox')).toHaveLength(1);
+    expect(rowCheckboxes(dialog)).toHaveLength(1);
   });
 });
 
 describe('MigrationDialog — persisted authentication', () => {
   it.each([
-    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, Model Hub will manage the selected authentication.'],
-    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，所选认证由模型网关管理。'],
+    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.'],
+    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。'],
   ] as const)('explains the saved source boundary and consequence in %s', async (language, sentence) => {
     await i18n.changeLanguage(language);
     serve([CODEX_KEY]);
@@ -499,7 +561,7 @@ describe('MigrationDialog — shared persisted files', () => {
 
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
-    const checkboxes = within(dialog).getAllByRole('checkbox');
+    const checkboxes = rowCheckboxes(dialog);
     expect(checkboxes).toHaveLength(3);
     expect(within(dialog).queryByText('Anthropic')).toBeNull();
     const sharedMessage = language === 'en'
@@ -526,7 +588,7 @@ describe('MigrationDialog — shared persisted files', () => {
 
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
-    const checkboxes = within(dialog).getAllByRole('checkbox');
+    const checkboxes = rowCheckboxes(dialog);
     for (const checkbox of checkboxes) expect(checkbox.getAttribute('aria-checked')).toBe('false');
     const start = within(dialog).getByRole('button', { name: 'Start migration' });
     expect((start as HTMLButtonElement).disabled).toBe(true);
@@ -555,7 +617,7 @@ describe('MigrationDialog — shared persisted files', () => {
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
     expect(within(dialog).queryByRole('status')).toBeNull();
-    const checkboxes = within(dialog).getAllByRole('checkbox');
+    const checkboxes = rowCheckboxes(dialog);
     expect(checkboxes).toHaveLength(3);
     for (const checkbox of checkboxes) expect((checkbox as HTMLButtonElement).disabled).toBe(false);
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
@@ -580,7 +642,7 @@ describe('MigrationDialog — shared persisted files', () => {
 
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
-    const [checkbox] = within(dialog).getAllByRole('checkbox');
+    const [checkbox] = rowCheckboxes(dialog);
     expect((checkbox as HTMLButtonElement).disabled).toBe(true);
     expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -603,7 +665,7 @@ describe('MigrationDialog — shared persisted files', () => {
 
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findAllByText('OpenAI');
-    const [checkbox] = within(dialog).getAllByRole('checkbox');
+    const [checkbox] = rowCheckboxes(dialog);
     expect((checkbox as HTMLButtonElement).disabled).toBe(true);
     expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -639,7 +701,7 @@ describe('MigrationDialog — shared persisted files', () => {
 
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
-    const checkboxes = within(dialog).getAllByRole('checkbox');
+    const checkboxes = rowCheckboxes(dialog);
     expect(checkboxes).toHaveLength(3);
     expect(within(dialog).getAllByText(/must migrate together: Claude Code, Codex, OpenCode/)).toHaveLength(3);
     await user.click(checkboxes[2]);
@@ -663,7 +725,7 @@ describe('MigrationDialog — shared persisted files', () => {
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
     expect(within(dialog).queryByText(/must migrate together/)).toBeNull();
-    const checkboxes = within(dialog).getAllByRole('checkbox');
+    const checkboxes = rowCheckboxes(dialog);
     await user.click(checkboxes[0]);
     expect(checkboxes[1].getAttribute('aria-checked')).toBe('true');
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
@@ -706,13 +768,15 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
 
     expect(visibleText(dialog)).toEqual([
       'Migrate to the Model Hub',
-      'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, Model Hub will manage the selected authentication.',
+      'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.',
       'Claude Code',
       'Anthropic',
       'Claude 账号登录（OAuth） · Claude Code configuration',
       'Codex',
       'OpenAI',
       'sk-…9f21 · Codex configuration',
+      'Also remove the API keys from the native CLI configuration',
+      'Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.',
       'Later',
       'Start migration',
       'Close',
@@ -720,6 +784,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
     expect(controls(dialog)).toEqual([
       { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
       { role: 'checkbox', name: 'OpenAI · sk-…9f21 · Codex configuration', disabled: false },
+      { role: 'checkbox', name: 'Also remove the API keys from the native CLI configuration', disabled: false },
       { role: null, name: 'Later', disabled: false },
       { role: null, name: 'Start migration', disabled: false },
       { role: null, name: 'Close', disabled: false },
@@ -748,6 +813,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
     expect(controls(dialog)).toEqual([
       { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
       { role: 'checkbox', name: 'Anthropic · sk-ant-…1c05 · Claude Code configuration', disabled: false },
+      { role: 'checkbox', name: 'Also remove the API keys from the native CLI configuration', disabled: false },
       { role: null, name: 'Later', disabled: false },
       { role: null, name: 'Start migration', disabled: false },
       { role: null, name: 'Close', disabled: false },

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -679,7 +680,7 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
 
     apply_response = client.post(
         "/api/models/migration/apply",
-        json={"item_ids": [item["id"] for item in scan["items"]]},
+        json={"item_ids": [item["id"] for item in scan["items"]], "clean_api_keys": True},
         headers=headers,
         base_url=base_url,
     )
@@ -769,6 +770,242 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
         assert secret not in serialized
 
 
+def test_mh_mig_007_default_apply_copies_api_keys_and_withdraws_only_subscriptions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scenario: MH-MIG-007."""
+
+    native_home = tmp_path / "native-home"
+    _write_claude(native_home)
+    _write_codex(native_home)
+    _write_opencode(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    kept = {
+        path: path.read_bytes() for path in (
+            native_home / ".claude" / "settings.json",
+            native_home / ".config" / "opencode" / "opencode.json",
+            native_home / ".local" / "share" / "opencode" / "auth.json",
+        )
+    }
+
+    service, store, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    items = client.post(
+        "/api/models/migration/scan", headers=headers, base_url=base_url,
+    ).get_json()["scan"]["items"]
+    assert {item["kind"] for item in items} == {"api_key", "oauth_native", "opencode_provider"}
+
+    rejected = client.post(
+        "/api/models/migration/apply",
+        json={"item_ids": [item["id"] for item in items], "clean_api_keys": "yes"},
+        headers=headers, base_url=base_url,
+    )
+    assert rejected.status_code == 409
+    assert not adapter.provisioned and not adapter.oauth_provisioned
+
+    response = client.post(
+        "/api/models/migration/apply",
+        json={"item_ids": [item["id"] for item in items]},
+        headers=headers, base_url=base_url,
+    )
+    assert response.status_code == 200
+    assert response.get_json()["applied"] == len(items)
+    assert len(adapter.oauth_provisioned) == 2
+    assert all(store.config.agents[backend].mode == "hub" for backend in ("claude", "codex", "opencode"))
+
+    # Static keys were copied; every native file holding only them is intact.
+    assert {path: path.read_bytes() for path in kept} == kept
+    # Subscription logins rotate refresh tokens: exactly one owner remains.
+    assert not (native_home / ".claude" / ".credentials.json").exists()
+    # A static key stored beside the ChatGPT login stays, with its routing.
+    assert json.loads((native_home / ".codex" / "auth.json").read_text(encoding="utf-8")) == {
+        "OPENAI_API_KEY": "sk-openai-test-123456",
+    }
+    assert 'model_provider = "Relay"' in (native_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    # Retained keys are shadowed by Hub launches, not pending imports: neither
+    # the migrate entry nor the Direct-to-Hub gate reappears for them.
+    assert service.migration_scan()["items"] == []
+    receipt = service.migration_journal.completed()
+    assert receipt["retained_native_ids"]
+    assert all(value.startswith("key_") for value in receipt["retained_native_ids"])
+    assert {copy["source_id"] for copy in receipt["retained_native_ids"].values()} <= {
+        source["id"] for source in service.list_sources()
+    }
+
+    # A different key saved later is new native authentication again.
+    settings = native_home / ".claude" / "settings.json"
+    settings.write_text(settings.read_text(encoding="utf-8").replace("sk-ant-test-123456789", "sk-ant-new-987654321"))
+    [changed] = service.migration_scan()["items"]
+    assert changed["backend"] == "claude" and changed["kind"] == "api_key"
+    assert asyncio.run(service.migration_apply([changed["id"]], clean_api_keys=True))["applied"] == 1
+    assert json.loads(settings.read_text(encoding="utf-8"))["env"] == {}
+    assert service.migration_scan()["items"] == []
+    # Earlier retained rows survive a later batch's receipt.
+    assert set(receipt["retained_native_ids"]) <= set(
+        service.migration_journal.completed()["retained_native_ids"]
+    )
+
+
+def test_mh_mig_007_codex_key_only_store_and_routing_stay_native(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: a Codex API-key store is not a subscription login."""
+    native_home = tmp_path / "native-home"
+    _write(native_home / ".codex" / "auth.json", json.dumps({"OPENAI_API_KEY": "sk-openai-test-123456"}))
+    _write(
+        native_home / ".codex" / "config.toml",
+        'model_provider = "Relay"\n\n[model_providers.Relay]\n'
+        'base_url = "https://codex-relay.example/v1"\nwire_api = "responses"\n',
+    )
+    _isolate_native_home(monkeypatch, native_home)
+    before = _tree_digest(native_home)
+    service, store, adapter = _service(tmp_path)
+    [item] = service.migration_scan()["items"]
+    assert item["kind"] == "api_key" and item["proposed_action"] == "import"
+    assert asyncio.run(service.migration_apply([item["id"]]))["applied"] == 1
+    assert len(adapter.provisioned) == 1 and store.config.agents["codex"].mode == "hub"
+    assert _tree_digest(native_home) == before
+    assert service.migration_scan()["items"] == []
+
+
+def test_mh_mig_007_managed_codex_provider_key_stays_native(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: a key in a managed-named Codex provider is not cleaned by default."""
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".codex" / "config.toml",
+        'model_provider = "openai-managed"\n\n[model_providers.openai-managed]\n'
+        'base_url = "https://codex-relay.example/v1"\nwire_api = "responses"\n'
+        'experimental_bearer_token = "sk-openai-managed-123456"\n',
+    )
+    _isolate_native_home(monkeypatch, native_home)
+    before = _tree_digest(native_home)
+    service, _store, adapter = _service(tmp_path)
+    [item] = service.migration_scan()["items"]
+    assert item["kind"] == "api_key" and item["may_hold_api_key"]
+    assert asyncio.run(service.migration_apply([item["id"]]))["applied"] == 1
+    assert len(adapter.provisioned) == 1
+    assert _tree_digest(native_home) == before
+
+
+def test_mh_mig_007_retained_key_returns_after_its_hub_source_is_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: a kept key is hidden only while its copied Hub source exists."""
+    native_home = tmp_path / "native-home"
+    _write(native_home / ".zshrc", "export ANTHROPIC_API_KEY=sk-ant-shell-123456\n")
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    [item] = service.migration_scan()["items"]
+    assert asyncio.run(service.migration_apply([item["id"]]))["applied"] == 1
+    assert service.migration_scan()["items"] == []
+    # A retry with a different cleanup choice is not a replay of this batch.
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply([item["id"]], clean_api_keys=True))
+    [copy] = service.migration_journal.completed()["retained_native_ids"].values()
+    payload = store.config.to_payload()
+    payload["sources"] = [source for source in payload["sources"] if source["id"] != copy["source_id"]]
+    for agent in payload["agents"].values():
+        agent["sources"]["order"] = [value for value in agent["sources"]["order"] if value != copy["source_id"]]
+        agent["routes"] = {}
+    store.config = ModelHubConfig.from_payload(payload)
+    [again] = service.migration_scan()["items"]
+    assert again["backend"] == "claude" and again["proposed_action"] == "import"
+    # The re-offered row migrates afresh instead of replaying the stale receipt.
+    assert asyncio.run(service.migration_apply([again["id"]]))["applied"] == 1
+    assert len(adapter.provisioned) == 2
+    assert service.migration_scan()["items"] == []
+
+
+def test_mh_mig_007_retained_key_returns_after_its_hub_key_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: replacing the copied Hub credential re-offers the native key."""
+    native_home = tmp_path / "native-home"
+    _write(native_home / ".zshrc", "export ANTHROPIC_API_KEY=sk-ant-shell-123456\n")
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, _adapter = _service(tmp_path)
+    [item] = service.migration_scan()["items"]
+    assert asyncio.run(service.migration_apply([item["id"]]))["applied"] == 1
+    [copy] = service.migration_journal.completed()["retained_native_ids"].values()
+    store.config.sources = [
+        replace(source, credential_ref="ref_replaced") if source.id == copy["source_id"] else source
+        for source in store.config.sources
+    ]
+    [again] = service.migration_scan()["items"]
+    assert again["backend"] == "claude" and again["proposed_action"] == "import"
+
+
+def test_mh_mig_007_later_cleanup_also_withdraws_a_kept_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: a cleanup batch withdraws a kept key it cannot show for selection."""
+    native_home = tmp_path / "native-home"
+    profile = native_home / ".zshrc"
+    _write(profile, "export ANTHROPIC_API_KEY=sk-ant-shell-123456\n")
+    _isolate_native_home(monkeypatch, native_home)
+    service, _store, adapter = _service(tmp_path)
+    [kept] = service.migration_scan()["items"]
+    assert asyncio.run(service.migration_apply([kept["id"]]))["applied"] == 1
+    settings = native_home / ".claude" / "settings.json"
+    _write(settings, json.dumps({"env": {"ANTHROPIC_API_KEY": "sk-ant-new-987654321"}}))
+    [added] = service.migration_scan()["items"]
+    assert added["id"] != kept["id"]
+    assert asyncio.run(service.migration_apply([added["id"]], clean_api_keys=True))["applied"] == 1
+    # The kept key's Hub copy already exists; it is withdrawn, not re-provisioned.
+    assert len(adapter.provisioned) == 2
+    assert json.loads(settings.read_text(encoding="utf-8"))["env"] == {}
+    assert "ANTHROPIC_API_KEY" not in profile.read_text(encoding="utf-8")
+    assert service.migration_scan()["items"] == []
+    assert service.migration_journal.completed()["retained_native_ids"] == {}
+    # A native restore of the withdrawn key is reported, not hidden by its old receipt.
+    _write(profile, "export ANTHROPIC_API_KEY=sk-ant-shell-123456\n")
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["claude"]
+
+
+def test_mh_mig_007_retained_key_identity_includes_provider() -> None:
+    """MH-MIG-007: providers sharing one key and URL keep separate receipts."""
+    from core.handlers.model_hub.migration import NativeMigrationItem, _retained_key_identity
+
+    def item(provider: str) -> NativeMigrationItem:
+        return NativeMigrationItem(
+            id=provider, source_id=provider, backend="opencode", kind="opencode_provider",
+            masked_detail="", proposed_action="import", selected=True, notes_key=None,
+            vendor="openai", protocol="openai_chat", display_name=provider,
+            base_url="https://relay.example/v1", secret="sk-shared-123456", native_provider_id=provider,
+        )
+
+    assert _retained_key_identity(item("relay-a")) != _retained_key_identity(item("relay-b"))
+
+
+@pytest.mark.parametrize("clean_api_keys", (False, True))
+def test_mh_mig_007_shell_startup_key_is_removed_only_on_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clean_api_keys: bool,
+) -> None:
+    """MH-MIG-007: a shell startup key is copied unless its cleanup was requested."""
+    native_home = tmp_path / "native-home"
+    profile = native_home / ".zshrc"
+    _write(profile, "alias ll='ls -l'\nexport ANTHROPIC_API_KEY=sk-ant-shell-123456\n")
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    [item] = service.migration_scan()["items"]
+    assert item["backend"] == "claude" and item["proposed_action"] == "import"
+    assert asyncio.run(service.migration_apply([item["id"]], clean_api_keys=clean_api_keys))["applied"] == 1
+    assert len(adapter.provisioned) == 1 and store.config.agents["claude"].mode == "hub"
+    assert profile.read_text(encoding="utf-8") == (
+        "alias ll='ls -l'\n" if clean_api_keys
+        else "alias ll='ls -l'\nexport ANTHROPIC_API_KEY=sk-ant-shell-123456\n"
+    )
+    assert service.migration_scan()["items"] == []
+    assert bool(service.migration_journal.completed()["retained_native_ids"]) is not clean_api_keys
+
+
 @pytest.mark.parametrize("discovery", (ObservationDiscovery.SUCCEEDED, ObservationDiscovery.FAILED))
 def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery: ObservationDiscovery,
@@ -801,7 +1038,7 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
 
     adapter.observe_source = observe
     [item] = service.migration_scan()["items"]
-    result = asyncio.run(service.migration_apply([item["id"]]))
+    result = asyncio.run(service.migration_apply([item["id"]], clean_api_keys=True))
     assert result["applied"] == 1
     [source] = _assert_canonical_round_trip(store.config).sources
     manual = [model for model in source.models if model.provenance == "manual"]
@@ -839,7 +1076,7 @@ def test_mh_mig_002_oauth_grants_move_into_engine_custody(
     assert {item["backend"] for item in oauth_items} == {"claude", "codex"}
     assert {item["proposed_action"] for item in oauth_items} == {"import"}
 
-    result = asyncio.run(service.migration_apply([item["id"] for item in oauth_items]))
+    result = asyncio.run(service.migration_apply([item["id"] for item in oauth_items], clean_api_keys=True))
     assert result["applied"] == 2
     assert {position["source_id"] for position in result["added_to"]} == {
         source.id for source in store.config.sources
@@ -956,7 +1193,7 @@ def test_claude_auth_token_preserves_supported_static_header_semantics(
     assert token not in json.dumps(item)
     if allowed:
         assert item["proposed_action"] == "import"
-        result = asyncio.run(service.migration_apply([item["id"]]))
+        result = asyncio.run(service.migration_apply([item["id"]], clean_api_keys=True))
         assert result["applied"] == 1
         [source] = store.config.sources
         assert adapter.auth_schemes[source.credential_ref] == "bearer"
@@ -968,7 +1205,7 @@ def test_claude_auth_token_preserves_supported_static_header_semantics(
     assert item["notes_key"] == "settings.models.migration.blocked.token"
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply([item["id"]]))
+        asyncio.run(service.migration_apply([item["id"]], clean_api_keys=True))
     assert error.value.code == "migration_item_conflict"
     assert adapter.provisioned == []
     assert store.config.sources == []
@@ -1015,7 +1252,7 @@ def test_codex_wire_protocol_change_invalidates_scanned_item(
     )
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply([item_id]))
+        asyncio.run(service.migration_apply([item_id], clean_api_keys=True))
     assert error.value.code == "migration_item_conflict"
     assert adapter.provisioned == []
     assert store.config.sources == []
@@ -1152,7 +1389,7 @@ def test_scan_keeps_invalid_endpoint_visible_while_valid_backend_items_remain_us
     assert claude_blockers[0]["proposed_action"] == "reauth"
     assert claude_blockers[0]["selected"] is False
     opencode_items = [item for item in scan if item["backend"] == "opencode"]
-    result = asyncio.run(service.migration_apply([item["id"] for item in opencode_items]))
+    result = asyncio.run(service.migration_apply([item["id"] for item in opencode_items], clean_api_keys=True))
     assert result["applied"] == 2
     assert {source.vendor for source in store.config.sources} == {
         "openrouter",
@@ -1210,7 +1447,7 @@ def test_failed_batch_revokes_every_provisioned_credential(
     adapter.unproven_observation_vendor = "zhipuai"
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply(item_ids))
+        asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
     assert error.value.code == "migration_item_conflict"
     assert adapter.revoked == ["cred_migration_1"]
     assert adapter.transient_revoked == adapter.transient_refs
@@ -1241,7 +1478,7 @@ def test_canonical_source_rejection_aborts_batch_and_revokes_credentials(
     )
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply(item_ids))
+        asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
 
     assert error.value.code == "migration_item_conflict"
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
@@ -1261,7 +1498,7 @@ def test_failed_persist_sync_restores_config_and_revokes_credentials(
     adapter.fail_sync_count = 1
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply(item_ids))
+        asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
     assert error.value.code == "migration_recovery_pending"
     assert store.config.sources
     assert service.migration_journal.load()["phase"] == "exposed"
@@ -1278,7 +1515,7 @@ def test_migration_requires_grouped_backend_selection_before_provisioning(
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply([item_ids[0]]))
+        asyncio.run(service.migration_apply([item_ids[0]], clean_api_keys=True))
     assert error.value.code == "migration_item_conflict"
     assert adapter.provisioned == []
     assert adapter.revoked == []
@@ -1304,7 +1541,7 @@ def test_apply_rejects_a_credential_changed_after_scan(
     )
 
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply([stale_id]))
+        asyncio.run(service.migration_apply([stale_id], clean_api_keys=True))
     assert error.value.code == "migration_item_conflict"
     assert adapter.provisioned == []
     assert store.config.sources == []
@@ -1535,3 +1772,119 @@ def test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone(
         assert row["proposed_action"] == item.proposed_action
         assert row["selected"] == item.selected
         assert row["notes_key"] == item.notes_key
+
+
+def test_mh_mig_007_default_oauth_withdrawal_keeps_routing_of_an_excluded_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: an unimportable kept key keeps the provider routing it needs."""
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".codex" / "auth.json",
+        json.dumps({
+            "OPENAI_API_KEY": "sk-openai-test-123456",
+            "tokens": {
+                "access_token": "codex-access-123456",
+                "refresh_token": "codex-refresh-123456",
+                "account_id": "acct_codex_test",
+            },
+        }),
+    )
+    config_path = native_home / ".codex" / "config.toml"
+    config = (
+        'cli_auth_credentials_store = "file"\nmodel_provider = "Relay"\n\n[model_providers.Relay]\n'
+        'base_url = "ftp://relay.example/v1"\nwire_api = "responses"\n'
+    )
+    _write(config_path, config)
+    _isolate_native_home(monkeypatch, native_home)
+    service, _store, _adapter = _service(tmp_path)
+    scan = service.migration_scan()["items"]
+    oauth = [item for item in scan if item["kind"] == "oauth_native"]
+    assert [item["proposed_action"] for item in scan if item["kind"] == "api_key"] == ["reauth"]
+    assert asyncio.run(service.migration_apply([oauth[0]["id"]]))["applied"] == 1
+    assert config_path.read_text(encoding="utf-8") == config
+    auth = json.loads((native_home / ".codex" / "auth.json").read_text(encoding="utf-8"))
+    assert auth["OPENAI_API_KEY"] == "sk-openai-test-123456" and "tokens" not in auth
+
+
+def test_mh_mig_007_managed_provider_keeps_an_excluded_key_beside_the_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: withdrawing a login keeps a managed provider's unimported key."""
+    native_home = tmp_path / "native-home"
+    _write(
+        native_home / ".codex" / "auth.json",
+        json.dumps({"tokens": {
+            "access_token": "codex-access-123456",
+            "refresh_token": "codex-refresh-123456",
+            "account_id": "acct_codex_test",
+        }}),
+    )
+    config_path = native_home / ".codex" / "config.toml"
+    config = (
+        'cli_auth_credentials_store = "file"\nmodel_provider = "openai-managed"\n\n'
+        '[model_providers.openai-managed]\nbase_url = "ftp://relay.example/v1"\n'
+        'wire_api = "responses"\nexperimental_bearer_token = "sk-openai-managed-123456"\n'
+    )
+    _write(config_path, config)
+    _isolate_native_home(monkeypatch, native_home)
+    service, _store, _adapter = _service(tmp_path)
+    scan = service.migration_scan()["items"]
+    assert "reauth" in [item["proposed_action"] for item in scan if item["kind"] == "api_key"]
+    oauth = [item["id"] for item in scan if item["kind"] == "oauth_native"]
+    assert asyncio.run(service.migration_apply(oauth))["applied"] == 1
+    assert config_path.read_text(encoding="utf-8") == config
+
+
+def test_mh_mig_007_cleanup_keeps_an_excluded_key_in_the_withdrawn_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: cleanup removes only keys the batch carried from a withdrawn store."""
+    native_home = tmp_path / "native-home"
+    auth_path = native_home / ".codex" / "auth.json"
+    _write(
+        auth_path,
+        json.dumps({
+            "OPENAI_API_KEY": "sk-openai-test-123456",
+            "tokens": {
+                "access_token": "codex-access-123456",
+                "refresh_token": "codex-refresh-123456",
+                "account_id": "acct_codex_test",
+            },
+        }),
+    )
+    _write(
+        native_home / ".codex" / "config.toml",
+        'cli_auth_credentials_store = "file"\nmodel_provider = "Relay"\n\n[model_providers.Relay]\n'
+        'base_url = "ftp://relay.example/v1"\nwire_api = "responses"\n'
+        '\n[model_providers.Other]\nbase_url = "https://other.example/v1"\nwire_api = "responses"\n'
+        'experimental_bearer_token = "sk-openai-other-654321"\n',
+    )
+    _isolate_native_home(monkeypatch, native_home)
+    service, _store, _adapter = _service(tmp_path)
+    scan = service.migration_scan()["items"]
+    ids = [item["id"] for item in scan if item["proposed_action"] == "import"]
+    assert any(item["proposed_action"] == "reauth" for item in scan)
+    assert any(item["kind"] == "oauth_native" and item["id"] in ids for item in scan)
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == len(ids)
+    auth = json.loads(auth_path.read_text(encoding="utf-8"))
+    assert auth["OPENAI_API_KEY"] == "sk-openai-test-123456" and "tokens" not in auth
+
+
+def test_mh_mig_007_default_copy_leaves_a_key_only_codex_store_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: with no login selected, a key-only Codex store is not rewritten."""
+    native_home = tmp_path / "native-home"
+    auth_path = native_home / ".codex" / "auth.json"
+    _write(auth_path, json.dumps({
+        "OPENAI_API_KEY": "sk-openai-test-123456", "auth_mode": "chatgpt",
+        "tokens": {}, "last_refresh": "2026-01-01T00:00:00Z",
+    }))
+    _isolate_native_home(monkeypatch, native_home)
+    before = auth_path.read_bytes()
+    service, _store, _adapter = _service(tmp_path)
+    ids = [item["id"] for item in service.migration_scan()["items"] if item["proposed_action"] == "import"]
+    assert ids
+    assert asyncio.run(service.migration_apply(ids))["applied"] == len(ids)
+    assert auth_path.read_bytes() == before

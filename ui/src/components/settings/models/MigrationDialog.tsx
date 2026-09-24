@@ -280,6 +280,9 @@ export const MigrationDialog: React.FC<{
   const [ownLoading, setOwnLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
   const [phase, setPhase] = React.useState<SetupPhase>({ kind: 'select' });
+  /** Consent to also delete the copied API keys natively. Subscription logins
+   *  always move: a rotating refresh token cannot have two owners. */
+  const [cleanApiKeys, setCleanApiKeys] = React.useState(false);
   /** Everything this dialog session has taken over, across re-entries. */
   const [completed, setCompleted] = React.useState(0);
   const aliveRef = React.useRef(true);
@@ -294,6 +297,7 @@ export const MigrationDialog: React.FC<{
     if (!open) return;
     setPhase({ kind: 'select' });
     setCompleted(0);
+    setCleanApiKeys(false);
   }, [open]);
 
   React.useEffect(() => {
@@ -362,6 +366,7 @@ export const MigrationDialog: React.FC<{
   };
   const appliable = appliableItems(items, selectedBackends);
   const selectedCount = appliable.length;
+  const selectsApiKeys = appliable.some((item) => item.may_hold_api_key ?? item.kind !== 'oauth_native');
   /** What a re-entry would still find, once a batch has landed. */
   const remaining = grouped.filter(groupSelectable)
     .reduce((total, group) => total + group.importRows.length, 0);
@@ -376,7 +381,7 @@ export const MigrationDialog: React.FC<{
     if (scope === 'setup') setPhase({ kind: 'applying', count: selectedCount });
     try {
       const ids = appliable.map((i) => i.id);
-      const result = await modelsApi.applyMigration(ids);
+      const result = await modelsApi.applyMigration(ids, selectsApiKeys && cleanApiKeys);
       if (!aliveRef.current) return;
       showToast(t('settings.models.migration.applied', { count: result.applied }) as string, 'success');
       setCompleted((prior) => prior + result.applied);
@@ -482,6 +487,21 @@ export const MigrationDialog: React.FC<{
                 ))}
               </div>
             ))}
+            {selectsApiKeys && (
+              <div className="flex items-start gap-3 rounded-xl border border-border px-3.5 py-3">
+                <Checkbox
+                  checked={cleanApiKeys}
+                  onCheckedChange={setCleanApiKeys}
+                  disabled={applying}
+                  label={t('settings.models.migration.cleanApiKeys') as string}
+                  className="mt-px"
+                />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-[14px] font-semibold text-foreground">{t('settings.models.migration.cleanApiKeys')}</span>
+                  <span className="text-[12px] leading-relaxed text-muted">{t('settings.models.migration.cleanApiKeysHint')}</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
