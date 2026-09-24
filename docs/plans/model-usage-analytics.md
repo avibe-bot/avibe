@@ -73,6 +73,10 @@ type UsageReport = UsageSummary & {
 are local `YYYY-MM-DD`; hourly keys are offset-aware instants, unambiguous
 across DST. Hourly intervals are actual consecutive hours, with the final
 interval partial. Daily intervals are server-local calendar days.
+Hourly identity is UTC-aligned across persistence, queue coalescing, and report
+projection, then displayed with the server-local offset. Fractional-offset time
+zones can therefore display boundaries at `:30` or `:45`; a DST offset change
+must never move a measured call between incompatible bucket grids.
 
 Each bucket's rows are sparse, unique source/model pairs. `sources` supplies
 their existing joined display identities. `totals`, `sources`, and `days`
