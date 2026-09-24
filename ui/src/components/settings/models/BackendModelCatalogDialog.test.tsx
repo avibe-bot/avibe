@@ -196,12 +196,46 @@ describe('BackendModelCatalogDialog', () => {
         'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
       ))
       .mockResolvedValue(agent([model('alpha')]));
-    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove', route: [{ source_id: 'src_a', model_id: 'beta-air' }] } });
     const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
     await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
     expect(write).toHaveBeenCalledTimes(2);
     expect(write.mock.calls[1][1]).toMatchObject({ force: true, would_remove_hops: hops, would_interrupt: [] });
+  });
+
+  it('asks a focused removal again when the refused route is not the one it showed', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_b', model_id: 'beta-max', position: 1 }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
+      ))
+      .mockResolvedValue(agent([model('alpha')]));
+    renderDialog({ focus: { modelId: 'beta', action: 'remove', route: [{ source_id: 'src_a', model_id: 'beta-air' }] } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    const again = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await waitFor(() => expect(within(again).getByRole('button', { name: 'Remove' })).toHaveProperty('disabled', false));
+    expect(write).toHaveBeenCalledTimes(1);
+    await user.click(within(again).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    expect(write.mock.calls[1][1]).toMatchObject({ force: true, would_remove_hops: hops });
+  });
+
+  it('keeps a focused editor on screen and inert while its save is pending', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    let settle: (value: ReturnType<typeof agent>) => void = () => {};
+    vi.spyOn(modelsApi, 'putAgentModels').mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    await user.click(await screen.findByRole('button', { name: 'Save model' }));
+    expect(screen.getByRole('button', { name: 'Save model' })).toHaveProperty('disabled', true);
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => { settle(agent([model('alpha')])); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
   });
 
   it('cancels a focused removal without writing', async () => {

@@ -117,7 +117,7 @@ export const RouteChainDialog: React.FC<{
   /** Hand this model over to the catalog dialog, which is the one writer of the
    *  model list — the Route dialog only names the model and the intent, so the
    *  edit and removal protocols (guard, refusal, save) stay in one place. */
-  onManageModel?: (action: "edit" | "remove") => void;
+  onManageModel?: (action: "edit" | "remove", route: RouteHop[]) => void;
 }> = ({
   selection,
   sources,
@@ -1240,7 +1240,7 @@ export const RouteChainDialog: React.FC<{
                       variant="outline"
                       size="sm"
                       className="model-hub-route-head-action"
-                      onClick={() => onManageModel?.("edit")}
+                      onClick={() => onManageModel?.("edit", draft)}
                     >
                       <Pencil aria-hidden="true" />
                       {t("settings.models.routeDialog.editModel")}
@@ -1250,7 +1250,7 @@ export const RouteChainDialog: React.FC<{
                       variant="destructive"
                       size="sm"
                       className="model-hub-route-head-action"
-                      onClick={() => onManageModel?.("remove")}
+                      onClick={() => onManageModel?.("remove", draft)}
                     >
                       <Trash2 aria-hidden="true" />
                       {t("settings.models.routeDialog.removeModel")}

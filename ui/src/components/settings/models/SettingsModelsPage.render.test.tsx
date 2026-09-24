@@ -330,6 +330,28 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeNull();
   });
 
+  it('rescans on refresh so a native login made since the page opened can be migrated', async () => {
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const hubClaude = { ...directAgent('claude'), mode: 'hub' as const, sources: { order: [], eligibility: [] } };
+    vi.spyOn(modelsApi, 'refreshAgentPresence').mockResolvedValue([hubClaude]);
+    const scan = vi.spyOn(modelsApi, 'scanMigration')
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValue({ items: [migrationCandidate] });
+    renderPage([retainedSource], [{
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+    }]);
+
+    await waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
+    await act(async () => { await scan.mock.results[0].value; });
+    expect(screen.queryByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeNull();
+    const refresh = screen.getByRole('button', { name: 'Detect Agent backends again' });
+    await waitFor(() => expect(refresh).toHaveProperty('disabled', false));
+    await userEvent.click(refresh);
+    expect(await screen.findByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeTruthy();
+  });
+
   it('installs and starts the runtime inline without an install confirmation dialog', async () => {
     const notInstalled = {
       ...runtime,

@@ -263,7 +263,8 @@ describe("RouteChainDialog", () => {
     const head = within(document.querySelector<HTMLElement>('.model-hub-route-head')!);
     await user.click(await head.findByRole('button', { name: 'Edit model' }));
     await user.click(head.getByRole('button', { name: 'Remove model' }));
-    expect(manage.mock.calls).toEqual([['edit'], ['remove']]);
+    const shown = [{ source_id: 'src_a', model_id: 'claude-opus-5' }, { source_id: 'src_b', model_id: 'opus-5' }];
+    expect(manage.mock.calls).toEqual([['edit', shown], ['remove', shown]]);
     // An unsaved draft would be dropped by leaving, so the handoff steps aside.
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
     expect(head.queryByRole('button', { name: 'Edit model' })).toBeNull();

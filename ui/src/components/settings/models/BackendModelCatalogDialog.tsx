@@ -53,6 +53,7 @@ import type {
   BackendModel,
   BackendModelsPut,
   ModelCandidate,
+  RouteHop,
   RouteHopRef,
   SupplyGap,
 } from './types';
@@ -67,7 +68,23 @@ type ReadState = 'loading' | 'ready' | 'error';
  * writes safe — the removal guard, the refusal replay, the single save — lives
  * here, and a second implementation of it would be a second protocol.
  */
-export type CatalogFocus = { modelId: string; action: 'edit' | 'remove' };
+export type CatalogFocus = {
+  modelId: string;
+  action: 'edit' | 'remove';
+  /** The route the opener showed for this row, in order — what a focused
+   *  removal's one confirmation stands for. */
+  route?: readonly RouteHop[];
+};
+
+/** Whether a refused plan removes exactly the route the opener showed. */
+const sameShownRoute = (hops: readonly RouteHopRef[], modelId: string, route: readonly RouteHop[]): boolean =>
+  hops.length === route.length
+  && [...hops].sort((left, right) => left.position - right.position).every((hop, index) => (
+    hop.menu_model === modelId
+    && hop.position === index + 1
+    && hop.source_id === route[index].source_id
+    && hop.model_id === route[index].model_id
+  ));
 
 /** Same shape the Source order drawer announces with: the key alone would tell a
  *  screen-reader user something moved without telling them where to. */
@@ -237,6 +254,8 @@ export const BackendModelCatalogDialog: React.FC<{
   const [expanded, setExpanded] = React.useState(false);
   /** The focused removal the user confirmed, kept on screen while it saves. */
   const [answered, setAnswered] = React.useState<RemovalQuestion | null>(null);
+  /** The focused edit the user committed, kept on screen while it saves. */
+  const [savingEdit, setSavingEdit] = React.useState<{ model: BackendModel | null; seedId?: string } | null>(null);
   const [announcement, setAnnouncement] = React.useState<Announcement>(null);
   const readAttempt = React.useRef(0);
   const grips = React.useRef(new Map<string, HTMLButtonElement>());
@@ -823,12 +842,15 @@ export const BackendModelCatalogDialog: React.FC<{
           // covered by what the user has already accepted, and the question is
           // re-asked with the server's own words.
           //
-          // A focused removal is the exception for its hops. Its one
-          // confirmation already said the row's route goes with it, and the
-          // picture cannot see an automatic route at all — so re-asking over
-          // hops would be the same question twice. Only an interruption, which
-          // no picture ever claims, is a consequence worth asking about again.
-          const agreed = (direct || samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops)))
+          // A focused removal is the exception for its hops, but only for the
+          // route its opener showed. Its one confirmation already said that
+          // route goes with the row, and the picture cannot see an automatic
+          // route at all — so re-asking over the same hops would be the same
+          // question twice. A route that changed since it was shown is not what
+          // the user confirmed, and is asked with the server's own words.
+          const shownRoute = direct && focus?.route
+            && sameShownRoute(refusal.wouldRemoveHops, focus.modelId, focus.route);
+          const agreed = (shownRoute || samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops)))
             && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps ?? []));
           refusalRef.current = {
             hops: refusal.wouldRemoveHops,
@@ -1231,16 +1253,25 @@ export const BackendModelCatalogDialog: React.FC<{
           )}
         </DialogContent>
       </Dialog>
-      {open && direct && editing && (
+      {open && direct && (editing ?? savingEdit) && (
         <BackendModelEditorDialog
           open
           backend={backend}
-          model={editing.model}
-          seedId={editing.seedId}
+          model={(editing ?? savingEdit)!.model}
+          seedId={(editing ?? savingEdit)!.seedId}
           takenIds={takenIds}
           effortSuggestions={effortSuggestions}
+          busy={busy || savingEdit !== null}
           onCancel={() => onClose()}
-          onCommit={(model) => { commitEdit(model); void save(); }}
+          onCommit={(model) => {
+            // With no list behind it, the editor is the only thing on screen,
+            // so it stays — inert — until the write it started settles.
+            setSavingEdit(editing);
+            commitEdit(model);
+            const pending = save();
+            if (pending) void pending.finally(() => setSavingEdit(null));
+            else setSavingEdit(null);
+          }}
         />
       )}
       {open && direct && (removing ?? answered) && (() => {

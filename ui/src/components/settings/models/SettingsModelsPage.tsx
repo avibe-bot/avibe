@@ -377,6 +377,8 @@ export const SettingsModelsPage: React.FC = () => {
    *  disagree. `null` until a scan answers; a failed scan keeps the entry,
    *  because the dialog is where that failure is explained. */
   const [migrationAvailable, setMigrationAvailable] = React.useState<boolean | null>(null);
+  /** Bumped by the explicit refresh, so a native login made since is noticed. */
+  const [migrationScanEpoch, setMigrationScanEpoch] = React.useState(0);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
@@ -508,7 +510,7 @@ export const SettingsModelsPage: React.FC = () => {
         if (!cancelled) setMigrationAvailable(true);
       });
     return () => { cancelled = true; };
-  }, [migrationOpen, runtimeConfigurationVisible]);
+  }, [migrationOpen, migrationScanEpoch, runtimeConfigurationVisible]);
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
       || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
@@ -1402,7 +1404,7 @@ export const SettingsModelsPage: React.FC = () => {
                 disabled={presenceRefreshing}
                 aria-label={t('settings.models.direct.action.refreshAgents')}
                 title={t('settings.models.direct.action.refreshAgents')}
-                onClick={() => void retrySupply()}
+                onClick={() => { setMigrationScanEpoch((epoch) => epoch + 1); void retrySupply(); }}
               ><RefreshCw aria-hidden className={cn('size-3.5', presenceRefreshing && 'animate-spin')} /></Button>}
               <span title={runtimeSwitchLabel}>
                 <ToggleSwitch
@@ -1627,14 +1629,14 @@ export const SettingsModelsPage: React.FC = () => {
           setRouteTarget(null);
           if (target) focusRouteDestination(target);
         }}
-        onManageModel={(action) => {
+        onManageModel={(action, route) => {
           // The catalog dialog is the one writer of the model list; the route
           // dialog steps aside while it edits or removes the model it was
           // showing, then reopens on that model.
           if (!routeTarget) return;
           catalogOriginRef.current = routeTarget;
           setRouteTarget(null);
-          setCatalogFocus({ modelId: routeTarget.modelId, action });
+          setCatalogFocus({ modelId: routeTarget.modelId, action, route });
           setMenuBackend(routeTarget.agent.backend);
         }}
         onCommitted={(result) => routeCommitted(result, routeTarget?.opener ?? null)}
