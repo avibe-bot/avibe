@@ -57,7 +57,11 @@ from core.run_settlement import (
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    SQLiteBackgroundTaskStore,
+    TERMINAL_RUN_STATUSES,
+    normalize_run_status,
+)
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -324,6 +328,8 @@ class ConsolidatedMessageDispatcher:
         # progress signal. Heartbeat re-renders do NOT go through the emit path,
         # so they never inflate it. Dropped per turn in ``_drop_status_keys``.
         self._status_step_count: dict[str, int] = {}
+        self._close_after_runtime_tasks: set[asyncio.Task] = set()
+        self._close_after_session_ids: set[str] = set()
         # Current context-window occupancy (keyed by SESSION key, not turn-key) so
         # the footer can show "{n} tok" of context the session is using. Backends
         # report the latest snapshot via ``note_session_tokens(total=…)`` (Claude:
@@ -441,11 +447,47 @@ class ConsolidatedMessageDispatcher:
             else SETTLED_BY_TURN_ONLY_RESULT
         )
 
-    def _release_runtime_turn(self, context: MessageContext) -> None:
+    def _release_runtime_turn(
+        self, context: MessageContext, output_semantics: MessageOutput
+    ) -> None:
         service = getattr(self.controller, "agent_service", None)
         release = getattr(service, "release_runtime_turn", None)
-        if callable(release):
-            release(context)
+        payload = getattr(context, "platform_specific", None) or {}
+        settlement = self._turn_release_settlement(output_semantics)
+        # Turn-only Activity delivery failure leaves its Run with the retry
+        # owner. A stopped/refresh result is resultless but has a separate
+        # Run-settlement writer, so it still qualifies for close-after.
+        # Terminal results arm close-after only after their Run write succeeds.
+        # Resultless settlements have a separate writer before this release.
+        run_terminal = settlement in SETTLEMENTS_WITHOUT_RESULT
+        wait_for_run_ids = tuple(payload.pop("_close_after_wait_for_run_ids", ()))
+        if run_terminal and payload.get("close_after"):
+            # The Turn writer can fail after the resultless output is delivered.
+            # Do not reserve or dispose the runtime until its Runs are terminal.
+            wait_for_run_ids = tuple(
+                dict.fromkeys(
+                    (*wait_for_run_ids, *self._terminal_agent_run_ids(context, output_semantics))
+                )
+            )
+        should_close = bool(payload.pop("_close_after_runtime_pending", False)) or bool(
+            payload.get("close_after") and run_terminal
+        )
+        lease = None
+        try:
+            reserve = getattr(service, "reserve_close_after_teardown", None)
+            if should_close and not wait_for_run_ids and callable(reserve):
+                lease = reserve(context)
+            elif callable(release):
+                release(context)
+        finally:
+            if should_close and lease is not False:
+                self._schedule_close_after_runtime(
+                    context, lease=lease, wait_for_run_ids=wait_for_run_ids
+                )
+            elif wait_for_run_ids:
+                self._schedule_close_after_runtime(
+                    context, wait_for_run_ids=wait_for_run_ids
+                )
 
     async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "processing_indicator", None)
@@ -1241,7 +1283,7 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None,
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
-    ) -> None:
+    ) -> list[str]:
         normalized_run_ids = list(
             dict.fromkeys(
                 run_id
@@ -1279,7 +1321,7 @@ class ConsolidatedMessageDispatcher:
                 error=terminal_error,
                 deferred_run_ids=deferred_run_ids,
             )
-            return
+            return deferred_run_ids
         get_run = getattr(store, "get_run", None)
         eligible_run_ids = (
             [
@@ -1304,11 +1346,13 @@ class ConsolidatedMessageDispatcher:
             ):
                 notification["fallback_run_id"] = min(eligible_run_ids)
             terminal_provenance["turn_failure_notification"] = notification
+        deferred_run_ids: list[str] = []
         for run_id in normalized_run_ids:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
             if run_terminal_status and self._run_has_blocking_activity(run_id):
+                deferred_run_ids.append(run_id)
                 defer_terminal = getattr(store, "defer_run_terminal", None)
                 if callable(defer_terminal):
                     defer_kwargs = {
@@ -1356,6 +1400,7 @@ class ConsolidatedMessageDispatcher:
                     run_id,
                     **record_kwargs,
                 )
+        return deferred_run_ids
 
     def _terminal_agent_run_ids(
         self,
@@ -1627,7 +1672,7 @@ class ConsolidatedMessageDispatcher:
         store = None
         try:
             store = SQLiteBackgroundTaskStore()
-            self._record_agent_run_terminal_for_ids(
+            deferred_run_ids = self._record_agent_run_terminal_for_ids(
                 store=store,
                 run_ids=run_ids,
                 text=text,
@@ -1641,9 +1686,253 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
             if require_confirmation:
                 raise
+            return
         finally:
             if store is not None:
                 store.close()
+        if semantics.settles_run:
+            payload = getattr(context, "platform_specific", None) or {}
+            defer_close_after = bool(
+                payload.get("close_after")
+                and semantics.completes_turn
+                and not semantics.detached
+                and self._is_current_runtime_turn(context)
+            )
+            if deferred_run_ids:
+                if defer_close_after:
+                    payload["_close_after_wait_for_run_ids"] = tuple(deferred_run_ids)
+                else:
+                    self._schedule_close_after_runtime(
+                        context, wait_for_run_ids=tuple(deferred_run_ids)
+                    )
+            elif defer_close_after:
+                payload["_close_after_runtime_pending"] = True
+            else:
+                self._schedule_close_after_runtime(context)
+
+    async def _wait_for_close_after_runs(self, run_ids: tuple[str, ...]) -> bool:
+        """Wait for the Run writer, not a Turn output, to finish disposal ownership."""
+
+        from core.inbox_events import RUNS_UPDATED_EVENT, bus
+
+        request_store = getattr(
+            getattr(self.controller, "scheduled_task_service", None),
+            "request_store",
+            None,
+        )
+        own_store = request_store is None
+        if own_store:
+            request_store = SQLiteBackgroundTaskStore()
+        get_run = getattr(request_store, "get_run", None)
+        if not callable(get_run):
+            if own_store:
+                request_store.close()
+            return False
+        subscription_id, queue = bus.subscribe()
+        try:
+            while True:
+                runs = [get_run(run_id) for run_id in run_ids]
+                if any(not isinstance(run, dict) for run in runs):
+                    logger.warning(
+                        "Skipping close-after: a Run is missing for %s",
+                        ",".join(run_ids),
+                    )
+                    return False
+                if all(
+                    normalize_run_status(run["status"]) in TERMINAL_RUN_STATUSES
+                    for run in runs
+                ) and not any(self._run_has_blocking_activity(run_id) for run_id in run_ids):
+                    return True
+                if getattr(self, "_close_after_settlement_closed", False):
+                    logger.warning(
+                        "Skipping close-after teardown: Run settlement did not finish for %s",
+                        ",".join(run_ids),
+                    )
+                    return False
+                try:
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=5)
+                except TimeoutError:
+                    continue
+                if (
+                    event_type != RUNS_UPDATED_EVENT
+                    or not isinstance(payload, dict)
+                    or str(payload.get("run_id") or "") not in run_ids
+                ):
+                    continue
+        finally:
+            bus.unsubscribe(subscription_id)
+            if own_store:
+                request_store.close()
+
+    def defer_close_after_until_run_terminal(self, context: MessageContext) -> None:
+        """Pre-native Stop has no terminal emit; its Run writer owns close-after."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        if not payload.get("close_after"):
+            return
+        run_id = str(payload.get("task_execution_id") or "").strip()
+        if run_id:
+            self._schedule_close_after_runtime(
+                context, wait_for_run_ids=(run_id,)
+            )
+
+    def _schedule_close_after_runtime(
+        self,
+        context: MessageContext,
+        *,
+        lease: tuple[str, str, asyncio.Task | None] | None = None,
+        wait_for_run_ids: tuple[str, ...] = (),
+    ) -> None:
+        """Release a runtime explicitly marked disposable after its Run settles."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        if not bool(payload.get("close_after")):
+            return
+        session_id = str(payload.get("agent_session_id") or "").strip()
+        target = payload.get("agent_session_target")
+        target = target if isinstance(target, dict) else {}
+        backend = str(
+            payload.get("agent_backend")
+            or target.get("agent_backend")
+            or ""
+        ).strip()
+        base_session_id = str(
+            target.get("session_anchor")
+            or payload.get("backend_base_session_id")
+            or ""
+        ).strip()
+        if (
+            not session_id
+            or not base_session_id
+            or backend not in {"claude", "codex", "opencode"}
+        ):
+            if lease is not None:
+                release_lease = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "release_runtime_turn_key",
+                    None,
+                )
+                if callable(release_lease):
+                    release_lease(lease[0], lease[1])
+            logger.warning(
+                "close-after requested without a disposable runtime target: session_id=%s base_session_id=%s backend=%s",
+                session_id,
+                base_session_id,
+                backend,
+            )
+            return
+        if session_id in self._close_after_session_ids:
+            if lease is not None:
+                release_lease = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "release_runtime_turn_key",
+                    None,
+                )
+                if callable(release_lease):
+                    release_lease(lease[0], lease[1])
+            return
+        self._close_after_session_ids.add(session_id)
+        backend_cleanup = payload.get("_close_after_backend_cleanup")
+
+        async def _close() -> None:
+            # A backend may finish its own post-result cleanup after the shared
+            # terminal boundary. Keep its gate reserved until that task exits.
+            current_lease = lease
+            try:
+                if wait_for_run_ids and not await self._wait_for_close_after_runs(
+                    wait_for_run_ids
+                ):
+                    return
+                if isinstance(backend_cleanup, asyncio.Event):
+                    await backend_cleanup.wait()
+                await asyncio.sleep(0)
+                if current_lease is not None and current_lease[2] is not None:
+                    await asyncio.wait({current_lease[2]})
+                runtime_key = str(
+                    payload.get("agent_runtime_turn_key") or ""
+                ).strip()
+                service = getattr(self.controller, "agent_service", None)
+                if current_lease is None:
+                    reserve_idle = getattr(service, "reserve_idle_close_after_teardown", None)
+                    current_lease = (
+                        await reserve_idle(runtime_key)
+                        if runtime_key and callable(reserve_idle)
+                        else False
+                    )
+                    if current_lease is False:
+                        logger.info(
+                            "Skipping close-after teardown for Agent Session %s: "
+                            "runtime %s is busy or its gate identity is unavailable",
+                            session_id,
+                            runtime_key,
+                        )
+                        return
+                manager = getattr(self.controller, "session_turns", None)
+                has_successor = getattr(manager, "has_close_after_successor", None)
+                if callable(has_successor):
+                    try:
+                        if has_successor(
+                            session_id,
+                            str(payload.get("turn_token") or "").strip(),
+                        ):
+                            logger.info(
+                                "Skipping close-after teardown for Agent Session %s: "
+                                "a durable successor owns the runtime",
+                                session_id,
+                            )
+                            return
+                    except Exception:
+                        logger.exception(
+                            "Skipping close-after teardown for Agent Session %s: "
+                            "durable successor check failed",
+                            session_id,
+                        )
+                        return
+                from core.services.running_agents import end_running_agent
+
+                result = await end_running_agent(
+                    self.controller,
+                    backend=backend,
+                    session_id=session_id,
+                    base_session_id=base_session_id or None,
+                )
+                if not result.get("ok") and result.get("error") != "session_not_live":
+                    logger.warning(
+                        "close-after failed for Agent Session %s: %s",
+                        session_id,
+                        result,
+                    )
+            except Exception:
+                logger.warning(
+                    "close-after runtime teardown failed for Agent Session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            finally:
+                if current_lease is not None and current_lease is not False:
+                    release_lease = getattr(
+                        getattr(self.controller, "agent_service", None),
+                        "release_runtime_turn_key",
+                        None,
+                    )
+                    if callable(release_lease):
+                        release_lease(current_lease[0], current_lease[1])
+                self._close_after_session_ids.discard(session_id)
+
+        task = asyncio.create_task(
+            _close(),
+            name=f"agent-runtime-close-after-{session_id}",
+        )
+        self._close_after_runtime_tasks.add(task)
+        task.add_done_callback(self._close_after_runtime_tasks.discard)
+
+    async def drain_close_after_runtime(self) -> None:
+        """Join teardowns after the Run settlement owner has stopped."""
+
+        self._close_after_settlement_closed = True
+        while self._close_after_runtime_tasks:
+            tasks = tuple(self._close_after_runtime_tasks)
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks))
 
     def _schedule_agent_run_activity(
         self,
@@ -2528,7 +2817,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted
@@ -2666,7 +2955,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, accepted_output_semantics)
 
         if activity_batch_incomplete:
             raise ActivityOutputDeliveryError(
@@ -2803,7 +3092,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type == "notify":
             # Three steps, three error scopes — deliberately NOT one blanket ``try``.
@@ -3300,7 +3589,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"

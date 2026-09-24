@@ -34,6 +34,9 @@ interface BackendLifecycleChipProps {
   cliStatus: CliStatus;
   /** Setup describes executable availability separately from connection readiness. */
   readyLabel?: string;
+  /** Setup reads an off switch as a step the person has not taken yet, not as a
+      backend that was turned off, so it names that state itself. */
+  disabledLabel?: string;
   onChanged?: (info?: BackendChipChange) => void | Promise<void>;
   onOperationChange?: (pending: boolean) => void;
   /** The setup card draws the action its lifecycle offers — update or install —
@@ -114,6 +117,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   onChanged,
   onOperationChange,
   readyLabel,
+  disabledLabel,
   onVisual,
   refreshKey,
   externallyBusy = false,
@@ -237,7 +241,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   const chipLabel = (() => {
     switch (visual) {
       case 'disabled':
-        return t('backendLifecycle.statusDisabled');
+        return disabledLabel || t('backendLifecycle.statusDisabled');
       case 'ready':
         return readyLabel || t('backendLifecycle.statusReady');
       case 'updating':

@@ -8,6 +8,18 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: memory_upgrade_compatibility
+    name: Memory retirement and official release upgrade compatibility
+    status: active
+    catalog: tests/scenarios/memory_upgrade_compatibility/catalog.yaml
+    observations: tests/scenarios/memory_upgrade_compatibility/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
+      - tests/e2e/test_retired_updater_bridge.py
+      - tests/test_memory_removal.py
+      - tests/test_memory_runtime_release_guard.py
+    unit_or_contract_tests:
+      - tests/test_release_verification.py
   - id: model_hub
     name: Model Hub configured routes and turn outcomes
     status: active
@@ -72,7 +84,8 @@ capabilities:
       - ui/src/components/settings/models/AgentCard.test.tsx
       - ui/src/components/settings/models/MigrationDialog.test.tsx
       - ui/src/components/settings/models/migrationScan.test.ts
-      - ui/src/components/onboarding/ImportKeysNotice.test.tsx
+      - ui/src/components/onboarding/providers/providerStage.test.ts
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
       - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

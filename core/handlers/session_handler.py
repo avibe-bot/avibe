@@ -47,7 +47,11 @@ from core.managed_skills import (
     managed_skill_project_base,
 )
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
-from core.resource_governance import governor_from_controller
+from core.resource_governance import (
+    observe_agent_resource_pressure,
+    governor_from_controller,
+    pids_failure_labels,
+)
 from core.runtime_activation import RuntimeActivationIdentity
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
@@ -2757,7 +2761,11 @@ class SessionHandler(BaseHandler):
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
             reason = self._t(reason_key, **reason_values)
-            diagnostic = self.claude_error_diagnostic(composite_key, error)
+            diagnostic = self.claude_error_diagnostic(
+                composite_key,
+                error,
+                client=client,
+            )
             logger.error(
                 "Claude process for session %s terminated (%s): %s",
                 composite_key,
@@ -2774,11 +2782,20 @@ class SessionHandler(BaseHandler):
                 expected_client=client,
                 reason="process_terminated",
             )
+            message = self._t("error.claudeProcessTerminated", reason=reason)
+            resource_failure = getattr(client, "_vibe_resource_failure", None)
+            if resource_failure is not None:
+                if resource_failure.kind == "pids":
+                    language = str(getattr(self.controller.config, "language", "en") or "en")
+                    message = (
+                        f"{message} "
+                        f"{self._t('error.agentPidsLimit', **pids_failure_labels(resource_failure, language))}"
+                    )
+                elif resource_failure.kind == "memory":
+                    message = f"{message} {self._t('error.agentMemoryLimit')}"
             await self._get_im_client(context).send_message(
                 context,
-                self._get_formatter(context).format_error(
-                    self._t("error.claudeProcessTerminated", reason=reason)
-                ),
+                self._get_formatter(context).format_error(message),
             )
             return False
         if "read() called while another coroutine" in error_msg:
@@ -2823,13 +2840,34 @@ class SessionHandler(BaseHandler):
             )
         return False
 
-    def claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+    def claude_error_diagnostic(
+        self,
+        composite_key: str,
+        error: Exception,
+        *,
+        client=None,
+    ) -> str:
         """Add process state and captured stderr to a Claude failure diagnostic."""
         diagnostic = str(error)
-        client = self.claude_sessions.get(composite_key)
+        # Callers that observe a concrete failed generation pass it through so a
+        # replacement registered under the same composite key cannot steal the
+        # diagnosis. The optional fallback preserves older direct callers.
+        if client is None:
+            client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
             diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"
+            resource_failure = getattr(client, "_vibe_resource_failure", None)
+            if not getattr(client, "_vibe_resource_failure_checked", False):
+                if resource_failure is None and not self.claude_teardown_is_intentional(
+                    composite_key, error, client=client
+                ):
+                    resource_failure = observe_agent_resource_pressure(self.controller)
+                    if resource_failure is not None:
+                        setattr(client, "_vibe_resource_failure", resource_failure)
+                setattr(client, "_vibe_resource_failure_checked", True)
+            if resource_failure is not None:
+                diagnostic = f"{diagnostic}\nResource diagnosis: {resource_failure.message}"
         stderr_tail = get_claude_client_stderr_tail(client)
         if stderr_tail:
             diagnostic = f"{diagnostic}\nClaude stderr tail:\n{stderr_tail}"

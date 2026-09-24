@@ -111,9 +111,10 @@ describe('Welcome', () => {
     const footer = container.querySelector('.onboarding-setup-footer') as HTMLElement;
     expect(aside.contains(alert)).toBe(true);
     expect(container.querySelector('[data-setup-screen-root="intro"]')!.contains(alert)).toBe(false);
-    // Order, not just ownership: only content after the footer is content the anchor
-    // cannot feel.
-    expect(footer.compareDocumentPosition(aside) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Placement, not just ownership: the slot lives in the cell the screens share, above
+    // the footer and out of the centred column, so what it holds cannot move the pair.
+    expect(aside.parentElement?.classList.contains('onboarding-screens')).toBe(true);
+    expect(footer.compareDocumentPosition(aside) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry' }).closest('.onboarding-primary-action')).toBeTruthy();
   });
   // e-Dq: detection awaits three CLI probes and only then asks to move. That

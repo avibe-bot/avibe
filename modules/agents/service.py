@@ -409,6 +409,22 @@ class AgentService:
                     else None
                 )
                 self.release_runtime_turn_key(runtime_key, gate.token)
+                defer_close_after = getattr(
+                    dispatcher,
+                    "defer_close_after_until_run_terminal",
+                    None,
+                )
+                if (
+                    (request.context.platform_specific or {}).get("close_after")
+                    and callable(defer_close_after)
+                ):
+                    try:
+                        defer_close_after(request.context)
+                    except Exception:
+                        logger.warning(
+                            "Failed to defer close-after after prewrite Stop",
+                            exc_info=True,
+                        )
                 cleanup = getattr(
                     dispatcher,
                     "finish_prewrite_stop_surfaces",
@@ -592,6 +608,7 @@ class AgentService:
             gate.runtime_started = True
             gate.activation_identity = activation_identity
             gate.liveness_probe = self._capture_backend_liveness(gate, context)
+            gate.exit_failure_probe = self._capture_backend_exit_failure(gate, context)
             self._start_runtime_liveness_monitor(runtime_key, gate, runtime_token)
             manager = getattr(self.controller, "session_turns", None)
             bind_native = getattr(manager, "on_native_start", None)
@@ -660,6 +677,25 @@ class AgentService:
                     exc_info=True,
                 )
         return lambda: self.backend_alive(context, use_captured=False)
+
+    @staticmethod
+    def _capture_backend_exit_failure(
+        gate: "_RuntimeTurnGate",
+        context: Any,
+    ) -> Callable[[], tuple[str, str] | None] | None:
+        capture = getattr(gate.agent, "capture_backend_exit_failure", None)
+        if callable(capture):
+            try:
+                probe = capture(context)
+                if callable(probe):
+                    return probe
+            except Exception:
+                logger.debug(
+                    "Failed to capture backend exit diagnosis for %s",
+                    gate.backend,
+                    exc_info=True,
+                )
+        return None
 
     @staticmethod
     def _probe_backend_liveness(
@@ -763,15 +799,39 @@ class AgentService:
                     if gate.request is not None
                     else terminal_turn_output()
                 )
-                await emit(
-                    context,
-                    "result",
-                    "",
-                    is_error=True,
-                    level="silent",
-                    output=output,
-                    terminal_error=self._backend_exit_terminal_error,
-                )
+                diagnosis = None
+                if gate.exit_failure_probe is not None:
+                    try:
+                        diagnosis = gate.exit_failure_probe()
+                    except Exception:
+                        logger.exception(
+                            "Backend exit diagnosis failed for backend=%s runtime=%s",
+                            gate.backend,
+                            runtime_key,
+                        )
+                if diagnosis is not None:
+                    from core.backend_failure import emit_backend_failure
+
+                    diagnostic, display_text = diagnosis
+                    await emit_backend_failure(
+                        self.controller,
+                        context,
+                        gate.backend,
+                        diagnostic,
+                        display_text=display_text,
+                        request=gate.request,
+                        output=output,
+                    )
+                else:
+                    await emit(
+                        context,
+                        "result",
+                        "",
+                        is_error=True,
+                        level="silent",
+                        output=output,
+                        terminal_error=self._backend_exit_terminal_error,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -883,6 +943,7 @@ class AgentService:
             context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
             context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = gate.token
             gate.liveness_probe = self._capture_backend_liveness(gate, context)
+            gate.exit_failure_probe = self._capture_backend_exit_failure(gate, context)
             self._start_runtime_liveness_monitor(runtime_key, gate, gate.token)
             context.platform_specific[AGENT_TURN_TOKEN] = gate.token
             manager = getattr(self.controller, "session_turns", None)
@@ -939,7 +1000,76 @@ class AgentService:
         finally:
             self.release_runtime_turn_key(runtime_key, runtime_token)
 
-    def release_runtime_turn_key(self, runtime_key: str, runtime_token: str | None = None) -> None:
+    def reserve_close_after_teardown(
+        self, context: Any
+    ) -> tuple[str, str, asyncio.Task | None] | bool | None:
+        """Hold the completed turn's gate while its disposable runtime is closed.
+
+        An already queued successor takes priority and retains the runtime.
+        Otherwise the reservation prevents a newly arriving successor from
+        starting during asynchronous backend teardown.
+        """
+        payload = getattr(context, "platform_specific", None) or {}
+        runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
+        gate = self._turn_gates.get(runtime_key)
+        if not runtime_key or not runtime_token or gate is None or gate.token != runtime_token:
+            return None
+        if self._lock_has_live_waiters(gate.lock):
+            self.release_runtime_turn(context)
+            return False
+        manager = getattr(self.controller, "session_turns", None)
+        bind_terminal = getattr(manager, "on_native_terminal", None)
+        try:
+            if callable(bind_terminal):
+                bind_terminal(context, outcome="terminal")
+        except Exception:
+            logger.exception("native terminal ownership reconciliation failed before close-after")
+            self.release_runtime_turn_key(runtime_key, runtime_token)
+            return False
+        has_successor = getattr(manager, "has_close_after_successor", None)
+        if callable(has_successor):
+            session_id = str(payload.get("agent_session_id") or "").strip()
+            completed_turn_id = str(payload.get("turn_token") or "").strip()
+            try:
+                if has_successor(session_id, completed_turn_id):
+                    self.release_runtime_turn_key(runtime_key, runtime_token)
+                    return False
+            except Exception:
+                logger.exception("durable successor check failed before close-after")
+                self.release_runtime_turn_key(runtime_key, runtime_token)
+                return False
+        reservation = f"close-after:{uuid.uuid4().hex}"
+        turn_task = gate.task
+        self.release_runtime_turn_key(runtime_key, runtime_token, reserve_token=reservation)
+        return runtime_key, reservation, turn_task
+
+    async def reserve_idle_close_after_teardown(
+        self, runtime_key: str
+    ) -> tuple[str, str, None] | bool:
+        """Reserve an idle runtime before detached close-after teardown.
+
+        The uncontended acquire completes without yielding. If a successor owns
+        or is queued on the gate, leave it untouched rather than stop its runtime.
+        """
+        runtime_key = str(runtime_key or "").strip()
+        if not runtime_key:
+            return False
+        gate = self._get_turn_gate(runtime_key)
+        if gate.lock.locked() or self._lock_has_live_waiters(gate.lock) or gate.token:
+            return False
+        await gate.lock.acquire()
+        reservation = f"close-after:{uuid.uuid4().hex}"
+        gate.token = reservation
+        return runtime_key, reservation, None
+
+    def release_runtime_turn_key(
+        self,
+        runtime_key: str,
+        runtime_token: str | None = None,
+        *,
+        reserve_token: str | None = None,
+    ) -> None:
         runtime_key = str(runtime_key or "").strip()
         if not runtime_key:
             return
@@ -950,7 +1080,7 @@ class AgentService:
             return
         liveness_task = gate.liveness_task
         gate.liveness_task = None
-        gate.token = ""
+        gate.token = reserve_token or ""
         gate.backend = ""
         gate.runtime_started = False
         gate.runtime_progress_token = ""
@@ -960,6 +1090,7 @@ class AgentService:
         gate.request = None
         gate.activation_identity = None
         gate.liveness_probe = None
+        gate.exit_failure_probe = None
         if liveness_task is not None and not liveness_task.done():
             try:
                 current = asyncio.current_task()
@@ -967,7 +1098,7 @@ class AgentService:
                 current = None
             if liveness_task is not current:
                 liveness_task.cancel()
-        if gate.lock.locked():
+        if gate.lock.locked() and reserve_token is None:
             gate.lock.release()
 
     async def force_cancel_backend_turns(self, backend: str) -> None:
@@ -1211,5 +1342,6 @@ class _RuntimeTurnGate:
     request: AgentRequest | None = None
     activation_identity: RuntimeActivationIdentity | None = None
     liveness_probe: Callable[[], Optional[bool]] | None = None
+    exit_failure_probe: Callable[[], tuple[str, str] | None] | None = None
     cancel_tidy_task: asyncio.Task | None = None
     liveness_task: asyncio.Task | None = None

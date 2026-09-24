@@ -370,6 +370,7 @@ vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correc
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
 `--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
@@ -394,6 +395,10 @@ P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队�
 
 `vibe hook send` 仅作为 deprecated 兼容入口保留。新的自动化入口应使用
 `vibe agent run`。
+
+对于新建或 fork 的 Session，如果希望 Run 结束后释放 Agent runtime，同时保留
+Session、transcript 和 Run 记录，可以使用 `--close-after`。它不能和
+`--session-id` 一起使用，因为现有 Session 自己管理 runtime 生命周期。
 
 ### `vibe watch`
 

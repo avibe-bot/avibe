@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { clearMigrationDismissed, isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import { Button } from '@/components/ui/button';
 import {
   createAgentCollectionReadAuthority,
@@ -27,6 +28,7 @@ import {
 } from '@/components/settings/models/collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components/settings/models/gatewayAdoption';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
+import { requiredBackends } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
 import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { foldRegionRead } from '@/components/settings/models/regionRead';
@@ -36,7 +38,6 @@ import {
 } from '@/components/settings/models/runtimeLifecycle';
 import type { AgentBackend, AgentSupply, RuntimeDependency, Source } from '@/components/settings/models/types';
 
-import { ImportKeysNotice } from '../ImportKeysNotice';
 import { useOnboardingMotion } from '../motion';
 import {
   setupCanAttemptInstall,
@@ -53,9 +54,9 @@ import {
   addedThroughMoreCount,
   adoptionBackend,
   defaultSelection,
+  offeredImportKeys,
   gatewayEvidenceSettled,
   gatewayIntent,
-  offeredImportKeys,
   pendingImportRows,
   providerAction,
   providerSetupAction,
@@ -76,11 +77,6 @@ import {
 // deep link — would render untiered without this line.
 import '../onboarding.css';
 import '../onboarding-providers.css';
-
-/** The wires' first arrival, staggered so the fan-in lands before the fan-out leaves.
- *  Two numbers rather than a timeline: each band's own 3-wire stagger is the CSS's. */
-const INBOUND_DELAY_MS = 120;
-const OUTBOUND_DELAY_MS = 570;
 
 /** A resume attempt this screen started. `step` is the step currently being attempted:
  *  it opens on what the authoritative read called for and follows the lifecycle
@@ -147,15 +143,11 @@ const observationOf = (runtime: RuntimeDependency | null): string => (runtime ==
     runtime.manifest.resolution,
   ].join(':'));
 
-/** Locale-correct enumeration without inventing a separator string for each language.
- *  Falls back to the ASCII list on a runtime without `Intl.ListFormat`. */
-const formatNames = (names: readonly string[], locale: string): string => {
-  try {
-    return new Intl.ListFormat(locale, { style: 'narrow', type: 'unit' }).format([...names]);
-  } catch {
-    return names.join(', ');
-  }
-};
+/** Enumeration joined with the separator the active language punctuates lists with
+ *  (`, ` in English, `、` in Chinese), which `Intl.ListFormat`'s unit style drops
+ *  entirely for zh. */
+const formatNames = (names: readonly string[], separator: string): string =>
+  names.join(separator);
 
 /**
  * C4 names one owner for every setup supply read, so the shell may hand this screen
@@ -180,7 +172,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     onNavigate,
     agentReads: sharedAgentReads,
   }, ref) {
-    const { t, i18n } = useTranslation();
+    const { t } = useTranslation();
     const motion = useOnboardingMotion();
     const attachMotion = motion.ref;
 
@@ -214,7 +206,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     const [importOpen, setImportOpen] = React.useState(false);
     const [importFailed, setImportFailed] = React.useState(false);
     const [verifying, setVerifying] = React.useState(false);
-    const [pulse, setPulse] = React.useState({ inbound: false, outbound: false });
 
     const selection = flowState.providerSelection;
     const ready = setupNavigationReady(capability, gatewayEnabled);
@@ -228,11 +219,12 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       () => unlistedDetected({ sources, scan: selection.scan }),
       [sources, selection.scan],
     );
+    // Against the Hub's own inventory: a key it is already supplying is not a batch
+    // this screen should ask for, and the action continues instead of opening a review
+    // of work that is done.
     const pending = React.useMemo(() => pendingImportRows(selection), [selection]);
-    // The capsule counts through the same consent grouping the cards and the dialog
-    // use, so a key it advertises is always one the review can actually act on.
-    const offered = React.useMemo(() => offeredImportKeys(selection), [selection]);
-
+    const importDeclined = selection.selectedBackends.length === 0
+      && isMigrationDismissed(offeredImportKeys(selection));
     // ── Supply ──────────────────────────────────────────────────────────────
 
     // Whether the server's own row defaults have been honoured yet. A scan is nulled
@@ -327,12 +319,20 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
           // server's own defaults — the same rows the shipped dialog opens ticked.
           // Afterwards the selection is the person's, and survives only where this
           // scan asks the same question the last one did.
+          const offer = offeredImportKeys({ scan: scanned, selectedBackends: [] });
+          const priorDismissed = isMigrationDismissed(offeredImportKeys(previous.providerSelection));
+          const dismissed = isMigrationDismissed(offer);
+          const defaults = defaultSelection(scanned).filter((backend) =>
+            !offer.some((item) => requiredBackends(scanned.items, [backend]).has(item.backend)
+              && isMigrationDismissed([item])));
           const selectedBackends = first && previous.providerSelection.scan === null
-            ? defaultSelection(scanned)
-            : reconcileSelection(
-              { scan: scanned, selectedBackends: previous.providerSelection.selectedBackends },
-              previous.providerSelection.scan,
-            );
+            ? defaults
+            : priorDismissed && !dismissed && previous.providerSelection.selectedBackends.length === 0
+              ? defaults
+              : reconcileSelection(
+                { scan: scanned, selectedBackends: previous.providerSelection.selectedBackends },
+                previous.providerSelection.scan,
+              );
           return { ...previous, providerSelection: { scan: scanned, selectedBackends } };
         });
         seededSelectionRef.current = true;
@@ -515,7 +515,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // ── Write admission ─────────────────────────────────────────────────────
 
     // One rule for every control that can start a write, wherever it is drawn: the
-    // cards, the footer, the capsule and the dialogs all admit the same thing, so a
+    // cards, the footer and the dialogs all admit the same thing, so a
     // control that is drawn somewhere else cannot admit what the footer refuses.
     //
     // Four separate facts, and a write needs all of them. What the machine's HEALTH is
@@ -575,7 +575,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       pendingCount: pending.length,
       importFailed,
       supply: sourceRead === 'read'
-        ? { kind: 'read', hasSource }
+        ? { kind: 'read', hasSource: hasSource || importDeclined }
         : { kind: sourceRead },
       gatewayBusy,
       // The same admission the dialogs are opened and submitted against, so the footer
@@ -632,24 +632,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       },
     }), [action.kind, action.blocked, onNavigate, openAdd, openImport, retrySupply]);
 
-    // ── First-entry sequence ────────────────────────────────────────────────
-
-    React.useEffect(() => {
-      if (!active) {
-        // Reset so a re-entry replays: the pulse is a `<g>` that has to remount.
-        setPulse({ inbound: false, outbound: false });
-        return;
-      }
-      // Paused mid-sequence keeps the frame it is on rather than snapping back —
-      // `data-motion` holds the CSS side, and clearing the timers holds this one.
-      if (!motion.running) return;
-      const timers = [
-        window.setTimeout(() => setPulse((state) => ({ ...state, inbound: true })), INBOUND_DELAY_MS),
-        window.setTimeout(() => setPulse((state) => ({ ...state, outbound: true })), OUTBOUND_DELAY_MS),
-      ];
-      return () => timers.forEach(window.clearTimeout);
-    }, [active, motion.running]);
-
     // ── Writes landing ──────────────────────────────────────────────────────
 
     const landSource = React.useCallback(async (created: SourceCreated | null, viaMore: boolean) => {
@@ -679,6 +661,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     }, [setFlowState, sourceReads]);
 
     const changeSelection = React.useCallback((selectedBackends: AgentBackend[]) => {
+      const newlySelected = selectedBackends.filter((backend) => !selection.selectedBackends.includes(backend));
+      clearMigrationDismissed(offeredImportKeys(selection).filter((item) => newlySelected.includes(item.backend)));
       // Editing the selection retires the verdict the server gave about the batch it
       // no longer describes.
       setImportFailed(false);
@@ -686,18 +670,16 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
         ...previous,
         providerSelection: { ...previous.providerSelection, selectedBackends },
       }));
-    }, [setFlowState]);
+    }, [selection, setFlowState]);
 
     const toggleSlot = React.useCallback((slot: ProviderSlot) => {
-      setImportFailed(false);
-      setFlowState((previous) => ({
-        ...previous,
-        providerSelection: {
-          ...previous.providerSelection,
-          selectedBackends: toggleSlotSelection(previous.providerSelection, slot),
-        },
-      }));
-    }, [setFlowState]);
+      changeSelection(toggleSlotSelection(selection, slot));
+    }, [changeSelection, selection]);
+
+    const declineImport = React.useCallback(() => {
+      writeMigrationDismissed(offeredImportKeys(selection));
+      changeSelection([]);
+    }, [selection, changeSelection]);
 
     // ── Sentence ────────────────────────────────────────────────────────────
 
@@ -706,17 +688,22 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       sources,
       selected: selection.selectedBackends,
       failed: supplyFailed,
+      reading: sourceRead === 'reading',
     });
-    const summaryText = summary.kind === 'none'
+    const summaryText = summary.kind === 'pending'
+      ? ''
+      : summary.kind === 'none'
       ? t('onboarding.providers.summaryNone')
       : summary.kind === 'error'
         ? t('onboarding.providers.summaryError')
-        : t(
-          summary.kind === 'added'
-            ? 'onboarding.providers.summaryAdded'
-            : 'onboarding.providers.summarySelected',
-          { count: summary.count, names: formatNames(summary.names, i18n.language) },
-        );
+        : [
+          t(
+            summary.kind === 'added'
+              ? 'onboarding.providers.summaryAdded'
+              : 'onboarding.providers.summarySelected',
+            { count: summary.count, names: formatNames(summary.names, t('onboarding.providers.summaryNameSeparator')) },
+          ),
+        ].join(' · ');
 
     // ── The way on when nothing is connected ────────────────────────────────
 
@@ -744,7 +731,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       setActionAside(setupRoot.current?.closest('.onboarding-step')
         ?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null);
     }, [onActionChange]);
-    const onwardNode = sourceRead === 'read' && !hasSource ? (
+    const onwardNode = sourceRead === 'read' && !hasSource && !importDeclined ? (
       <div className="onboarding-setup-hint">
         <p className="text-center text-xs text-muted">
           {t('onboarding.providers.continueHint')}{' '}
@@ -799,7 +786,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               direction="inbound"
               stage={stage}
               endpointSelector=".setup-provider-card"
-              pulse={pulse.inbound}
             />
 
             <GatewayCard
@@ -812,7 +798,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               direction="outbound"
               stage={stage}
               endpointSelector=".setup-destination"
-              pulse={pulse.outbound}
             />
 
             <DestinationRow />
@@ -830,18 +815,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
                 </Button>
               )}
             </p>
-
-            {/* The slot is always here; only the capsule inside it comes and goes. That
-                is what keeps the footer action still when someone dismisses the offer. */}
-            <div className="setup-provider-offer">
-              {active && (
-                <ImportKeysNotice
-                  candidates={offered}
-                  imported={flowState.importedCount}
-                  onReview={openImport}
-                />
-              )}
-            </div>
           </div>
         </div>
 
@@ -903,6 +876,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               setSupplyToken((token) => token + 1);
             }}
             onClose={() => setImportOpen(false)}
+            onDecline={declineImport}
           />
         )}
 

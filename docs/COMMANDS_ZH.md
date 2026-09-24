@@ -865,6 +865,7 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--scope-id`
 - `--model`
 - `--reasoning-effort`
+- `--close-after`
 - `--sync`
 - `--message`
 - `--message-file`
@@ -875,6 +876,10 @@ no-delivery session，更适合 sub-agent 调用。
 Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `session_id` 的
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
+
+`--close-after` 适用于新建或 fork 的 Session。Run 结束后它会释放该 Agent
+runtime，同时保留 Session、transcript 和 Run 记录；不能和现有的
+`--session-id` 一起使用。
 
 对于现有 `--session-id`，默认投递是 P1：新消息会 steering 进活动 native Turn，
 Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。`--queue` 会

@@ -83,10 +83,10 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
                 aria-selected={active}
                 onClick={() => handleSelect(lang.code)}
                 className={clsx(
-                  'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors',
-                  active
-                    ? 'text-foreground'
-                    : 'text-muted hover:bg-surface-2 hover:text-foreground'
+                  // `--surface-2` is white on a light theme, which is also the menu's own
+                  // surface: a row highlighted with it reads as no highlight at all.
+                  'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-foreground/[0.06] hover:text-foreground',
+                  active ? 'bg-mint-soft text-foreground' : 'text-muted'
                 )}
               >
                 <span>{lang.label}</span>

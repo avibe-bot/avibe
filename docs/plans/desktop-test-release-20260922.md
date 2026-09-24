@@ -1471,6 +1471,36 @@ with distinct source and automation revisions, and installed wheel/sdist
 consumers check real built artifacts. The asset matrix and release workflows
 are unchanged; a new reviewed head and unused TEST tag are required.
 
+## H27 — latest master integration and owner-deferred P2 findings
+
+On 2026-09-24 the owner reopened the integration lane to include the actual
+current `origin/master` `ebebb64d3ca56f85032435576e2acf90c1197a34` in the
+desktop PR lineage. GitHub's PR `baseRefOid` was stale, so the merge used the
+explicitly fetched remote branch. The merge has the desktop candidate
+`e3fc4fa0c10bfb7126f2e12c6f134acdb3980534` and that master commit as its two
+parents.
+
+The merge had one textual conflict, in
+`tests/test_release_verification.py`. The desktop H26 contract copies the
+source-controlled `tests/test_distribution_artifacts.py` into the sparse
+fixture so its installed skill snapshot is authoritative. The master contract
+also copies `tests/e2e/**` and `tests/__init__.py` for the `publish.yml`
+release-automation checkout and consumes the retired-updater test from that
+checkout. The resolution keeps the union of both copy predicates and retains
+both consuming assertion sets. All other master paths, including the Memory
+release-upgrade gates and setup/onboarding UI, are preserved by the real merge;
+release workflow semantics and H26 packaging behavior are unchanged.
+
+The owner explicitly deferred the two unresolved Codex P2 findings on the
+pre-integration head. `4088247715` (legacy private Runtime CLI selectors must
+not fall through to PATH) and `4088247722` (initial adoption of a managed
+Runtime must retain liveness after the first shell navigation failure) are
+recorded as owner-deferred for this round. Neither finding is fixed by this
+integration commit, neither thread is replied to or resolved here, and the
+candidate must not be described as having a Codex pass until a later review
+disposition is explicitly established. The local H27 draft fixes remain
+outside the candidate and are preserved separately for recovery.
+
 ## Known-by-design ledger additions
 
 - **Taken up in H19.** `query_endpoint` sets `stderr(Stdio::null())` and the

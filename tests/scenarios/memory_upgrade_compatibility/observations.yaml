@@ -1,0 +1,12 @@
+version: 1
+capability: memory_upgrade_compatibility
+observations:
+  - id: MUC-OBS-001
+    source: post-removal-official-upgrade-audit
+    summary: Startup's Model Hub persistence copied the old root including memory; the existing bridge E2E was opt-in and absent from the official publish job, and the guard selected draft releases.
+    affects:
+      - MUC-001
+      - MUC-004
+      - MUC-005
+    previous_assumption: Explicit saves and a local opt-in E2E covered the official upgrade path.
+    observed_behavior: Startup migration and official publication have distinct write and test gates.

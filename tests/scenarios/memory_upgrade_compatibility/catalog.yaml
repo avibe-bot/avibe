@@ -1,0 +1,44 @@
+version: 1
+capability:
+  id: memory_upgrade_compatibility
+  name: Memory retirement and official release upgrade compatibility
+  canonical_tests:
+    - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
+    - tests/test_memory_removal.py
+    - tests/e2e/test_retired_updater_bridge.py
+    - tests/test_memory_runtime_release_guard.py
+    - tests/test_release_verification.py
+  shared_harness: []
+status_legend:
+  covered: deterministic test or release-gated end-to-end evidence exists
+scenarios:
+  - id: MUC-001
+    name: startup migration removes obsolete config key only after successful write while preserving other configuration and user data
+    status: covered
+    kind: upgrade
+    layer: contract
+    test: tests/test_memory_removal.py::test_retired_memory_removed_only_after_successful_startup_migration
+  - id: MUC-002
+    name: concurrent config writer wins and next startup can complete migration
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_memory_removal.py::test_retired_memory_migration_does_not_overwrite_concurrent_writer
+  - id: MUC-003
+    name: malformed config remains intact during recovery
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_memory_removal.py::test_retired_memory_malformed_config_keeps_original_for_recovery
+  - id: MUC-004
+    name: official publication gates real pip and uv upgrades from pinned v3.1.0 wheels to built core and inert bridge
+    status: covered
+    kind: release
+    layer: scenario
+    test: tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data
+  - id: MUC-005
+    name: historical Runtime guard excludes drafts while retaining published stable and prerelease manifests
+    status: covered
+    kind: release
+    layer: contract
+    test: tests/test_memory_runtime_release_guard.py::test_resolve_manifests_shell_selects_history_and_excludes_new_or_invalid_wheels

@@ -36,6 +36,7 @@ from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
@@ -5735,6 +5736,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     deliver_key = (getattr(args, "deliver_key", None) or "").strip()
     agent_name = (getattr(args, "agent", None) or "").strip()
     visibility = (getattr(args, "visibility", None) or "").strip()
+    close_after = bool(getattr(args, "close_after", False))
     if bool(getattr(args, "async_run", False)) and bool(getattr(args, "sync_run", False)):
         raise TaskCliError(
             "use either --async or --sync, not both",
@@ -5813,6 +5815,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             "visibility options only apply when creating or forking a Session",
             code="visibility_with_existing_session",
             hint="Use `vibe session update --visible|--hidden` (or `--visibility ...`) to change an existing Session.",
+            help_command=help_command,
+        )
+    if close_after and session_id:
+        raise TaskCliError(
+            "--close-after requires a new or forked Agent Session",
+            code="close_after_requires_owned_session",
+            hint="Use --close-after with --agent, --create-session, or --fork-session. Existing Sessions keep their runtime lifecycle.",
             help_command=help_command,
         )
     if session_id and (create_session or create_per_run):
@@ -6721,6 +6730,7 @@ def cmd_agent_run(args):
         callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context, target_session_id=session_id)
         if callback_session_id:
             _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
+        close_after = bool(getattr(args, "close_after", False))
         legacy_deliver_key = args.deliver_key
         if (getattr(args, "same_scope", False) or (getattr(args, "scope_id", None) or "").strip()) and legacy_deliver_key != scope_key:
             legacy_deliver_key = None
@@ -6794,6 +6804,8 @@ def cmd_agent_run(args):
         provenance_metadata = metadata_with_resource_user_context(
             provenance_metadata, caller_authorization
         )
+        if close_after:
+            provenance_metadata[AGENT_RUN_CLOSE_AFTER_METADATA_KEY] = True
         request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
@@ -6832,6 +6844,7 @@ def cmd_agent_run(args):
             "visibility": target.visibility if session_id else visibility,
             "deliver_key": legacy_deliver_key,
             "callback_session_id": callback_session_id,
+            "close_after": close_after,
             "async": run_async,
             "caller_context": caller_context.to_metadata() if caller_context else None,
             "callback_notice": callback_notice,
@@ -6847,6 +6860,7 @@ def cmd_agent_run(args):
                 "source_kind": source_kind,
                 "source_actor": source_actor,
                 "parent_run_id": parent_run_id,
+                "close_after": close_after,
             },
         }
         if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
@@ -11443,14 +11457,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         status = str(dependency.get("status") or "missing")
         ready = bool(dependency.get("installed")) and status == "ready"
         version = dependency.get("version")
-        memory_details = (
-            {
-                "dependency_reason": dependency.get("reason"),
-                "dependency_required": bool(dependency.get("required")),
-            }
-            if False
-            else {}
-        )
         if ready:
             if dependency_id == "git-runtime" and dependency.get("source") == "system":
                 _add_doctor_item(
@@ -11471,7 +11477,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                     ),
                     code=f"dependencies.{dependency_id}.ready",
                     dependency_status=None,
-                    **memory_details,
                 )
             continue
 
@@ -11494,13 +11499,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 severity,
                 i18n_t("doctor.item.dependencyPlatformUnsupported", language, label=label),
                 i18n_t("doctor.action.dependencyPlatformUnsupported", language),
-                code=(
-                    f"dependencies.{dependency_id}.unsupported"
-                    if False
-                    else f"dependencies.{dependency_id}.platform_unsupported"
-                ),
+                code=f"dependencies.{dependency_id}.platform_unsupported",
                 dependency_status=None,
-                **memory_details,
             )
             continue
 
@@ -16606,6 +16606,11 @@ def build_parser():
         "--no-callback",
         action="store_true",
         help="For async runs, intentionally skip automatic callback delivery and inspect the run later.",
+    )
+    agent_run_parser.add_argument(
+        "--close-after",
+        action="store_true",
+        help="Close the newly-created Agent runtime after the run settles while keeping its Session and transcript.",
     )
     agent_wait_group = agent_run_parser.add_mutually_exclusive_group()
     agent_wait_group.add_argument(

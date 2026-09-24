@@ -667,11 +667,6 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         except Exception:  # noqa: BLE001
             logger.debug("end: codex turn/interrupt failed for %s", base_session_id, exc_info=True)
     try:
-        # Fully remove the session's mappings (thread + cwd + session_key), not
-        # just ``invalidate_thread`` (which preserves cwd/session_key) — otherwise
-        # ``_collect_codex``'s ``all_base_sessions()`` still enumerates it and the
-        # row never disappears from the Running tab.
-        session_mgr.clear(base_session_id)
         turn_registry.clear_session(base_session_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
@@ -680,22 +675,33 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     # that cwd, stop it too so the codex process is actually freed (otherwise it
     # lingers with zero sessions); if other sessions still use it, leave it up.
     process_killed = False
-    if cwd and transport is not None:
-        remaining: list = []
+    retire_idle = getattr(agent, "retire_unowned_session_transport", None)
+    other_sessions = (
+        set(session_mgr.sessions_for_cwd(cwd)) - {base_session_id}
+        if cwd else set()
+    )
+    if cwd and transport is not None and not other_sessions and callable(retire_idle):
         try:
-            remaining = session_mgr.sessions_for_cwd(cwd)
-        except Exception:  # noqa: BLE001
-            remaining = []
-        if not remaining:
-            try:
-                await transport.stop()
-                transports.pop(cwd, None)
-                last_activity = getattr(agent, "_transport_last_activity", None)
-                if isinstance(last_activity, dict):
-                    last_activity.pop(cwd, None)
-                process_killed = True
-            except Exception:  # noqa: BLE001
-                logger.debug("end: codex transport stop failed for %s", cwd, exc_info=True)
+            process_killed = bool(
+                await retire_idle(cwd, ending_session_id=base_session_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("end: codex transport stop failed for %s", cwd, exc_info=True)
+            return {"ok": False, "error": "transport_retire_failed", "detail": str(exc)}
+        if not process_killed:
+            return {"ok": False, "error": "transport_retire_failed"}
+    try:
+        # Keep the cwd mapping until transport retirement succeeds, so a failed
+        # close remains reachable by Session ID for a later End attempt.
+        session_mgr.clear(base_session_id)
+        getattr(agent, "_session_locks", {}).pop(base_session_id, None)
+        getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
+        clear_thread_cache = getattr(agent, "_clear_thread_developer_instructions", None)
+        if callable(clear_thread_cache):
+            clear_thread_cache(base_session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
+        return {"ok": False, "error": "clear_failed", "detail": str(exc)}
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.
@@ -716,20 +722,46 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
         return {"ok": False, "error": "opencode_unavailable"}
     active_requests = getattr(agent, "_active_requests", {}) or {}
     task = active_requests.get(base_session_id)
-    # Best-effort remote abort (so the OpenCode server stops the run too), then
-    # cancel the local polling task.
     session_mgr = getattr(agent, "_session_manager", None)
-    try:
-        get_req = getattr(session_mgr, "get_request_session", None)
-        req_info = get_req(base_session_id) if callable(get_req) else None
-        if req_info:
-            server = await agent._get_server()
-            await server.abort_session(req_info[0], req_info[1])
-    except Exception:  # noqa: BLE001
-        logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
+    get_req = getattr(session_mgr, "get_request_session", None)
+    req_info = get_req(base_session_id) if callable(get_req) else None
     if task is not None and not task.done():
+        # Active End has already gone through the canonical stop path. Finish
+        # interrupting its native poll, but do not retire a shared server here.
+        try:
+            if req_info:
+                server = await agent._get_server()
+                await server.abort_session(req_info[0], req_info[1])
+        except Exception:  # noqa: BLE001
+            logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
         task.cancel()
-    return {"ok": True, "action": "ended", "backend": "opencode"}
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+
+    retire_req = getattr(session_mgr, "retire_request_session", None)
+    if callable(retire_req):
+        retire_req(base_session_id)
+    else:
+        pop_req = getattr(session_mgr, "pop_request_session", None)
+        if callable(pop_req):
+            pop_req(base_session_id)
+    getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
+    list_all = getattr(session_mgr, "list_all", None)
+    if not callable(list_all) or list_all():
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+    if any(not request.done() for request in active_requests.values()):
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+
+    # The serve process is shared across Sessions. Its existing strict idle
+    # retirement checks native requests, durable ownership, and process proof.
+    server = getattr(getattr(agent, "_client_manager", None), "_server_manager", None)
+    if server is None:
+        return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
+    try:
+        await server.retire_for_native_migration()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
+        return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
+    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": True}
 
 
 async def _settle_workbench_turn(
@@ -1228,7 +1260,8 @@ async def end_running_agent(
     - claude → interrupt the turn + disconnect the SDK client + reap the subprocess.
     - codex  → interrupt the turn + clear the session mappings (+ stop the shared
       app-server when this was its last session).
-    - opencode → abort the remote run + cancel the local polling task.
+    - opencode → abort an active run; retire the shared serve process when idle
+      and no other session owns it.
 
     For an ACTIVE turn, the stop goes through the canonical per-backend stop path
     (Workbench turns via ``SessionTurnManager.cancel``; IM / agent-run turns via

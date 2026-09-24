@@ -116,7 +116,7 @@ def test_failed_fetch_preserves_previous_verified_backup_output(monkeypatch, tmp
 
 
 def test_resolve_manifests_shell_selects_history_and_excludes_new_or_invalid_wheels(tmp_path):
-    """Execute the workflow's resolver with a fake gh release API/download."""
+    """MUC-005: execute the resolver against published stable/prerelease and draft fixtures."""
     import yaml
 
     workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/memory-runtime-release-guard.yml").read_text())
@@ -138,6 +138,9 @@ def test_resolve_manifests_shell_selects_history_and_excludes_new_or_invalid_whe
             archive.writestr(f"{name}.dist-info/RECORD", "")
 
     wheel(root / "v3.1.0" / "avibe_os-3.1.0-py3-none-any.whl", "avibe_os", old_manifest.read_bytes())
+    prerelease_manifest, _, _ = _fixture(tmp_path / "prerelease", tag="v3.0.9rc1")
+    wheel(root / "v3.0.9rc1" / "avibe_os-3.0.9rc1-py3-none-any.whl", "avibe_os", prerelease_manifest.read_bytes())
+    wheel(root / "v3.0.8" / "avibe_os-3.0.8-py3-none-any.whl", "avibe_os", old_manifest.read_bytes())
     inert = tmp_path / "inert"
     subprocess.run([
         sys.executable, str(Path(__file__).parents[1] / "scripts/build_retired_companion.py"),
@@ -147,14 +150,28 @@ def test_resolve_manifests_shell_selects_history_and_excludes_new_or_invalid_whe
     shutil.copy2(next(inert.glob("*.whl")), root / "gh-v3.2.0rc1/avibe_memory-3.2.0rc1-py3-none-any.whl")
     wheel(root / "v3.2.0" / "avibe_memory-3.2.0-py3-none-any.whl", "avibe_memory")
 
+    releases = [
+        {"tag_name": tag, "draft": draft, "prerelease": prerelease,
+         "assets": [{"name": path.name} for path in (root / tag).glob("*.whl")]}
+        for tag, draft, prerelease in (
+            ("v3.0.8", True, False),
+            ("v3.0.9rc1", False, True),
+            ("v3.1.0", False, False),
+            ("gh-v3.2.0rc1", False, True),
+            ("v3.2.0", False, False),
+        )
+    ]
+
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_bin.joinpath("gh").write_text(
         "#!/usr/bin/env python3\n"
-        "import pathlib, shutil, sys\n"
+        "import json, pathlib, shutil, subprocess, sys\n"
         "args=sys.argv[1:]\n"
         "if args[:2] == ['api', '--paginate']:\n"
-        " print('v3.1.0\\tavibe-os\\tavibe_os-*.whl\\n' 'gh-v3.2.0rc1\\tavibe-memory\\tavibe_memory-*.whl\\n' 'v3.2.0\\tavibe-memory\\tavibe_memory-*.whl')\n"
+        f" releases={releases!r}\n"
+        " result=subprocess.run(['jq', '-r', args[args.index('--jq')+1]], input=json.dumps(releases), text=True, capture_output=True, check=True)\n"
+        " print(result.stdout, end='')\n"
         "elif args[:2] == ['release', 'download']:\n"
         " tag=args[2]; pattern=args[args.index('--pattern')+1]; destination=pathlib.Path(args[args.index('--dir')+1]); destination.mkdir(parents=True, exist_ok=True)\n"
         f" source=pathlib.Path({str(root)!r})/tag\n"
@@ -180,7 +197,8 @@ def test_resolve_manifests_shell_selects_history_and_excludes_new_or_invalid_whe
     records = json.loads(values["manifests"])
     excluded = json.loads(values["excluded"])
     assert values["available"] == "true"
-    assert [item["release_tag"] for item in records] == ["v3.1.0"]
+    assert [item["release_tag"] for item in records] == ["v3.0.9rc1", "v3.1.0"]
+    assert "v3.0.8" not in {item["release_tag"] for item in records + excluded}
     reasons = {item["release_tag"]: item["reason"] for item in excluded}
     assert "verified inert compatibility bridge" in reasons["gh-v3.2.0rc1"]
     assert "not a verified inert bridge" in reasons["v3.2.0"]

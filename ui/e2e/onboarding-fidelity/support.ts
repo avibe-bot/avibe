@@ -2,6 +2,8 @@ import type { Page, Route } from '@playwright/test';
 
 export const ORIGIN = 'http://127.0.0.1:5212';
 
+export const isRetiredMemoryPath = (pathname: string) => pathname === '/api/memory' || pathname.startsWith('/api/memory/');
+
 /** Every phase of the authored 8.9s loop, addressed by the elapsed time it freezes at. */
 export const PHASES = {
   'pm-working': 600,
@@ -116,6 +118,12 @@ export async function serveProduct(page: Page) {
   await page.route('**/api/opencode/permission-status', (route) =>
     route.fulfill({ json: { ok: true, permission_allowed: true } }),
   );
+  await page.route('**/*', (route) => {
+    const request = route.request();
+    if (!isRetiredMemoryPath(new URL(request.url()).pathname)) return route.fallback();
+    denied.push(`${request.method()} ${request.url()}`);
+    return route.abort();
+  });
   return denied;
 }
 

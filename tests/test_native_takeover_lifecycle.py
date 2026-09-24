@@ -670,6 +670,7 @@ async def test_opencode_unproven_pid_file_is_blocker_not_kill_target():
     server._has_active_run_sessions = Mock(return_value=False)
     server._runtime_activation_retire = Mock(return_value=True)
     server._process = None
+    server.port = 4096
     server._read_pid_file = Mock(return_value={"pid": 123})
     server._pid_exists = Mock(return_value=True)
     server._terminate_pid_tree_sync = Mock(side_effect=AssertionError("must not kill"))

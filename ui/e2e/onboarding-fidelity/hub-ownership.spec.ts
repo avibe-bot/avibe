@@ -5,12 +5,8 @@ import { ORIGIN, serveProduct } from './support';
 // server responses are fixture-owned; the Vite server has a dead backend.
 // The Python connection tests separately establish the readiness producer.
 //
-// C4 moved the assistant card's model entry into a dialog the step owns, so setup
-// no longer leaves for the Hub settings page at all. This used to cover the return
-// from it — going out, migrating there and coming back to the same step. There is
-// nothing to come back from now, and the contract that mattered is the one that
-// survives it: the Hub owns authentication, the take-over happens without the step
-// ever being unmounted, and completion stays gated on a real readiness answer.
+// Setup migrates a discovered key from Providers before entering Assistants.
+// The Hub owns authentication, and completion stays gated on a fresh readiness answer.
 for (const width of [1200, 390]) {
   test(`Hub owns assistant authentication and its take-over completes inside setup at ${width}px`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 844 });
@@ -138,43 +134,24 @@ for (const width of [1200, 390]) {
 
     await page.goto('/setup');
     await page.getByRole('button', { name: 'Get started', exact: true }).click();
-    // Nothing is connected yet, so the journey opens on Providers with only the
-    // take-over it found on offer. Saying so there is what leaves a way through to
-    // the screen that owns the Hub — and the take-over is still only on offer when
-    // it does: the credential this run imports is taken over from the Hub itself.
     await expect(page.locator('[data-setup-screen="providers"]')).toBeVisible();
-    await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
-    const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
-    await expect(enter).toBeDisabled();
-    await expect.poll(() => observedReady.length).toBeGreaterThan(0);
-    const wizard = await page.locator('.onboarding-assistants').elementHandle();
-    const claude = page.getByLabel('Claude Code', { exact: true });
-    // The card offers no native key: whatever this backend authenticates with is
-    // the Hub's to hold, and the step says so rather than offering a second way.
-    await expect(claude.getByRole('button', { name: 'Add API Key', exact: true })).toHaveCount(0);
-
-    // The take-over is the step's own: the notice opens the Hub's migration dialog
-    // in place, so nothing here navigates and there is no step to come back to.
-    await page.getByRole('button', { name: 'Review migration', exact: true }).click();
-    const migration = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Migrate to the Model Hub', exact: true }) });
+    await page.getByRole('button', { name: 'Migrate 1 key and continue', exact: true }).click();
+    const migration = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Migrate to Model Hub', exact: true }) });
     await expect(migration).toBeVisible();
     await migration.getByRole('button', { name: 'Start migration', exact: true }).click();
     await expect.poll(() => applied).toEqual([['mig_claude_fixture']]);
+    await migration.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(migration).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`hub-migrated-${width}.png`) });
 
-    // The step was never unmounted, so the same node is still the one being read.
+    await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
     await expect(page.locator('.onboarding-assistants')).toBeVisible();
-    expect(await wizard!.evaluate((node) => node.isConnected)).toBe(true);
+    const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
+    const claude = page.getByLabel('Claude Code', { exact: true });
+    await expect(claude.getByRole('button', { name: 'Add API Key', exact: true })).toHaveCount(0);
 
-    // Readiness is re-read the way this step says it is: the caption under the pair
-    // offers the rescan, and the answer it gets is what opens the workspace. The
-    // take-over used to be followed by a return to this screen, which re-read the
-    // backends on the way in; completing it in place needs the rescan to do it.
-    await expect(enter).toBeDisabled();
-    await page.getByRole('button', { name: 'Re-scan', exact: true }).click();
+    // Enter is admitted only after the backend reports readiness with the migrated key.
     await expect(enter).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Review migration', exact: true })).toHaveCount(0);
     expect(observedReady).toContain(true);
     await page.screenshot({ path: info.outputPath(`setup-hub-ready-${width}.png`), fullPage: true });
     await enter.click();
