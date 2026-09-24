@@ -981,7 +981,7 @@ def test_hourly_report_joins_every_local_day_owner_across_midnight(
     to_day: str,
     window_days: int,
 ) -> None:
-    """One real hour can join two daily owners and a horizon can touch three dates."""
+    """MH-USAGE-BACKEND-006: one hour joins all daily owners across midnight/DST."""
 
     previous_tz = os.environ.get("TZ")
     try:

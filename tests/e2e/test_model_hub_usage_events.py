@@ -99,7 +99,7 @@ def test_e2_usage_windows_are_bounded(
 def test_e2_usage_reports_reconcile_across_http_ipc_and_restart(
     usage_analytics_app,
 ) -> None:
-    """The temporal matrix retains exact pair identities through real IPC."""
+    """MH-USAGE-E2E-001: the matrix retains exact pair identities through real IPC."""
 
     model_hub_app = usage_analytics_app
     common_model = "shared-model"
@@ -225,7 +225,7 @@ def test_e2_usage_reports_reconcile_across_http_ipc_and_restart(
 def test_e2_daily_only_history_is_not_invented_as_hourly_usage(
     model_hub_app_factory,
 ) -> None:
-    """Released daily files remain readable without fabricated hourly history."""
+    """MH-USAGE-E2E-002: released daily files never fabricate hourly history."""
 
     now = datetime.now(timezone.utc)
     counts = {

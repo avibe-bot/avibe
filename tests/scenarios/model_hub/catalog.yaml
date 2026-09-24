@@ -709,6 +709,26 @@ scenarios:
     kind: contract
     layer: unit
     test: tests/test_ui_server_fastapi.py::test_the_usage_route_forwards_a_modern_window_and_rejects_selector_conflicts
+  - id: MH-USAGE-BACKEND-006
+    name: Fractional-offset and DST hourly reports join every local-day owner across midnight
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_hourly_report_joins_every_local_day_owner_across_midnight
+    related_tests:
+      - tests/test_model_hub_usage.py::test_legacy_usage_after_local_midnight_marks_the_overlapping_hour_incomplete
+  - id: MH-USAGE-E2E-001
+    name: Measured hourly and daily reports reconcile through HTTP and IPC after a controller restart
+    status: covered
+    kind: persistence
+    layer: e2e
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_usage_reports_reconcile_across_http_ipc_and_restart
+  - id: MH-USAGE-E2E-002
+    name: The real usage API preserves released daily history without inventing hourly counts
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_daily_only_history_is_not_invented_as_hourly_usage
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
