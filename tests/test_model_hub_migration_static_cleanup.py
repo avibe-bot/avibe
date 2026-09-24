@@ -420,8 +420,11 @@ def test_completed_replay_rejects_a_config_blocker_written_after_cleanup(home, t
     assert caught.value.status == 409
 
 
-def test_invalid_codex_auth_file_blocks_hub_mode(home, tmp_path):
-    _write(home / ".codex/auth.json", "{1: 2}")
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_invalid_codex_auth_file_blocks_hub_mode(home, tmp_path, unreadable):
+    _write(home / ".codex/auth.json", json.dumps({"OPENAI_API_KEY": KEY}) if unreadable else "{1: 2}")
+    if unreadable:
+        (home / ".codex/auth.json").chmod(0)
     service, _, _ = _service(tmp_path, migration_home=home)
     assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
 

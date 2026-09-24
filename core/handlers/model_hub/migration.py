@@ -500,11 +500,11 @@ def _native_store_items(
             native_store_revision=snapshot.revision,
             native_store_placeholder=placeholder,
             source_paths=source_paths,
-            # Codex parses its own auth.json before any Hub routing applies,
-            # so one it cannot read as JSON fails every launch.
+            # Codex reads its own auth.json before any Hub routing applies,
+            # so one it cannot read or parse fails every launch.
             config_blocker=(
                 backend == "codex" and payload.get("store") == "file"
-                and payload.get("status") == "invalid"
+                and payload.get("status") in {"invalid", "permission_needed"}
             ),
         ))
     if secret:
