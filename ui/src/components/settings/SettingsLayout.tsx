@@ -34,6 +34,7 @@ import { isDesktopShell } from '@/lib/desktopShell';
 import {
   closeSettingsOverlay,
   isChromelessShellPath,
+  SETUP_VISIT_SETTINGS_PATHS,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
@@ -289,6 +290,9 @@ export const SettingsLayout: React.FC = () => {
     () => SETTINGS_GROUPS.map((group) => ({
       ...group,
       items: group.items.flatMap((item) => {
+        // Over the wizard, only the sections the setup visit keeps: any other
+        // row would leave the setup and lose the step it is on.
+        if (setupOrigin && !SETUP_VISIT_SETTINGS_PATHS.has(item.path)) return [];
         if (item.ownerOnly && !capabilities.can_manage_instance) return [];
         if (item.feature === 'models' && !modelHubVisible) return [];
         return [{
@@ -298,7 +302,7 @@ export const SettingsLayout: React.FC = () => {
         }];
       }),
     })).filter((group) => group.items.length > 0),
-    [capabilities.can_manage_instance, channelSettingsVisible, modelHubVisible],
+    [capabilities.can_manage_instance, channelSettingsVisible, modelHubVisible, setupOrigin],
   );
 
   const activeTrail = (() => {

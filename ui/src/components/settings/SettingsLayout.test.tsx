@@ -306,6 +306,26 @@ describe('SettingsLayout', () => {
     });
   });
 
+  // AUTH-SETUP-125: Settings opened over the wizard offers only the sections the
+  // setup visit keeps, so no row leads out of the setup and loses its step.
+  it('offers only the setup visit sections over the wizard', async () => {
+    const setup: Location = { pathname: '/setup', search: '', hash: '', state: null, key: 'setup' };
+    renderLayout(
+      { pathname: '/settings/general', state: settingsOverlayOpenState(setup, null) },
+      { shellHasSidebar: false },
+    );
+
+    expect(screen.getByText('general-body')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    });
+    const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
+  });
+
   it('opens Messaging Platforms by default and still allows manual collapse', async () => {
     const user = userEvent.setup();
     renderLayout('/settings/service');

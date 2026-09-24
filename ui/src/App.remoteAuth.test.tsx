@@ -230,6 +230,7 @@ describe('AuthGuard setup-bypass authorization', () => {
 });
 
 describe('AuthGuard General Settings over setup', () => {
+  // AUTH-SETUP-125
   it('opens the desktop Settings request over the wizard without leaving it', async () => {
     api.getAuthSession.mockResolvedValue({
       remote: false,
