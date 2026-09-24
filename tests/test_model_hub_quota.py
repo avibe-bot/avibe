@@ -148,6 +148,7 @@ def test_codex_quota_parser_reads_primary_secondary_and_additional_limits():
         (parse_codex_quota, b"\xff\xfe"),
         pytest.param(parse_codex_quota, json.dumps({"additional_rate_limits": [], "pad": "x" * (512 * 1024)}),
                      id="oversized-body"),
+        pytest.param(parse_codex_quota, '{"plan_type": "\\ud800", "rate_limit": {}}', id="lone-surrogate"),
     ],
 )
 def test_quota_parsers_reject_a_malformed_body_as_one_source_failure(parser, body):
@@ -198,6 +199,16 @@ def test_quota_parsers_bound_values_from_a_hostile_body():
     assert len(parsed["windows"][0]["label"]) == 64
     parsed = parse_claude_quota(json.dumps({"five_hour": {"utilization": 1, "resets_at": "9999-12-31T23:59:00-05:00"}}))
     assert parsed["windows"][0]["resets_at"] is None
+
+    # A limit with headroom never rounds up to the spent sentinel; a sub-second span is unreadable.
+    codex = {"rate_limit": {"primary_window": {"used_percent": 99.96, "limit_window_seconds": 0.5, "reset_at": 0.5}}}
+    parsed = parse_codex_quota(json.dumps(codex))
+    _validate_windows(parsed)
+    assert [(w["used_pct"], w["window_seconds"], w["resets_at"]) for w in parsed["windows"]] == [(99.9, None, None)]
+
+    # Unknown metadata ahead of Claude's fixed keys does not crowd them out.
+    padded = {f"meta{i}": {} for i in range(100)} | {"five_hour": {"utilization": 7}}
+    assert [w["id"] for w in parse_claude_quota(json.dumps(padded))["windows"]] == ["five_hour"]
 
 
 class _Clock:

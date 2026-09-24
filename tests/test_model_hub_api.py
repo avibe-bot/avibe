@@ -6780,6 +6780,8 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     tmp_path,
 ):
     service, store, adapter = _service(tmp_path)
+    from core.handlers.model_hub.quota import SubscriptionQuotaError
+
     source = ModelHubSourceConfig(
         id="src_huboauth01",
         kind="subscription",
@@ -6802,6 +6804,14 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
+    quota_reads = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        quota_reads.append(source_id)
+        raise SubscriptionQuotaError("auth_expired")
+
+    adapter.subscription_quota = subscription_quota
+    assert asyncio.run(service.quota_summary())["sources"][0]["state"] == "auth_expired"
 
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
@@ -6812,6 +6822,9 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
         }
     )
     result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    # The same ref names a new grant: its quota is re-read, not held behind the old failure.
+    asyncio.run(service.quota_summary())
+    assert quota_reads == [source.id, source.id]
 
     assert result["recovered"] is True
     assert result["source"]["state"]["status"] == "standby"

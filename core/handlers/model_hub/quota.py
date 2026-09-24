@@ -79,13 +79,15 @@ def _percent(value: object) -> Optional[float]:
     number = float(value)
     if not math.isfinite(number):
         return None
-    return round(min(100.0, max(0.0, number)), 1)
+    rounded = round(min(100.0, max(0.0, number)), 1)
+    # 100 means spent; rounding must not promote a limit with headroom to it.
+    return 99.9 if rounded >= 100.0 and number < 100.0 else rounded
 
 
 def _seconds(value: object) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(value) or value < 1:
         return None
     return int(value)
 
@@ -152,6 +154,11 @@ def _load_object(body: object) -> dict[str, Any]:
         raise SubscriptionQuotaError("malformed") from None
     if not isinstance(payload, dict) or "error" in payload:
         raise SubscriptionQuotaError("malformed")
+    try:
+        # An escaped lone surrogate decodes but cannot be served as UTF-8 JSON.
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, ValueError):
+        raise SubscriptionQuotaError("malformed") from None
     return payload
 
 
@@ -201,7 +208,10 @@ def _claude_limit_rows(rows: list[object]) -> list[dict[str, Any]]:
 
 def _claude_top_level(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
-    for key, value in itertools.islice(payload.items(), _MAX_UPSTREAM_ROWS):
+    # The fixed keys are always read; only unknown keys count against the row cap.
+    fixed = [(key, payload[key]) for key in _CLAUDE_TOP_LEVEL if key in payload]
+    unknown = ((key, value) for key, value in payload.items() if key not in _CLAUDE_TOP_LEVEL)
+    for key, value in itertools.chain(fixed, itertools.islice(unknown, _MAX_UPSTREAM_ROWS)):
         if key in _CLAUDE_SKIPPED_TOP_LEVEL or not isinstance(value, dict) or "utilization" not in value:
             continue
         used = _percent(value.get("utilization"))
@@ -430,6 +440,15 @@ class SubscriptionQuotaCache:
             "refresh_interval_seconds": int(QUOTA_REFRESH_INTERVAL.total_seconds()),
             "sources": [self._payload(source) for source in sources],
         }
+
+    def forget(self, source_id: str) -> None:
+        """Drop a Source's snapshot, failure, and throttle, e.g. after re-authentication.
+
+        The credential ref alone is not grant identity: re-authentication can keep it.
+        An in-flight read of the old grant lands on the detached entry and is discarded.
+        """
+
+        self._entries.pop(source_id, None)
 
     def _entry(self, source: QuotaSourceRef) -> _QuotaEntry:
         entry = self._entries.get(source.source_id)
