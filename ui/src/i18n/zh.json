@@ -1482,6 +1482,7 @@
           "historyComplete": "历史完整",
           "sourceId": "供应商 ID",
           "modelId": "模型 ID",
+          "ledgerKey": "内部账本键",
           "sourceLabel": "供应商",
           "modelLabel": "模型",
           "tokenReports": "Token 报告数",

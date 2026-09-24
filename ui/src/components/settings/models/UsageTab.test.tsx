@@ -412,6 +412,7 @@ describe('UsageTab', () => {
       historyComplete: 'history_complete',
       sourceId: 'source_id',
       modelId: 'model_id',
+      ledgerKey: 'ledger_key',
       sourceLabel: 'source_label',
       modelLabel: 'model_label',
       requests: 'requests',
@@ -426,7 +427,7 @@ describe('UsageTab', () => {
 
     expect(csv.split('\r\n')).toHaveLength(2);
     expect(csv).toContain('2026-09-24T00:00:00+08:00');
-    expect(csv).toContain('source-formula,model-formula');
+    expect(csv).toContain("source-formula,'@model,model-formula");
     expect(csv).toContain("'=supplier");
     expect(csv).toContain("'@model");
     expect(csv).toContain('4,1,148230');
@@ -444,5 +445,43 @@ describe('UsageTab', () => {
       buckets: [bucket('00', [])],
     }), { sourceIds: [], modelKeys: [] }, '00', headers, 'Unknown model');
     expect(idleCsv.split('\r\n')[1]?.split(',').slice(-7)).toEqual(['0', '0', '0', '0', '0', '0', '0']);
+  });
+
+  it('does not export a folded ledger key as the canonical model ID', () => {
+    const foldedKey = `model-head-${'x'.repeat(180)}`;
+    const csv = buildUsageCsv(report({
+      sources: [{
+        source_id: 'source-removed',
+        label: null,
+        last_metered_at: null,
+        ...counters(),
+        models: [],
+      }],
+      buckets: [bucket('00', [row({
+        source_id: 'source-removed',
+        model_id: foldedKey,
+      })])],
+    }), { sourceIds: [], modelKeys: [] }, '00', {
+      bucketKey: 'bucket_key',
+      startAt: 'start_at',
+      endAt: 'end_at',
+      historyComplete: 'history_complete',
+      sourceId: 'source_id',
+      modelId: 'model_id',
+      ledgerKey: 'ledger_key',
+      sourceLabel: 'source_label',
+      modelLabel: 'model_label',
+      requests: 'requests',
+      tokenReports: 'token_reports',
+      inputTokens: 'input_tokens',
+      nonCachedInputTokens: 'non_cached_input_tokens',
+      cachedInputTokens: 'cached_input_tokens',
+      outputTokens: 'output_tokens',
+      totalTokens: 'total_tokens',
+    }, 'Unknown model');
+
+    const [header, line] = csv.split('\r\n');
+    expect(header).toContain('model_id,ledger_key');
+    expect(line?.split(',').slice(5, 7)).toEqual(['', foldedKey]);
   });
 });

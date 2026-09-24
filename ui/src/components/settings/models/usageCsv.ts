@@ -28,6 +28,7 @@ export type UsageCsvHeaders = {
   historyComplete: string;
   sourceId: string;
   modelId: string;
+  ledgerKey: string;
   sourceLabel: string;
   modelLabel: string;
   requests: string;
@@ -69,6 +70,7 @@ export function buildUsageCsv(
         bucket.end_at,
         String(bucket.history_complete),
         row?.source_id ?? '',
+        identity?.modelLabel ?? '',
         row?.model_id ?? '',
         row === null ? '' : sourceIdentityLabel(report, row.source_id, labelContext),
         row === null ? '' : identity?.modelLabel || unknownModel,
@@ -89,6 +91,7 @@ export function buildUsageCsv(
     headers.historyComplete,
     headers.sourceId,
     headers.modelId,
+    headers.ledgerKey,
     headers.sourceLabel,
     headers.modelLabel,
     headers.requests,

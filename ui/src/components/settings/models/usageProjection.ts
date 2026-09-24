@@ -29,6 +29,7 @@ export type UsageLabelContext = {
   sourceDisplayLabels: ReadonlyMap<string, string>;
   identityCollisionLabels: ReadonlySet<string>;
   identityModelCollisionKeys: ReadonlySet<string>;
+  identityDisplayLabels: ReadonlyMap<string, string>;
 };
 
 export type UsageSeries = {
@@ -238,6 +239,33 @@ export function usageLabelContext(
       .filter(([, count]) => count > 1)
       .map(([label]) => label),
   );
+  const identityByKey = new Map(identities.map((identity) => [identity.key, identity] as const));
+  const identityCandidates = new Map(
+    identities.map((identity) => {
+      const label = identityLabel(identity, locale);
+      const modelSuffix = (
+        (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1
+      ) ? ` · ${identity.modelId}` : '';
+      const candidate = identityCollisionLabels.has(label)
+        ? `${label} · ${identity.sourceId}${modelSuffix}`
+        : label;
+      return [identity.key, candidate] as const;
+    }),
+  );
+  const identityDisplayLabels = new Map<string, string>();
+  const usedIdentityLabels = new Set<string>();
+  for (const [key, candidate] of identityCandidates) {
+    const identity = identityByKey.get(key)!;
+    let displayLabel = candidate;
+    let suffix = 0;
+    while (usedIdentityLabels.has(displayLabel)) {
+      suffix += 1;
+      const identitySuffix = ` · ${identity.sourceId} · ${identity.modelId}`;
+      displayLabel = `${candidate}${identitySuffix}${suffix > 1 ? ` (${suffix})` : ''}`;
+    }
+    usedIdentityLabels.add(displayLabel);
+    identityDisplayLabels.set(key, displayLabel);
+  }
   return {
     sourceCollisionLabels,
     sourceDisplayLabels,
@@ -251,6 +279,7 @@ export function usageLabelContext(
         })
         .map((identity) => identity.key),
     ),
+    identityDisplayLabels,
   };
 }
 
@@ -269,6 +298,8 @@ export function identityDisplayLabel(
   locale = 'en',
   context?: UsageLabelContext,
 ): string {
+  const displayLabel = context?.identityDisplayLabels.get(identity.key);
+  if (displayLabel) return displayLabel;
   const label = identityLabel(identity, locale);
   if (!context?.identityCollisionLabels.has(label)) return label;
   const modelSuffix = context.identityModelCollisionKeys.has(identity.key) ? ` · ${identity.modelId}` : '';

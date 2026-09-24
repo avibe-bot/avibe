@@ -1482,6 +1482,7 @@
           "historyComplete": "History complete",
           "sourceId": "Source ID",
           "modelId": "Model ID",
+          "ledgerKey": "Internal ledger key",
           "sourceLabel": "Source",
           "modelLabel": "Model",
           "tokenReports": "Token reports",

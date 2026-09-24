@@ -1423,6 +1423,69 @@ def test_legacy_usage_after_local_midnight_marks_the_overlapping_hour_incomplete
     assert incomplete["end_at"] == "2026-09-24T00:15:00+05:45"
 
 
+def test_expired_legacy_rows_do_not_reenter_hourly_history_after_timezone_change(
+    tmp_path: Path,
+) -> None:
+    """A stale instant must win over a new host-zone day fallback."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Pacific/Honolulu"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(json.dumps([{
+            "day": "2026-09-25",
+            "source_id": "src-expired-legacy",
+            "model_id": "model-expired-legacy",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+            "last_metered_at": "2026-09-24T10:00:00+00:00",
+        }]), encoding="utf-8")
+
+        report = ledger.report(window="24h", now=now)
+        daily = ledger.report(window="7d", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 0
+    assert all(bucket["history_complete"] for bucket in report["buckets"])
+    assert daily["totals"]["requests"] == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("not json", id="unreadable"),
+        pytest.param('{"rows": []}', id="not-a-list"),
+        pytest.param('[{"day": "not-a-day"}]', id="unusable-row"),
+    ],
+)
+def test_degraded_ledger_history_is_not_published_as_complete_zero(
+    tmp_path: Path,
+    content: str,
+) -> None:
+    """A read failure makes the affected modern report buckets uncertain."""
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True)
+    ledger.path.write_text(content, encoding="utf-8")
+
+    daily = ledger.report(window="7d", now=NOW)
+    hourly = ledger.report(window="24h", now=NOW)
+
+    assert all(not bucket["history_complete"] for bucket in daily["buckets"])
+    assert all(not bucket["history_complete"] for bucket in hourly["buckets"])
+
+
 def test_a_window_excludes_days_outside_it(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
 

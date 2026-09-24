@@ -566,6 +566,12 @@ class SourceIdentity:
     model_ids: Sequence[str] = ()
 
 
+@dataclass(frozen=True)
+class _LedgerRead:
+    rows: list[dict]
+    degraded: bool
+
+
 def _keyed_identities(
     identities: Optional[Sequence[SourceIdentity]],
 ) -> tuple[dict[str, Optional[str]], dict[tuple[str, str], str]]:
@@ -829,9 +835,9 @@ class BoundedUsageLedger:
             return rows
         return sorted(rows, key=lambda row: _recency(row, measured))[-self.max_rows :]
 
-    def _read(self) -> list[dict]:
+    def _read(self) -> _LedgerRead:
         if not self.path.exists():
-            return []
+            return _LedgerRead([], False)
         # Degrading to empty keeps a broken optional-feature file from failing
         # startup, but the next write replaces that file — so this is the last
         # moment its history is recoverable, and saying nothing would erase it
@@ -846,10 +852,10 @@ class BoundedUsageLedger:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError) as exc:
             logger.warning("Model Hub usage ledger %s is unreadable: %s", self.path, exc)
-            return []
+            return _LedgerRead([], True)
         if not isinstance(payload, list):
             logger.warning("Model Hub usage ledger %s is not a list of rows", self.path)
-            return []
+            return _LedgerRead([], True)
         rows: dict[tuple[str, str, str], dict] = {}
         dropped = 0
         for item in payload:
@@ -877,17 +883,19 @@ class BoundedUsageLedger:
         # wrote. Same answer as every other door, for the same reason: a row whose
         # magnitude no published document could carry is dropped, not saturated.
         held = []
+        degraded = dropped > 0
         for row in rows.values():
             if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
                 held.append(row)
                 continue
+            degraded = True
             logger.warning(
                 "Model Hub usage ledger %s dropped row %s: merged counters outgrew "
                 "what the file can carry",
                 self.path,
                 _row_key(row),
             )
-        return sorted(held, key=_row_key)
+        return _LedgerRead(sorted(held, key=_row_key), degraded)
 
     def _write(self, rows: list[dict], *, measured: datetime) -> None:
         """Persist the rows the file can hold, at both of the capacities it has.
@@ -972,7 +980,7 @@ class BoundedUsageLedger:
             return
         with self._lock:
             persisted_at = _aware(self._now())
-            rows = {_row_key(row): row for row in self._read()}
+            rows = {_row_key(row): row for row in self._read().rows}
             folded = False
             for call in calls:
                 metered_at = min(_aware(call.at), persisted_at)
@@ -1073,15 +1081,16 @@ class BoundedUsageLedger:
             placed.append(_retain_hour_slices(row, measured))
         return placed
 
-    def window(self, *, days: int, now: datetime) -> list[dict]:
-        """Return the rows inside the trailing local-day window, oldest first."""
+    def _window_rows(self, *, days: int, now: datetime) -> tuple[list[dict], bool]:
+        """Return reportable rows and whether reading the ledger degraded."""
 
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
         first_day = (today - timedelta(days=bounded_days - 1)).isoformat()
         last_day = today.isoformat()
         with self._lock:
-            rows = self._read()
+            read = self._read()
+        rows = read.rows
         placed = [row for row in rows if first_day <= row["day"] <= last_day]
         # The reportable set is formed here, so this is where the file's row
         # capacity bounds what `summary` can publish — after the date filter, never
@@ -1101,24 +1110,33 @@ class BoundedUsageLedger:
                 len(placed) - len(held),
                 self.max_rows,
             )
-        return sorted(held, key=_row_key)
+        return sorted(held, key=_row_key), read.degraded
+
+    def window(self, *, days: int, now: datetime) -> list[dict]:
+        """Return the rows inside the trailing local-day window, oldest first."""
+
+        rows, _degraded = self._window_rows(days=days, now=now)
+        return rows
 
     def _hourly_rows(
         self,
         *,
         starts: Sequence[datetime],
         now: datetime,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Select hourly owners by durable UTC evidence before local projection."""
 
         report_instant = _aware(now)
         horizon_start = starts[0].astimezone(timezone.utc)
         current_start = starts[-1].astimezone(timezone.utc)
         with self._lock:
-            rows = self._read()
+            read = self._read()
 
         candidates: list[dict] = []
-        for row in rows:
+        for row in read.rows:
+            latest = _instant(row.get("last_metered_at"))
+            if latest is not None and latest < horizon_start:
+                continue
             row_day = _calendar_day(row["day"])
             if row_day is not None and _overlaps_local_day(
                 horizon_start,
@@ -1128,7 +1146,6 @@ class BoundedUsageLedger:
                 candidates.append(row)
                 continue
 
-            latest = _instant(row.get("last_metered_at"))
             if latest is not None and horizon_start <= latest <= report_instant:
                 candidates.append(row)
                 continue
@@ -1152,7 +1169,7 @@ class BoundedUsageLedger:
                 len(candidates) - len(held),
                 self.max_rows,
             )
-        return sorted(held, key=_row_key)
+        return sorted(held, key=_row_key), read.degraded
 
     def summary(
         self,
@@ -1185,7 +1202,7 @@ class BoundedUsageLedger:
 
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
-        rows = self.window(days=bounded_days, now=now)
+        rows, _degraded = self._window_rows(days=bounded_days, now=now)
         return self._summary_from_rows(
             rows,
             window_days=bounded_days,
@@ -1280,7 +1297,7 @@ class BoundedUsageLedger:
         report_local = _local(now)
         today = report_local.date()
         from_day = today - timedelta(days=bounded_days - 1)
-        rows = self.window(days=bounded_days, now=now)
+        rows, read_degraded = self._window_rows(days=bounded_days, now=now)
         summary = self._summary_from_rows(
             rows,
             window_days=bounded_days,
@@ -1316,7 +1333,7 @@ class BoundedUsageLedger:
                     "key": bucket_day.isoformat(),
                     "start_at": start.isoformat(),
                     "end_at": end.isoformat(),
-                    "history_complete": True,
+                    "history_complete": not read_degraded,
                     "rows": sorted(
                         by_day.get(bucket_day.isoformat(), []),
                         key=lambda row: (row["source_id"], row["model_id"]),
@@ -1352,11 +1369,11 @@ class BoundedUsageLedger:
         # DST plus a fractional offset can make these 24 actual intervals touch
         # three local dates. Select rows from their durable UTC-hour evidence
         # before applying the current host timezone to their local presentation.
-        rows = self._hourly_rows(starts=starts, now=report_instant)
+        rows, read_degraded = self._hourly_rows(starts=starts, now=report_instant)
         measured_by_bucket: list[dict[tuple[str, str], dict]] = [
             {} for _ in starts
         ]
-        incomplete: set[int] = set()
+        incomplete: set[int] = set(range(len(starts))) if read_degraded else set()
 
         for row in rows:
             # Read-only projection must apply the same temporal evidence policy

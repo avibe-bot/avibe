@@ -824,6 +824,7 @@ export const UsageTab: React.FC<{
       historyComplete: t('settings.models.usage.csv.historyComplete') as string,
       sourceId: t('settings.models.usage.csv.sourceId') as string,
       modelId: t('settings.models.usage.csv.modelId') as string,
+      ledgerKey: t('settings.models.usage.csv.ledgerKey') as string,
       sourceLabel: t('settings.models.usage.csv.sourceLabel') as string,
       modelLabel: t('settings.models.usage.csv.modelLabel') as string,
       requests: t('settings.models.usage.table.requests') as string,

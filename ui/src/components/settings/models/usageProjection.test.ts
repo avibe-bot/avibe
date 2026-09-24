@@ -135,6 +135,46 @@ describe('usageProjection', () => {
     expect(labels.every((label) => label.length > 0)).toBe(true);
   });
 
+  it('keeps final identity labels unique after collision suffixes are added', () => {
+    const value = reportWith([
+      bucket('00', [
+        row({ model_id: 'old-a' }),
+        row({ model_id: 'old-b' }),
+        row({ source_id: 'source-b', model_id: 'literal-model' }),
+      ]),
+    ]);
+    value.sources = [
+      {
+        source_id: 'source-a',
+        label: 'Supplier',
+        last_metered_at: null,
+        ...counters(),
+        models: [],
+      },
+      {
+        source_id: 'source-b',
+        label: 'Supplier',
+        last_metered_at: null,
+        ...counters(),
+        models: [{
+          model_id: 'literal-model',
+          label: 'Unknown model · source-a · old-a',
+          ...counters(),
+        }],
+      },
+    ];
+
+    const labels = seriesFor(
+      value,
+      { sourceIds: [], modelKeys: [] },
+      'model',
+      'tokens',
+    ).map((series) => series.label);
+
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels).toContain('Supplier · Unknown model · source-a · old-a');
+  });
+
   it('renders incomplete empty buckets as unavailable gaps, not zero', () => {
     const value = reportWith([bucket('00', [], false), bucket('01', [], false)]);
     const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'total', 'tokens');
