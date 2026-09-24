@@ -12,10 +12,15 @@ from tests.e2e.test_install_command import _docker_available
 
 @pytest.mark.integration
 def test_released_updater_replaces_companion_without_touching_user_data(tmp_path):
+    """MUC-004: released updater crosses the removal boundary without rewriting data."""
     names = ("AVIBE_CORE_WHEEL", "AVIBE_BRIDGE_WHEEL", "AVIBE_OLD_CORE_WHEEL", "AVIBE_OLD_COMPANION_WHEEL")
     if not all(os.environ.get(name) for name in names):
+        if os.environ.get("AVIBE_RELEASE_GATE") == "1":
+            pytest.fail("Release gate requires all four pinned old and new wheels")
         pytest.skip("Explicit new and released v3.1.0 artifact paths required")
     if not _docker_available():
+        if os.environ.get("AVIBE_RELEASE_GATE") == "1":
+            pytest.fail("Release gate requires Docker for isolated real upgrades")
         pytest.skip("Docker is required for isolated github.com routing")
     for name in names:
         source = Path(os.environ[name]).resolve()

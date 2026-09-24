@@ -156,6 +156,8 @@ jobs:
             gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
               --jq '
                 .[] |
+                select(.draft == false) |
+                # Published prereleases are historical releases too; drafts are not.
                 if any(.assets[]?; (.name | startswith("avibe_memory-")) and (.name | endswith(".whl"))) then
                   [.tag_name, "avibe-memory", "avibe_memory-*.whl"] | @tsv
                 elif any(.assets[]?; (.name | startswith("avibe_os-")) and (.name | endswith(".whl"))) then
