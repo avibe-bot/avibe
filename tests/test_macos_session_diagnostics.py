@@ -391,7 +391,11 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     monkeypatch.setattr(service_main, "load_config", lambda: loaded_config)
     monkeypatch.setattr(service_main, "setup_logging", lambda level: None)
     monkeypatch.setattr(service_main, "apply_claude_sdk_patches", lambda: None)
-    monkeypatch.setattr(service_main, "prepare_sqlite_state", lambda loaded: report)
+    monkeypatch.setattr(
+        service_main,
+        "prepare_sqlite_state",
+        lambda loaded: calls.append("sqlite.prepare") or report,
+    )
     monkeypatch.setattr(
         service_main,
         "start_macos_session_diagnostics",
@@ -409,6 +413,10 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
 
     service_main.main()
 
+    # The migration runs under the lock and before anything is constructed
+    # against the schema it produces.
+    assert calls.index("lock.acquire") < calls.index("sqlite.prepare")
+    assert calls.index("sqlite.prepare") < calls.index("controller.init")
     assert calls.index("diagnostics.start") < calls.index("controller.run")
     assert calls.index("controller.run") < calls.index("controller.shutdown:signal 15")
     assert calls.index("controller.shutdown:signal 15") < calls.index(
