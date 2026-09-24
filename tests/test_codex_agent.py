@@ -2688,7 +2688,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent._inject_caller_env_config = Mock(return_value=("path-state", True))
         agent._mark_fork_correction_pending = Mock()
         agent._clear_fork_correction_pending = Mock()
-        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._should_trim_forked_running_turn = AsyncMock(return_value=False)
         agent._inject_forked_session_correction = AsyncMock()
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent.bind_agent_session_id = Mock(return_value="ses-target")
@@ -2740,7 +2740,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent._inject_caller_env_config = Mock(return_value=("path-state", True))
         agent._mark_fork_correction_pending = Mock()
         agent._clear_fork_correction_pending = Mock()
-        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._should_trim_forked_running_turn = AsyncMock(return_value=False)
         agent._inject_forked_session_correction = AsyncMock()
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent.bind_agent_session_id = Mock(return_value="ses-target")
@@ -2785,7 +2785,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent._inject_caller_env_config = Mock(return_value=("path-state", True))
         agent._mark_fork_correction_pending = Mock()
         agent._clear_fork_correction_pending = Mock()
-        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+        agent._should_trim_forked_running_turn = AsyncMock(return_value=False)
         agent._inject_forked_session_correction = AsyncMock()
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent.bind_agent_session_id = Mock(return_value="ses-target")
@@ -2866,6 +2866,67 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions.bind_agent_session.assert_not_called()
         self.assertFalse(agent.is_fork_correction_pending("ses-target"))
 
+    async def test_fork_rejects_trim_without_native_turn_boundary(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", reply_enhancements=False),
+            session_turns=SimpleNamespace(
+                native_turn_id_for_initial_message=Mock(return_value=None),
+            ),
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value=None),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        agent._fork_source_prompt_state = Mock(return_value=(None, None, None))
+        agent._resolve_codex_agent_settings = Mock(
+            return_value=(None, None, None, None),
+        )
+        agent._inject_caller_env_config = Mock(return_value=("", False))
+        agent._should_trim_forked_running_turn = AsyncMock(return_value=True)
+        agent._mark_fork_correction_pending = Mock()
+        agent._clear_fork_correction_pending = Mock()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(platform_specific={}),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+        )
+        transport = SimpleNamespace(send_request=AsyncMock())
+
+        with patch(
+            "vibe.internal_client.turn_state",
+            new=AsyncMock(
+                return_value={
+                    "body": {
+                        "in_flight": True,
+                        "native_turn_started": True,
+                    }
+                }
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "source turn boundary is unknown"):
+                await agent._fork_thread(
+                    transport,
+                    request,
+                    {
+                        "source_session_id": "ses-source",
+                        "source_native_session_id": "thread-source",
+                        "source_message_id": "msg-source",
+                        "trim_latest_running_turn": True,
+                    },
+                )
+
+        transport.send_request.assert_not_awaited()
+        agent._clear_fork_correction_pending.assert_called_once_with("ses-target")
+
     async def test_start_or_resume_thread_rolls_back_running_fork_before_correction(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
@@ -2876,6 +2937,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             bind_agent_session=Mock(return_value="ses-target"),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-source")
+        )
         agent._fork_correction_pending_base_sessions = set()
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -2914,11 +2978,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/fork",
-            "thread/rollback",
             "thread/inject_items",
         ])
-        rollback_params = transport.send_request.await_args_list[1].args[1]
-        self.assertEqual(rollback_params, {"threadId": "thread-fork", "numTurns": 1})
+        fork_params = transport.send_request.await_args_list[0].args[1]
+        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
         agent.sessions.bind_agent_session.assert_called_once_with(
             "avibe::project::proj_1",
             "codex",
@@ -3028,7 +3091,13 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         async def turn_state(_source_session_id):
             nonlocal turn_state_checked
             turn_state_checked = True
-            return {"body": {"in_flight": True, "native_turn_started": True}}
+            return {
+                "body": {
+                    "in_flight": True,
+                    "native_turn_started": True,
+                    "native_turn_id": "turn-source",
+                }
+            }
 
         async def send_request(method, params):
             if method == "thread/fork":
@@ -3046,9 +3115,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/fork",
-            "thread/rollback",
             "thread/inject_items",
         ])
+        fork_params = transport.send_request.await_args_list[0].args[1]
+        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
 
     async def test_start_or_resume_thread_rolls_back_pre_start_fork_after_source_output(self):
         agent = object.__new__(CodexAgent)
@@ -3060,6 +3130,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             bind_agent_session=Mock(return_value="ses-target"),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-source")
+        )
         agent._fork_correction_pending_base_sessions = set()
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -3110,11 +3183,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/fork",
-            "thread/rollback",
             "thread/inject_items",
         ])
-        rollback_params = transport.send_request.await_args_list[1].args[1]
-        self.assertEqual(rollback_params, {"threadId": "thread-fork", "numTurns": 1})
+        fork_params = transport.send_request.await_args_list[0].args[1]
+        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
 
     async def test_start_or_resume_thread_skips_running_fork_rollback_when_anchor_completed(self):
         agent = object.__new__(CodexAgent)
@@ -3126,6 +3198,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             bind_agent_session=Mock(return_value="ses-target"),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-source")
+        )
         agent._fork_correction_pending_base_sessions = set()
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -3252,6 +3327,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             bind_agent_session=Mock(return_value="ses-target"),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-source")
+        )
         agent._fork_correction_pending_base_sessions = set()
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -3304,11 +3382,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/fork",
-            "thread/rollback",
             "thread/inject_items",
         ])
-        rollback_params = transport.send_request.await_args_list[1].args[1]
-        self.assertEqual(rollback_params, {"threadId": "thread-fork", "numTurns": 1})
+        fork_params = transport.send_request.await_args_list[0].args[1]
+        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
 
     async def test_start_or_resume_thread_rolls_back_user_anchor_completed_before_native_start_flag(self):
         agent = object.__new__(CodexAgent)
@@ -3320,6 +3397,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             bind_agent_session=Mock(return_value="ses-target"),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-source")
+        )
         agent._fork_correction_pending_base_sessions = set()
         request = SimpleNamespace(
             working_path="/tmp/work",
@@ -3373,9 +3453,10 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/fork",
-            "thread/rollback",
             "thread/inject_items",
         ])
+        fork_params = transport.send_request.await_args_list[0].args[1]
+        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
 
     async def test_start_or_resume_thread_does_not_roll_back_when_new_user_after_anchor(self):
         agent = object.__new__(CodexAgent)
@@ -3464,9 +3545,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 has_input_turn_after_anchor=False,
             ),
         ):
-            should_rollback = await agent._should_rollback_forked_running_turn(fork)
+            should_trim = await agent._should_trim_forked_running_turn(fork)
 
-        self.assertTrue(should_rollback)
+        self.assertTrue(should_trim)
 
     async def test_start_or_resume_thread_does_not_roll_back_user_anchor_before_native_start(self):
         agent = object.__new__(CodexAgent)
@@ -6340,7 +6421,7 @@ class CodexPromptSnapshotRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     thread_id = "thread-1"
                     if forked:
                         agent._inject_caller_env_config = Mock(return_value=("path", True))
-                        agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+                        agent._should_trim_forked_running_turn = AsyncMock(return_value=False)
                         agent._inject_forked_session_correction = AsyncMock()
                         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
                         agent.bind_agent_session_id = Mock(return_value="ses-runtime")

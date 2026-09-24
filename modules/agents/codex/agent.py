@@ -2621,7 +2621,15 @@ class CodexAgent(BaseAgent):
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
-            should_trim = await self._should_rollback_forked_running_turn(fork)
+            should_trim = await self._should_trim_forked_running_turn(fork)
+            if should_trim:
+                native_turn_id = await self._fork_source_native_turn_id(fork)
+                if not native_turn_id:
+                    raise RuntimeError(
+                        "Cannot fork Codex thread while the source turn boundary "
+                        "is unknown"
+                    )
+                params["beforeTurnId"] = native_turn_id
             resp = await transport.send_request("thread/fork", params)
             thread_id = resp.get("id", "")
             if not thread_id:
@@ -2631,8 +2639,6 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
-            if should_trim:
-                await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
@@ -2714,8 +2720,8 @@ class CodexAgent(BaseAgent):
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
 
-    async def _should_rollback_forked_running_turn(self, fork: dict[str, Any]) -> bool:
-        """Rollback only when Codex's latest-turn rollback still targets the reserved turn."""
+    async def _should_trim_forked_running_turn(self, fork: dict[str, Any]) -> bool:
+        """Trim only when the reserved fork boundary still targets this turn."""
 
         if not bool(fork.get("trim_latest_running_turn")):
             return False
@@ -2753,20 +2759,52 @@ class CodexAgent(BaseAgent):
         body = turn_result.get("body") or {}
         return bool(body.get("in_flight") and body.get("native_turn_started"))
 
-    async def _rollback_forked_running_turn(
-        self,
-        transport: CodexTransport,
-        thread_id: str,
-    ) -> None:
-        """Remove the source's still-running latest turn from a forked thread."""
+    async def _fork_source_native_turn_id(self, fork: dict[str, Any]) -> Optional[str]:
+        """Return the native turn that must be excluded from a Codex fork."""
 
-        await transport.send_request(
-            "thread/rollback",
-            {
-                "threadId": thread_id,
-                "numTurns": 1,
-            },
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        if not source_session_id:
+            return None
+
+        turn_registry = getattr(self, "_turn_registry", None)
+        get_active_turn = getattr(turn_registry, "get_active_turn", None)
+        if callable(get_active_turn):
+            native_turn_id = str(get_active_turn(source_session_id) or "").strip()
+            if native_turn_id:
+                return native_turn_id
+
+        source_message_id = str(fork.get("source_message_id") or "").strip()
+        session_turns = getattr(getattr(self, "controller", None), "session_turns", None)
+        get_for_initial_message = getattr(
+            session_turns,
+            "native_turn_id_for_initial_message",
+            None,
         )
+        if source_message_id and callable(get_for_initial_message):
+            try:
+                native_turn_id = str(
+                    get_for_initial_message(source_session_id, source_message_id) or ""
+                ).strip()
+            except Exception:
+                logger.debug(
+                    "Could not read persisted Codex fork boundary for session %s",
+                    source_session_id,
+                    exc_info=True,
+                )
+            else:
+                if native_turn_id:
+                    return native_turn_id
+
+        from vibe import internal_client
+
+        try:
+            turn_result = await internal_client.turn_state(source_session_id)
+        except (internal_client.InternalServerTimeout, internal_client.InternalServerUnavailable):
+            return None
+        body = turn_result.get("body") or {}
+        if not (body.get("in_flight") and body.get("native_turn_started")):
+            return None
+        return str(body.get("native_turn_id") or "").strip() or None
 
     def _resolve_codex_agent_settings(
         self,
