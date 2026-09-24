@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Check, CodeXml, FileText, ListChecks } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
@@ -7,20 +7,19 @@ import { ASSISTANT_ORDER, WORK_LINES, collaborationFrame } from './collaboration
 import { useOnboardingMotion } from './motion';
 
 /**
- * Wire geometry in the 976x350 wire box, which the stylesheet sizes at the card's
+ * Handoff geometry in the 976x350 wire box, which the stylesheet sizes at the card's
  * height times 350/300 — the reference's own proportion (271 around 232, 306 around
  * 262, 385 around 330 all read that way). Taking the box's height from the card and
  * putting the handoffs at y=150 of 350 is what keeps them on the cards' shared
- * midline at every tier rather than only at the authored one; the return loop runs
- * from the third card's centre to the first's along y=338, inside the band the stage
- * reserves under the cards. The x coordinates are the card tracks' own edges in 976
- * space, so the stretched viewBox keeps every port on a card edge at every width.
+ * midline at every tier rather than only at the authored one. The x coordinates are
+ * the card tracks' own edges in 976 space, so the stretched viewBox keeps every port
+ * on a card edge at every width. The return loop is not in this box: see `ReturnWire`.
  */
-const WIRES = [
-  'M299 150H339',
-  'M637 150H677',
-  'M826 300V322Q826 338 810 338H165Q149 338 149 322V300',
-];
+const WIRES = ['M299 150H339', 'M637 150H677'];
+/** The wire index the timeline gives the return from the third card to the first. */
+const RETURN_WIRE = 2;
+/** The return loop's legs and corner radius, in the same 976 space as the handoffs. */
+const RETURN_LEGS = { from: 826, to: 149, radius: 16 };
 /** Only the four handoff ends are drawn: the return loop leaves its cards unmarked. */
 const PORTS: [number, number][] = [[299, 150], [339, 150], [637, 150], [677, 150]];
 const ICONS = [FileText, CodeXml, ListChecks];
@@ -106,31 +105,84 @@ function Skeleton({ backend, done, written }: { backend: string; done: boolean; 
   );
 }
 
-/** The wires are stretched to the card grid, so every coordinate stays proportional. */
-function Circuit({ handoff }: { handoff: { wire: number; progress: number } | null }) {
-  const glowId = useId();
-  const pulse = handoff && {
-    strokeDashoffset: 16 - 100 * handoff.progress,
-    opacity: Math.max(0, Math.min(1, handoff.progress / 0.08, (1 - handoff.progress) / 0.06)),
+type Handoff = { wire: number; progress: number } | null;
+
+/** A single dash of a 100-unit path crossing it once, fading in and out at its ends. */
+function Pulse({ d, progress, glowId }: { d: string; progress: number; glowId: string }) {
+  const style = {
+    strokeDashoffset: 16 - 100 * progress,
+    opacity: Math.max(0, Math.min(1, progress / 0.08, (1 - progress) / 0.06)),
   };
   return (
+    <g data-testid="handoff-pulse">
+      <path className="onboarding-pulse-halo" d={d} pathLength={100} style={{ ...style, filter: `url(#${glowId})` }} />
+      <path className="onboarding-pulse-core" d={d} pathLength={100} style={style} />
+    </g>
+  );
+}
+
+function Glow({ id }: { id: string }) {
+  return <defs><filter id={id} x="-100%" y="-500%" width="300%" height="1100%"><feGaussianBlur stdDeviation="3" /></filter></defs>;
+}
+
+/** The wires are stretched to the card grid, so every coordinate stays proportional. */
+function Circuit({ handoff }: { handoff: Handoff }) {
+  const glowId = useId();
+  return (
     <svg className="onboarding-wires" viewBox="0 0 976 350" fill="none" preserveAspectRatio="none" aria-hidden="true">
-      <defs>
-        <filter id={glowId} x="-100%" y="-500%" width="300%" height="1100%"><feGaussianBlur stdDeviation="3" /></filter>
-      </defs>
+      <Glow id={glowId} />
       {WIRES.map((d, index) => (
         <g key={d}>
           <path className="onboarding-wire" d={d} />
-          {handoff?.wire === index && (
-            <g data-testid="handoff-pulse">
-              <path className="onboarding-pulse-halo" d={d} pathLength={100} style={{ ...pulse, filter: `url(#${glowId})` }} />
-              <path className="onboarding-pulse-core" d={d} pathLength={100} style={pulse ?? undefined} />
-            </g>
-          )}
+          {handoff?.wire === index && <Pulse d={d} progress={handoff.progress} glowId={glowId} />}
         </g>
       ))}
       {PORTS.map(([x, y]) => <circle key={`${x}-${y}`} className="onboarding-port" cx={x} cy={y} r={3} />)}
     </svg>
+  );
+}
+
+/**
+ * The return loop and the caption cut into it. The stylesheet hangs this box from the
+ * cards' floor down to the line the other setup screens set their summary on, which is
+ * the stage's floor rather than the diagram's — so its height is whatever the window
+ * leaves, and a stretched viewBox would bend the corners differently at every size.
+ * The path is drawn in the box's own pixels instead: the legs keep their 976-space
+ * tracks and the corners stay round.
+ */
+function ReturnWire({ handoff, returning, caption }: { handoff: Handoff; returning: boolean; caption: string }) {
+  const glowId = useId();
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const measure = () => {
+      const { width, height } = node.getBoundingClientRect();
+      setSize((current) => (current.width === width && current.height === height ? current : { width, height }));
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const { width, height } = size;
+  const scale = width / 976;
+  const from = RETURN_LEGS.from * scale;
+  const to = RETURN_LEGS.to * scale;
+  const radius = Math.min(RETURN_LEGS.radius * scale, height);
+  const d = `M${from} 0V${height - radius}Q${from} ${height} ${from - radius} ${height}`
+    + `H${to + radius}Q${to} ${height} ${to} ${height - radius}V0`;
+  return (
+    <div ref={ref} className="onboarding-return">
+      <svg className="onboarding-return-wire" fill="none" aria-hidden="true">
+        <Glow id={glowId} />
+        <path className="onboarding-wire" d={d} />
+        {handoff?.wire === RETURN_WIRE && <Pulse d={d} progress={handoff.progress} glowId={glowId} />}
+      </svg>
+      <p className="onboarding-story-caption" data-returning={returning}>{caption}</p>
+    </div>
   );
 }
 
@@ -195,10 +247,9 @@ export function CollaborationStory({ active = true }: { active?: boolean }) {
             );
           })}
         </div>
-        <p className="onboarding-story-caption" data-returning={frame.returning}>
-          {t(frame.returning ? 'onboarding.story.returnCaption' : 'onboarding.story.caption')}
-        </p>
       </div>
+      <ReturnWire handoff={frame.handoff} returning={frame.returning}
+        caption={t(frame.returning ? 'onboarding.story.returnCaption' : 'onboarding.story.caption')} />
     </section>
   );
 }
