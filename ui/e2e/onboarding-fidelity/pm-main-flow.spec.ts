@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { ORIGIN, serveProduct } from './support';
+import { isRetiredMemoryPath, ORIGIN, serveProduct } from './support';
 import { readFileSync } from 'node:fs';
 const en=JSON.parse(readFileSync(new URL('../../src/i18n/en.json', import.meta.url),'utf8'));
 
@@ -50,7 +50,6 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
     const b=path.split('/')[3],ready=!!saved[b]?.length;
     return answer({ok:true,backend:b,enabled:b!=='opencode',installed:true,supply_mode:'hub',auth:'api_key',application:'applied',ready,entry_eligible:ready});
    }
-   if(path==='/api/memory/status')return answer({ok:true,enabled:false});
    if(path==='/api/projects')return answer({ok:true,projects:[]});
    if(path==='/api/scopes')return answer({ok:true,scopes:[]});
    if(path==='/api/inbox')return answer({sessions:[],next_cursor:null,unread_by_session:{},unread_total:0,unread_sessions:0});
@@ -83,5 +82,36 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   expect(errors).toEqual([]);
   expect(writes.filter(w=>w.path==='/api/config').at(-1)?.body?.setup_completed).toBe(true);
   expect(denied.filter(r=>/PUT|POST.*(?:auth|runtime)/.test(r))).toEqual([]);
+  expect(denied.filter(r=>isRetiredMemoryPath(new URL(r.slice(r.indexOf(' ') + 1)).pathname))).toEqual([]);
  });
 }
+
+test('retired Memory API guard rejects root and nested requests without overmatching', async ({page}) => {
+ const denied=await serveProduct(page);
+ await page.goto('/e2e/onboarding-fidelity/fixture.html');
+ await page.route(`${ORIGIN}/api/**`,route=>route.fallback());
+ const results=await page.evaluate(async()=>{
+  const url=(path:string)=>`${location.origin}${path}`;
+  const requests=[
+   new Request(url('/api/memory?probe=root'),{method:'GET'}),
+   new Request(url('/api/memory/status?probe=nested'),{method:'POST'}),
+   new Request(url('/api/memory/items/1?probe=deep'),{method:'PUT'}),
+   new Request(url('/api/memory-bank/status'),{method:'GET'}),
+  ];
+  return Promise.all(requests.map(async request=>{
+   try {
+    const response=await fetch(request);
+    return {path:new URL(request.url).pathname,status:response.status};
+   } catch {
+    return {path:new URL(request.url).pathname,failed:true};
+   }
+  }));
+ });
+ expect(results.slice(0,3).every(result=>'failed' in result)).toBe(true);
+ expect(results[3]).toEqual({path:'/api/memory-bank/status',status:200});
+ expect(denied.filter(r=>isRetiredMemoryPath(new URL(r.slice(r.indexOf(' ') + 1)).pathname))).toEqual([
+  'GET http://127.0.0.1:5212/api/memory?probe=root',
+  'POST http://127.0.0.1:5212/api/memory/status?probe=nested',
+  'PUT http://127.0.0.1:5212/api/memory/items/1?probe=deep',
+ ]);
+});
