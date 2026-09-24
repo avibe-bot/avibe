@@ -36,6 +36,23 @@ def _catalog_reference(path):
     catalog.retain = Mock(return_value=catalog)
     return catalog
 
+
+def _fork_transport():
+    def send_request(method, _params):
+        if method == "thread/read":
+            return {
+                "thread": {
+                    "turns": [
+                        {"id": "turn-before", "status": "completed", "items": []},
+                        {"id": "turn-source", "status": "inProgress", "items": []},
+                    ]
+                }
+            }
+        return {"thread": {"id": "thread-fork"}}
+
+    return SimpleNamespace(send_request=AsyncMock(side_effect=send_request))
+
+
 _modules_pkg = types.ModuleType("modules")
 _agents_pkg = types.ModuleType("modules.agents")
 _codex_pkg = types.ModuleType("modules.agents.codex")
@@ -2927,7 +2944,38 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         transport.send_request.assert_not_awaited()
         agent._clear_fork_correction_pending.assert_called_once_with("ses-target")
 
-    async def test_start_or_resume_thread_rolls_back_running_fork_before_correction(self):
+    async def test_fork_boundary_requires_a_completed_predecessor(self):
+        agent = object.__new__(CodexAgent)
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-source"),
+        )
+        transport = SimpleNamespace(
+            send_request=AsyncMock(
+                return_value={
+                    "thread": {
+                        "turns": [
+                            {"id": "turn-source", "status": "inProgress", "items": []},
+                        ]
+                    }
+                }
+            )
+        )
+
+        boundary = await agent._fork_source_last_completed_turn_id(
+            transport,
+            {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "thread-source",
+            },
+        )
+
+        self.assertEqual(boundary, (True, None))
+        transport.send_request.assert_awaited_once_with(
+            "thread/read",
+            {"threadId": "thread-source", "includeTurns": True},
+        )
+
+    async def test_start_or_resume_thread_trims_running_fork_before_correction(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -2971,17 +3019,20 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        transport = _fork_transport()
 
         thread_id = await agent._start_or_resume_thread(transport, request)
 
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/read",
             "thread/fork",
             "thread/inject_items",
         ])
-        fork_params = transport.send_request.await_args_list[0].args[1]
-        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
+        self.assertEqual(
+            transport.send_request.await_args_list[1].args[1]["lastTurnId"],
+            "turn-before",
+        )
         agent.sessions.bind_agent_session.assert_called_once_with(
             "avibe::project::proj_1",
             "codex",
@@ -2989,7 +3040,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "thread-fork",
         )
 
-    async def test_start_or_resume_thread_skips_running_fork_rollback_before_native_start(self):
+    async def test_start_or_resume_thread_keeps_running_fork_before_native_start(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3030,7 +3081,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        transport = _fork_transport()
 
         with patch(
             "vibe.internal_client.turn_state",
@@ -3044,7 +3095,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "thread/inject_items",
         ])
 
-    async def test_start_or_resume_thread_rolls_back_pre_start_fork_after_source_started(self):
+    async def test_start_or_resume_thread_trims_pre_start_fork_after_source_started(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3099,7 +3150,16 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 }
             }
 
-        async def send_request(method, params):
+        def send_request(method, _params):
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "turns": [
+                            {"id": "turn-before", "status": "completed", "items": []},
+                            {"id": "turn-source", "status": "inProgress", "items": []},
+                        ]
+                    }
+                }
             if method == "thread/fork":
                 self.assertTrue(turn_state_checked)
             return {"thread": {"id": "thread-fork"}}
@@ -3114,13 +3174,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/read",
             "thread/fork",
             "thread/inject_items",
         ])
-        fork_params = transport.send_request.await_args_list[0].args[1]
-        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
+        fork_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(fork_params["lastTurnId"], "turn-before")
 
-    async def test_start_or_resume_thread_rolls_back_pre_start_fork_after_source_output(self):
+    async def test_start_or_resume_thread_trims_pre_start_fork_after_source_output(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3165,7 +3226,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        transport = _fork_transport()
 
         with patch.object(
             _MODULE,
@@ -3182,13 +3243,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/read",
             "thread/fork",
             "thread/inject_items",
         ])
-        fork_params = transport.send_request.await_args_list[0].args[1]
-        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
+        fork_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(fork_params["lastTurnId"], "turn-before")
 
-    async def test_start_or_resume_thread_skips_running_fork_rollback_when_anchor_completed(self):
+    async def test_start_or_resume_thread_keeps_running_fork_when_anchor_completed(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3233,7 +3295,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        transport = _fork_transport()
 
         with patch.object(
             _MODULE,
@@ -3254,7 +3316,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "thread/inject_items",
         ])
 
-    async def test_start_or_resume_thread_skips_running_fork_rollback_after_source_completed(self):
+    async def test_start_or_resume_thread_keeps_running_fork_after_source_completed(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3317,7 +3379,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "thread/inject_items",
         ])
 
-    async def test_start_or_resume_thread_rolls_back_reserved_user_anchor_after_source_completed(self):
+    async def test_start_or_resume_thread_trims_reserved_user_anchor_after_source_completed(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3362,7 +3424,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        transport = _fork_transport()
 
         with patch.object(
             _MODULE,
@@ -3381,13 +3443,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/read",
             "thread/fork",
             "thread/inject_items",
         ])
-        fork_params = transport.send_request.await_args_list[0].args[1]
-        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
+        fork_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(fork_params["lastTurnId"], "turn-before")
 
-    async def test_start_or_resume_thread_rolls_back_user_anchor_completed_before_native_start_flag(self):
+    async def test_start_or_resume_thread_trims_user_anchor_completed_before_native_start_flag(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3432,7 +3495,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        transport = _fork_transport()
 
         with patch.object(
             _MODULE,
@@ -3452,13 +3515,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/read",
             "thread/fork",
             "thread/inject_items",
         ])
-        fork_params = transport.send_request.await_args_list[0].args[1]
-        self.assertEqual(fork_params["beforeTurnId"], "turn-source")
+        fork_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(fork_params["lastTurnId"], "turn-before")
 
-    async def test_start_or_resume_thread_does_not_roll_back_when_new_user_after_anchor(self):
+    async def test_start_or_resume_thread_does_not_trim_when_new_user_after_anchor(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -3549,7 +3613,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(should_trim)
 
-    async def test_start_or_resume_thread_does_not_roll_back_user_anchor_before_native_start(self):
+    async def test_start_or_resume_thread_does_not_trim_user_anchor_before_native_start(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
