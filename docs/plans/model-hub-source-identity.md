@@ -18,12 +18,16 @@
   substitute another source's identity or a credential/account ID.
   Reject non-UTF-8-encodable labels and compare labels and stored tokens after
   the same whitespace normalization.
-- Show the account on its own line in source cards and details. One browser
-  preference controls visibility across both surfaces; persist only the
-  preference. Hidden text must be absent from DOM text, accessible labels,
-  and hover titles. The eye control must not open the source detail.
-  Keep the graph endpoint on the full card so all controls belong to that
-  source and desktop wires retain the card's right-edge midpoint.
+- Show the account on its own line in source cards and details. A single eye
+  control in the source-list header hides account identities, endpoint URLs,
+  and masked API keys together. Source details expose the same shared control
+  in their header; do not add per-source or per-field eye buttons. Persist only
+  the browser preference. Hidden metadata must be absent from DOM text,
+  accessible labels, and hover titles, including endpoint-derived protocol
+  prefixes in source details. Explicit editing forms remain editable.
+  Keep each source row as one full-card opener and graph endpoint, so desktop
+  wires retain the card's right-edge midpoint. The global eye must not open
+  a source or highlight one source's wires.
 - Order source-card badges as kind then protocol. API key is cyan, subscription
   retains its semantic accent, and protocol is neutral with no vendor/domain
   prefix. Endpoint details remain available separately.

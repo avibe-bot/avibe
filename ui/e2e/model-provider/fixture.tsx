@@ -9,7 +9,8 @@ import '../../src/components/settings/models/modelHubSurface.css';
 import { Button } from '../../src/components/ui/button';
 import { AddApiKeyDialog } from '../../src/components/settings/models/AddApiKeyDialog';
 import { SourceDetailPanel } from '../../src/components/settings/models/SourceDetailPanel';
-import { SourceRow } from '../../src/components/settings/models/SourceRow';
+import { SourcesCard } from '../../src/components/settings/models/SourcesCard';
+import { readyRegion } from '../../src/components/settings/models/regionRead';
 import { createSourceCollectionReadAuthority } from '../../src/components/settings/models/collectionReadAuthority';
 import { modelsApi } from '../../src/components/settings/models/modelsApi';
 import { readSurfaceLanding, type TrackSourceMutation } from '../../src/components/settings/models/mutationSettlement';
@@ -115,8 +116,9 @@ function IdentityFixture() {
   const [selected, setSelected] = useState(identitySources[0]);
   return <I18nextProvider i18n={language}>
     <main className="mx-auto flex min-h-dvh max-w-[1100px] flex-col gap-5 bg-surface p-3 md:flex-row">
-      <section data-testid="identity-cards" className="w-full shrink-0 space-y-2.5 md:w-[400px]">
-        {identitySources.map((source) => <SourceRow key={source.id} source={source} onOpen={setSelected} />)}
+      <section data-testid="identity-cards" className="w-full shrink-0 self-start md:w-[400px]">
+        <SourcesCard read={readyRegion(identitySources)} onOpenSource={setSelected}
+          onRetry={() => {}} onAddApiKey={() => {}} onAddSubscription={() => {}} />
       </section>
       <section className="min-w-0 flex-1" data-testid="identity-detail">
         <SourceDetailPanel source={selected} trackMutation={async () => { throw new Error('Read-only fixture'); }}

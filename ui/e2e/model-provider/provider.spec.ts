@@ -9,7 +9,7 @@ for (const lang of ['en', 'zh'] as const) {
       await page.goto(`/e2e/model-provider/fixture.html?identity=1&lang=${lang}&theme=${theme}`);
       const cards = page.getByTestId('identity-cards');
       const detail = page.getByTestId('identity-detail');
-      const pills = cards.locator('.model-hub-pill');
+      const pills = cards.locator('[data-source-id] .model-hub-pill');
       await expect(pills).toHaveText([
         text('upstream.kind.subscription'), 'OpenAI Responses',
         text('upstream.kind.subscription'), 'OpenAI Responses',
@@ -18,21 +18,33 @@ for (const lang of ['en', 'zh'] as const) {
       await expect(cards.getByText('first@example.com', { exact: true })).toBeVisible();
       await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
       await cards.screenshot({ path: info.outputPath('identity-visible.png') });
-      // The eye is its own control, even when it sits inside the clickable card.
-      await cards.getByRole('button', { name: text('upstream.hideAccount') }).nth(1).click();
+      // One header control covers every source; no per-row or per-field eyes.
+      await expect(cards.getByRole('button', { name: text('upstream.hidePrivateDetails') })).toHaveCount(1);
+      await expect(cards.locator('[data-source-id] button')).toHaveCount(0);
+      await cards.getByRole('button', { name: text('upstream.hidePrivateDetails') }).click();
       await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
       await expect(page.getByText('first@example.com', { exact: true })).toHaveCount(0);
       await expect(page.locator('[title*="@example.com"]')).toHaveCount(0);
+      expect(await cards.innerHTML()).not.toContain('relay.example');
+      expect(await cards.innerHTML()).not.toContain('sk-…1234');
       await page.reload();
       await expect(page.getByText('first@example.com', { exact: true })).toHaveCount(0);
       await cards.getByRole('button', { name: 'OpenAI 2', exact: true }).click();
       await expect(detail.getByRole('heading', { name: 'OpenAI 2', exact: true })).toBeVisible();
-      const show = detail.getByRole('button', { name: text('upstream.showAccount') });
+      const show = detail.getByRole('button', { name: text('upstream.showPrivateDetails') });
       await show.focus();
       await page.keyboard.press('Enter');
       await expect(cards.getByText('first@example.com', { exact: true })).toBeVisible();
       await expect(detail.getByText('long-account-name-for-overflow-check@example.com', { exact: true })).toBeVisible();
-      await cards.getByRole('button', { name: text('upstream.hideAccount') }).first().click();
+      await cards.getByRole('button', { name: text('upstream.hidePrivateDetails') }).click();
+      await cards.getByRole('button', { name: 'Example relay', exact: true }).click();
+      await expect(detail.getByRole('heading', { name: 'Example relay', exact: true })).toBeVisible();
+      expect(await detail.innerHTML()).not.toContain('relay.example');
+      expect(await detail.innerHTML()).not.toContain('sk-…1234');
+      await detail.getByRole('button', { name: text('upstream.showPrivateDetails') }).click();
+      await expect(detail.getByText('https://relay.example/v1', { exact: true })).toBeVisible();
+      await expect(detail.getByText('sk-…1234', { exact: true })).toBeVisible();
+      await cards.getByRole('button', { name: text('upstream.hidePrivateDetails') }).click();
       await cards.screenshot({ path: info.outputPath('identity-hidden.png') });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     });

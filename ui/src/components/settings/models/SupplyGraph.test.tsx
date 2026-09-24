@@ -6,6 +6,7 @@ import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
 import { SourceRow } from './SourceRow';
+import { SourcePrivacyToggle } from './SourcePrivacy';
 import { SupplyGraph } from './SupplyGraph';
 import type { SupplyRelation } from './supplyRelations';
 
@@ -30,6 +31,7 @@ const Fixture: React.FC<{ relations?: SupplyRelation[]; withSourceCard?: boolean
   return (
     <div ref={ref} data-testid="graph-root">
       {withSourceCard ? <I18nextProvider i18n={i18n}>
+        <SourcePrivacyToggle />
         <SourceRow source={{
           id: 'src_a', last_discovered_at: null, kind: 'subscription', vendor: 'openai', display_name: 'OpenAI',
           protocol: 'openai_responses', base_url: null, supply_channel: 'hub', billing: 'monthly',
@@ -51,14 +53,14 @@ afterEach(() => {
 });
 
 describe('SupplyGraph', () => {
-  it('anchors to the whole SourceRow and highlights when its account control is focused', async () => {
+  it('anchors to the whole SourceRow and distinguishes its focus from the global privacy control', async () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
       if (this.dataset.testid === 'graph-root') return rect(0, 0, 600, 300);
       if (this.dataset.agentBackend === 'claude') return rect(450, 40, 100, 100);
-      // The opener covers only the title/badges in layout; the card includes
-      // the account and state rows. Its stretched hit area is not its bounds.
+      // A full-card endpoint includes the account row. An inner title/badge
+      // button would have smaller bounds and must not own this graph hook.
+      if (this.dataset.sourceId === 'src_a' && this.querySelector('[data-source-account]')) return rect(10, 10, 300, 120);
       if (this.tagName === 'BUTTON') return rect(60, 20, 200, 40);
-      if (this.dataset.sourceId === 'src_a') return rect(10, 10, 300, 120);
       return rect(0, 0, 0, 0);
     });
     const view = render(<Fixture withSourceCard />);
@@ -68,10 +70,12 @@ describe('SupplyGraph', () => {
       return element as SVGPathElement;
     });
     expect(path.getAttribute('d')).toBe('M 310 70 C 380 70, 380 90, 450 90');
-    const eye = view.getByRole('button', { name: i18n.t('settings.models.upstream.hideAccount') });
-    fireEvent.focusIn(eye);
+    const opener = view.getByRole('button', { name: 'OpenAI' });
+    fireEvent.focusIn(opener);
     await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(true));
-    fireEvent.focusOut(eye, { relatedTarget: view.container });
+    const eye = view.getByRole('button', { name: i18n.t('settings.models.upstream.hidePrivateDetails') });
+    fireEvent.focusOut(opener, { relatedTarget: eye });
+    fireEvent.focusIn(eye);
     await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(false));
   });
 

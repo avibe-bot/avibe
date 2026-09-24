@@ -15,7 +15,8 @@ import { classifyModelHubFailure } from './asyncLifetime';
 import { Field } from './dialogFields';
 import { GuardImpact } from './GuardImpact';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
-import { SourceAccountLabel } from './SourceAccountLabel';
+import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
+import { useSourceDetailsHidden } from './sourcePrivacyPreference';
 import {
   assessSourceEdit,
   canEditSourceEndpoint,
@@ -171,6 +172,7 @@ export const SourceDetailPanel: React.FC<{
   activeBackends?: ReadonlySet<AgentBackend>;
 }> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends }) => {
   const { t, i18n } = useTranslation();
+  const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const [pendingAction, setPendingAction] = React.useState<'refetch' | 'add_model' | 'other' | null>(null);
@@ -654,14 +656,14 @@ export const SourceDetailPanel: React.FC<{
   const providerIdentity = sourceProviderIdentity(source);
   const providerCopyKey = SOURCE_PROVIDER_COPY_KEYS[providerIdentity];
   const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
-  const interfaceLabel = `${providerLabel} · ${t(PROTOCOL_COPY_KEYS[source.protocol])}`;
+  const protocolLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
+  const interfaceLabel = detailsHidden ? protocolLabel : `${providerLabel} · ${protocolLabel}`;
   const credentialLabel = source.kind === 'api_key'
     ? t('settings.models.sourceDetail.metadata.apiKey')
     : t('settings.models.sourceDetail.metadata.account');
   const credentialValue = source.kind === 'api_key'
-    ? source.masked_credential ?? '—'
-    : source.account_label ?? '—';
-  const endpoint = source.base_url ?? t('settings.models.sourceDetail.metadata.officialEndpoint');
+    ? source.masked_credential
+    : source.account_label;
   const lastFetched = source.last_discovered_at
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
@@ -681,12 +683,15 @@ export const SourceDetailPanel: React.FC<{
           </div>
           <p className="model-hub-source-summary truncate">{usageSummary}</p>
         </div>
+        {(source.base_url || credentialValue) && <SourcePrivacyToggle />}
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
-        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono" title={endpoint as string}>{endpoint}</dd></div>
-        <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{source.kind === 'subscription' && source.account_label
-          ? <SourceAccountLabel label={source.account_label} />
-          : <span className="block truncate" title={credentialValue}>{credentialValue}</span>}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{source.base_url
+          ? <SourcePrivateValue value={source.base_url} />
+          : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
+        <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{credentialValue
+          ? <SourcePrivateValue value={credentialValue} />
+          : '—'}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.type')}</dt><dd className="truncate" title={interfaceLabel}>{interfaceLabel}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.lastFetched')}</dt><dd className="truncate">{lastFetched}</dd></div>
       </dl>

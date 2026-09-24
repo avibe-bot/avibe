@@ -22,7 +22,10 @@ const retained: Source = {
   models: [],
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 describe('SourcesCard footer', () => {
   it('fills a narrow overview column without preserving an intrinsic panel width', () => {
@@ -49,7 +52,38 @@ describe('SourcesCard footer', () => {
     const title = screen.getByText('Retained source');
     expect(title.className).toContain('block');
     expect(title.nextElementSibling?.className).toContain('flex');
-    expect(screen.getByRole('button', { name: 'Retained source' }).parentElement?.parentElement?.className).toContain('min-h-[96px]');
+    expect(screen.getByRole('button', { name: 'Retained source' }).className).toContain('min-h-[96px]');
+  });
+
+  it.each(['en', 'zh'])('uses one header toggle for all account, URL and key details in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    const onOpenSource = vi.fn();
+    const rows: Source[] = [
+      { ...retained, base_url: 'https://private-relay.example/v1', masked_credential: 'sk-…7890' },
+      { ...retained, id: 'src_account', kind: 'subscription', account_label: 'owner@example.com' },
+    ];
+    const tree = <I18nextProvider i18n={locale}>
+      <SourcesCard read={readyRegion(rows)} onRetry={vi.fn()} onOpenSource={onOpenSource} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
+    </I18nextProvider>;
+    const view = render(tree);
+    const toggle = screen.getByRole('button', { name: locale.t('settings.models.upstream.hidePrivateDetails') });
+    expect(toggle.closest('[data-source-id]')).toBeNull();
+    expect(view.container.querySelector('button button')).toBeNull();
+    expect(view.container.querySelector('[data-source-id] button')).toBeNull();
+    await userEvent.click(toggle);
+    expect(onOpenSource).not.toHaveBeenCalled();
+    for (const value of ['private-relay.example', 'sk-…7890', 'owner@example.com']) {
+      expect(view.container.innerHTML).not.toContain(value);
+    }
+    view.unmount();
+    const remounted = render(tree);
+    expect(remounted.container.innerHTML).not.toContain('private-relay.example');
+    const reveal = screen.getByRole('button', { name: locale.t('settings.models.upstream.showPrivateDetails') });
+    reveal.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.getByText('private-relay.example/v1 · sk-…7890')).toBeTruthy();
+    expect(screen.getByText('owner@example.com')).toBeTruthy();
+    expect(onOpenSource).not.toHaveBeenCalled();
   });
 
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {
