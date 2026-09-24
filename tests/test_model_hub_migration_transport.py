@@ -136,7 +136,7 @@ def test_all_anthropic_native_producers_refuse_unpreservable_transport(tmp_path,
     assert all(row.notes_key == BLOCKED for row in rows)
     assert secret not in json.dumps([row.to_payload() for row in rows])
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row.id for row in rows]))
+        asyncio.run(service.migration_apply([row.id for row in rows], clean_api_keys=True))
     assert {path: path.read_bytes() for path in paths} == before
     assert not store.config.sources
     assert not adapter.provisioned and not adapter.transient_refs
@@ -153,7 +153,7 @@ def test_official_api_key_still_migrates_from_every_native_producer(tmp_path, na
         store.native_auth_snapshot = lambda backends: legacy
     rows = _scan(service, roots, legacy)
     assert rows and all(row.proposed_action == "import" for row in rows)
-    result = asyncio.run(service.migration_apply([row.id for row in rows]))
+    result = asyncio.run(service.migration_apply([row.id for row in rows], clean_api_keys=True))
     assert result["applied"] == len(rows)
     assert all(source.protocol == "anthropic" for source in store.config.sources)
     assert all(scheme is None for scheme in adapter.auth_schemes.values())
@@ -268,7 +268,7 @@ def test_observation_cannot_change_native_auth_semantics(
     [row] = service.migration_scan()["items"]
     assert row["proposed_action"] == "import"
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert path.read_bytes() == before
     assert not adapter.provisioned
     assert service.migration_journal.load() is None
@@ -283,7 +283,7 @@ def test_observation_may_change_openai_dialect_without_changing_bearer_auth(tmp_
     service, store, adapter = _service(tmp_path, migration_home=native)
     adapter.observed_protocols["custom"] = "openai_responses"
     [row] = service.migration_scan()["items"]
-    assert asyncio.run(service.migration_apply([row["id"]]))["applied"] == 1
+    assert asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))["applied"] == 1
     assert store.config.sources[0].protocol == "openai_responses"
 
 
@@ -391,7 +391,7 @@ def test_real_observation_cannot_promote_custom_key_to_anthropic_transport(tmp_p
             [row] = service.migration_scan()["items"]
             assert row["proposed_action"] == "import"
             with pytest.raises(ModelHubError):
-                await service.migration_apply([row["id"]])
+                await service.migration_apply([row["id"]], clean_api_keys=True)
             assert any(headers.get("x-api-key") == KEY for _, headers in requests)
             assert path.read_bytes() == before
             assert not store.config.sources
@@ -412,7 +412,7 @@ def test_custom_bearer_keeps_actual_proof_discovery_and_cleanup(tmp_path, native
             service, store, _ = _service(tmp_path, migration_home=native)
             runtime = _real_http_adapter(service, tmp_path)
             rows = service.migration_scan()["items"]
-            result = await service.migration_apply([row["id"] for row in rows])
+            result = await service.migration_apply([row["id"] for row in rows], clean_api_keys=True)
             assert result["applied"] == 1
             [source] = store.config.sources
             assert await runtime.credential_auth_scheme(source.credential_ref) == "bearer"

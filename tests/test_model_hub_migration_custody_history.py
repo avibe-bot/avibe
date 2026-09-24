@@ -77,7 +77,7 @@ def _ids(service, backend: str | None = None) -> list[str]:
 def _apply(service, backend: str | None = None) -> dict:
     ids = _ids(service, backend)
     assert ids
-    return asyncio.run(service.migration_apply(ids))
+    return asyncio.run(service.migration_apply(ids, clean_api_keys=True))
 
 
 def _legacy(service) -> None:
@@ -353,7 +353,7 @@ def test_first_receipt_interrupted_forget_preserves_explicit_new_history(home, t
     with monkeypatch.context() as patch:
         patch.setattr(service.migration_journal, "forget", crash)
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply(ids))
+            asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     expected = ["claude"] if first == "oauth" else []
     assert service.migration_journal.completed()["oauth_custody_backends"] == expected
     counts = _counts(adapter)
@@ -368,7 +368,7 @@ def test_first_receipt_interrupted_forget_preserves_explicit_new_history(home, t
             asyncio.run(restarted.recover_runtime_intent())
         assert restarted.migration_journal.load() is None
     asyncio.run(restarted.recover_runtime_intent())
-    assert asyncio.run(restarted.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(restarted.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert _counts(adapter) == counts
     assert restarted.migration_journal.completed()["oauth_custody_backends"] == expected
     assert restarted.migration_journal.load() is None
@@ -418,7 +418,7 @@ def test_completion_crash_replays_custody_union_once(home, tmp_path, monkeypatch
         patch.setattr(NativeTakeoverJournal, "save", crash_save)
         patch.setattr(NativeTakeoverJournal, "forget", crash_forget)
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply(ids))
+            asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert triggered
     counts = _counts(adapter)
     restarted, _, _ = _service(tmp_path, migration_home=home)
@@ -426,9 +426,9 @@ def test_completion_crash_replays_custody_union_once(home, tmp_path, monkeypatch
     asyncio.run(restarted.recover_runtime_intent())
     if rejected:
         with pytest.raises(ModelHubError):
-            asyncio.run(restarted.migration_apply(ids))
+            asyncio.run(restarted.migration_apply(ids, clean_api_keys=True))
     else:
-        assert asyncio.run(restarted.migration_apply(ids))["applied"] == 1
+        assert asyncio.run(restarted.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert _counts(adapter) == counts
     assert restarted.migration_journal.load() is None
     receipt = restarted.migration_journal.completed()
@@ -464,7 +464,7 @@ def test_invalid_custody_evidence_is_not_empty_or_legacy(home, tmp_path, marker,
         native = _oauth(home, "claude")
         before = native.read_bytes()
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply(["mig_fixture_untrusted"]))
+            asyncio.run(service.migration_apply(["mig_fixture_untrusted"], clean_api_keys=True))
         assert native.read_bytes() == before
         assert _counts(adapter) == counts and store.config.to_payload() == previous
         assert journal.path.read_bytes() == original

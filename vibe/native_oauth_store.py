@@ -370,14 +370,49 @@ def _claude_same_account(
     )
 
 
-def _remove_codex_oauth(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _remove_codex_oauth(payload: Mapping[str, Any], *, keep_api_key: bool = False) -> dict[str, Any]:
     result = dict(payload)
     result.pop("tokens", None)
     result.pop("last_refresh", None)
-    result.pop("OPENAI_API_KEY", None)
+    if not keep_api_key:
+        result.pop("OPENAI_API_KEY", None)
     if result.get("auth_mode") == "chatgpt":
         result.pop("auth_mode", None)
     return result
+
+
+def codex_edit_keeping_api_key(edit: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Withdraw only the login from a Codex store edit; its static key stays.
+
+    A store with nothing to withdraw becomes a compare-only guard, so a change
+    made while the migration is in flight is still detected.
+    """
+
+    if edit is None:
+        return None
+    operations = []
+    for operation in _normalize_operations(edit):
+        before = operation.get("before")
+        exists, value = _state_value(before) if isinstance(before, dict) else (False, None)
+        payload: object = value
+        if isinstance(value, str):
+            try:
+                payload = json.loads(value)
+            except ValueError:
+                payload = None
+        if not exists or not isinstance(payload, dict):
+            operations.append(operation)
+            continue
+        after_payload = _remove_codex_oauth(payload, keep_api_key=True)
+        if after_payload == payload:
+            after: dict[str, Any] = dict(before)
+        elif operation.get("kind") == "file":
+            after = _state_for_json_payload(after_payload, value if isinstance(value, str) else "")
+        else:
+            stored = after_payload if isinstance(value, dict) else json.dumps(after_payload, ensure_ascii=False, indent=2)
+            after = {"exists": True, "value": stored} if after_payload else {"exists": False}
+        operations.append({**operation, "after": after})
+    return {**edit, "operations": operations}
 
 
 def _remove_claude_oauth(payload: Mapping[str, Any]) -> dict[str, Any]:

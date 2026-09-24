@@ -256,6 +256,14 @@ class NativeTakeoverJournal:
                     or any(not isinstance(value, str) or not value for value in payload["inventory_ids"])
                 )
             )
+            or not isinstance(payload.get("retained_native_ids", {}), dict)
+            or any(
+                not isinstance(key, str) or not key or not isinstance(value, dict)
+                or not isinstance(value.get("source_id"), str) or not value["source_id"]
+                or not isinstance(value.get("credential_ref"), str) or not value["credential_ref"]
+                for key, value in payload.get("retained_native_ids", {}).items()
+            )
+            or not isinstance(payload.get("clean_api_keys", True), bool)
             or not isinstance(payload.get("clean_native_stores", {}), dict)
             or any(
                 backend not in {"claude", "codex"}
@@ -375,12 +383,21 @@ class NativeTakeoverJournal:
         receipt = NativeTakeoverJournal(self.path.with_name("last-completed.json"))
         previous = receipt.load()
         custody_backends = self.oauth_custody_backends(previous) | self.oauth_custody_backends(record)
+        # A batch replaces only the store proofs it touched; a copy-only batch
+        # leaves another batch's verified-clean store revision in place.
+        touched_stores = {store.get("backend") for store in record.get("keychain", [])}
         clean_stores = {
             backend: revision
             for backend, revision in (previous or {}).get("clean_native_stores", {}).items()
-            if backend not in record["backends"]
+            if backend not in touched_stores
         }
         clean_stores.update(record.get("clean_native_stores", {}))
+        # Static keys copied without cleanup stay native across later batches;
+        # each one remains hidden from pending inventory while its Source lives.
+        retained = {
+            **(previous or {}).get("retained_native_ids", {}),
+            **record.get("retained_native_ids", {}),
+        }
         receipt.save({
             "version": 1,
             "phase": "complete",
@@ -399,6 +416,8 @@ class NativeTakeoverJournal:
                 if source["id"] in record["source_ids"]
             },
             "clean_native_stores": clean_stores,
+            "retained_native_ids": retained,
+            **({"clean_api_keys": record["clean_api_keys"]} if "clean_api_keys" in record else {}),
             "oauth_custody_backends": sorted(custody_backends),
         })
         self.forget()

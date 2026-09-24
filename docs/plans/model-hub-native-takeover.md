@@ -10,7 +10,9 @@ remaining live-account verification boundaries are described below.
   Runtime enablement is not consent to transfer or delete native credentials.
 - Switching a backend from Direct to Hub first offers the existing migration
   dialog when native credentials are present. The dialog selects accounts and
-  has one consequence sentence plus **Not now** / **Start migration**.
+  has one consequence sentence plus **Not now** / **Start migration**. When the
+  selection includes an API key it also offers one unchecked-by-default opt-in,
+  **Also remove the API keys from the native CLI configuration**.
   Dismissing it leaves the backend and native authentication unchanged.
 - The same dialog is available to existing Hub users through **One-click
   migration**. Existing native subscription sources are eligible for custody
@@ -24,7 +26,9 @@ remaining live-account verification boundaries are described below.
   Success means takeover and cleanup completed, not just import accepted.
 - Chinese product name: `模型网关`; English: `Model Hub`. The approved Chinese
   consequence sentence is exactly:
-  `迁移后，CLI的认证信息将完全交由模型网关管理`
+  `迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。`
+  It replaces the earlier `迁移后，CLI的认证信息将完全交由模型网关管理`, which
+  promised a withdrawal API keys no longer undergo by default.
 
 ## Public boundary
 
@@ -33,7 +37,7 @@ The existing endpoints and response envelopes remain compatible:
 | Endpoint | Request | Successful response data |
 | --- | --- | --- |
 | `POST /api/models/migration/scan` | none | `scan: { items: MigrationItem[] }` |
-| `POST /api/models/migration/apply` | `{ item_ids: string[] }` | `{ applied: number, sources: Source[], added_to: Placement[] }` |
+| `POST /api/models/migration/apply` | `{ item_ids: string[], clean_api_keys?: boolean }` | `{ applied: number, sources: Source[], added_to: Placement[] }` |
 
 Scan is read-only. It never transfers custody, prompts for browser login,
 refreshes tokens, deletes native material, or returns secrets. Item IDs bind
@@ -70,7 +74,22 @@ and then present that two-request sequence as atomic.
 5. Upload HTTP 200 and protocol inventory are not upstream OAuth validation.
    No completion claim may be based only on them. No new browser login is
    required for a compatible, valid, refresh-capable native grant.
-6. Remove only replaced authentication and direct-routing settings. Preserve
+6. Subscription OAuth always changes owner: its native grant is withdrawn,
+   because a rotating refresh token cannot have two holders. An API key is a
+   static credential Hub launches already shadow, so by default it is copied and
+   its native configuration (shell startup files, each backend's config and
+   provider routing, the Avibe-saved `agents.<backend>` key, and a Codex
+   `OPENAI_API_KEY` even when it shares a store with a withdrawn ChatGPT login)
+   stays in place; only `clean_api_keys: true` removes it. A kept key-only
+   store is still guarded compare-only. The completion receipt maps each kept
+   key to the Hub Source and credential it was copied into, so a later scan
+   does not offer the same unchanged key again while Hub holds that copy; a
+   changed key, or one whose Source was deleted or re-keyed, is offered and
+   migrates afresh. The receipt records the cleanup choice, and a retry that
+   changes it is a conflict rather than a replay. A scan admits a key another
+   native config still references; only its cleanup is refused before any
+   write. When cleanup runs, remove only replaced
+   authentication and direct-routing settings. Preserve
    sessions, skills, MCP, unrelated providers, and unrelated configuration
    fields. Recheck all supported precedence layers so an overriding project,
    environment, or legacy setting cannot silently keep direct authentication.

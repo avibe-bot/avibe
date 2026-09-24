@@ -1710,7 +1710,9 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，所选认证由模型网关管理。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。",
+        "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
+        "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
         "sharedFiles": "这些后端共用文件中保存的认证，需要一起迁移：{{backends}}。勾选或取消其中一个，会同时更新全部关联后端。",
         "scanFailed": "扫描 Agent 配置失败，请重试",
@@ -5071,7 +5073,7 @@
     },
     "import": {
       "title": "迁移到模型网关",
-      "description": "迁移后，这些助手改用模型网关连接模型，原配置文件里对应的 Key 会被移除，其他设置不变。",
+      "description": "迁移后，这些助手改用模型网关连接模型。原配置文件里的 Key 默认保留，这些助手不再使用它们，其他设置不变。",
       "action_one": "查看选中的 {{count}} 项",
       "action_other": "查看选中的 {{count}} 项",
       "scopeNote": "这里只迁移 API Key。订阅登录和无法迁移的配置，请到设置中处理。",
@@ -5081,7 +5083,7 @@
       "progressDetail": "正在迁移认证并更新关联助手的连接",
       "done_one": "已迁移 {{count}} 项配置",
       "done_other": "已迁移 {{count}} 项配置",
-      "doneDetail": "迁移和原生认证清理已完成。请确认助手的模型路由。",
+      "doneDetail": "迁移已完成。请确认助手的模型路由。",
       "remaining_one": "还有 {{count}} 项需要查看，可随时继续",
       "remaining_other": "还有 {{count}} 项需要查看，可随时继续",
       "remainingAction": "继续选择",

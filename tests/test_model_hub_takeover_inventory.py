@@ -34,7 +34,7 @@ def test_global_and_project_keys_are_all_imported_and_unrelated_data_survives(mo
     service.migration_project_roots = lambda: (project,)
     ids = [item["id"] for item in service.migration_scan()["items"]]
     assert len(ids) == 2
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 2
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 2
     assert len(adapter.provisioned) == 2
     assert store.config.agents["opencode"].mode == "hub"
     for path in (global_path, project_path):
@@ -55,9 +55,9 @@ def test_shadowed_opencode_auth_key_is_not_silently_deleted(monkeypatch, tmp_pat
     ids = [item["id"] for item in service.migration_scan()["items"]]
     assert len(ids) == 2
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids[:1]))
+        asyncio.run(service.migration_apply(ids[:1], clean_api_keys=True))
     assert adapter.provisioned == []
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 2
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 2
     assert len(adapter.keys) == 2
     assert json.loads(auth_path.read_text()) == {}
 
@@ -85,20 +85,20 @@ def test_keychain_takeover_preserves_mcp_without_offering_it_as_a_new_login(monk
     service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert keychain.read_calls == []  # Metadata-only consent.
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     assert json.loads(path.read_text()) == {"mcpOAuth": {"provider": "preserved"}}
     assert json.loads(keychain.items[locator][0]) == {"mcpOAuth": {"provider": "preserved"}}
     reads_after_takeover = len(keychain.read_calls)
     assert service.migration_scan()["items"] == []
     assert len(keychain.read_calls) == reads_after_takeover
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     # A subsequent backend migration must not forget the verified clean store.
     _write(home / ".config/opencode/opencode.json", json.dumps({
         "provider": {"openai": {"options": {"apiKey": "fixture-other-key"}}},
     }))
     next_ids = [row["id"] for row in service.migration_scan()["items"]]
-    assert asyncio.run(service.migration_apply(next_ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(next_ids, clean_api_keys=True))["applied"] == 1
     assert service.migration_scan()["items"] == []
     assert len(keychain.read_calls) == reads_after_takeover
     # A changed metadata revision is never suppressed by that receipt.
@@ -131,7 +131,7 @@ def test_unchanged_unrelated_keychain_container_completes_without_import(monkeyp
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert len(ids) == 1
     assert not keychain.read_calls
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert store.config.agents[backend].mode == "hub"
     assert not store.config.sources
     assert not adapter.provisioned and not adapter.oauth_provisioned
@@ -140,7 +140,7 @@ def test_unchanged_unrelated_keychain_container_completes_without_import(monkeyp
     reads = len(keychain.read_calls)
     assert reads > 0
     assert service.migration_scan()["items"] == []
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert len(keychain.read_calls) == reads
     keychain.items[locator] = (original[locator][0], "fixture-new-revision")
     keychain.mdates[locator] += 1
@@ -179,8 +179,8 @@ def test_empty_codex_container_never_authorizes_deleting_dormant_file_grant(
     store.config.agents["codex"].mode = "direct"
     ids = [row["id"] for row in service.migration_scan()["items"]]
     if with_api_key:
-        # The key migrates; the dormant file grant is never deleted.
-        asyncio.run(service.migration_apply(ids))
+        # The key migrates (removed only on request); the dormant file grant is never deleted.
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
         assert json.loads(dormant.read_bytes()) == {"tokens": payload["tokens"]}
         assert store.config.agents["codex"].mode == "hub"
         assert len(adapter.provisioned) == len(store.config.sources) == 1
@@ -189,7 +189,7 @@ def test_empty_codex_container_never_authorizes_deleting_dormant_file_grant(
         assert service.migration_journal.load() is None
         return
     else:
-        assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+        assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
         assert store.config.agents["codex"].mode == "hub"
     assert dormant.read_bytes() == before
     assert not store.config.sources
@@ -240,7 +240,7 @@ def test_empty_container_evidence_cannot_hide_denial_or_an_intervening_login(
     adapter.start = start
     keychain.read_denied = boundary == "permission"
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert not store.config.sources
     assert not adapter.oauth_provisioned and not adapter.provisioned
     assert not keychain.delete_calls and not keychain.write_calls
@@ -255,7 +255,7 @@ def test_empty_container_evidence_cannot_hide_denial_or_an_intervening_login(
         # A new, explicit consent can now take over the new login.
         adapter.ensure_installed = lambda **kwargs: _return_async(EngineEnsureResult(status, False))
         adapter.start = lambda: _return_async(status)
-        assert asyncio.run(service.migration_apply(new_ids))["applied"] == 1
+        assert asyncio.run(service.migration_apply(new_ids, clean_api_keys=True))["applied"] == 1
         assert len(adapter.oauth_provisioned) == 1
         assert service.migration_journal.load() is None
 
@@ -276,7 +276,9 @@ def test_unsupported_provider_blocks_only_its_cli_before_any_cleanup(monkeypatch
     service, _, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert {row["proposed_action"] for row in rows} == {"import", "reauth"}
-    asyncio.run(service.migration_apply([row["id"] for row in rows if row["proposed_action"] == "import"]))
+    asyncio.run(service.migration_apply(
+        [row["id"] for row in rows if row["proposed_action"] == "import"], clean_api_keys=True,
+    ))
     # The OAuth provider the Hub cannot carry stays exactly as it was.
     assert json.loads(path.read_bytes()) == {
         "github-copilot": json.loads(before)["github-copilot"],
@@ -294,7 +296,7 @@ def test_project_key_changed_after_consent_refuses_without_import(monkeypatch, t
     ids = [row["id"] for row in service.migration_scan()["items"]]
     _write(path, json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-second"}}))
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert adapter.provisioned == []
     assert json.loads(path.read_text())["env"]["ANTHROPIC_API_KEY"] == "fixture-second"
 
@@ -342,7 +344,7 @@ wire_api = "responses"
 
     service.migration_guard = guard
     with pytest.raises(ModelHubError) as failure:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert failure.value.code == "migration_item_conflict"
     assert not adapter.provisioned and not adapter.oauth_provisioned
     assert store.config.agents["codex"].mode == "direct"
@@ -358,7 +360,7 @@ def test_existing_hub_key_still_clears_legacy_auth_when_hub_config_is_unchanged(
     }))
     service, memory, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
-    asyncio.run(service.migration_apply(ids))
+    asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     config_path = tmp_path / "avibe-config.json"
     monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
     config = V2Config.default()
@@ -371,7 +373,7 @@ def test_existing_hub_key_still_clears_legacy_auth_when_hub_config_is_unchanged(
 
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert len(ids) == 1
-    result = asyncio.run(service.migration_apply(ids))
+    result = asyncio.run(service.migration_apply(ids, clean_api_keys=True))
 
     assert result["applied"] == 1
     loaded = V2Config.load(config_path=config_path)
@@ -401,12 +403,12 @@ def test_reused_hub_key_requires_current_proof_before_native_cleanup(monkeypatch
     if not accepted:
         adapter.unproven_observation_vendor = "anthropic"
         with pytest.raises(ModelHubError) as failure:
-            asyncio.run(service.migration_apply(ids))
+            asyncio.run(service.migration_apply(ids, clean_api_keys=True))
         assert failure.value.code == "migration_item_conflict"
         assert native.read_bytes() == before
         assert store.config.to_payload() == previous
     else:
-        assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+        assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
         assert store.config.to_payload()["sources"] == previous["sources"]
         assert json.loads(native.read_text()) == {"env": {}, "mcp": {"keep": True}}
     assert len(adapter.observed) == observed + 1
@@ -450,7 +452,7 @@ def test_interrupted_claude_auth_backup_is_imported_and_cannot_restore_old_key(m
     service, _, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert len(rows) == 3
-    result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    result = asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert result["applied"] == 3
     assert len(adapter.oauth_provisioned) == 1
     assert {target[2] for target in adapter.keys.values()} == {
@@ -482,7 +484,7 @@ def test_explicit_incompatible_native_grant_is_blocked_before_custody(monkeypatc
     rows = service.migration_scan()["items"]
     assert len(rows) == 1 and rows[0]["proposed_action"] == "keep_native"
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([rows[0]["id"]]))
+        asyncio.run(service.migration_apply([rows[0]["id"]], clean_api_keys=True))
     assert path.read_bytes() == original
     assert not adapter.oauth_provisioned
 
@@ -521,7 +523,7 @@ request_max_retries = 3
     service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
     assert len(ids) == 1
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert len(adapter.provisioned) == 1
     content = path.read_text()
     assert "fixture-bearer-key" not in content
@@ -552,9 +554,9 @@ def test_duplicate_apply_joins_owned_operation_and_shutdown_waits(monkeypatch, t
             stopped.append(True)
 
         adapter.sync_sources, adapter.stop = paused_sync, stop
-        first = asyncio.create_task(service.migration_apply(ids))
+        first = asyncio.create_task(service.migration_apply(ids, clean_api_keys=True))
         await entered.wait()
-        second = asyncio.create_task(service.migration_apply(ids))
+        second = asyncio.create_task(service.migration_apply(ids, clean_api_keys=True))
         shutdown = asyncio.create_task(service.stop())
         await asyncio.sleep(0)
         assert not second.done() and not shutdown.done()

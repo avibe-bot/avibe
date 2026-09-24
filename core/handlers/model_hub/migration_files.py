@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,7 @@ from vibe.codex_config import (
     _dump_toml,
     get_codex_config_paths,
 )
+from vibe.native_oauth_store import codex_edit_keeping_api_key
 from vibe.opencode_config import (
     get_opencode_auth_path,
     get_opencode_config_paths,
@@ -191,18 +193,44 @@ def planned_native_references(
     return {name: tuple(paths) for name, paths in references.items()}
 
 
+def _keep(payload: dict) -> None:
+    """Guard a file whose static credentials stay native."""
+
+
+def native_store_items(
+    items: list[NativeMigrationItem], *, clean_api_keys: bool,
+) -> list[NativeMigrationItem]:
+    """Items with the native credential-store edit (file or Keychain) to apply.
+
+    A subscription login is always withdrawn. Without key cleanup a Codex
+    store keeps its static key, and a key-only store becomes a compare-only
+    guard so a change during the migration is still detected.
+    """
+    if clean_api_keys:
+        return items
+    return [
+        replace(item, native_store_edit=codex_edit_keeping_api_key(item.native_store_edit))
+        if item.backend == "codex" and item.native_store_edit else item
+        for item in items
+    ]
+
+
 def plan_native_cleanup(
     items: list[NativeMigrationItem],
     *,
     home: Path | None,
     project_roots: tuple[Path, ...] = (),
     _include_shell: bool = True,
+    clean_api_keys: bool = True,
 ) -> list[NativeFileEdit]:
     """One before/after image per path, even when providers share a file.
 
     Only selected backend authentication is removed. Planning refuses malformed
     files instead of using the forgiving UI probes that can return an empty
-    document after a parse failure.
+    document after a parse failure. Without ``clean_api_keys`` static keys are
+    copied, not withdrawn: a Hub launch pins its own connection above them.
+    Subscription grants rotate and keep a single owner, so they are always
+    withdrawn. Unchanged files are still guarded.
     """
     edits: dict[Path, NativeFileEdit] = {}
     selected_backends = {item.backend for item in items}
@@ -216,7 +244,7 @@ def plan_native_cleanup(
             edits[guard.path] = guard
     # Native-store resolution owns credential paths (including isolated secure
     # roots), while this planner owns one final file image for the whole batch.
-    for item in items:
+    for item in native_store_items(items, clean_api_keys=clean_api_keys):
         for operation in (item.native_store_edit or {}).get("operations", []):
             if operation.get("kind") != "file":
                 continue
@@ -263,6 +291,10 @@ def plan_native_cleanup(
     for item in items:
         if item.secret:
             selected_by_backend.setdefault(item.backend, set()).add(item.secret)
+    oauth_backends = {
+        item.backend for item in items
+        if item.kind == "oauth_native" and not item.native_store_placeholder
+    }
 
     def selected_api_key(value: object, backend: str) -> bool:
         # Producers normalize static keys for proof/custody. Exact raw bytes
@@ -314,7 +346,7 @@ def plan_native_cleanup(
                     env.pop("ANTHROPIC_BASE_URL", None)
 
         for path in claude_settings_paths(home, project_roots):
-            edit_json(path, clear_settings, guard_unchanged=True)
+            edit_json(path, clear_settings if clean_api_keys else _keep, guard_unchanged=True)
         backup_path = get_claude_oauth_settings_backup_path(home).absolute()
         backup_edit = edits.get(backup_path)
         if backup_edit and backup_edit.before != backup_edit.after and backup_edit.after is not None:
@@ -326,18 +358,27 @@ def plan_native_cleanup(
         config_path, auth_path = get_codex_config_paths(home)
 
         def clear_auth(payload: dict) -> None:
-            # Credentials outside the selection stay native (see Claude above).
-            if not payload.get("OPENAI_API_KEY") or selected_api_key(payload["OPENAI_API_KEY"], "codex"):
+            # Credentials outside the selection stay native (see Claude above);
+            # without cleanup a selected key is copied and stays native too.
+            if clean_api_keys and (
+                not payload.get("OPENAI_API_KEY") or selected_api_key(payload["OPENAI_API_KEY"], "codex")
+            ):
                 payload.pop("OPENAI_API_KEY", None)
             if not payload.get("tokens") or any(
                 item.backend == "codex" and item.kind == "oauth_native"
                 and not item.native_store_placeholder
                 for item in items
             ):
-                for key in ("tokens", "auth_mode", "last_refresh"):
+                for key in ("tokens", "last_refresh"):
                     payload.pop(key, None)
+                # A kept key still authenticates native launches; only the login goes.
+                if not payload.get("OPENAI_API_KEY") or payload.get("auth_mode") == "chatgpt":
+                    payload.pop("auth_mode", None)
 
-        edit_json(auth_path, clear_auth, guard_unchanged=True)
+        edit_json(
+            auth_path, clear_auth if clean_api_keys or "codex" in oauth_backends else _keep,
+            guard_unchanged=True,
+        )
         managed_ids = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
         # An env_key is carried only when a selected row resolved it to a
         # selected key; an unresolved or unselected one stays native.
@@ -386,8 +427,19 @@ def plan_native_cleanup(
             if config is None:
                 continue
             before = json.dumps(config, sort_keys=True, default=str)
-            removable = set(managed_ids)
-            removable.update(item.native_provider_id for item in items if item.backend == "codex" and item.native_provider_id)
+            # Without key cleanup a provider stays unless only the withdrawn
+            # login routes through it.
+            removable = set(managed_ids) if clean_api_keys else set()
+            removable.update(
+                item.native_provider_id for item in items
+                if item.backend == "codex" and item.native_provider_id
+                and (clean_api_keys or item.kind == "oauth_native")
+            )
+            if not clean_api_keys:
+                removable -= {
+                    item.native_provider_id for item in items
+                    if item.backend == "codex" and item.kind != "oauth_native"
+                }
             providers = config.get("model_providers")
             if isinstance(providers, dict):
                 # A retained provider keeps its selectors and whatever
@@ -430,7 +482,10 @@ def plan_native_cleanup(
             # A consented empty container is unrelated data, not replaced
             # authentication. Keep its selector so the recorded clean revision
             # remains observable (and a later native login is not hidden).
-            if not any(item.backend == "codex" and item.native_store_placeholder for item in items):
+            # A kept key may live in the selected store, so only cleanup drops it.
+            if clean_api_keys and not any(
+                item.backend == "codex" and item.native_store_placeholder for item in items
+            ):
                 config.pop(CREDENTIALS_STORE_KEY, None)
             if json.dumps(config, sort_keys=True, default=str) != before:
                 edits[config_path] = NativeFileEdit(config_path.absolute(), content, _dump_toml(config).encode())
@@ -515,7 +570,7 @@ def plan_native_cleanup(
                         provider.pop("options", None)
 
         for path in opencode_config_paths(home, project_roots):
-            edit_json(path, clear_providers, jsonc=True, guard_unchanged=True)
+            edit_json(path, clear_providers if clean_api_keys else _keep, jsonc=True, guard_unchanged=True)
 
         def clear_provider_auth(payload: dict) -> None:
             for vendor in vendors:
@@ -523,12 +578,15 @@ def plan_native_cleanup(
                     continue
                 payload.pop(vendor, None)
 
-        edit_json(opencode_auth_path(home), clear_provider_auth, guard_unchanged=True)
+        edit_json(
+            opencode_auth_path(home), clear_provider_auth if clean_api_keys else _keep,
+            guard_unchanged=True,
+        )
     if backends and _include_shell:
         from .migration_shell import cleanup_shell_profile, read_shell_profiles
 
         selected_values: dict[str, str] = {}
-        for item in items:
+        for item in items if clean_api_keys else ():
             for name, value in item.shell_values:
                 if name in selected_values and selected_values[name] != value:
                     raise TakeoverStateError("conflicting native credential snapshots")
