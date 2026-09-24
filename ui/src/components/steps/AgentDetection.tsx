@@ -670,7 +670,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
      sentence rather than beside the action, so it reads as part of the explanation
      instead of a second control competing with the button. */
   const rescan = (
-          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
+          <Button type="button" variant="link" size="xs" className="h-auto p-0"
             onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
             <RefreshCw size={12} />{t('agentDetection.rescan')}
           </Button>
@@ -680,7 +680,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
            sentence is what gets centred. The rescan rides in the flanking column
            beside it — inside one centred line it pulled the sentence off the
            action's axis by half its own width. */
-        <p className="onboarding-setup-hint-line text-xs text-muted">
+        <p className="onboarding-setup-hint-line text-muted">
           <span>{t('onboarding.connection.entryHint')}</span>
           {rescan}
         </p>

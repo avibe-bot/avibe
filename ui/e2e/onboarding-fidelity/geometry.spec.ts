@@ -575,7 +575,7 @@ const expectSamePair = async (page: Page, before: Pair) => {
  */
 test.describe('shared screen anchors', () => {
   for (const viewport of [{ width: 1132, height: 664 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }]) {
-    test(`${viewport.width} desktop captions share one horizontal line`, async ({ page }) => {
+    test(`${viewport.width} desktop captions sit on their own lines`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await serveProduct(page);
       await serveModelHub(page);
@@ -584,16 +584,27 @@ test.describe('shared screen anchors', () => {
         const rect = await box(page, selector);
         return rect.y + rect.height / 2;
       };
+      const fontSize = (selector: string) =>
+        page.locator(selector).first().evaluate((node) => getComputedStyle(node).fontSize);
+      // The welcome caption is a label cut into the return wire: centred on the wire's
+      // horizontal run, which is y=338 of the 350-high wire box.
+      const wires = await box(page, '.onboarding-wires');
       const welcome = await center('.onboarding-story-caption');
+      expect(welcome).toBeCloseTo(wires.y + wires.height * 338 / 350, 0);
+      const welcomeSize = await fontSize('.onboarding-story-caption');
       await page.getByRole('button', { name: '立即开始' }).click();
       await page.clock.runFor(950);
       await expect(page.locator('.setup-provider-summary')).toContainText('已选');
       const providers = await center('.setup-provider-summary');
+      expect(welcomeSize).toBe(await fontSize('.setup-provider-summary'));
       await page.locator('.onboarding-setup-hint button').click();
       await page.clock.runFor(950);
       const assistants = await center('.onboarding-setup-hint');
-      expect(welcome).toBeCloseTo(providers, 0);
       expect(assistants).toBeCloseTo(providers, 0);
+      // The rescan link is centred on the sentence it follows, in the same type.
+      expect(await center('.onboarding-setup-hint-line > button')).toBeCloseTo(await center('.onboarding-setup-hint-line > span'), 0);
+      expect(await fontSize('.onboarding-setup-hint-line > span')).toBe(welcomeSize);
+      expect(await fontSize('.onboarding-setup-hint-line > button')).toBe(welcomeSize);
     });
   }
 
