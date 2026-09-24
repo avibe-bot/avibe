@@ -21,7 +21,6 @@ export const sourceProviderIdentity = (source: Pick<Source, 'vendor' | 'base_url
 
 export const sourceDetail = (source: Source): string | null => {
   const parts: string[] = [];
-  if (source.account_label) parts.push(source.account_label);
   if (source.base_url) {
     try {
       const url = new URL(source.base_url);

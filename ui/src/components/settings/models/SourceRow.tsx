@@ -4,11 +4,8 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
-import {
-  SOURCE_PROVIDER_COPY_KEYS,
-  sourceDetail,
-  sourceProviderIdentity,
-} from './sourcePresentation';
+import { sourceDetail } from './sourcePresentation';
+import { SourcePrivateValue } from './SourcePrivacy';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
@@ -23,10 +20,7 @@ export const SourceRow: React.FC<{
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const detail = sourceDetail(source);
-  const providerIdentity = sourceProviderIdentity(source);
-  const providerCopyKey = SOURCE_PROVIDER_COPY_KEYS[providerIdentity];
-  const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
-  const interfaceLabel = `${providerLabel} · ${t(PROTOCOL_COPY_KEYS[source.protocol])}`;
+  const interfaceLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
   const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'card', i18n.language, now, {
@@ -59,17 +53,18 @@ export const SourceRow: React.FC<{
       <span className="min-w-0 flex-1">
         <span className="block min-w-0 truncate text-[12.5px] font-bold leading-[18px] text-foreground" title={source.display_name}>{source.display_name}</span>
         <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : accent])}>
+            {t(`settings.models.upstream.kind.${kindKey}`)}
+          </span>
           <span
             className="model-hub-pill model-hub-source-interface-pill border"
             title={interfaceLabel}
           >
             <span className="truncate">{interfaceLabel}</span>
           </span>
-          <span className={cn('model-hub-pill border', ACCENT_PILL[accent])}>
-            {t(`settings.models.upstream.kind.${kindKey}`)}
-          </span>
         </span>
-        {detail && <span className="model-hub-upstream-detail mt-1 block truncate font-mono text-[10.5px] leading-[14px]" title={detail}>{detail}</span>}
+        {source.account_label && <span data-source-account><SourcePrivateValue value={source.account_label} className="model-hub-upstream-detail mt-1 text-[10.5px] leading-[14px]" /></span>}
+        {detail && <SourcePrivateValue value={detail} className="model-hub-upstream-detail mt-1 text-[10.5px] leading-[14px]" />}
         {state.key && <span className={cn('mt-1 flex items-center gap-[5px] text-[10.5px] font-semibold', state.textClass)}>
           <span className={cn('size-[5px] rounded-full', state.dotClass)} />
           {t(state.key, state.values)}

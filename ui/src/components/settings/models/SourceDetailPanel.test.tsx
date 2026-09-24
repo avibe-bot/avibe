@@ -206,6 +206,7 @@ const renderEchoPanel = (
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   commits.length = 0;
   sourceSnapshot = 0;
   vi.restoreAllMocks();
@@ -213,6 +214,26 @@ afterEach(() => {
 });
 
 describe('SourceDetailPanel', () => {
+  it.each(['en', 'zh'])('hides endpoint, key and domain-derived metadata with one header control in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    const { container } = render(<I18nextProvider i18n={locale}>
+      <CommittedPanel source={{ ...source, masked_credential: 'sk-…1234' }} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider>);
+    const hide = screen.getByRole('button', { name: locale.t('settings.models.upstream.hidePrivateDetails') });
+    expect(hide.closest('.model-hub-source-bar')).not.toBeNull();
+    expect(container.querySelector('.model-hub-source-metadata button')).toBeNull();
+    await userEvent.click(hide);
+    expect(container.innerHTML).not.toContain('relay.example');
+    expect(container.innerHTML).not.toContain('sk-…1234');
+    expect(screen.getByText('Anthropic Messages', { exact: true })).toBeTruthy();
+    const show = screen.getByRole('button', { name: locale.t('settings.models.upstream.showPrivateDetails') });
+    show.focus();
+    await userEvent.keyboard(' ');
+    expect(screen.getByText('https://relay.example/v1', { exact: true })).toBeTruthy();
+    expect(screen.getByText('sk-…1234', { exact: true })).toBeTruthy();
+    expect(screen.getByTitle('relay.example · Anthropic Messages')).toBeTruthy();
+  });
+
   it.each(['upstream', 'catalog', 'user', null] as const)('keeps provider inventory independent of %s reasoning metadata', async (provenance) => {
     const model = { ...source.models[0], reasoning_efforts_source: provenance };
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts');
