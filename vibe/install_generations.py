@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 RECEIPT = ".avibe-install.json"
 INSTALLER_PID = ".avibe-installing"
+_PATH_OPTIONS = ("--candidate", "--launcher", "--source-generation")
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,51 @@ def _windows_sid_to_text(sid: object) -> str:
         local_free(text)
 
 
+def _windows_sid_to_account_name(sid: object) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    lookup_account_sid = advapi32.LookupAccountSidW
+    lookup_account_sid.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_wchar_p,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    lookup_account_sid.restype = wintypes.BOOL
+    name_size = wintypes.DWORD()
+    domain_size = wintypes.DWORD()
+    sid_type = wintypes.DWORD()
+    lookup_account_sid(
+        None,
+        sid,
+        None,
+        ctypes.byref(name_size),
+        None,
+        ctypes.byref(domain_size),
+        ctypes.byref(sid_type),
+    )
+    if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
+        raise OSError(ctypes.get_last_error(), "LookupAccountSidW size failed")
+    name = ctypes.create_unicode_buffer(name_size.value)
+    domain = ctypes.create_unicode_buffer(domain_size.value)
+    if not lookup_account_sid(
+        None,
+        sid,
+        name,
+        ctypes.byref(name_size),
+        domain,
+        ctypes.byref(domain_size),
+        ctypes.byref(sid_type),
+    ):
+        raise OSError(ctypes.get_last_error(), "LookupAccountSidW failed")
+    return f"{domain.value}\\{name.value}" if domain.value else name.value
+
+
 def _windows_filesystem_owner(path: Path) -> _OwnerIdentity:
     import ctypes
     from ctypes import wintypes
@@ -194,7 +240,12 @@ def _windows_filesystem_owner(path: Path) -> _OwnerIdentity:
     if result:
         raise OSError(result, f"GetNamedSecurityInfoW failed for {path}")
     try:
-        return _OwnerIdentity(sid=_windows_sid_to_text(owner_sid))
+        sid = _windows_sid_to_text(owner_sid)
+        try:
+            name = _windows_sid_to_account_name(owner_sid)
+        except OSError:
+            name = None
+        return _OwnerIdentity(sid=sid, name=name)
     finally:
         local_free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
         local_free.argtypes = [ctypes.c_void_p]
@@ -256,7 +307,12 @@ def _windows_process_owner(process: psutil.Process) -> _OwnerIdentity:
             ):
                 raise OSError(ctypes.get_last_error(), f"GetTokenInformation failed for pid {process.pid}")
             owner_sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents
-            return _OwnerIdentity(sid=_windows_sid_to_text(owner_sid))
+            sid = _windows_sid_to_text(owner_sid)
+            try:
+                name = _windows_sid_to_account_name(owner_sid)
+            except OSError:
+                name = None
+            return _OwnerIdentity(sid=sid, name=name)
         finally:
             close_handle(token_handle)
     finally:
@@ -287,6 +343,27 @@ def _process_owner(process: psutil.Process) -> _OwnerIdentity:
         except psutil.NoSuchProcess:
             raise
         except (OSError, RuntimeError) as exc:
+            # OpenProcess can race a process that disappeared after
+            # process_iter() captured it.  Preserve that normal snapshot race
+            # as NoSuchProcess so the caller skips only that process; a live
+            # or unclassifiable process still defers collection.
+            try:
+                if not process.is_running():
+                    raise psutil.NoSuchProcess(process.pid)
+            except psutil.NoSuchProcess:
+                raise
+            except psutil.Error:
+                pass
+            try:
+                name = process.username()
+            except psutil.NoSuchProcess:
+                raise
+            except (OSError, psutil.Error, AttributeError) as owner_exc:
+                raise _ProcessInspectionUnavailable(
+                    f"cannot inspect process owner for pid {process.pid}"
+                ) from owner_exc
+            if name:
+                return _OwnerIdentity(name=name)
             raise _ProcessInspectionUnavailable(
                 f"cannot inspect process owner for pid {process.pid}"
             ) from exc
@@ -317,6 +394,7 @@ def _owners_match_any(
     install_owners: list[_OwnerIdentity],
 ) -> bool:
     comparable = False
+    incomparable = False
     for install_owner in install_owners:
         if process_owner.sid is not None and install_owner.sid is not None:
             comparable = True
@@ -330,7 +408,9 @@ def _owners_match_any(
             comparable = True
             if os.path.normcase(process_owner.name) == os.path.normcase(install_owner.name):
                 return True
-    if not comparable:
+        else:
+            incomparable = True
+    if incomparable or not comparable:
         raise _ProcessInspectionUnavailable("process and install owner identities are incomparable")
     return False
 
@@ -342,24 +422,119 @@ def _normalize_process_argument(value: object) -> str:
     return text
 
 
+def _shell_tokens_with_quote_provenance(
+    command: str,
+) -> list[tuple[str, tuple[bool, ...]]]:
+    """Parse a POSIX fallback command while retaining quoting evidence."""
+
+    tokens: list[tuple[str, tuple[bool, ...]]] = []
+    current: list[tuple[str, bool]] = []
+    token_started = False
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        value = command[index]
+        if quote is not None:
+            if value == quote:
+                quote = None
+            elif value == "\\" and quote == '"' and index + 1 < len(command):
+                index += 1
+                current.append((command[index], True))
+            else:
+                current.append((value, True))
+            token_started = True
+        elif value in "\"'":
+            quote = value
+            token_started = True
+        elif value == "\\":
+            if index + 1 >= len(command):
+                raise ValueError("unterminated escape in fallback command")
+            index += 1
+            current.append((command[index], True))
+            token_started = True
+        elif value.isspace():
+            if token_started:
+                tokens.append((
+                    "".join(value for value, _ in current),
+                    tuple(quoted for _, quoted in current),
+                ))
+                current = []
+                token_started = False
+        else:
+            current.append((value, False))
+            token_started = True
+        index += 1
+    if quote is not None:
+        raise ValueError("unterminated quote in fallback command")
+    if token_started:
+        tokens.append((
+            "".join(value for value, _ in current),
+            tuple(quoted for _, quoted in current),
+        ))
+    return tokens
+
+
+def _fallback_path_boundaries_are_proven(
+    command: str,
+    arguments: list[str],
+) -> bool:
+    if os.name == "nt":
+        return True
+    try:
+        tokens = _shell_tokens_with_quote_provenance(command)
+    except ValueError:
+        return False
+    if [value for value, _ in tokens] != arguments:
+        return False
+    if arguments and not all(tokens[0][1]):
+        return False
+    for index, argument in enumerate(arguments):
+        if argument in _PATH_OPTIONS:
+            if index + 1 >= len(tokens) or not all(tokens[index + 1][1]):
+                return False
+        elif any(argument.startswith(f"{option}=") for option in _PATH_OPTIONS):
+            option, operand = argument.split("=", 1)
+            offset = len(option) + 1
+            if not operand or not all(tokens[index][1][offset:]):
+                return False
+    return True
+
+
 def _relative_path_argument(
     value: str,
     *,
     index: int,
     previous: str | None,
     cwd: Path,
+    ignore_bare_interpreter: bool = False,
 ) -> Path | None:
+    for option in _PATH_OPTIONS:
+        prefix = f"{option}="
+        if value.startswith(prefix):
+            operand = value[len(prefix) :]
+            if not operand:
+                raise _ProcessInspectionUnavailable(f"empty path argument in {value}")
+            return None if Path(operand).is_absolute() else Path(operand)
     if not value or value.startswith("-") or "://" in value:
         return None
     if Path(value).is_absolute():
         return None
     if previous in {"--candidate", "--launcher", "--source-generation"}:
         return Path(value)
+    if (
+        value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or Path(cwd / value).is_file()
+    ):
+        return Path(value)
     if not (value in {".", ".."} or value.startswith(("./", "../", ".\\", "..\\"))):
         if "/" not in value and "\\" not in value:
             if index != 0:
                 return None
             name = Path(value).name.lower()
+            if ignore_bare_interpreter and name.startswith("python"):
+                return None
             if not name.startswith("python") and name not in {"vibe", "vibe.exe"}:
                 return None
     path = Path(value)
@@ -385,17 +560,9 @@ def _process_arguments(process: psutil.Process) -> list[str]:
             raise _ProcessInspectionUnavailable(
                 f"cannot parse command line for pid {process.pid}"
             ) from exc
-        if (
-            arguments
-            and Path(arguments[0]).is_absolute()
-            and not (
-                Path(arguments[0]).is_file()
-                and os.access(arguments[0], os.X_OK)
-            )
-            and not command.lstrip().startswith(('"', "'"))
-        ):
+        if not _fallback_path_boundaries_are_proven(command, arguments):
             raise _ProcessInspectionUnavailable(
-                f"cannot prove command-line boundaries for pid {process.pid}"
+                f"cannot prove command-line path boundaries for pid {process.pid}"
             )
     if not arguments:
         raise _ProcessInspectionUnavailable(f"cannot inspect command line for pid {process.pid}")
@@ -482,6 +649,7 @@ def _running_paths() -> set[Path]:
                         index=index,
                         previous=arguments[index - 1] if index else None,
                         cwd=cwd,
+                        ignore_bare_interpreter=process.pid == os.getpid(),
                     )
                 )
                 is not None
@@ -492,8 +660,15 @@ def _running_paths() -> set[Path]:
                     f"relative process paths have ambiguous launch provenance for pid {process.pid}"
                 )
             values = [*arguments]
+            values.extend(
+                value.split("=", 1)[1]
+                for value in arguments
+                if any(value.startswith(f"{option}=") for option in _PATH_OPTIONS)
+            )
             try:
                 values.append(process.exe())
+            except psutil.NoSuchProcess:
+                raise
             except (psutil.Error, OSError, AttributeError) as exc:
                 raise _ProcessInspectionUnavailable(
                     f"cannot inspect executable for pid {process.pid}"
@@ -576,9 +751,14 @@ def collect_before_activation(activation: AtomicActivation) -> list[Path]:
         for references in owned.values():
             launchers.update(references)
         for launcher in launchers:
-            generation = upgrade._launcher_generation(launcher, root)
-            if generation is not None:
-                kept.add(generation)
+            launcher_generation = upgrade._launcher_generation(launcher, root)
+            if launcher_generation is not None:
+                kept.add(launcher_generation)
+                # A symlink, hardlink, or marker-backed copy has a unique
+                # launcher identity. Do not broaden that proof into a byte
+                # match across every identical wheel copy, or repeated
+                # cross-volume installs would retain all generations.
+                continue
             try:
                 launcher_bytes = launcher.read_bytes()
             except FileNotFoundError:
@@ -586,8 +766,9 @@ def collect_before_activation(activation: AtomicActivation) -> list[Path]:
             try:
                 marker = launcher.parent / f".{launcher.name}.avibe-generation"
                 marked = Path(marker.read_text(encoding="utf-8-sig").strip())
-                if (generation := upgrade._generation_for_path(marked, root)) is not None:
+                if (generation := upgrade._generation_for_path(marked, root)) in owned:
                     kept.add(generation)
+                    continue
             except FileNotFoundError:
                 pass
             # A copied launcher can outlive a failed/stale marker write.
@@ -609,6 +790,15 @@ def collect_before_activation(activation: AtomicActivation) -> list[Path]:
                 shutil.rmtree(generation)
                 removed.append(generation)
             except OSError:
+                try:
+                    if generation.is_dir():
+                        _write_receipt(generation, owned[generation])
+                except Exception:
+                    logger.warning(
+                        "Could not restore ownership receipt for %s after partial cleanup",
+                        generation,
+                        exc_info=True,
+                    )
                 logger.warning("Could not collect owned install generation %s", generation, exc_info=True)
         if removed:
             logger.info("Collected %d superseded owned install generations", len(removed))

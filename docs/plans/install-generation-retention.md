@@ -31,7 +31,10 @@ generations with a successful-activation receipt, not arbitrary old directories.
   `chdir`, so collection retains all owned history for that operation.
 - Each successful activation attempts to record its stable launcher in its
   generation. All recorded launchers participate in collection, including symlink,
-  hardlink, and copy fallback identities. Missing copy markers cannot authorize deletion.
+  hardlink, and copy fallback identities. Once a symlink, hardlink, or valid copy
+  marker proves one generation, collection does not broaden that proof into a
+  byte match across identical wheel copies. Missing or stale copy markers use the
+  conservative byte fallback and cannot authorize deletion without a match.
 - When a second launcher targets an already receipted generation, its launcher
   reference is written under the install lock before the launcher is published.
   A failed reservation leaves the launcher and existing receipt unchanged. Fresh
@@ -69,9 +72,9 @@ normal PR CI and exact-head Codex review gates. No production cleanup or restart
 
 ## Local evidence
 
-- The focused retention suite after the safety-boundary correction: 50 passed.
+- The focused retention suite after the safety-boundary correction: 60 passed.
 - The install/upgrade consumer suite (`test_upgrade_flow`, retention, installer
-  script, and install-command E2E): 282 passed, 1 skipped locally because Docker
+  script, and install-command E2E): 292 passed, 1 skipped locally because Docker
   is unavailable.
 - First-head retention, dependency repair, and integrity suites: 255 passed;
   the Docker install test is skipped locally because Docker is unavailable.
@@ -109,9 +112,18 @@ assertions passed, then a delayed `ToastProvider` timer accessed `window` after
 test teardown. It is intentionally outside this retention patch.
 
 The local pre-push review also required narrow hardening corrections:
-bare interpreter names and separator-free source arguments now fail closed as
-relative references, ambiguous unquoted fallback command lines defer collection,
-Windows owner probes declare pointer-sized API handles and skip PID 0, and
-processes that exit during owner inspection are skipped as a normal snapshot race
-rather than deferring the whole collection pass. An alias cannot adopt an
-unreceipted generation.
+bare interpreter names from other processes and separator-free source arguments
+fail closed as relative references; only the current collector's own bare
+interpreter token is ignored. Ambiguous unquoted fallback command lines defer
+collection, including path-bearing options whose quoting cannot be proven.
+Inline `--candidate=`, `--launcher=`, and `--source-generation=` operands are
+also inspected rather than discarded as flags. Windows owner probes declare
+pointer-sized API handles and skip PID 0. A protected Windows process may use
+the platform-reported account name when the token handle is unavailable; the
+managed root carries the corresponding SID/account identity, while an
+unreadable or ambiguous identity still defers collection. Processes that exit
+during owner inspection are skipped as a normal snapshot race rather than
+deferring the whole collection pass. An alias cannot adopt an unreceipted
+generation. Copy fallback byte comparison is used only when the launcher has
+no proven symlink, hardlink, or valid generation marker; this keeps repeated
+identical wheel installs bounded while retaining marker failures conservatively.
