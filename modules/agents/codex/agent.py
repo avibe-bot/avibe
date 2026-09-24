@@ -48,7 +48,11 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
 )
-from core.resource_governance import governor_from_controller
+from core.resource_governance import (
+    observe_agent_resource_pressure,
+    governor_from_controller,
+    pids_failure_labels,
+)
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
@@ -259,6 +263,60 @@ class CodexAgent(BaseAgent):
         if transport is None:
             return lambda: None
         return lambda: self._transport_alive(transport)
+
+    def capture_backend_exit_failure(
+        self,
+        context: Any,
+    ) -> Callable[[], tuple[str, str] | None] | None:
+        """Bind resource diagnosis to the app-server generation owning this turn."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        base_session_id = str(payload.get("turn_base_session_id") or "").strip()
+        cwd = self._session_mgr.get_cwd(base_session_id) if base_session_id else None
+        transport = self._transports.get(cwd) if cwd else None
+        if transport is None:
+            return None
+
+        cached_diagnosis: tuple[str, str] | None = None
+        exit_checked = False
+
+        def diagnose() -> tuple[str, str] | None:
+            nonlocal cached_diagnosis, exit_checked
+            if exit_checked:
+                return cached_diagnosis
+            process = getattr(transport, "_process", None)
+            if process is None or getattr(process, "returncode", None) is None:
+                # A liveness failure may precede a definitive process exit.
+                return None
+            failure = self._resource_failure_for_transport(transport)
+            if failure is None:
+                # Shared cgroup observations belong to this exit boundary only.
+                # A later retry must not attach a newer event to an older death.
+                exit_checked = True
+                return None
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            if failure.kind == "pids":
+                visible = i18n_t(
+                    "error.agentPidsLimit",
+                    language,
+                    **pids_failure_labels(failure, language),
+                )
+            elif failure.kind == "memory":
+                visible = i18n_t("error.agentMemoryLimit", language)
+            else:
+                exit_checked = True
+                return None
+            cached_diagnosis = (
+                f"backend_runtime_exited_before_terminal\nResource diagnosis: {failure.message}",
+                f"❌ {visible}",
+            )
+            exit_checked = True
+            return cached_diagnosis
+
+        return diagnose
 
     def can_reuse_direct_connection_probe(self, cwd: str) -> bool:
         """Return whether a cached transport can test direct credentials."""
@@ -596,7 +654,13 @@ class CodexAgent(BaseAgent):
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
-                error_text = self._error_display_text(e)
+                # A successful replacement consumes no shared pressure evidence.
+                # Diagnose only the transport whose failure is actually reported.
+                resource_failure = self._resource_failure_for_transport(transport)
+                error_text = self._error_display_text(
+                    e,
+                    resource_failure=resource_failure,
+                )
                 await emit_backend_failure(
                     self.controller,
                     request.context,
@@ -1131,6 +1195,40 @@ class CodexAgent(BaseAgent):
             self._turn_registry.clear_session(base_session_id)
             self._clear_thread_developer_instructions(base_session_id)
 
+    async def retire_unowned_session_transport(
+        self, cwd: str, *, ending_session_id: str | None = None
+    ) -> bool:
+        """Reclaim the exact cwd generation while retaining the ending Session on failure."""
+
+        async with self._transport_locks.setdefault(cwd, asyncio.Lock()):
+            transport = self._transports.get(cwd)
+
+            def has_other_sessions() -> bool:
+                return any(
+                    session_id != ending_session_id
+                    for session_id in self._session_mgr.sessions_for_cwd(cwd)
+                )
+
+            if transport is None or has_other_sessions():
+                return False
+
+            async def still_unowned() -> bool:
+                return (
+                    self._transports.get(cwd) is transport
+                    and not has_other_sessions()
+                    and not self._has_active_turns_for_cwd(cwd)
+                )
+
+            detached = await self._stop_and_detach_transport_generation(
+                cwd,
+                transport,
+                final_predicate=still_unowned,
+                require_process_exit=True,
+            )
+            if detached:
+                self._retire_model_hub_process_scope(cwd)
+            return detached
+
     async def refresh_auth_state(self) -> None:
         """Drop app-server runtime state so future turns pick up fresh auth."""
         if not hasattr(self, "_transport_last_activity"):
@@ -1339,20 +1437,60 @@ class CodexAgent(BaseAgent):
         session_id = payload.get("agent_session_id") if isinstance(payload, dict) else None
         setter(request.base_session_id, session_id)
 
-    def _error_display_text(self, error: BaseException) -> str:
+    def _resource_failure_for_transport(self, transport: CodexTransport | None):
+        process = getattr(transport, "_process", None)
+        if process is None or getattr(process, "returncode", None) is None:
+            return None
+        if getattr(transport, "_vibe_resource_failure_checked", False):
+            return getattr(transport, "_vibe_resource_failure", None)
+        failure = observe_agent_resource_pressure(self.controller)
+        setattr(transport, "_vibe_resource_failure", failure)
+        setattr(transport, "_vibe_resource_failure_checked", True)
+        if failure is not None:
+            logger.error(
+                "Codex app-server exited while the shared Agent cgroup reported resource pressure: %s",
+                failure.message,
+            )
+        return failure
+
+    def _error_display_text(
+        self,
+        error: BaseException,
+        *,
+        resource_failure=None,
+    ) -> str:
         if isinstance(error, CodexResponseTooLargeError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t('error.codexResponseTooLarge', language, limitMiB=error.limit // (1024 * 1024))}"
-        if isinstance(error, CodexPromptRefreshUnavailableError):
+            message = i18n_t(
+                "error.codexResponseTooLarge",
+                language,
+                limitMiB=error.limit // (1024 * 1024),
+            )
+        elif isinstance(error, CodexPromptRefreshUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t('error.codexPromptRefreshUnavailable', language)}"
-        return f"❌ Codex error: {error}"
+            message = i18n_t("error.codexPromptRefreshUnavailable", language)
+        else:
+            message = f"Codex error: {error}"
+
+        if resource_failure is not None:
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            if getattr(resource_failure, "kind", None) == "pids":
+                message = (
+                    f"{message} "
+                    f"{i18n_t('error.agentPidsLimit', language, **pids_failure_labels(resource_failure, language))}"
+                )
+            elif getattr(resource_failure, "kind", None) == "memory":
+                message = f"{message} {i18n_t('error.agentMemoryLimit', language)}"
+        return f"❌ {message}"
 
     def _runtime_ownership_target_for_cwd(
         self,

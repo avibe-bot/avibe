@@ -1880,7 +1880,7 @@ class Controller:
 
         await self._stop_model_hub_snapshot_reconciliation()
 
-        service_stops: list[asyncio.Task[None]] = []
+        service_stops: list[tuple[str, asyncio.Task[None]]] = []
         for service_name in (
             "model_hub_service",
             "scheduled_task_service",
@@ -1890,13 +1890,33 @@ class Controller:
             stop = getattr(service, "stop", None)
             if callable(stop):
                 service_stops.append(
-                    asyncio.create_task(
-                        stop(),
-                        name=f"controller-{service_name}-stop",
+                    (
+                        service_name,
+                        asyncio.create_task(
+                            stop(),
+                            name=f"controller-{service_name}-stop",
+                        ),
                     )
                 )
-        results = await asyncio.gather(*service_stops, return_exceptions=True)
+        results = await asyncio.gather(
+            *(task for _, task in service_stops), return_exceptions=True
+        )
         errors = [result for result in results if isinstance(result, BaseException)]
+        # Stopping the task service settles its in-flight Runs. Disposable
+        # runtimes waiting on those rows must then finish before the loop exits,
+        # especially adopted OpenCode servers that survive normal shutdown. If
+        # that settlement owner failed, the waiting tasks cannot safely finish.
+        task_service_failed = any(
+            service_name == "scheduled_task_service"
+            and isinstance(result, BaseException)
+            for (service_name, _), result in zip(service_stops, results)
+        )
+        drain_close_after = getattr(dispatcher, "drain_close_after_runtime", None)
+        if callable(drain_close_after) and not task_service_failed:
+            try:
+                await drain_close_after()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
         stop_supervisor = getattr(supervisor, "stop", None)
         if callable(stop_supervisor):
             try:

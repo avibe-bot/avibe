@@ -889,6 +889,7 @@ Important options:
 - `--scope-id`
 - `--model`
 - `--reasoning-effort`
+- `--close-after`
 - `--sync`
 - `--message`
 - `--message-file`
@@ -900,6 +901,10 @@ Runs are asynchronous by default: the command queues the run, returns a payload
 with `run_id` / `session_id`, and uses the callback policy to deliver the final
 result later. Use `--sync` only when the terminal should wait for completion.
 `--async` is still accepted for older scripts but is no longer required.
+
+`--close-after` applies to a new or forked Session. It releases that Agent
+runtime after the Run settles while keeping the Session, transcript, and Run
+record. It cannot target an existing `--session-id`.
 
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
