@@ -401,7 +401,7 @@ class NativeTakeoverJournal:
             **{
                 identity: copy
                 for identity, copy in (previous or {}).get("retained_native_ids", {}).items()
-                if identity not in withdrawn
+                if identity not in withdrawn and copy.get("key_fingerprint") not in withdrawn
             },
             **record.get("retained_native_ids", {}),
         }

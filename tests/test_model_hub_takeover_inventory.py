@@ -851,3 +851,66 @@ def test_reauth_terminal_completion_still_binds_a_kept_keychain_key(monkeypatch,
         agent["routes"] = {}
     store.config = ModelHubConfig.from_payload(payload)
     assert [row["backend"] for row in service.migration_scan()["items"]] == ["codex"]
+
+
+def test_key_cleanup_keeps_an_unselected_codex_login(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    tokens = {"access_token": "fixture-access-only"}
+    _write(home / ".codex/auth.json", json.dumps({"OPENAI_API_KEY": "fixture-key-123456", "tokens": tokens}))
+    _write(home / ".codex/config.toml", 'cli_auth_credentials_store = "file"\n')
+    service, _store, _adapter = _service(tmp_path, migration_home=home)
+    scan = service.migration_scan()["items"]
+    assert {row["kind"]: row["proposed_action"] for row in scan} == {
+        "oauth_native": "keep_native", "api_key": "import",
+    }
+    ids = [row["id"] for row in scan if row["proposed_action"] == "import"]
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
+    assert json.loads((home / ".codex/auth.json").read_text())["tokens"] == tokens
+
+
+def test_cleanup_retires_a_receipt_copied_under_an_earlier_route(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    auth, config = home / ".codex/auth.json", home / ".codex/config.toml"
+    route_a = 'cli_auth_credentials_store = "file"\n'
+    route_b = route_a + (
+        'model_provider = "Relay"\n\n[model_providers.Relay]\n'
+        'base_url = "https://relay.example/v1"\nwire_api = "responses"\n'
+    )
+    _write(auth, json.dumps({"OPENAI_API_KEY": "fixture-key-123456"}))
+    _write(config, route_a)
+    service, _store, _adapter = _service(tmp_path, migration_home=home)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert service.migration_scan()["items"] == []
+    _write(config, route_b)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
+    assert not auth.exists() or "OPENAI_API_KEY" not in json.loads(auth.read_text())
+    # The key the user cleaned comes back under route A: it is offered again.
+    _write(auth, json.dumps({"OPENAI_API_KEY": "fixture-key-123456"}))
+    _write(config, route_a)
+    assert [row["kind"] for row in service.migration_scan()["items"]] == ["api_key"]
+
+
+def test_pending_journal_from_before_the_cleanup_option_resumes(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write_claude_oauth(home)
+    service, _store, adapter = _service(tmp_path, migration_home=home)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    validate = adapter.validate_oauth_credential
+
+    async def inconclusive(ref):
+        raise RuntimeError("fixture inconclusive")
+
+    adapter.validate_oauth_credential = inconclusive
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    record = service.migration_journal.load()
+    assert record["phase"] != "complete"
+    record.pop("clean_api_keys")
+    service.migration_journal.save(record)
+    adapter.validate_oauth_credential = validate
+    assert asyncio.run(service.migration_apply(ids))["applied"] == len(ids)

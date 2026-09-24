@@ -214,7 +214,8 @@ def native_store_items(
         item.secret.strip() for item in items
         if clean_api_keys and _codex_store_key_item(item)
     )
-    withdraw_login = clean_api_keys or any(
+    # Key cleanup consent never extends to a login the batch did not carry.
+    withdraw_login = any(
         item.backend == "codex" and item.kind == "oauth_native" for item in items
     )
     return [

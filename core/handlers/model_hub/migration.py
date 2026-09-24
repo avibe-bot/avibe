@@ -292,6 +292,11 @@ def _retained_key_identity(item: NativeMigrationItem) -> str:
     )
 
 
+def _retained_key_fingerprint(item: NativeMigrationItem) -> str:
+    """Name a copied static key by backend and material alone, across routes."""
+    return "keymat_" + _stable_suffix(item.backend, (item.secret or "").strip())
+
+
 def _retained_copy_live(copy: Mapping[str, str] | None, live_credentials: Mapping[str, object]) -> bool:
     """A kept native key is shadowed only while Hub still holds its exact copy."""
     return copy is not None and live_credentials.get(copy["source_id"], None) == copy["credential_ref"]
@@ -1771,6 +1776,7 @@ async def _prepare_takeover(
                         source_ids.append(candidate.id)
                         item_sources[_retained_key_identity(item)] = {
                             "source_id": candidate.id, "credential_ref": candidate.credential_ref,
+                            "key_fingerprint": _retained_key_fingerprint(item),
                             **({
                         "store_backend": item.backend, "store_routing": item.native_store_routing or "",
                     } if item.native_store_revision else {}),
@@ -1858,6 +1864,7 @@ async def _prepare_takeover(
             if item.kind != "oauth_native":
                 item_sources[_retained_key_identity(item)] = {
                     "source_id": source.id, "credential_ref": source.credential_ref,
+                    "key_fingerprint": _retained_key_fingerprint(item),
                     **({
                         "store_backend": item.backend, "store_routing": item.native_store_routing or "",
                     } if item.native_store_revision else {}),
@@ -1908,9 +1915,12 @@ async def _prepare_takeover(
                 identity: copy for identity, copy in item_sources.items()
             },
             # A cleanup batch withdraws these kept keys, retiring their receipts.
+            # Identities and material fingerprints both retire: a receipt
+            # written under an earlier route still names this withdrawn key.
             "withdrawn_native_ids": sorted({
-                _retained_key_identity(item) for item in [*selected, *retained_keys]
+                name for item in [*selected, *retained_keys]
                 if clean_api_keys and item.kind != "oauth_native"
+                for name in (_retained_key_identity(item), _retained_key_fingerprint(item))
             }),
         }
         seen_stores: set[str] = set()
@@ -2206,8 +2216,12 @@ async def apply_native_migration(
             same_selection = {item["id"] for item in record["items"]} == set(item_ids)
             if record["phase"] != "complete" and not same_selection:
                 raise MigrationConflictError
-            # Receipts predating the option always cleaned native keys.
-            if replayable and same_selection and record.get("clean_api_keys", True) != clean_api_keys:
+            # Receipts predating the option always cleaned native keys. A
+            # pending journal from before it already staged that decision and
+            # resumes as staged.
+            if replayable and same_selection and (
+                "clean_api_keys" in record or record["phase"] == "complete"
+            ) and record.get("clean_api_keys", True) != clean_api_keys:
                 raise MigrationConflictError
             if same_selection and replayable:
                 if record["phase"] == "complete":
