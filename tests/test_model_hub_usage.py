@@ -646,7 +646,12 @@ def test_usage_writer_never_coalesces_different_hours_before_persistence(tmp_pat
     async def exercise() -> dict:
         ledger = _ledger(tmp_path, now=_Clock(NOW + timedelta(hours=2)))
         writer = UsageWriter(ledger)
-        writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        writer.record(
+            source_id="src_a",
+            model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=2),
+            at=NOW,
+        )
         writer.record(
             source_id="src_a",
             model_id="model-x",
@@ -661,7 +666,8 @@ def test_usage_writer_never_coalesces_different_hours_before_persistence(tmp_pat
     nonempty = [bucket for bucket in report["buckets"] if bucket["rows"]]
     assert len(nonempty) == 2
     assert sum(bucket["rows"][0]["requests"] for bucket in nonempty) == 2
-    assert sum(bucket["rows"][0]["token_reports"] for bucket in nonempty) == 1
+    assert sum(bucket["rows"][0]["token_reports"] for bucket in nonempty) == 2
+    assert sum(bucket["rows"][0]["input_tokens"] for bucket in nonempty) == 7
 
 
 def test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour(
@@ -833,6 +839,114 @@ def test_daily_midnight_uses_the_date_specific_local_offset() -> None:
         time.tzset()
 
     assert winter.utcoffset() != summer.utcoffset()
+
+
+def test_hourly_retention_expiry_does_not_poison_retained_hours(tmp_path: Path) -> None:
+    """Expired slices outside the report horizon are not missing history."""
+
+    previous_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(NOW))
+        ledger.record(
+            source_id="src_expiry",
+            model_id="model-expiry",
+            usage=ProtocolUsageReport(input_tokens=25),
+            at=NOW - timedelta(hours=25),
+        )
+        ledger.record(
+            source_id="src_expiry",
+            model_id="model-expiry",
+            usage=ProtocolUsageReport(input_tokens=23),
+            at=NOW - timedelta(hours=23),
+        )
+        hourly = ledger.report(window="24h", now=NOW)
+        daily = ledger.report(window="7d", now=NOW)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert hourly["totals"]["requests"] == 1
+    assert hourly["totals"]["input_tokens"] == 23
+    assert all(bucket["history_complete"] for bucket in hourly["buckets"])
+    assert daily["totals"]["requests"] == 2
+    assert daily["totals"]["input_tokens"] == 48
+
+
+def test_hourly_boundaries_match_across_lord_howe_dst_transition(tmp_path: Path) -> None:
+    """Hourly identity stays UTC-stable while Lord Howe displays a 30-minute jump."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 10, 4, 3, 15, tzinfo=timezone.utc)
+    at = datetime(2026, 10, 3, 14, 45, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Australia/Lord_Howe"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.record(
+            source_id="src_lord-howe",
+            model_id="model-dst",
+            usage=ProtocolUsageReport(input_tokens=1),
+            at=at,
+        )
+        hourly = ledger.report(window="24h", now=now)
+        daily = ledger.report(window="7d", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    populated = [bucket for bucket in hourly["buckets"] if bucket["rows"]]
+    transition = next(
+        bucket
+        for bucket in hourly["buckets"]
+        if bucket["start_at"] == "2026-10-04T01:30:00+10:30"
+    )
+    assert len(populated) == 1
+    assert populated[0]["start_at"] == "2026-10-04T00:30:00+10:30"
+    assert populated[0]["end_at"] == "2026-10-04T01:30:00+10:30"
+    assert transition["end_at"] == "2026-10-04T03:00:00+11:00"
+    assert hourly["totals"]["requests"] == 1
+    assert daily["totals"]["requests"] == 1
+    assert all(bucket["history_complete"] for bucket in hourly["buckets"])
+
+
+def test_hourly_boundaries_display_non_dst_fractional_offset(tmp_path: Path) -> None:
+    """UTC-hour identity remains stable in a non-DST fractional-offset zone."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 24, 12, 30, tzinfo=timezone.utc)
+    at = datetime(2026, 9, 24, 11, 45, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Asia/Kathmandu"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.record(
+            source_id="src-kathmandu",
+            model_id="model-fractional",
+            usage=ProtocolUsageReport(input_tokens=1),
+            at=at,
+        )
+        hourly = ledger.report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    populated = [bucket for bucket in hourly["buckets"] if bucket["rows"]]
+    assert len(populated) == 1
+    assert populated[0]["start_at"] == "2026-09-24T16:45:00+05:45"
+    assert populated[0]["end_at"] == "2026-09-24T17:45:00+05:45"
+    assert hourly["totals"]["requests"] == 1
+    assert all(bucket["history_complete"] for bucket in hourly["buckets"])
 
 
 def test_a_window_excludes_days_outside_it(tmp_path: Path) -> None:

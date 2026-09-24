@@ -289,20 +289,23 @@ def _local_midnight(day: date) -> datetime:
 
 
 def _hour_start(moment: datetime) -> datetime:
-    """Return the local start of the actual hour containing ``moment``."""
+    """Return the UTC boundary of the actual hour containing ``moment``."""
 
-    local = _local(moment)
-    return local.replace(minute=0, second=0, microsecond=0)
+    return _aware(moment).astimezone(timezone.utc).replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
 
 
 def _hour_key(moment: datetime) -> str:
-    """Spell one hourly bucket with its explicit server-local UTC offset."""
+    """Spell one hourly bucket with its canonical UTC boundary."""
 
     return _hour_start(moment).isoformat(timespec="seconds")
 
 
 def _hour_key_parts(value: object, *, day: Optional[date] = None) -> Optional[tuple[str, datetime]]:
-    """Parse and normalize a persisted hourly key, retaining the local offset."""
+    """Parse and normalize a persisted hourly key to its UTC boundary."""
 
     if not isinstance(value, str) or not value.strip() or _calendar_day(value.strip()) is not None:
         return None
@@ -318,7 +321,7 @@ def _hour_key_parts(value: object, *, day: Optional[date] = None) -> Optional[tu
     carried = _carried(parsed)
     if carried is None:
         return None
-    if parsed.minute or parsed.second or parsed.microsecond:
+    if carried.minute or carried.second or carried.microsecond:
         return None
     try:
         local = carried.astimezone()
@@ -326,15 +329,15 @@ def _hour_key_parts(value: object, *, day: Optional[date] = None) -> Optional[tu
         return None
     if day is not None and local.date() != day:
         return None
-    return local.isoformat(timespec="seconds"), local
+    return carried.isoformat(timespec="seconds"), carried
 
 
 def _hour_starts(now: datetime) -> tuple[datetime, ...]:
-    """Return the 24 actual consecutive local-hour starts ending at ``now``."""
+    """Return the 24 actual consecutive UTC-hour starts ending at ``now``."""
 
-    current = _hour_start(now).astimezone(timezone.utc)
+    current = _hour_start(now)
     return tuple(
-        (current - timedelta(hours=offset)).astimezone()
+        current - timedelta(hours=offset)
         for offset in range(USAGE_HOURLY_RETENTION_HOURS - 1, -1, -1)
     )
 
@@ -432,6 +435,8 @@ def _normalize_row(row: object) -> Optional[dict]:
     normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
     raw_hours = row.get("hours")
     if isinstance(raw_hours, list):
+        # An empty list with the producer's complete flag can be ordinary
+        # retention expiry: the daily owner outlives its 24-hour slices.
         by_key: dict[str, dict] = {}
         invalid_hour = False
         duplicate_hour = False
@@ -470,11 +475,6 @@ def _normalize_row(row: object) -> Optional[dict]:
             # arbitrary hour, so discard all hourly slices and report the
             # temporal history as unavailable.
             hours = []
-            invalid_hour = True
-        if not hours and any(counters[key] > 0 for key in _COUNTER_KEYS):
-            # An explicit empty list is not the released daily-only shape. When
-            # the daily owner carries usage, an empty nested history is missing
-            # temporal evidence and must not claim complete hourly coverage.
             invalid_hour = True
         normalized["hours"] = sorted(hours, key=lambda item: item["key"])
         normalized["hourly_history_complete"] = (
@@ -653,10 +653,9 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
             incomplete = True
             continue
         if instant < oldest_start:
-            # The daily row survives longer than its nested hourly horizon. Once
-            # an older slice is evicted, this row no longer has complete hourly
-            # evidence even if the remaining list is otherwise valid.
-            incomplete = True
+            # This is ordinary retention pruning, not missing evidence inside
+            # the requested recent-hour window. Do not poison newer retained
+            # slices merely because their daily owner also carried an older one.
             continue
         retained[key] = {**item, "key": key}
     if len(retained) > USAGE_HOURLY_RETENTION_HOURS:
@@ -1205,27 +1204,32 @@ class BoundedUsageLedger:
                     end = (
                         starts[index + 1]
                         if index + 1 < len(starts)
-                        else _local(report_instant)
+                        else report_instant
                     )
-                    if start.date() == row_day and start < end and end > first_start:
+                    if (
+                        start.astimezone().date() == row_day
+                        and start < end
+                        and end > first_start
+                    ):
                         incomplete.add(index)
             for item in row.get("hours") or ():
                 parts = _hour_key_parts(item.get("key"), day=row_day)
                 if parts is None:
                     continue
                 _key, start = parts
-                bucket = interval_by_instant.get(start.astimezone(timezone.utc))
+                bucket = interval_by_instant.get(start)
                 if bucket is None:
                     continue
-                start_local, index = bucket
-                if start_local < first_start or start_local > last_start:
+                _start_utc, index = bucket
+                if start < first_start or start > last_start:
                     continue
-                if start.astimezone(timezone.utc) > report_instant:
+                if start > report_instant:
                     incomplete.add(index)
                     continue
                 key = (row["source_id"], row["model_id"])
                 projected = measured_by_bucket[index].get(key)
                 if projected is None:
+                    start_local = start.astimezone()
                     projected = {
                         "day": start_local.date().isoformat(),
                         "source_id": row["source_id"],
@@ -1244,7 +1248,9 @@ class BoundedUsageLedger:
         bucket_rows = []
         summary_rows = []
         for index, start in enumerate(starts):
-            end = starts[index + 1] if index + 1 < len(starts) else report_local
+            end = starts[index + 1] if index + 1 < len(starts) else report_instant
+            start_local = start.astimezone()
+            end_local = end.astimezone()
             projected_rows = [
                 {
                     "source_id": row["source_id"],
@@ -1258,16 +1264,16 @@ class BoundedUsageLedger:
             ]
             bucket_rows.append(
                 {
-                    "key": start.isoformat(timespec="seconds"),
-                    "start_at": start.isoformat(),
-                    "end_at": end.isoformat(),
+                    "key": start_local.isoformat(timespec="seconds"),
+                    "start_at": start_local.isoformat(),
+                    "end_at": end_local.isoformat(),
                     "history_complete": index not in incomplete,
                     "rows": projected_rows,
                 }
             )
             summary_rows.extend(measured_by_bucket[index].values())
 
-        days = sorted({start.date().isoformat() for start in starts})
+        days = sorted({start.astimezone().date().isoformat() for start in starts})
         summary = self._summary_from_rows(
             summary_rows,
             window_days=len(days),
@@ -1279,7 +1285,7 @@ class BoundedUsageLedger:
             **summary,
             "window_key": "24h",
             "granularity": "hour",
-            "from_at": first_start.isoformat(),
+            "from_at": first_start.astimezone().isoformat(),
             "to_at": report_local.isoformat(),
             "buckets": bucket_rows,
         }

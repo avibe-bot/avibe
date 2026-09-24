@@ -187,14 +187,17 @@
       "additionalProperties": false,
       "properties": {
         "key": {
+          "description": "Server-local rendering of the canonical UTC hour boundary, with an explicit offset; fractional-offset zones may show :30 or :45.",
           "type": "string",
           "minLength": 1
         },
         "start_at": {
+          "description": "Inclusive server-local rendering of the canonical UTC hour boundary.",
           "type": "string",
           "format": "date-time"
         },
         "end_at": {
+          "description": "Exclusive server-local rendering of the next canonical UTC hour boundary; the final bucket ends at report time.",
           "type": "string",
           "format": "date-time"
         },

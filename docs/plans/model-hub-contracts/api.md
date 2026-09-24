@@ -92,6 +92,11 @@ keeps the legacy `UsageSummary` fields and adds `window_key`, `granularity`,
 has 24 actual consecutive hourly buckets, including the current partial hour. The
 daily reports have one bucket per server-local calendar day.
 
+Hourly persistence, queue coalescing, and interval identity use UTC hour boundaries.
+The returned `key`, `start_at`, and `end_at` render those boundaries in the server-local
+offset, so fractional-offset zones may show `:30` or `:45`, and a DST transition may
+change the displayed wall-clock span while each interval remains one actual hour.
+
 Each bucket carries `history_complete` independently of `token_reports`. A legacy
 daily-only ledger can therefore contribute to daily reports while leaving affected
 hourly buckets incomplete; its daily count is never assigned to an hour using
