@@ -272,13 +272,17 @@ def plan_native_cleanup(
 
     if "claude" in backends:
         claude_keys = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+        # Consent is per field too: equal bytes carried from one Claude field
+        # never authorize removing another field the scan kept native.
+        selected_by_field: dict[str, set[str]] = {}
+        for item in items:
+            if item.backend == "claude" and item.secret:
+                for field in (item.native_field, *item.shell_auth_variables):
+                    if field:
+                        selected_by_field.setdefault(field, set()).add(item.secret)
 
         def claude_retained(key: str, value: object) -> bool:
-            selected = (
-                selected_api_key(value, "claude")
-                if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-                else isinstance(value, str) and value in selected_by_backend.get("claude", set())
-            )
+            selected = isinstance(value, str) and value.strip() in selected_by_field.get(key, set())
             return bool(value) and not selected
 
         # Claude merges its settings layers, so a credential kept native in any

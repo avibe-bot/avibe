@@ -378,6 +378,24 @@ def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
     assert not any(item.config_blocker for item in _items(service, ()))
 
 
+@pytest.mark.parametrize("field", [
+    "model = 1", 'model_context_window = "big"', "notify = \"say\"", 'sandbox_mode = "open"',
+    "hide_agent_reasoning = 1", "mcp_oauth_callback_port = 70000", 'tui = "bad"',
+])
+def test_codex_malformed_top_level_field_blocks_hub_mode(home, tmp_path, field):
+    _write(home / ".codex/config.toml", f'{field}\n[model_providers.relay]\nhttp_headers = {{ X = "y" }}\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+def test_codex_well_typed_top_level_fields_do_not_block_hub_mode(home, tmp_path):
+    _write(home / ".codex/config.toml", 'model = "gpt-5"\napproval_policy = "never"\n'
+           'model_context_window = 200000\nnotify = ["say"]\nforced_chatgpt_workspace_id = "w"\n'
+           'future_field = 1\n[tui]\nanything = 1\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert not any(item.config_blocker for item in _items(service, ()))
+
+
 def test_codex_count_beyond_signed_64_bits_blocks_hub_mode(home, tmp_path):
     _write(home / ".codex/config.toml", "model_providers = { relay = { stream_max_retries = 9223372036854775808 } }\n")
     service, _, _ = _service(tmp_path, migration_home=home)
@@ -395,6 +413,17 @@ def test_apply_rejects_a_backend_whose_native_config_blocks_hub_mode(home, tmp_p
     assert caught.value.status == 409
     assert not store.config.sources and not adapter.provisioned
     assert KEY.encode() in (home / ".codex/auth.json").read_bytes()
+
+
+def test_completed_replay_rejects_a_config_blocker_written_after_cleanup(home, tmp_path):
+    _seed(home, "codex-auth")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    [item_id] = [row["id"] for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    assert asyncio.run(service.migration_apply([item_id]))["applied"] == 1
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.migration_apply([item_id]))
+    assert caught.value.status == 409
 
 
 def test_opencode_header_auth_in_one_layer_keeps_another_layers_endpoint(home, tmp_path):
@@ -425,6 +454,17 @@ def test_equal_secret_selected_for_another_backend_leaves_claude_oauth_token(hom
     for edit in plan_native_cleanup([*codex, claude], home=home):
         edit.apply()
     assert json.loads(settings.read_text())["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == KEY
+
+
+def test_equal_claude_api_key_leaves_a_blocked_oauth_token_in_another_field(home, tmp_path):
+    settings = home / ".claude/settings.json"
+    _write(settings, json.dumps({"env": {"ANTHROPIC_API_KEY": KEY, "CLAUDE_CODE_OAUTH_TOKEN": KEY}}))
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, ()) if item.proposed_action == "import"]
+    assert [item.backend for item in importable] == ["claude"]
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    assert json.loads(settings.read_text())["env"] == {"CLAUDE_CODE_OAUTH_TOKEN": KEY}
 
 
 def test_claude_retained_credential_in_one_layer_keeps_another_layers_base_url(home, tmp_path):
