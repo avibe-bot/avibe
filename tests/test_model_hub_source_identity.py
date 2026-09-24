@@ -64,6 +64,28 @@ def test_subscription_allocation_respects_reserved_names_and_explicit_custom_nam
     asyncio.run(scenario())
 
 
+def test_explicit_default_looking_names_are_preserved_and_omitted_names_are_allocated(tmp_path):
+    async def scenario():
+        service, store, adapter = _service(tmp_path)
+        for _ in range(2):
+            flow = await _completed_flow(service, adapter, "openai")
+            result = await service.create_source({
+                "kind": "subscription", "vendor": "openai", "supply_channel": "hub",
+                "display_name": "OpenAI", "oauth_flow_ref": flow["flow_id"],
+            })
+            assert result["source"]["display_name"] == "OpenAI"
+            assert (await service.oauth_status(flow["flow_id"]))["source"] == result["source"]
+        flow = await _completed_flow(service, adapter, "openai")
+        result = await service.create_source({
+            "kind": "subscription", "vendor": "openai", "supply_channel": "hub",
+            "oauth_flow_ref": flow["flow_id"],
+        })
+        assert result["source"]["display_name"] == "OpenAI 2"
+        assert [source.display_name for source in store.config.sources] == ["OpenAI", "OpenAI", "OpenAI 2"]
+
+    asyncio.run(scenario())
+
+
 def _bound_account(tmp_path, vendor="openai", **identity):
     store = EngineStateStore(tmp_path / "engine")
     source_id = "src_identity001"
@@ -109,6 +131,11 @@ def test_kimi_device_metadata_is_not_presented_as_an_account(tmp_path):
         ({"account_id": "account-123", "name": "private-access-fixture"}, None),
         ({"email": "not-an-email"}, None),
         ({"email": "line\nbreak@example.com"}, None),
+        ({"email": "\ud800@example.com"}, None),
+        ({"email": "\udfff@example.com"}, None),
+        ({"email": "\ud800@example.com", "username": "safe-user"}, "safe-user"),
+        ({"username": "\udfff"}, None),
+        ({"username": "用户😀"}, "用户😀"),
         ({"username": "Bearer abcdefghijklmnop"}, None),
         ({"username": "sk-abcdefghijk123"}, None),
         ({"username": "private-access-fixture"}, None),
@@ -120,6 +147,14 @@ def test_kimi_device_metadata_is_not_presented_as_an_account(tmp_path):
 def test_only_safe_public_account_fields_are_projected(tmp_path, identity, expected):
     _, adapter, source_id, ref, _ = _bound_account(tmp_path, **identity)
     assert adapter.subscription_account_label(source_id, "openai", ref) == expected
+
+
+@pytest.mark.parametrize("token_field", ["access_token", "refresh_token", "id_token"])
+@pytest.mark.parametrize("label_field", ["email", "username"])
+def test_account_fields_cannot_publish_whitespace_wrapped_tokens(tmp_path, token_field, label_field):
+    identity = {token_field: " \topaque@example.com\n ", label_field: "opaque@example.com"}
+    _, adapter, source_id, ref, _ = _bound_account(tmp_path, **identity)
+    assert adapter.subscription_account_label(source_id, "openai", ref) is None
 
 
 @pytest.mark.parametrize("failure", ["prefix", "provider", "missing", "corrupt", "file_mode", "directory_mode", "symlink"])

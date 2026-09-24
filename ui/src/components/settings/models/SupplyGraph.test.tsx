@@ -2,7 +2,10 @@
 import * as React from 'react';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { I18nextProvider } from 'react-i18next';
 
+import i18n from '@/i18n';
+import { SourceRow } from './SourceRow';
 import { SupplyGraph } from './SupplyGraph';
 import type { SupplyRelation } from './supplyRelations';
 
@@ -22,11 +25,18 @@ const rect = (left: number, top: number, width: number, height: number): DOMRect
   toJSON: () => ({}),
 });
 
-const Fixture: React.FC<{ relations?: SupplyRelation[] }> = ({ relations = [relation] }) => {
+const Fixture: React.FC<{ relations?: SupplyRelation[]; withSourceCard?: boolean }> = ({ relations = [relation], withSourceCard = false }) => {
   const ref = React.useRef<HTMLDivElement>(null);
   return (
     <div ref={ref} data-testid="graph-root">
-      <div data-source-id="src_a" />
+      {withSourceCard ? <I18nextProvider i18n={i18n}>
+        <SourceRow source={{
+          id: 'src_a', last_discovered_at: null, kind: 'subscription', vendor: 'openai', display_name: 'OpenAI',
+          protocol: 'openai_responses', base_url: null, supply_channel: 'hub', billing: 'monthly',
+          state: { status: 'standby', retry_at: null, detail_key: null }, models: [],
+          account_label: 'owner@example.com',
+        }} onOpen={() => {}} />
+      </I18nextProvider> : <div data-source-id="src_a" />}
       <div data-source-id="src_b" />
       <div data-agent-backend="claude" />
       <div data-agent-backend="codex" />
@@ -41,6 +51,30 @@ afterEach(() => {
 });
 
 describe('SupplyGraph', () => {
+  it('anchors to the whole SourceRow and highlights when its account control is focused', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
+      if (this.dataset.testid === 'graph-root') return rect(0, 0, 600, 300);
+      if (this.dataset.agentBackend === 'claude') return rect(450, 40, 100, 100);
+      // The opener covers only the title/badges in layout; the card includes
+      // the account and state rows. Its stretched hit area is not its bounds.
+      if (this.tagName === 'BUTTON') return rect(60, 20, 200, 40);
+      if (this.dataset.sourceId === 'src_a') return rect(10, 10, 300, 120);
+      return rect(0, 0, 0, 0);
+    });
+    const view = render(<Fixture withSourceCard />);
+    const path = await waitFor(() => {
+      const element = view.container.querySelector<SVGPathElement>('.model-hub-wire');
+      expect(element).not.toBeNull();
+      return element as SVGPathElement;
+    });
+    expect(path.getAttribute('d')).toBe('M 310 70 C 380 70, 380 90, 450 90');
+    const eye = view.getByRole('button', { name: i18n.t('settings.models.upstream.hideAccount') });
+    fireEvent.focusIn(eye);
+    await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(true));
+    fireEvent.focusOut(eye, { relatedTarget: view.container });
+    await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(false));
+  });
+
   it('draws on the shared mount and re-measures when a nested card scrolls', async () => {
     let sourceTop = 10;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {

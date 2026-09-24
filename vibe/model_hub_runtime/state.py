@@ -1379,7 +1379,11 @@ class EngineStateStore:
 
 def _oauth_account_label(payload: dict[str, Any]) -> str | None:
     """Only provider-declared public identity fields can become UI metadata."""
-    secrets = [payload.get(key) for key in ("access_token", "refresh_token", "id_token")]
+    secrets = {
+        value.strip()
+        for key in ("access_token", "refresh_token", "id_token")
+        if isinstance(value := payload.get(key), str)
+    }
     for key in ("email", "username"):
         value = payload.get(key)
         if not isinstance(value, str):
@@ -1388,7 +1392,10 @@ def _oauth_account_label(payload: dict[str, Any]) -> str | None:
         if (
             not candidate
             or len(candidate) > 254
-            or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+            or any(
+                ord(character) < 32 or ord(character) == 127 or 0xD800 <= ord(character) <= 0xDFFF
+                for character in candidate
+            )
             or contains_credential_material(candidate)
             or candidate in secrets
             or (key == "email" and re.fullmatch(r"[^@\s]+@[^@\s]+", candidate) is None)

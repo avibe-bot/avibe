@@ -4,8 +4,10 @@
 
 - When a new subscription would receive an existing vendor default name,
   allocate the first available numbered name (`OpenAI`, `OpenAI 2`, …) under
-  the existing source mutation lock. Preserve existing names, explicit custom
-  names, source IDs, routes, and OAuth retry idempotency.
+  the existing source mutation lock. Carry whether the create request defaulted
+  the name into the commit path; preserve explicit names even when they equal
+  the vendor default. Preserve existing names, source IDs, routes, and OAuth
+  retry idempotency.
 - Reuse `Source.account_label` for optional subscription display metadata.
   Hub metadata must come from the credential bound to that exact source,
   vendor, and engine prefix, with email preferred over a provider username.
@@ -14,10 +16,14 @@
 - Missing, malformed, or unreadable display metadata means no account label;
   it does not prevent source listing or imply authentication failure. Never
   substitute another source's identity or a credential/account ID.
+  Reject non-UTF-8-encodable labels and compare labels and stored tokens after
+  the same whitespace normalization.
 - Show the account on its own line in source cards and details. One browser
   preference controls visibility across both surfaces; persist only the
   preference. Hidden text must be absent from DOM text, accessible labels,
   and hover titles. The eye control must not open the source detail.
+  Keep the graph endpoint on the full card so all controls belong to that
+  source and desktop wires retain the card's right-edge midpoint.
 - Order source-card badges as kind then protocol. API key is cyan, subscription
   retains its semantic accent, and protocol is neutral with no vendor/domain
   prefix. Endpoint details remain available separately.

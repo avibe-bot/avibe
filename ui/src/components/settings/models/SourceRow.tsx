@@ -37,6 +37,7 @@ export const SourceRow: React.FC<{
   const adopted = !source.verification_pending && (source.state.status === 'active' || source.state.status === 'standby') && (adoptedBy?.length ?? 0) > 0;
   return (
     <div
+      data-source-id={source.id}
       className={cn(
         'relative flex h-auto min-h-[96px] w-full items-center gap-2.5 rounded-[10px] border border-border bg-background px-3 py-2 text-left transition-colors hover:border-border-strong',
         adopted && source.supply_channel === 'native_cli' && 'border-cyan/30 bg-cyan/[0.04]',
@@ -50,7 +51,6 @@ export const SourceRow: React.FC<{
       <span className="pointer-events-none min-w-0 flex-1">
         <button
           type="button"
-          data-source-id={source.id}
           aria-label={source.display_name}
           onClick={(event) => onOpen(source, event.currentTarget)}
           className="pointer-events-auto block w-full text-left before:absolute before:inset-0 before:rounded-[10px] focus-visible:outline-none focus-visible:before:ring-2 focus-visible:before:ring-ring"

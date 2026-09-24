@@ -2168,12 +2168,13 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         *,
         previous: Optional[ModelHubConfig] = None,
+        display_name_defaulted: bool = False,
     ) -> None:
         previous = previous or self.store.load()
         config = self._clone_config(previous)
         if any(item.id == source.id for item in config.sources):
             raise ModelHubError("migration_item_conflict", status=409)
-        if source.kind == "subscription" and source.display_name == seeded_source_name(source.vendor):
+        if source.kind == "subscription" and display_name_defaulted:
             names = {item.display_name for item in config.sources}
             seed = source.display_name
             number = 2
@@ -2308,6 +2309,7 @@ class ModelHubService:
         oauth_ref: str,
         channel: Literal["native_cli", "hub"],
         vendor: str,
+        display_name_defaulted: bool = False,
         completed_flow: Optional[OAuthFlowState] = None,
         idempotent: bool = False,
     ) -> dict:
@@ -2501,6 +2503,7 @@ class ModelHubService:
                 await self._commit_new_source_locked(
                     source,
                     previous=previous,
+                    display_name_defaulted=display_name_defaulted,
                 )
                 persisted = True
                 try:
@@ -3031,6 +3034,7 @@ class ModelHubService:
         await self._create_oauth_source(
             [],
             display_name=seeded_source_name(binding.vendor),
+            display_name_defaulted=True,
             billing="monthly",
             created_at=self.now().isoformat(),
             oauth_ref=flow_id,
@@ -3085,6 +3089,7 @@ class ModelHubService:
             vendor = normalize_model_hub_vendor_id(vendor)
         except ValueError:
             raise ModelHubError("discovery_failed") from None
+        display_name_defaulted = not payload.get("display_name")
         display_name = payload.get("display_name") or seeded_source_name(vendor)
         if kind not in {"subscription", "api_key"}:
             raise ModelHubError("discovery_failed")
@@ -3174,6 +3179,7 @@ class ModelHubService:
                 await self._create_oauth_source(
                     manual_models,
                     display_name=display_name,
+                    display_name_defaulted=display_name_defaulted,
                     billing=cast(Literal["monthly", "metered"], billing),
                     created_at=self.now().isoformat(),
                     oauth_ref=oauth_ref,
