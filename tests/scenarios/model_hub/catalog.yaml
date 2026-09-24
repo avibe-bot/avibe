@@ -23,6 +23,8 @@ capability:
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
+    - tests/test_model_hub_quota.py
+    - ui/src/components/settings/models/QuotaTab.test.tsx
     - tests/test_local_deps.py
     - tests/test_opencode_server.py
     - tests/test_runtime_activation.py
@@ -678,6 +680,102 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-027
+  - id: MH-QUOTA-001
+    name: Claude's fixed quota windows parse and null or app-only windows are skipped
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_claude_quota_parser_reads_legacy_windows_and_skips_nulls
+  - id: MH-QUOTA-002
+    name: Claude limit rows classify on kind and keep the server's model names, including non-ASCII ones
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_claude_quota_parser_prefers_server_limits_and_keeps_unknown_rows
+  - id: MH-QUOTA-003
+    name: Codex quota windows classify by length and name Spark from its metered feature
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_codex_quota_parser_reads_primary_secondary_and_additional_limits
+  - id: MH-QUOTA-004
+    name: A malformed or hostile quota body is one Source's sanitized failure with bounded values
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_parsers_reject_a_malformed_body_as_one_source_failure
+  - id: MH-QUOTA-005
+    name: Each subscription's quota is re-read at most every five minutes and concurrent reads share one fetch
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_refreshes_each_source_at_most_every_five_minutes
+  - id: MH-QUOTA-006
+    name: A failed quota re-read keeps the last good windows and reports the Source stale
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_keeps_the_last_good_snapshot_as_stale
+  - id: MH-QUOTA-007
+    name: A refused grant reports auth_expired and one Source's failure never fails the page
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_reports_auth_expired_and_never_a_page_failure
+  - id: MH-QUOTA-008
+    name: A forced quota refresh is rate-limited and a vendor 429 cools the Source down
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_forced_refresh_is_rate_limited_and_429_cools_down
+  - id: MH-QUOTA-009
+    name: A re-authenticated subscription does not inherit the old grant's quota
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_forgets_a_reauthenticated_grant
+  - id: MH-QUOTA-010
+    name: A slow vendor quota call does not hold the page
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_does_not_hold_the_page_on_a_slow_vendor
+  - id: MH-QUOTA-011
+    name: The engine reads quota with the bound grant and only parsed windows cross the adapter
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
+  - id: MH-QUOTA-012
+    name: Quota routes serve hub subscriptions only and a forced refresh inside its interval is served from cache
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_api.py::test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh
+  - id: MH-QUOTA-013
+    name: The quota tab shows each window's remaining share, pace, and reset, with scoped models grouped
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-013
+  - id: MH-QUOTA-014
+    name: A stale or expired subscription keeps its last windows under a re-login banner
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-014
+  - id: MH-QUOTA-015
+    name: The quota tab stays within a narrow viewport
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-015
+  - id: MH-QUOTA-016
+    name: The quota report is read when its tab is opened and refreshed only while it stays open
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-016
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
