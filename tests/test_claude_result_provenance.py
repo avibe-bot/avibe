@@ -115,6 +115,19 @@ def _client(messages):
     return _Client()
 
 
+def _failing_client(messages, error):
+    class _Client:
+        def receive_messages(self):
+            async def _iterate():
+                for message in messages:
+                    yield message
+                raise error
+
+            return _iterate()
+
+    return _Client()
+
+
 def _task_pair(task_id: str):
     return [
         TaskStartedMessage(task_id),
@@ -171,6 +184,62 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(activity_call.kwargs["output"].detached)
         self.assertIs(human_call.kwargs["request"], request)
         self.assertFalse(agent._has_pending_requests("session-provenance:/tmp/work"))
+
+    async def test_human_result_preserves_detached_activity_until_followup_result(self):
+        key = "session-human-before-detached:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-human-before-detached",
+            activity_id="task-detached-first",
+            kind="local_agent",
+            turn_id="background-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=key,
+            activity_id="task-detached-first",
+            status="completed",
+            metadata={"summary": "background finished"},
+            expects_output=True,
+        )
+        detached = service.activities.claim_completed_output("claude", key)
+        self.assertIsNotNone(detached)
+        agent._detached_activity_outputs[key] = [detached]
+        agent.emit_result_message = _dispatcher_owned_emit(service)
+
+        await agent._receive_messages(
+            _client(
+                [
+                    ResultMessage("human reply", origin={"kind": "human"}),
+                    ResultMessage(
+                        "background reply",
+                        origin={"kind": "task-notification"},
+                    ),
+                ]
+            ),
+            "sess-human-before-detached",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(agent.emit_result_message.await_count, 2)
+        human_call, activity_call = agent.emit_result_message.await_args_list
+        self.assertIs(human_call.kwargs["request"], request)
+        self.assertNotIn("output", human_call.kwargs)
+        self.assertIsNone(activity_call.kwargs.get("request"))
+        self.assertTrue(activity_call.kwargs["output"].detached)
+        self.assertEqual(
+            activity_call.kwargs["output"].activity_ids,
+            ("task-detached-first",),
+        )
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertFalse(service.activities.has_completed_output("claude", key))
 
     async def test_buffered_assistant_frames_replay_after_human_result_classification(self):
         key = "session-buffered-provenance:/tmp/work"
@@ -507,6 +576,116 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second.kwargs["output"].detached)
         self.assertIs(human.kwargs["request"], request)
         self.assertFalse(agent._has_pending_requests("session-provenance:/tmp/work"))
+
+    async def test_ambiguous_task_started_does_not_copy_human_harness_attribution(self):
+        key = "session-ambiguous-harness:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        request.context.platform_specific.update(
+            {
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "human-run",
+                "accepted_agent_run_ids": ["human-run", "accepted-run"],
+                "delivery_key_external": "human-delivery",
+            }
+        )
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = _dispatcher_owned_emit(service)
+
+        await agent._receive_messages(
+            _client(
+                [
+                    TaskStartedMessage("task-ambiguous-harness"),
+                    TaskNotificationMessage(
+                        "task-ambiguous-harness",
+                        "background finished",
+                    ),
+                    ResultMessage(
+                        "background reply",
+                        origin={"kind": "task-notification"},
+                    ),
+                ]
+            ),
+            "sess-ambiguous-harness",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertTrue(output.detached)
+        self.assertEqual(output.run_ids, ())
+        self.assertIsNone(output.metadata["turn_id"])
+        self.assertTrue(agent._has_pending_requests(key))
+        self.assertIs(agent._pending_requests[key][0], request)
+
+    async def test_buffered_background_task_stays_provisional_until_detached_result(self):
+        key = "session-buffered-background-provisional:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        request.context.platform_specific.update(
+            {
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "human-run",
+                "accepted_agent_run_ids": ["human-run"],
+                "delivery_key_external": "human-delivery",
+            }
+        )
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = _dispatcher_owned_emit(service)
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-buffered-background-provisional",
+            activity_id="older-background",
+            kind="local_agent",
+            turn_id="older-turn",
+        )
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(
+                        _block(
+                            ToolUseBlock,
+                            id="background-tool",
+                            name="Agent",
+                            input={
+                                "description": "run detached work",
+                                "run_in_background": True,
+                            },
+                        )
+                    ),
+                    TaskStartedMessage(
+                        "task-buffered-background",
+                        tool_use_id="background-tool",
+                    ),
+                    TaskNotificationMessage(
+                        "task-buffered-background",
+                        "background finished",
+                    ),
+                    ResultMessage(
+                        "background reply",
+                        origin={"kind": "task-notification"},
+                    ),
+                ]
+            ),
+            "sess-buffered-background-provisional",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        output = agent.emit_result_message.await_args.kwargs["output"]
+        self.assertTrue(output.detached)
+        self.assertEqual(output.run_ids, ())
+        self.assertEqual(output.activity_ids, ("task-buffered-background",))
+        self.assertIsNone(output.metadata["turn_id"])
+        self.assertTrue(agent._has_pending_requests(key))
 
     async def test_write_fence_rejects_replaced_or_stopping_client_before_native_write(self):
         key = "session-write-fence:/tmp/work"
@@ -862,6 +1041,56 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         release_eof.set()
         await receiver
 
+    async def test_receiver_error_closes_write_admission_before_replay(self):
+        key = "session-error-write-fence:/tmp/work"
+        agent, _service = _build_agent()
+        context = _context(key)
+        replay_started = asyncio.Event()
+        release_replay = asyncio.Event()
+        client = SimpleNamespace(query=AsyncMock())
+        agent.claude_sessions[key] = client
+
+        async def replay_failure(*_args, **_kwargs):
+            replay_started.set()
+            await release_replay.wait()
+            return None
+
+        agent._replay_buffered_terminal_failures = replay_failure
+        agent._handle_receiver_exception = AsyncMock()
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _failing_client(
+                    [
+                        TaskStartedMessage("task-error-write-fence"),
+                        _failure_assistant("backend exploded"),
+                    ],
+                    RuntimeError("receiver disconnected"),
+                ),
+                "sess-error-write-fence",
+                "/tmp/work",
+                context,
+                composite_key=key,
+            )
+        )
+        await asyncio.wait_for(replay_started.wait(), timeout=1)
+        self.assertIn(key, agent._steering_closing_keys())
+
+        async def fenced_write():
+            async with agent._steering_lock(key):
+                await agent._write_human_query(
+                    client,
+                    key,
+                    "new input",
+                    context,
+                )
+
+        write = asyncio.create_task(fenced_write())
+        with self.assertRaises(ClaudeInputNotSentError):
+            await asyncio.wait_for(write, timeout=1)
+        self.assertFalse(client.query.await_count)
+        release_replay.set()
+        await receiver
+
     async def test_primary_write_and_stop_share_the_native_write_fence(self):
         key = "session-primary-stop-fence:/tmp/work"
         agent, _service = _build_agent()
@@ -938,6 +1167,94 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         await primary_task
         self.assertTrue(await asyncio.wait_for(stop_task, timeout=1))
         self.assertTrue(interrupt_called.is_set())
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_stop_wins_before_write_without_duplicate_prewrite_settlement(self):
+        key = "session-stop-before-write:/tmp/work"
+        agent, _service = _build_agent()
+        agent.session_handler.handle_session_error = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent._delete_ack = AsyncMock()
+        agent._prepare_message_with_files = lambda request: request.message
+        agent.mark_runtime_turn_started = Mock()
+
+        class _Client:
+            _vibe_runtime_base_session_id = "sess-stop-before-write"
+            _vibe_runtime_session_key = key
+
+            def __init__(self):
+                self.query = AsyncMock()
+                self.interrupt_called = False
+
+            async def interrupt(self):
+                self.interrupt_called = True
+
+            async def disconnect(self):
+                return None
+
+        client = _Client()
+        agent.claude_sessions[key] = client
+        receiver_task = asyncio.create_task(asyncio.Event().wait())
+        agent.receiver_tasks[key] = receiver_task
+        agent.session_handler.get_or_create_claude_session = AsyncMock(
+            return_value=client,
+        )
+        context = _context(key)
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        request = SimpleNamespace(
+            context=context,
+            message="input stopped before write",
+            working_path="/tmp/work",
+            base_session_id="sess-stop-before-write",
+            composite_session_id=key,
+            session_key="session-key",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+            vibe_agent_system_prompt=None,
+            input_metadata=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+        stop_request = SimpleNamespace(
+            context=_context(key, turn_token="stop-turn"),
+            composite_session_id=key,
+            stop_failure_reason=None,
+        )
+
+        admission = agent._steering_lock(key)
+        await admission.acquire()
+        stop_task = asyncio.create_task(agent.handle_stop(stop_request))
+        await asyncio.sleep(0)
+        primary_task = asyncio.create_task(agent.handle_message(request))
+        await asyncio.sleep(0)
+        admission.release()
+
+        self.assertTrue(await asyncio.wait_for(stop_task, timeout=1))
+        await asyncio.wait_for(primary_task, timeout=1)
+
+        client.query.assert_not_awaited()
+        self.assertTrue(client.interrupt_called)
+        self.assertIs(backend_dispatch_attempted(context), False)
+        self.assertEqual(
+            prewrite_failure_evidence(context),
+            {
+                "reason": "claude_runtime_changed_before_write",
+                "requires_explicit_retry": True,
+            },
+        )
+        agent.session_handler.handle_session_error.assert_not_awaited()
+        # The only terminal emit is Stop's authoritative silent settlement.
+        self.assertEqual(agent.controller.emit_agent_message.await_count, 1)
+        self.assertEqual(
+            agent.controller.emit_agent_message.await_args.kwargs["level"],
+            "silent",
+        )
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
 

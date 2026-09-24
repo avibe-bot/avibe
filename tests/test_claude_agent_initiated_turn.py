@@ -873,7 +873,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detached.id, "task-detached")
         service.activities.ack_completed_output(detached)
 
-    async def test_terminal_only_task_event_keeps_current_turn_origin(self):
+    async def test_terminal_only_task_event_stays_provenance_pending(self):
         agent, service = _build_agent()
         composite_key = "session-terminal-only:/tmp/work"
         pending_context = SimpleNamespace(
@@ -894,7 +894,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         activity = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(activity)
-        self.assertEqual(activity.turn_id, "current-turn")
+        self.assertIsNone(activity.turn_id)
+        self.assertTrue(activity.metadata["provenance_pending"])
 
     async def test_failed_activity_snapshot_waits_for_run_owner_ack(self):
         agent, service = _build_agent()
@@ -939,7 +940,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.status, "failed")
         service.activities.ack_recovered_terminal.assert_not_called()
 
-    async def test_activity_keeps_origin_delivery_target_when_a_newer_turn_arrives(self):
+    async def test_ambiguous_activity_does_not_copy_pending_delivery_target(self):
         agent, service = _build_agent()
         composite_key = "session-delivery-origin:/tmp/work"
         origin_context = SimpleNamespace(
@@ -981,10 +982,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         activity = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(activity)
-        self.assertEqual(
-            activity.metadata["delivery_key_external"],
-            "slack::channel::C-ORIGIN",
-        )
+        self.assertNotIn("delivery_key_external", activity.metadata)
+        self.assertIsNone(activity.turn_id)
 
     async def test_completed_task_notification_at_eof_settles_without_sdk_summary(self):
         agent, service = _build_agent()
@@ -2673,7 +2672,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service.activities.has_active("claude", composite_key))
         self.assertEqual(mark_idle_calls, [composite_key])
 
-    async def test_task_start_uses_current_request_run_not_stale_receiver_run(self):
+    async def test_ambiguous_task_start_does_not_copy_current_request_run(self):
         agent, service = _build_agent()
         composite_key = "session-lineage:/tmp/work"
         pending_context = SimpleNamespace(
@@ -2702,11 +2701,12 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
 
         activity = service.activities.active_for_runtime("claude", composite_key)[0]
-        self.assertEqual(activity.run_id, "run-current")
-        self.assertEqual(activity.turn_id, "current-turn")
-        self.assertEqual(activity.metadata["run_ids"], ["run-current"])
+        self.assertIsNone(activity.run_id)
+        self.assertIsNone(activity.turn_id)
+        self.assertNotIn("run_ids", activity.metadata)
+        self.assertTrue(activity.metadata["provenance_pending"])
 
-    async def test_task_progress_keeps_original_run_lineage(self):
+    async def test_task_progress_keeps_ambiguous_activity_unattributed(self):
         agent, service = _build_agent()
         composite_key = "session-progress-lineage:/tmp/work"
         origin_context = SimpleNamespace(
@@ -2751,9 +2751,10 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
 
         activity = service.activities.active_for_runtime("claude", composite_key)[0]
-        self.assertEqual(activity.run_id, "run-origin")
-        self.assertEqual(activity.turn_id, "turn-origin")
-        self.assertEqual(activity.metadata["run_ids"], ["run-origin"])
+        self.assertIsNone(activity.run_id)
+        self.assertIsNone(activity.turn_id)
+        self.assertNotIn("run_ids", activity.metadata)
+        self.assertTrue(activity.metadata["provenance_pending"])
 
         self.assertTrue(
             agent._handle_activity_message(
@@ -2764,9 +2765,10 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         completed = service.activities.claim_completed_output("claude", composite_key)
         self.assertIsNotNone(completed)
-        self.assertEqual(completed.run_id, "run-origin")
-        self.assertEqual(completed.turn_id, "turn-origin")
-        self.assertEqual(completed.metadata["run_ids"], ["run-origin"])
+        self.assertIsNone(completed.run_id)
+        self.assertIsNone(completed.turn_id)
+        self.assertNotIn("run_ids", completed.metadata)
+        self.assertTrue(completed.metadata["provenance_pending"])
 
     async def test_failed_task_does_not_claim_a_missing_followup_output(self):
         mark_idle_calls: list[str] = []

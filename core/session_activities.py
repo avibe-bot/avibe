@@ -907,12 +907,15 @@ class SessionActivityRegistry:
         runtime_key: str,
         *,
         turn_ids: set[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
     ) -> list[SessionActivity]:
         """Atomically claim one causal batch without disturbing other output.
 
         Explicit ``turn_ids`` select every matching completion in FIFO order,
         even when unrelated output is interleaved. Without them, the queue head
         defines the batch; turn-less legacy completions remain single-item.
+        ``metadata_match`` selects a producer-defined provisional batch without
+        borrowing a human Turn identity.
         """
 
         key = (str(backend), str(runtime_key))
@@ -926,6 +929,13 @@ class SessionActivityRegistry:
                 for claimed in self._claimed_completed_outputs.values()
             ):
                 return []
+            if metadata_match is not None:
+                claimed = self._claim_completed_outputs(
+                    backend,
+                    runtime_key,
+                    metadata_match=metadata_match,
+                )
+                return self._bind_claimed_output_batch_or_requeue(claimed)
             queue = self._completed_outputs.get(key)
             if not queue:
                 return []
@@ -1229,6 +1239,7 @@ class SessionActivityRegistry:
         runtime_key: str,
         *,
         turn_ids: set[str] | None = None,
+        metadata_match: dict[str, Any] | None = None,
         max_age_seconds: float = 0,
         recovered_only: bool = False,
         limit: int | None = None,
@@ -1266,6 +1277,12 @@ class SessionActivityRegistry:
                     retained.append(entry)
                     continue
                 if unbound_only and assigned_batch_id:
+                    retained.append(entry)
+                    continue
+                if metadata_match is not None and any(
+                    activity.metadata.get(name) != value
+                    for name, value in metadata_match.items()
+                ):
                     retained.append(entry)
                     continue
                 activity_key = self._activity_key(activity)

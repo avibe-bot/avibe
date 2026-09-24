@@ -104,6 +104,10 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
+        # Monotonic admission epochs let a writer that was queued before Stop
+        # distinguish Stop-owned prewrite rejection from an unrelated runtime
+        # replacement after the lock has been released.
+        self._steering_stop_epochs: dict[str, int] = {}
         self._native_input_receipts: dict[str, list[_ClaudeInputReceipt]] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._steering_input_shutdowns: set[str] = set()
@@ -278,6 +282,7 @@ class ClaudeAgent(BaseAgent):
         runtime_session_key = request.composite_session_id
         turn_registered = False
         client = None
+        input_receipt = None
 
         # Question callback handling (disabled - SDK doesn't support AskUserQuestion response)
         # if self.ENABLE_ASK_USER_QUESTION and request.message.startswith("claude_question:"):
@@ -301,28 +306,43 @@ class ClaudeAgent(BaseAgent):
             if callable(mark_session_active):
                 mark_session_active(runtime_session_key)
 
-            # Queue reaction BEFORE sending query to avoid race condition where
-            # a fast result arrives before the reaction is queued
-            if request.ack_reaction_message_id and request.ack_reaction_emoji:
-                if runtime_session_key not in self._pending_reactions:
-                    self._pending_reactions[runtime_session_key] = []
-                self._pending_reactions[runtime_session_key].append(
-                    (request.ack_reaction_message_id, request.ack_reaction_emoji)
-                )
-            self._pending_requests.setdefault(runtime_session_key, []).append(request)
-            self._refresh_activity_provenance_barrier(runtime_session_key)
-
             # Prepare message with file attachment info if present
             message = self._prepare_message_with_files(request)
             message = self.render_input(message, getattr(request, "input_metadata", None))
-            input_receipt = self._register_native_input(
-                runtime_session_key,
-                message,
-                kind="primary",
-            )
+            admission_stop_epoch = self._steering_stop_epoch(runtime_session_key)
 
             try:
                 async with self._steering_lock(runtime_session_key):
+                    if (
+                        self._steering_stop_epoch(runtime_session_key)
+                        != admission_stop_epoch
+                    ):
+                        # Stop already won the only admission fence. The
+                        # request was never registered and must retain its
+                        # definitely-unsent recovery evidence without entering
+                        # the generic runtime-error settlement path.
+                        setattr(request, "_claude_stop_owned", True)
+                        raise ClaudeInputNotSentError(
+                            "claude_runtime_changed_before_write",
+                            "error.claudeInputRuntimeChanged",
+                        )
+
+                    # Queue reaction and register the request while holding the
+                    # same fence as Stop/native write. This makes registration
+                    # itself part of the terminal ownership decision.
+                    if request.ack_reaction_message_id and request.ack_reaction_emoji:
+                        if runtime_session_key not in self._pending_reactions:
+                            self._pending_reactions[runtime_session_key] = []
+                        self._pending_reactions[runtime_session_key].append(
+                            (request.ack_reaction_message_id, request.ack_reaction_emoji)
+                        )
+                    self._pending_requests.setdefault(runtime_session_key, []).append(request)
+                    self._refresh_activity_provenance_barrier(runtime_session_key)
+                    input_receipt = self._register_native_input(
+                        runtime_session_key,
+                        message,
+                        kind="primary",
+                    )
                     writers = self._steering_writer_keys()
                     writers.add(runtime_session_key)
                     try:
@@ -335,7 +355,8 @@ class ClaudeAgent(BaseAgent):
                     finally:
                         writers.discard(runtime_session_key)
             except (Exception, asyncio.CancelledError):
-                self._remove_native_input_receipt(runtime_session_key, input_receipt)
+                if input_receipt is not None:
+                    self._remove_native_input_receipt(runtime_session_key, input_receipt)
                 raise
             input_receipt.state = "accepted"
             from core.skill_observability import accept_catalog
@@ -381,6 +402,7 @@ class ClaudeAgent(BaseAgent):
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
             missing_session = isinstance(e, ClaudeSessionNotFoundError)
             input_not_sent = isinstance(e, ClaudeInputNotSentError)
+            stop_owned = bool(getattr(request, "_claude_stop_owned", False))
             if missing_session:
                 mark_prewrite_recovery_required(context, "native_session_not_found")
             elif input_not_sent:
@@ -410,6 +432,17 @@ class ClaudeAgent(BaseAgent):
                 client=client,
             )
             try:
+                if stop_owned:
+                    # Stop owns the only terminal settlement. The prewrite
+                    # failure above is durable recovery evidence only; emitting
+                    # a runtime-changed error or another silent result here
+                    # would settle the same user request twice.
+                    self._requeue_request_activity(request)
+                    logger.info(
+                        "Claude request was rejected after Stop won admission for %s",
+                        runtime_session_key,
+                    )
+                    return
                 # A typed local resume failure takes precedence over incidental
                 # auth words in the working path or captured process diagnostic.
                 handled = False
@@ -1037,6 +1070,18 @@ class ClaudeAgent(BaseAgent):
             self._steering_generations = generations
         return generations.get(composite_key, 0)
 
+    def _steering_stop_epoch(self, composite_key: str) -> int:
+        epochs = getattr(self, "_steering_stop_epochs", None)
+        if epochs is None:
+            epochs = {}
+            self._steering_stop_epochs = epochs
+        return epochs.get(composite_key, 0)
+
+    def _advance_steering_stop_epoch(self, composite_key: str) -> int:
+        epoch = self._steering_stop_epoch(composite_key) + 1
+        self._steering_stop_epochs[composite_key] = epoch
+        return epoch
+
     def _steering_closing_keys(self) -> set[str]:
         closing = getattr(self, "_steering_closing", None)
         if closing is None:
@@ -1052,12 +1097,24 @@ class ClaudeAgent(BaseAgent):
         return writers
 
     async def _prepare_steering_cleanup(self, composite_key: str) -> None:
+        await self._close_steering_admission(composite_key)
+
+    def _mark_steering_closing(self, composite_key: str) -> None:
+        """Reject new native writes before an async receiver-end replay."""
+
         self._steering_closing_keys().add(composite_key)
-        locks = getattr(self, "_steering_locks", None) or {}
-        lock = locks.get(composite_key)
-        if lock is not None:
-            async with lock:
-                pass
+
+    async def _close_steering_admission(self, composite_key: str) -> None:
+        """Close native write admission and drain the current writer.
+
+        The closing marker prevents a waiter from entering the fence, while
+        acquiring the same lock makes an already-admitted write finish before
+        receiver replay or cleanup can settle the old generation.
+        """
+
+        self._mark_steering_closing(composite_key)
+        async with self._steering_lock(composite_key):
+            pass
 
     def _retire_steering_state(
         self,
@@ -1454,6 +1511,7 @@ class ClaudeAgent(BaseAgent):
                     self._steering_closing_keys().discard(composite_key)
                     self._ambiguous_interrupt_keys().add(composite_key)
                     raise
+                self._advance_steering_stop_epoch(composite_key)
                 # Claim the pending Result owner before releasing the lock. A
                 # terminal frame queued behind interrupt must not settle this
                 # stopped Turn as a successful result.
@@ -1966,10 +2024,12 @@ class ClaudeAgent(BaseAgent):
                             return
                         raw_result_text = getattr(message, "result", None)
                         result_text = raw_result_text
-                        detached_activities = self._detached_activity_outputs.pop(
-                            composite_key,
-                            None,
-                        )
+                        detached_activities = None
+                        if output_mode == "activity":
+                            detached_activities = self._detached_activity_outputs.pop(
+                                composite_key,
+                                None,
+                            )
                         if detached_activities:
                             detached_activity = detached_activities[-1]
                             detached_text = self._detached_assistant_text.get(
@@ -2344,7 +2404,7 @@ class ClaudeAgent(BaseAgent):
                     continue
             # EOF owns terminal settlement. Announce it before awaiting any lock
             # so an overlapping write cannot report ACCEPTED with no receiver.
-            self._steering_closing_keys().add(composite_key)
+            self._mark_steering_closing(composite_key)
             buffered_failure = await self._replay_buffered_terminal_failures(
                 composite_key,
                 context,
@@ -2395,7 +2455,7 @@ class ClaudeAgent(BaseAgent):
             # Close admission before replaying the prior turn's failure. The
             # replay is explicitly allowed to settle that already-buffered
             # failure, while every new native write sees the closing fence.
-            self._steering_closing_keys().add(composite_key)
+            self._mark_steering_closing(composite_key)
             buffered_failure = await self._replay_buffered_terminal_failures(
                 composite_key,
                 context,
@@ -2737,7 +2797,7 @@ class ClaudeAgent(BaseAgent):
         # primary/steer cannot enter the dying receiver.  Keep the steering
         # lock limited to the state snapshot; session cleanup may acquire the
         # generation lock and must never do so while this lock is held.
-        self._steering_closing_keys().add(composite_key)
+        await self._close_steering_admission(composite_key)
         async with self._steering_lock(composite_key):
             mark_session_idle = getattr(self.session_handler, "mark_session_idle", None)
             if callable(mark_session_idle):
@@ -3892,7 +3952,13 @@ class ClaudeAgent(BaseAgent):
             (existing_activity is not None and existing_activity.foreground)
             or (tool_use_id and tool_use_id in foreground_tool_ids)
         )
-        if self._pending_requests.get(composite_key) and not foreground:
+        pending = self._pending_requests.get(composite_key) or []
+        # A pending human request is not enough to prove that this Activity
+        # belongs to it. Keep all newly-created Activities provisional until
+        # Result.origin classifies the phase, even when a buffered foreground
+        # ToolUseBlock already supplied an operational foreground hint.
+        provenance_pending = bool(pending and existing_activity is None)
+        if provenance_pending:
             self._activity_provenance_barriers.add(composite_key)
         # The SDK task ``summary`` is a CLI-generated receipt such as
         # 'Background command "..." completed (exit code 0)'. It is not
@@ -3907,19 +3973,27 @@ class ClaudeAgent(BaseAgent):
             }.items()
             if value not in (None, "")
         }
+        if provenance_pending:
+            metadata["provenance_pending"] = True
         if existing_activity is None:
-            pending = self._pending_requests.get(composite_key) or []
-            source = getattr(pending[0], "context", None) if pending else context
-            delivery_key = str(
-                (getattr(source, "platform_specific", None) or {}).get(
-                    "delivery_key_external"
-                )
-                or ""
-            ).strip()
-            if delivery_key:
-                metadata["delivery_key_external"] = delivery_key
-            run_ids = self._activity_run_ids(composite_key, context)
-            turn_id = self._current_turn_id(composite_key, context)
+            if provenance_pending:
+                # Activity ownership is provisional until Result.origin
+                # classifies this phase. Never inherit a newer human request's
+                # Harness identity while the task's owner is ambiguous.
+                run_ids = []
+                turn_id = None
+            else:
+                source = getattr(pending[0], "context", None) if pending else context
+                delivery_key = str(
+                    (getattr(source, "platform_specific", None) or {}).get(
+                        "delivery_key_external"
+                    )
+                    or ""
+                ).strip()
+                if delivery_key:
+                    metadata["delivery_key_external"] = delivery_key
+                run_ids = self._activity_run_ids(composite_key, context)
+                turn_id = self._current_turn_id(composite_key, context)
         else:
             run_ids = []
             if existing_activity.run_id:
@@ -3979,7 +4053,12 @@ class ClaudeAgent(BaseAgent):
             logger.warning("Ignoring Claude %s with non-terminal status %r", event, status)
             return True
 
-        if existing_activity is None:
+        if existing_activity is None or (
+            existing_activity is not None
+            and foreground
+            and not existing_activity.foreground
+            and bool(pending)
+        ):
             registry.start(
                 backend=self.name,
                 runtime_key=composite_key,
@@ -4380,7 +4459,13 @@ class ClaudeAgent(BaseAgent):
             activities = registry.claim_completed_output_batch(
                 self.name,
                 composite_key,
+                metadata_match={"provenance_pending": True},
             )
+            if not activities:
+                activities = registry.claim_completed_output_batch(
+                    self.name,
+                    composite_key,
+                )
             if not activities:
                 return False
             activity = activities[-1]
@@ -4489,6 +4574,14 @@ class ClaudeAgent(BaseAgent):
         existing result path retains its normal lifecycle behavior.
         """
         registry = self._activity_registry()
+        pending = self._pending_requests.get(composite_key) or []
+        if message_type == "result" and result_owner == "human":
+            # Result.origin is the terminal owner. Preserve any detached state
+            # for a later task-notification Result instead of letting it
+            # intercept this human settlement.
+            if pending:
+                return None
+
         detached_activities = self._detached_activity_outputs.get(composite_key)
         if detached_activities:
             return "activity"
@@ -4501,20 +4594,26 @@ class ClaudeAgent(BaseAgent):
         # when the paired result is consumed or the receiver exits.
         if composite_key in self._suppressed_synthetic_results:
             return None
-        pending = self._pending_requests.get(composite_key) or []
         if message_type == "result" and result_owner == "human":
-            if pending:
-                # Explicit human provenance protects this result from any
-                # completed Activity waiting on the same runtime.
-                return None
+            # No pending human request remains, so this is an unsolicited
+            # frame despite the SDK's human origin marker. Keep the historical
+            # detached lifecycle for that case without consuming any pending
+            # request (there is none to consume).
             self._detached_unsolicited_outputs.add(composite_key)
             return "detached"
         if message_type == "result" and result_owner == "detached":
-            completed_activities = (
-                registry.claim_completed_output_batch(self.name, composite_key)
-                if registry is not None
-                else []
-            )
+            completed_activities = []
+            if registry is not None and pending:
+                completed_activities = registry.claim_completed_output_batch(
+                    self.name,
+                    composite_key,
+                    metadata_match={"provenance_pending": True},
+                )
+            if not completed_activities and registry is not None:
+                completed_activities = registry.claim_completed_output_batch(
+                    self.name,
+                    composite_key,
+                )
             if completed_activities:
                 self._detached_activity_outputs[composite_key] = completed_activities
                 return "activity"
