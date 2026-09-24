@@ -20,6 +20,7 @@ from core.message_output import (
 from core.native_dispatch_phase import mark_backend_dispatch_attempted, mark_prewrite_recovery_required
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
+from core.resource_governance import pids_failure_labels
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_work import RuntimeWorkLane
 from core.services.agent_steering import (
@@ -123,10 +124,24 @@ class ClaudeAgent(BaseAgent):
         # )
         self._question_handler = None
 
-    def _claude_error_diagnostic(self, composite_key: str, error: Exception) -> str:
+    def _claude_error_diagnostic(
+        self,
+        composite_key: str,
+        error: Exception,
+        *,
+        client=None,
+    ) -> str:
         diagnostic = getattr(self.session_handler, "claude_error_diagnostic", None)
         if callable(diagnostic):
             try:
+                if client is not None:
+                    try:
+                        return diagnostic(composite_key, error, client=client)
+                    except TypeError:
+                        # Keep compatibility with lightweight test doubles and
+                        # older session handlers that still expose the two-arg
+                        # diagnostic hook.
+                        pass
                 return diagnostic(composite_key, error)
             except Exception:
                 logger.debug("claude: failed to build error diagnostic", exc_info=True)
@@ -142,7 +157,13 @@ class ClaudeAgent(BaseAgent):
         lang = getattr(getattr(self.controller, "config", None), "language", "en")
         return str(i18n_t(key, lang, **kwargs))
 
-    def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
+    def _format_error_notify(
+        self,
+        error: Exception,
+        *,
+        composite_key: str | None = None,
+        client=None,
+    ) -> str:
         """Return the durable notify text for Claude terminal errors."""
         if isinstance(error, ClaudeSessionNotFoundError):
             detail = self._translate_error(
@@ -153,12 +174,27 @@ class ClaudeAgent(BaseAgent):
             return f"❌ {detail}"
         if is_claude_sdk_buffer_error(error):
             return f"❌ {self._translate_error('error.sessionConnectionLost')}"
-        client = self.claude_sessions.get(composite_key) if composite_key else None
+        if client is None:
+            client = self.claude_sessions.get(composite_key) if composite_key else None
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
             reason = self._translate_error(reason_key, **reason_values)
-            return f"❌ {self._translate_error('error.claudeProcessTerminated', reason=reason)}"
+            message = self._translate_error("error.claudeProcessTerminated", reason=reason)
+            resource_failure = getattr(client, "_vibe_resource_failure", None)
+            if resource_failure is not None:
+                if getattr(resource_failure, "kind", None) == "pids":
+                    language = str(
+                        getattr(getattr(self.controller, "config", None), "language", "en")
+                        or "en"
+                    )
+                    message = (
+                        f"{message} "
+                        f"{self._translate_error('error.agentPidsLimit', **pids_failure_labels(resource_failure, language))}"
+                    )
+                elif getattr(resource_failure, "kind", None) == "memory":
+                    message = f"{message} {self._translate_error('error.agentMemoryLimit')}"
+            return f"❌ {message}"
         return f"❌ Claude error: {error}"
 
     async def handle_message(self, request: AgentRequest) -> None:
@@ -267,7 +303,11 @@ class ClaudeAgent(BaseAgent):
             missing_session = isinstance(e, ClaudeSessionNotFoundError)
             if missing_session:
                 mark_prewrite_recovery_required(context, "native_session_not_found")
-            diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
+            diagnostic = self._claude_error_diagnostic(
+                runtime_session_key,
+                e,
+                client=client,
+            )
             # Classify BEFORE recording: ``record_model_hub_native_failure``
             # turns the pending native/hub attempt into a failed one, so a
             # process the service killed on purpose would settle that source's
@@ -282,7 +322,11 @@ class ClaudeAgent(BaseAgent):
             self._remove_pending_request(runtime_session_key, request)
             self._mark_session_idle_if_no_pending_requests(runtime_session_key)
             await self._remove_ack_reaction(request)
-            error_notify = self._format_error_notify(e, composite_key=runtime_session_key)
+            error_notify = self._format_error_notify(
+                e,
+                composite_key=runtime_session_key,
+                client=client,
+            )
             try:
                 # A typed local resume failure takes precedence over incidental
                 # auth words in the working path or captured process diagnostic.
@@ -2003,6 +2047,14 @@ class ClaudeAgent(BaseAgent):
                         # the result to the live sink instead of rejecting it as a
                         # stale straggler. No-op for fresh sessions / absent tokens.
                         self._adopt_pending_turn_token(context, pending_request)
+                        close_after_payload = getattr(context, "platform_specific", None) or {}
+                        backend_cleanup = (
+                            asyncio.Event()
+                            if close_after_payload.get("close_after")
+                            else None
+                        )
+                        if backend_cleanup is not None:
+                            close_after_payload["_close_after_backend_cleanup"] = backend_cleanup
 
                         # A terminal result consumes this Turn even when IM delivery
                         # fails. A failed Activity delivery is requeued below, but its
@@ -2087,29 +2139,35 @@ class ClaudeAgent(BaseAgent):
                                         exc_info=True,
                                     )
                         finally:
-                            await self._remove_result_pending_reaction(
-                                composite_key,
-                                context,
-                                pending_request,
-                            )
-                            self._last_assistant_text.pop(composite_key, None)
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
-                            is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
                             try:
-                                session = await self.session_manager.get_or_create_session(
-                                    context.user_id, context.channel_id
-                                )
-                                if session and is_idle:
-                                    session.session_active[composite_key] = False
-                            except Exception:
-                                logger.debug(
-                                    "claude: failed to update session_active after result for %s",
+                                await self._remove_result_pending_reaction(
                                     composite_key,
-                                    exc_info=True,
+                                    context,
+                                    pending_request,
                                 )
-                            if emit_failed:
-                                self._release_service_runtime_turn(context)
+                                self._last_assistant_text.pop(composite_key, None)
+                                self._foreground_tool_use_ids.pop(composite_key, None)
+                                self._turns_with_foreground_tools.discard(composite_key)
+                                is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
+                                try:
+                                    session = await self.session_manager.get_or_create_session(
+                                        context.user_id, context.channel_id
+                                    )
+                                    if session and is_idle:
+                                        session.session_active[composite_key] = False
+                                except Exception:
+                                    logger.debug(
+                                        "claude: failed to update session_active after result for %s",
+                                        composite_key,
+                                        exc_info=True,
+                                    )
+                                if emit_failed:
+                                    self._release_service_runtime_turn(context)
+                            finally:
+                                if backend_cleanup is not None:
+                                    backend_cleanup.set()
+                                    if close_after_payload.get("_close_after_backend_cleanup") is backend_cleanup:
+                                        close_after_payload.pop("_close_after_backend_cleanup", None)
                         if settling_ambiguous_primary:
                             return
                         continue
@@ -2245,8 +2303,16 @@ class ClaudeAgent(BaseAgent):
         contained = False
         if returncode is not None:
             eof_error = RuntimeError(terminal_error)
-            error_notify = self._format_error_notify(eof_error, composite_key=composite_key)
-            diagnostic = self._claude_error_diagnostic(composite_key, eof_error)
+            diagnostic = self._claude_error_diagnostic(
+                composite_key,
+                eof_error,
+                client=client,
+            )
+            error_notify = self._format_error_notify(
+                eof_error,
+                composite_key=composite_key,
+                client=client,
+            )
             failure_context = getattr(pending_request, "context", context)
             intentional_teardown = self._teardown_is_intentional(
                 composite_key, eof_error, client=client
@@ -2361,13 +2427,21 @@ class ClaudeAgent(BaseAgent):
             pending_request = pending[0] if pending else None
             self._adopt_pending_turn_token(context, pending_request)
             await self._clear_pending_reactions(composite_key, context)
-            diagnostic = self._claude_error_diagnostic(composite_key, error)
-            error_notify = self._format_error_notify(error, composite_key=composite_key)
-            failure_context = getattr(pending_request, "context", context)
             # Read the client once and reuse it for both the health gate and the
             # handler, so a replacement registering in between cannot make the
             # two disagree about which generation actually failed.
             errored_client = self.claude_sessions.get(composite_key)
+            diagnostic = self._claude_error_diagnostic(
+                composite_key,
+                error,
+                client=errored_client,
+            )
+            error_notify = self._format_error_notify(
+                error,
+                composite_key=composite_key,
+                client=errored_client,
+            )
+            failure_context = getattr(pending_request, "context", context)
             intentional_teardown = self._teardown_is_intentional(
                 composite_key, error, client=errored_client
             )
@@ -2651,6 +2725,7 @@ class ClaudeAgent(BaseAgent):
             "task_trigger_kind",
             "task_execution_id",
             "accepted_agent_run_ids",
+            "close_after",
         )
         current_payload = getattr(context, "platform_specific", None) or {}
         updates_attribution = any(

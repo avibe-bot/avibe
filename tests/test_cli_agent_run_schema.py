@@ -61,6 +61,7 @@ _EXPECTED_KEYS = {
     "callback_session_id",
     "caller_context",
     "callback_notice",
+    "close_after",
     "async",
     "run",
 }
@@ -77,6 +78,7 @@ _EXPECTED_RUN_KEYS_QUEUED = {
     "source_kind",
     "source_actor",
     "parent_run_id",
+    "close_after",
 }
 
 
@@ -129,6 +131,50 @@ def test_agent_run_default_async_envelope_schema(tmp_path: Path, capsys) -> None
     assert run["source_kind"] == "cli"
     assert run["source_actor"] is None
     assert run["parent_run_id"] is None
+    assert payload["close_after"] is False
+    assert run["close_after"] is False
+
+
+def test_agent_run_close_after_is_persisted_for_new_session(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(
+        ["--agent", "worker", "--close-after", "--no-callback", "--message", "hi"]
+    )
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._primary_platform", return_value="slack"),
+    ):
+        result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["close_after"] is True
+    assert payload["run"]["close_after"] is True
+    stored = request_store.get_run(payload["run_id"])
+    assert stored is not None
+    assert stored["metadata"]["close_after"] is True
+
+
+def test_agent_run_close_after_rejects_existing_session() -> None:
+    args = _parse_agent_run(
+        ["--agent", "worker", "--session-id", "ses_existing", "--close-after", "--message", "hi"]
+    )
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._validate_run_session_policy(args, help_command="vibe agent run --help")
+
+    # The flag is validated after the target is resolved in cmd_agent_run; the
+    # parser still exposes it as a normal boolean for callers that inspect args.
+    assert args.close_after is True
 
 
 def test_agent_run_releases_reserved_session_when_guarded_enqueue_loses(

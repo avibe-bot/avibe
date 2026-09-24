@@ -67,7 +67,11 @@ Important config payload shape:
   },
   "runtime": {
     "default_cwd": "/path/to/workdir",
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "resource_governance": {
+      "mode": "auto",
+      "agent_pids_max": 4096
+    }
   },
   "agents": {
     "opencode": {

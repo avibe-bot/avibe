@@ -7,13 +7,16 @@ from config import paths
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
 from core.resource_governance import (
     MIB,
+    AgentResourceFailure,
     AgentResourceGovernor,
     _is_known_avibe_runtime_member,
     config_from_controller,
     derive_agent_limits,
     is_controller_resource_governor,
     governor_from_controller,
+    pids_failure_labels,
     tenant_memory_limit_bytes,
+    tenant_pid_limit,
 )
 
 
@@ -24,7 +27,208 @@ def test_derive_agent_limits_uses_single_aggregate_budget() -> None:
     assert limits.memory_high == 2367 * MIB
     assert limits.cpu_weight == 50
     assert limits.io_weight == 50
-    assert limits.pids_max == 512
+    assert limits.pids_max == 4096
+
+
+def test_agent_pid_limit_reserves_runtime_capacity_below_ancestor_cap() -> None:
+    assert derive_agent_limits(None, tenant_pids_max=4096).pids_max == 3072
+    assert derive_agent_limits(
+        None, {"agent_pids_max": 8192}, tenant_pids_max=1024
+    ).pids_max == 768
+    assert derive_agent_limits(
+        None, {"agent_pids_max": 256}, tenant_pids_max=4096
+    ).pids_max == 256
+
+
+def test_tenant_pid_limit_uses_tightest_ancestor(tmp_path: Path) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (root / "pids.max").write_text("2048\n", encoding="utf-8")
+    (base / "pids.max").write_text("4096\n", encoding="utf-8")
+
+    assert tenant_pid_limit(base, root) == 2048
+
+
+def test_governor_diagnoses_pid_limit_from_counter_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    base.mkdir(parents=True)
+    group.mkdir()
+    for name, value in (
+        ("cgroup.procs", ""),
+        ("pids.current", "100"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 0\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+    monkeypatch.setattr(governor, "_group", group)
+    governor._event_baseline = governor.snapshot()
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    failure = governor.observe_resource_pressure()
+
+    assert failure is not None
+    assert failure.kind == "pids"
+    assert failure.pids_current == 100
+    assert failure.pids_max == 4096
+    assert failure.event_delta == 1
+    assert "events.max_delta=1" in failure.message
+    assert "shared Agent cgroup" in failure.message
+    assert governor.observe_resource_pressure() is None
+    (group / "pids.current").write_text("0\n", encoding="utf-8")
+    (group / "pids.events").write_text("max 6\n", encoding="utf-8")
+    zero_failure = governor.observe_resource_pressure()
+    assert zero_failure is not None
+    assert zero_failure.pids_current == 0
+    assert "current=0" in zero_failure.message
+
+
+def test_pid_limit_fallback_labels_are_localized() -> None:
+    failure = AgentResourceFailure(kind="pids", message="pressure")
+
+    assert pids_failure_labels(failure, "zh") == {
+        "current": "未知",
+        "limit": "未知或不限",
+    }
+    assert pids_failure_labels(failure, "en") == {
+        "current": "unknown",
+        "limit": "unknown or unlimited",
+    }
+
+
+def test_unchanged_governance_config_keeps_pressure_baseline_across_reload(
+    tmp_path: Path,
+) -> None:
+    group = tmp_path / "avibe-agents"
+    group.mkdir()
+    for name, value in (
+        ("pids.current", "1"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 0\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+    governor = AgentResourceGovernor({"mode": "enabled"})
+    governor._group = group
+    baseline = governor.snapshot()
+    governor._event_baseline = baseline
+
+    governor.update_config({"mode": "enabled"})
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    assert governor.group_path == group
+    assert governor._event_baseline is baseline
+    assert governor.observe_resource_pressure().event_delta == 1
+
+
+def test_changed_limits_reconfigure_same_group_without_losing_pressure(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    group.mkdir(parents=True)
+    (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
+    (base / "pids.max").write_text("4096\n", encoding="utf-8")
+    for name, value in (
+        ("cgroup.procs", ""),
+        ("cpu.weight", "50"),
+        ("memory.high", "max"),
+        ("memory.max", "max"),
+        ("pids.current", "1"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 0\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+    governor = AgentResourceGovernor(
+        {"mode": "enabled", "agent_cpu_weight": 50},
+        root=root,
+        base_cgroup=base,
+    )
+    governor._base = base
+    governor._group = group
+    baseline = governor.snapshot()
+    governor._event_baseline = baseline
+
+    governor.update_config(
+        {"mode": "enabled", "agent_cpu_weight": 100, "agent_pids_max": 8192}
+    )
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    assert governor.group_path == group
+    assert governor._event_baseline is baseline
+    assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "100"
+    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "3072"
+    assert governor.observe_resource_pressure().event_delta == 1
+
+
+def test_governor_diagnoses_memory_limit_from_counter_delta(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    base.mkdir(parents=True)
+    group.mkdir()
+    for name, value in (
+        ("cgroup.procs", ""),
+        ("pids.current", "100"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 0\n"),
+        ("memory.events", "max 1\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+    governor._group = group
+    governor._event_baseline = governor.snapshot()
+    (group / "memory.events").write_text("max 2\noom 0\noom_kill 0\n", encoding="utf-8")
+
+    failure = governor.observe_resource_pressure()
+
+    assert failure is not None
+    assert failure.kind == "memory"
+    assert "event=max" in failure.message
+    assert governor.observe_resource_pressure() is None
+
+
+def test_simultaneous_pid_and_memory_events_remain_separately_observable(
+    tmp_path: Path,
+) -> None:
+    group = tmp_path / "avibe-agents"
+    group.mkdir()
+    for name, value in (
+        ("pids.current", "100"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 1\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+    governor = AgentResourceGovernor({"mode": "enabled"})
+    governor._group = group
+    governor._event_baseline = governor.snapshot()
+
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+    (group / "memory.events").write_text(
+        "max 2\noom 1\noom_kill 1\n", encoding="utf-8"
+    )
+
+    pid_failure = governor.observe_resource_pressure()
+    memory_failure = governor.observe_resource_pressure()
+
+    assert pid_failure is not None and pid_failure.kind == "pids"
+    assert memory_failure is not None and memory_failure.kind == "memory"
+    assert "event=oom_kill" in memory_failure.message
+    assert governor.observe_resource_pressure() is None
 
 
 def test_derive_agent_limits_honors_explicit_bytes() -> None:
@@ -238,7 +442,8 @@ def test_governor_update_config_resets_cached_group(tmp_path: Path, monkeypatch:
 
     governor.update_config({"mode": "disabled"})
 
-    assert governor.group_path is None
+    # Existing members remain observable, but new processes are not adopted.
+    assert governor.group_path == group
     assert governor.apply_to_pid(4322, label="test") is False
 
 
@@ -248,6 +453,7 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     base.mkdir(parents=True)
     (root / "memory.max").write_text("max\n", encoding="utf-8")
     (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
+    (base / "pids.max").write_text("4096\n", encoding="utf-8")
     (base / "cgroup.controllers").write_text("memory cpu io pids\n", encoding="utf-8")
     (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
     (base / "cgroup.procs").write_text("1001\n1002\n", encoding="utf-8")
@@ -268,9 +474,11 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
                 "cpu.weight",
                 "io.weight",
                 "pids.max",
+                "pids.events",
                 "cgroup.procs",
             ):
                 (group / name).write_text("", encoding="utf-8")
+            (group / "pids.events").write_text("max 0\n", encoding="utf-8")
         if path == runtime_group:
             (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
@@ -284,6 +492,8 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
                 remaining = "1002\n" if value == "1001" else ""
                 (base / "cgroup.procs").write_text(remaining, encoding="utf-8")
             return
+        if path == group / "cgroup.procs":
+            (group / "pids.events").write_text("max 1\n", encoding="utf-8")
         path.write_text(f"{value}\n", encoding="utf-8")
 
     monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
@@ -299,7 +509,32 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     assert (group / "memory.oom.group").read_text(encoding="utf-8").strip() == "1"
     assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "50"
     assert (group / "io.weight").read_text(encoding="utf-8").strip() == "default 50"
-    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "512"
+    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "3072"
+    assert governor.observe_resource_pressure().kind == "pids"
+
+
+def test_existing_agent_group_baseline_precedes_migrated_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    group.mkdir(parents=True)
+    (base / "memory.max").write_text(str(512 * MIB), encoding="utf-8")
+    (group / "cgroup.procs").write_text("", encoding="utf-8")
+    (group / "pids.events").write_text("max 4\n", encoding="utf-8")
+    (group / "memory.high").write_text("max\n", encoding="utf-8")
+    (group / "memory.max").write_text("max\n", encoding="utf-8")
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+
+    def migrate(*_args, **_kwargs):
+        (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    monkeypatch.setattr(governor, "_prepare_base_cgroup", migrate)
+    monkeypatch.setattr(governor, "_enable_subtree_controllers", lambda _base: None)
+
+    assert governor._ensure_group(known_agent_pids={4321}) == group
+    assert governor.observe_resource_pressure().event_delta == 1
 
 
 def test_governor_falls_back_when_memory_controller_is_missing(
@@ -453,6 +688,7 @@ def test_governor_allows_known_agent_pids_during_base_migration(
         if path == group:
             for name in ("cpu.weight", "io.weight", "pids.max", "cgroup.procs"):
                 (group / name).write_text("", encoding="utf-8")
+            (group / "pids.events").write_text("max 0\n", encoding="utf-8")
         if path == runtime_group:
             (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
@@ -462,6 +698,7 @@ def test_governor_allows_known_agent_pids_during_base_migration(
             runtime_writes.append(value)
         elif path == group / "cgroup.procs":
             agent_writes.append(value)
+            (group / "pids.events").write_text("max 1\n", encoding="utf-8")
         else:
             path.write_text(f"{value}\n", encoding="utf-8")
             return
@@ -481,6 +718,7 @@ def test_governor_allows_known_agent_pids_during_base_migration(
     assert runtime_writes == ["1001"]
     assert agent_writes == ["5001", "5002", "5001", "5002"]
     assert governor.group_path == group
+    assert governor.observe_resource_pressure().kind == "pids"
 
 
 def test_governor_falls_back_when_subtree_control_enable_fails(

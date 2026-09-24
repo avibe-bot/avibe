@@ -246,6 +246,8 @@ class OpenCodeServerManager:
         self.resource_governor = resource_governor
         self.host = DEFAULT_OPENCODE_HOST
         self._process: Optional[Process] = None
+        self._last_start_failure_pid: int | None = None
+        self._start_attempt_generation = 0
         # The event loop ``_process`` was created on. Subprocess transports
         # bind their internal Future / wait helpers to the creating loop;
         # ``process.wait()`` or ``terminate_process_tree(process)`` from a
@@ -287,6 +289,7 @@ class OpenCodeServerManager:
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
         self._runtime_activation_retire: Callable[[bool, bool], bool] | None = None
         self._runtime_generation_token: tuple[int, float | None] | None = None
+        self._observed_runtime_process: tuple[int, float] | None = None
 
     def set_runtime_activation_retire(
         self,
@@ -324,6 +327,7 @@ class OpenCodeServerManager:
                 "OpenCode runtime replacement could not retire its activation generation"
             )
         self._runtime_generation_token = None
+        self._observed_runtime_process = None
 
     def _observe_runtime_generation(
         self,
@@ -338,6 +342,47 @@ class OpenCodeServerManager:
         if previous is not None and previous != token:
             self._retire_runtime_generation_for_replacement()
         self._runtime_generation_token = token
+        if previous != token:
+            self._last_start_failure_pid = None
+        if previous != token or self._observed_runtime_process is None:
+            created_at = runtime.process_create_time(token[0])
+            self._observed_runtime_process = (
+                (token[0], created_at) if created_at is not None else None
+            )
+
+    def observed_runtime_exit_pid(self) -> int | None:
+        """Return only an observed server generation that has since exited."""
+
+        identity = self._observed_runtime_process
+        if identity is None:
+            return None
+        pid, created_at = identity
+        current_created_at = runtime.process_create_time(pid)
+        if current_created_at == created_at or (
+            current_created_at is None and self._pid_exists(pid)
+        ):
+            return None
+        return pid
+
+    def _pid_file_proves_owned_server(self, info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(info, dict):
+            return False
+        pid = info.get("pid")
+        created_at = info.get("process_created_at")
+        if not isinstance(pid, int) or not isinstance(created_at, (int, float)):
+            return False
+        if isinstance(created_at, bool) or created_at <= 0:
+            return False
+        if not self._pid_file_references_current_server(info):
+            return False
+        return runtime.process_create_time(pid) == float(created_at)
+
+    def _terminate_owned_adopted_server_sync(
+        self, pid: int, info: Dict[str, Any]
+    ) -> bool:
+        if not self._pid_file_proves_owned_server(info):
+            raise RuntimeError("OpenCode server ownership cannot be proven")
+        return self._terminate_pid_tree_sync(pid)
 
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
@@ -494,16 +539,25 @@ class OpenCodeServerManager:
         async with self._get_lock():
             if self._active_requests or self._has_active_run_sessions():
                 raise RuntimeError("OpenCode runtime is busy")
-            retire = self._runtime_activation_retire
-            if callable(retire) and not retire(False, True):
-                raise RuntimeError("OpenCode runtime retirement was refused")
             process = self._process
-            # A pid-file without a live child handle is not sufficient proof of
-            # ownership (PID reuse). Leave it for the external-process blocker.
             info = self._read_pid_file()
             recorded_pid = info.get("pid") if isinstance(info, dict) else None
             if process is None and isinstance(recorded_pid, int) and self._pid_exists(recorded_pid):
-                raise RuntimeError("OpenCode server ownership cannot be proven")
+                # A command/port match alone can belong to a reused PID.
+                if not self._pid_file_proves_owned_server(info):
+                    raise RuntimeError("OpenCode server ownership cannot be proven")
+            retire = self._runtime_activation_retire
+            if callable(retire) and not retire(False, True):
+                raise RuntimeError("OpenCode runtime retirement was refused")
+            if process is None and isinstance(recorded_pid, int) and self._pid_exists(recorded_pid):
+                if not await finish_native_operation(
+                    asyncio.to_thread(
+                        self._terminate_owned_adopted_server_sync,
+                        recorded_pid,
+                        info,
+                    )
+                ) or self._pid_exists(recorded_pid):
+                    raise RuntimeError("OpenCode server did not exit")
             if process is not None and process.returncode is None:
                 if not await finish_native_operation(
                     asyncio.to_thread(self._terminate_pid_tree_sync, process.pid)
@@ -518,6 +572,7 @@ class OpenCodeServerManager:
             self._process_loop = None
             self._base_url = None
             self._runtime_generation_token = None
+            self._observed_runtime_process = None
             self._auth_refresh_pending = False
             self._auth_refresh_pending_port = None
             self._apply_pending_runtime_config_locked()
@@ -573,6 +628,7 @@ class OpenCodeServerManager:
         self._process_loop = None
         self._base_url = None
         self._runtime_generation_token = None
+        self._observed_runtime_process = None
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port = None
         self._apply_pending_runtime_config_locked()
@@ -1013,6 +1069,7 @@ class OpenCodeServerManager:
         caller_context_path: object = _USE_CURRENT_CALLER_CONTEXT_PATH,
         owner_pid: Optional[int] = _CURRENT_OWNER_PID,
         runtime_policy_revision: Optional[str] = _MANAGED_RUNTIME_POLICY_REVISION,
+        process_created_at: float | None = None,
     ) -> None:
         try:
             self._pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1025,6 +1082,8 @@ class OpenCodeServerManager:
             }
             if owner_pid is not None:
                 payload["owner_pid"] = owner_pid
+            if process_created_at is not None:
+                payload["process_created_at"] = process_created_at
             if runtime_policy_revision is not None:
                 payload["runtime_policy_revision"] = runtime_policy_revision
             if caller_context_path is _USE_CURRENT_CALLER_CONTEXT_PATH:
@@ -1837,6 +1896,8 @@ class OpenCodeServerManager:
         # ``runtime.stop_pid``) is loop-agnostic and is the correct
         # cleanup path; just detach the dangling Python object first.
         current_loop = asyncio.get_running_loop()
+        self._start_attempt_generation += 1
+        self._last_start_failure_pid = None
         if (
             self._process
             and self._process.returncode is None
@@ -1916,7 +1977,10 @@ class OpenCodeServerManager:
             # safely before issuing ``process.wait()``.
             self._process_loop = current_loop
             if self._process and self._process.pid:
-                self._write_pid_file(self._process.pid)
+                self._write_pid_file(
+                    self._process.pid,
+                    process_created_at=runtime.process_create_time(self._process.pid),
+                )
                 self._apply_resource_governance(self._process.pid)
         except FileNotFoundError:
             raise RuntimeError(
@@ -1934,12 +1998,18 @@ class OpenCodeServerManager:
                 break
             await asyncio.sleep(0.5)
 
-        exit_code = self._process.returncode
+        process = self._process
+        exit_code = process.returncode
+        # A live process below is terminated by Avibe for timeout. Only an
+        # independently exited process may consume shared pressure evidence.
+        self._last_start_failure_pid = (
+            getattr(process, "pid", None) if exit_code is not None else None
+        )
         if exit_code is None:
             # A late-starting process must not become a healthy but unmanaged
             # server after this call reports failure and clears its PID file.
             await terminate_process_tree(
-                self._process,
+                process,
                 logger,
                 "OpenCode server after startup timeout",
                 terminate_timeout=5,
@@ -2012,6 +2082,8 @@ class OpenCodeServerManager:
         self._base_url = None
         self._process = None
         self._process_loop = None
+        self._runtime_generation_token = None
+        self._observed_runtime_process = None
 
     @classmethod
     def terminate_instance_sync(cls) -> None:
