@@ -1,0 +1,140 @@
+# Model usage analytics
+
+Status: implementation.
+
+## Approved behavior
+
+The owner approved the interactive usage preview on September 24, 2026, including
+the subsequent explicit pin interaction. This approval is the visual reference
+for the new usage surface; existing Model Hub tokens and primitives still own
+the surrounding shell. The reference is the orchestrator Session's Show Page
+(`seskugjeceav3`), not a new navigation shell to copy into the product.
+
+- A shared time range and multi-select Source/model filters drive the statistics,
+  chart, table, and CSV export.
+- Offer 24 hours, 7 days, 30 days, and 60 days. The initial view is 24 hours.
+  Use hourly lines for 24 hours, daily lines for 7 days, and daily stacked bars
+  for 30/60 days. Display the server-returned time boundaries and time zone.
+- The hourly view includes the current partial hour and preceding 23 hourly
+  intervals. Label the partial hour and disclose the actual range. It is an
+  hourly-bucket view, not an exact second-level sliding window.
+- Metrics: all tokens, input including cache, output, cache reads, requests.
+  Groups: total, token type, model, Source (labelled supplier in the UI).
+  Token-type grouping is unavailable for request counts.
+- Total tokens = input + output. Disjoint token series use noncached input
+  (`input_tokens - cached_input_tokens`), cached input, and output.
+- A model's identity is `(source_id, model_id)`, never its label. Different
+  configured Sources remain distinct even when labels or vendor brands match.
+- A hover opens readable exact figures for its time bucket. Clicking a point
+  opens an ordinary, dismissible detail popover. Outside click closes it.
+  Only the explicit pin control in the popover corner pins/unpins the detail;
+  clicking the plot again never toggles pinning. Pinned details survive outside
+  clicks; changing report scope clears the pin. Escape dismisses the detail.
+  Pinning also narrows the table to that bucket; unpinning restores the range.
+- The chart precedes the exact-count details table. Chart legend visibility is
+  presentation only and must not silently change report scope or CSV contents.
+- Preserve honest unavailable/partial-report states, historical identities,
+  loading/failure behavior, keyboard access, light/dark themes, and narrow screens.
+
+## Shared wire contract
+
+The existing `GET /api/models/usage?days=N` remains supported with its current
+shape and default. The same route accepts an exclusive `window` selector:
+`24h | 7d | 30d | 60d`. Invalid or conflicting selectors return 400.
+The controller RPC, its client, and service forward this selector explicitly.
+The modern UI uses `window` exclusively.
+
+A modern response retains `{ok, contract_version, usage}`. `usage` extends the
+existing UsageSummary fields with the following required fields:
+
+```ts
+type UsageWindowKey = '24h' | '7d' | '30d' | '60d';
+type UsageBucketRow = UsageCounters & {
+  source_id: string;
+  model_id: string;
+};
+type UsageBucket = {
+  key: string;
+  start_at: string; // RFC3339, inclusive, explicit server-local UTC offset
+  end_at: string;   // RFC3339, exclusive; current bucket ends at report time
+  history_complete: boolean;
+  rows: UsageBucketRow[];
+};
+type UsageReport = UsageSummary & {
+  window_key: UsageWindowKey;
+  granularity: 'hour' | 'day';
+  from_at: string; // first bucket start
+  to_at: string;   // report time
+  buckets: UsageBucket[];
+};
+```
+
+`buckets` is dense and chronological: 24, 7, 30, or 60 entries. Daily keys
+are local `YYYY-MM-DD`; hourly keys are offset-aware instants, unambiguous
+across DST. Hourly intervals are actual consecutive hours, with the final
+interval partial. Daily intervals are server-local calendar days.
+
+Each bucket's rows are sparse, unique source/model pairs. `sources` supplies
+their existing joined display identities. `totals`, `sources`, and `days`
+aggregate these exact same rows, including for hourly reports. For hourly
+reports `window_days` names the number of local calendar dates touched by the
+reported buckets; it must not pretend that 24 hours means today's calendar day.
+Daily reports preserve the legacy aggregate's bounds and survivor set.
+
+`history_complete` means the time granularity is available for that bucket;
+it is independent of `token_reports`, which describes vendor reporting.
+Legacy daily usage must never be allocated to an invented hour using its
+last-metered timestamp. Preserve it in daily reports, report only measured
+hourly counts, and mark affected hourly buckets incomplete. The UI renders
+gaps/partial-history language rather than claiming zero historical usage.
+A completely idle, fully observed bucket can display zero. A bucket containing
+requests but no token reports displays an unavailable token value, not zero.
+
+Only the ledger produces the temporal matrix; the service joins identities;
+RPC and HTTP preserve the fields; the browser projects filters/groups over
+this one matrix. This report remains isolated from admission and routing.
+No credential or upstream request-body fields are added.
+
+## Storage boundary and ownership
+
+The existing bounded ledger remains the sole metering owner. Extend it with
+bounded recent hour aggregates without discarding the released list-of-daily-
+rows format. Prefer optional nested hour slices in the retained daily rows:
+one atomic write captures each call in both granularities. Older files load
+without fabricated hourly history. Daily totals remain authoritative for
+daily reports and include pre-upgrade usage; hourly slices are never added to
+those totals a second time. Retain only the hourly slices needed for the
+24-hour view, with explicit capacity and corruption handling. Existing
+batching must not combine calls from different hours before the ledger sees
+their temporal identity.
+
+The backend lane owns Python, the JSON schema/API documentation, and Python
+tests. The UI lane owns frontend code, localizations, frontend tests, and
+UI-side fixtures. The orchestrator owns integration, this plan, public user
+documentation, regression acceptance, and final PR/review/CI delivery.
+Interface deviations must be agreed with the orchestrator before integration.
+
+## Acceptance
+
+1. Real metered calls survive restart and reconcile across daily/hourly totals,
+   Source/model filters, token metrics, and series/table projections.
+2. Released daily-only files keep their existing totals. Hourly history gaps
+   are explicit; corrupt/future/DST boundaries do not fabricate known usage.
+3. Cache is counted exactly once; missing vendor usage and actual zero differ.
+4. Hover, click-away, explicit pin/unpin, Escape, touch, and keyboard controls
+   work without moving or changing the time being pinned.
+5. Focused backend and frontend tests, changed-file lint, and the production UI
+   build pass. Exercise the boundary with real fixture data, including Unicode
+   and same-labelled Sources/models. CI owns repository-wide gates.
+6. User-facing browser checks run against hermetic fixtures or a task-owned
+   local Incus environment; never modify the running personal Avibe instance.
+7. Current-head Codex review, CI, and resolved-thread gates are required.
+   Opening the implementation PR is authorized; merging/deploying is not.
+
+## Known by design
+
+- This is metered gateway usage, not native subscription quota or monetary cost.
+- Historical daily counts cannot be reverse-engineered into hourly data.
+- The approved preview's illustrative sidebar/data are not production changes.
+- Source/model labels come from current configuration; deleted identities keep
+  the existing honest historical-identity rendering.
