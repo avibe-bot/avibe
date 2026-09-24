@@ -29,12 +29,10 @@
 // passing no count renders the raw key against a family that has no plain key.
 //
 // `count` is one of the options the call site hands over, and the same reading
-// answers the other one that changes what "has copy" means. `returnObjects` says
-// the caller consumes a LIST — `MemorySettingsPanel` maps over its result — so a
-// value turned into an object or a plain string is renderable by every other
-// measure and still throws on `.map`. Both are read off the call rather than
-// listed as keys here, so a second site asking for a list is covered the day it
-// is written.
+// answers the other one that changes what "has copy" means. A caller that uses
+// `returnObjects` to consume a LIST needs an array rather than an object or a
+// plain string, even if the latter looks renderable. Both are read off the call
+// rather than listed as keys here, so a list consumer is covered when added.
 //
 // That axis is closed by a MODEL rather than by a list of options, which is what
 // it finally became: one question — how much copy does this call DEMAND — with
@@ -177,9 +175,8 @@
 //   `<Trans>`. An object passes none of them — i18next hands a plain call its
 //   diagnostic instead of a string — and neither does a list.
 //
-//   LIST, where a call site reads `returnObjects` and maps what comes back;
-//   `MemorySettingsPanel` does, over the two keys in `src/` that answer this
-//   way. A nonempty list of copy, because a locale that keeps the array and
+//   LIST, where a call site reads `returnObjects` and maps what comes back.
+//   A nonempty list of copy, because a locale that keeps the array and
 //   empties an entry renders a blank row rather than a raw key.
 //
 //   SUBTREE, where the name is not a key at all but a PREFIX its component
@@ -661,10 +658,10 @@ const probes = (lng: string, reference: Reference): Record<string, unknown>[] =>
  *
  * Asking the value rather than a `t()` projection is what makes it position-free
  * and option-free. The projection needed the call's position to find the key AND
- * the call's options to see the value: `memory/MemorySettingsPanel.tsx` reads two
- * keys with `returnObjects` and maps them as arrays, and a probe without that
- * option gets i18next's "returned an object instead of string" diagnostic — a
- * nonempty string, which passed, while the surface rendered no rows.
+ * the call's options to see the value: a list consumer using `returnObjects`
+ * would map the result as an array, while a probe without that option gets
+ * i18next's "returned an object instead of string" diagnostic — a nonempty
+ * string, which passes even though the consumer cannot render any rows.
  *
  * A collection has to be nonempty AND renderable in every slot, because a locale
  * that keeps the array and empties an entry renders a blank row rather than a raw
@@ -1017,7 +1014,7 @@ export const parityGaps = (
  * string; turn it into an object and i18next hands back its diagnostic instead
  * of copy. A call reading `returnObjects` maps the value, so it has to be a list
  * of strings; turn it into an object, a plain string, or a list of objects and
- * `MemorySettingsPanel` throws on `.map` or hands React an object child.
+ * a list consumer throws on `.map` or hands React an object child.
  *
  * That shape is read off the call, exactly as `count` is, so a second site
  * asking for a list is covered without naming its keys here.
@@ -1533,8 +1530,8 @@ describe('app i18n key coverage', () => {
       missingCopy(localeInstance('en', { fixture: { listA: value } }), 'en', listed);
 
     expect(check(['one', 'two'])).toBe(false);
-    // The two shapes that read as copy and still throw on `.map`, which is what
-    // `MemorySettingsPanel` does with the result. Renderable is not enough here.
+    // These shapes read as copy but fail when a list consumer calls `.map`.
+    // Renderable is not enough here.
     expect(check({ 0: 'one', 1: 'two' })).toBe(true);
     expect(check('one, two')).toBe(true);
     // And a plain call is unaffected: a string is all it ever needed.
@@ -1583,11 +1580,11 @@ describe('app i18n key coverage', () => {
     expect(call({ card: {} }, echo)).toBe(false);
 
     // The escapes this round closed, at the boundary that closes them. Each name
-    // is fine on the NAME side — one is a list the app really reads, one is a
-    // pinned prefix — and neither classification reaches a call it cannot serve.
+    // is fine on the NAME side — one is a list-shaped fixture, one is a pinned
+    // prefix — and neither classification reaches a call it cannot serve.
     const onList = (over: Partial<Reference> = {}): Reference =>
-      ({ key: 'memory.rows', counted: false, listed: false, demand: 'exact', ...over });
-    const rows = { memory: { rows: ['one', 'two'] } };
+      ({ key: 'fixture.rows', counted: false, listed: false, demand: 'exact', ...over });
+    const rows = { fixture: { rows: ['one', 'two'] } };
     expect(call(rows, onList())).toBe(true); // a plain call renders `[object Object]`
     expect(call(rows, onList({ demand: 'none' }))).toBe(true); // and a default does not cover a present key
     expect(call(rows, onList({ listed: true }))).toBe(false); // the consumer that reads it is untouched

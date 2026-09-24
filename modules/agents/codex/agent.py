@@ -3008,9 +3008,8 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh mutable non-prompt thread config before starting a Turn."""
         self.ensure_agent_session_id(request)
-        # The caller invokes this after prompt rendering grants or revokes the
-        # per-turn Memory CLI capability, so the environment observes that
-        # decision without rendering the prompt a second time.
+        # Refresh caller environment and git path after prompt rendering,
+        # without rendering the prompt a second time.
         caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 
