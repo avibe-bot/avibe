@@ -1178,7 +1178,7 @@
         "addApiKey": "添加 API Key",
         "showPrivateDetails": "显示账号和 API 连接信息",
         "hidePrivateDetails": "隐藏账号和 API 连接信息",
-        "hiddenDetails": "信息已隐藏",
+        "hiddenDetails": "已隐藏",
         "state": {
           "supplyingNative": "{{backend}} 正在使用（Agent 管理）",
           "supplying": "{{backends}} 正在使用",

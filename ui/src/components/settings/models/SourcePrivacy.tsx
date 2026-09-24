@@ -10,7 +10,10 @@ export function SourcePrivateValue({ value, className }: { value: string; classN
   const hidden = useSourceDetailsHidden();
   return (
     <span className={cn('block min-w-0 truncate font-mono', className)} title={hidden ? undefined : value}>
-      {hidden ? t('settings.models.upstream.hiddenDetails') : value}
+      {hidden ? <span className="flex min-w-0 items-center gap-1">
+        <EyeOff className="size-3 shrink-0" aria-hidden="true" />
+        <span className="truncate">{t('settings.models.upstream.hiddenDetails')}</span>
+      </span> : value}
     </span>
   );
 }

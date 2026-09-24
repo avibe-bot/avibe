@@ -75,6 +75,12 @@ describe('SourcesCard footer', () => {
     for (const value of ['private-relay.example', 'sk-…7890', 'owner@example.com']) {
       expect(view.container.innerHTML).not.toContain(value);
     }
+    const placeholders = screen.getAllByText(lng === 'zh' ? '已隐藏' : 'Hidden', { exact: true });
+    expect(placeholders).toHaveLength(2);
+    for (const placeholder of placeholders) {
+      expect(placeholder.previousElementSibling?.classList.contains('lucide-eye-off')).toBe(true);
+      expect(placeholder.previousElementSibling?.getAttribute('aria-hidden')).toBe('true');
+    }
     view.unmount();
     const remounted = render(tree);
     expect(remounted.container.innerHTML).not.toContain('private-relay.example');

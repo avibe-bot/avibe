@@ -22,6 +22,8 @@ for (const lang of ['en', 'zh'] as const) {
       await expect(cards.getByRole('button', { name: text('upstream.hidePrivateDetails') })).toHaveCount(1);
       await expect(cards.locator('[data-source-id] button')).toHaveCount(0);
       await cards.getByRole('button', { name: text('upstream.hidePrivateDetails') }).click();
+      await expect(cards.getByText(lang === 'zh' ? '已隐藏' : 'Hidden', { exact: true })).toHaveCount(3);
+      await expect(cards.locator('[data-source-id] .lucide-eye-off[aria-hidden="true"]')).toHaveCount(3);
       await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
       await expect(page.getByText('first@example.com', { exact: true })).toHaveCount(0);
       await expect(page.locator('[title*="@example.com"]')).toHaveCount(0);

@@ -1178,7 +1178,7 @@
         "addApiKey": "Add API key",
         "showPrivateDetails": "Show accounts and API connection details",
         "hidePrivateDetails": "Hide accounts and API connection details",
-        "hiddenDetails": "Details hidden",
+        "hiddenDetails": "Hidden",
         "state": {
           "supplyingNative": "Supplying {{backend}} (native)",
           "supplying": "Supplying {{backends}}",
