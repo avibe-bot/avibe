@@ -487,6 +487,32 @@ def test_the_usage_read_is_served_natively_rather_than_from_a_compat_worker(monk
     assert asked == [7]
 
 
+def test_the_usage_route_forwards_a_modern_window_and_rejects_selector_conflicts(monkeypatch):
+    """MH-USAGE-BACKEND-005: the HTTP route preserves modern selector semantics."""
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    asked: list[dict] = []
+
+    class LedgerClient:
+        async def usage_summary(self, **kwargs) -> dict:
+            asked.append(kwargs)
+            return {"window_key": kwargs["window"]}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: LedgerClient())
+
+    modern = app.test_client().get("/api/models/usage?window=24h")
+    conflict = app.test_client().get("/api/models/usage?days=7&window=24h")
+    invalid = app.test_client().get("/api/models/usage?window=hour")
+
+    assert modern.status_code == 200
+    assert modern.get_json()["usage"] == {"window_key": "24h"}
+    assert conflict.status_code == 400
+    assert conflict.get_json()["error"] == "invalid_parameter"
+    assert invalid.status_code == 400
+    assert invalid.get_json()["error"] == "invalid_parameter"
+    assert asked == [{"window": "24h"}]
+
+
 def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(monkeypatch):
     from core.services import settings as settings_service
     from storage.settings_service import StaleScopeAgentBindingError

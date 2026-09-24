@@ -199,9 +199,16 @@ async def dispatch_model_hub_rpc(
         # Reads the ledger file and the config store, and takes the same lock a
         # concurrent `record()` holds across `fsync()`. On the controller loop
         # that is every turn on this machine waiting on one settings page.
+        usage_kwargs = {}
+        if "days" in payload:
+            usage_kwargs["days"] = payload["days"]
+        if "window" in payload:
+            usage_kwargs["window"] = payload["window"]
+        if not usage_kwargs:
+            usage_kwargs["days"] = USAGE_DEFAULT_WINDOW_DAYS
         return await asyncio.to_thread(
             service.usage_summary,
-            days=payload.get("days", USAGE_DEFAULT_WINDOW_DAYS),
+            **usage_kwargs,
         )
     if operation == "get_agent_chain":
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))

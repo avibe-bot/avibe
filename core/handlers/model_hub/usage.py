@@ -35,7 +35,7 @@ import threading
 from concurrent.futures import Executor
 from concurrent.futures import Future as CFuture
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Final, Mapping, Optional, Sequence
 
@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 USAGE_RETENTION_DAYS: Final = 62
 USAGE_MAX_ROWS: Final = 400
 USAGE_DEFAULT_WINDOW_DAYS: Final = 30
+USAGE_HOURLY_RETENTION_HOURS: Final = 24
+USAGE_WINDOW_KEYS: Final = ("24h", "7d", "30d", "60d")
 # The largest integer the settings page holds exactly. Nothing on this side of the
 # wire needs it: `json.loads` reads a counter of any size into an exact `int`, and
 # so do the rpc and client hops. The doubles appear one boundary later, in the
@@ -272,6 +274,125 @@ def _timestamp(value: object) -> Optional[str]:
     return parsed.isoformat()
 
 
+def _local(moment: datetime) -> datetime:
+    """Return one carried instant in the server's local timezone."""
+
+    return _aware(moment).astimezone()
+
+
+def _local_midnight(day: date) -> datetime:
+    """Construct a server-local midnight for a calendar date."""
+
+    # Start naive so the OS applies the offset and DST rule for this date,
+    # rather than borrowing today's offset for a historical calendar day.
+    return datetime.combine(day, time.min).astimezone()
+
+
+def _hour_start(moment: datetime) -> datetime:
+    """Return the local start of the actual hour containing ``moment``."""
+
+    local = _local(moment)
+    return local.replace(minute=0, second=0, microsecond=0)
+
+
+def _hour_key(moment: datetime) -> str:
+    """Spell one hourly bucket with its explicit server-local UTC offset."""
+
+    return _hour_start(moment).isoformat(timespec="seconds")
+
+
+def _hour_key_parts(value: object, *, day: Optional[date] = None) -> Optional[tuple[str, datetime]]:
+    """Parse and normalize a persisted hourly key, retaining the local offset."""
+
+    if not isinstance(value, str) or not value.strip() or _calendar_day(value.strip()) is not None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    try:
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+    except (OverflowError, OSError, ValueError):
+        return None
+    carried = _carried(parsed)
+    if carried is None:
+        return None
+    if parsed.minute or parsed.second or parsed.microsecond:
+        return None
+    try:
+        local = carried.astimezone()
+    except (OverflowError, OSError, ValueError):
+        return None
+    if day is not None and local.date() != day:
+        return None
+    return local.isoformat(timespec="seconds"), local
+
+
+def _hour_starts(now: datetime) -> tuple[datetime, ...]:
+    """Return the 24 actual consecutive local-hour starts ending at ``now``."""
+
+    current = _hour_start(now).astimezone(timezone.utc)
+    return tuple(
+        (current - timedelta(hours=offset)).astimezone()
+        for offset in range(USAGE_HOURLY_RETENTION_HOURS - 1, -1, -1)
+    )
+
+
+def _merge_hour_slices(target: dict, incoming: dict) -> None:
+    """Merge optional hourly slices without changing the daily aggregate."""
+
+    target_hours = target.get("hours")
+    incoming_hours = incoming.get("hours")
+    target_complete = target.get("hourly_history_complete") is True
+    incoming_complete = incoming.get("hourly_history_complete") is True
+
+    if target_hours is None:
+        target["hours"] = None if incoming_hours is None else [dict(item) for item in incoming_hours]
+    elif incoming_hours is not None:
+        by_key = {item["key"]: item for item in target_hours}
+        for item in incoming_hours:
+            existing = by_key.get(item["key"])
+            if existing is None:
+                by_key[item["key"]] = dict(item)
+                continue
+            _accumulate(existing, item)
+            existing["last_metered_at"] = _newer_timestamp(
+                existing.get("last_metered_at"),
+                item.get("last_metered_at"),
+            )
+        target["hours"] = sorted(by_key.values(), key=lambda item: item["key"])
+
+    target["hourly_history_complete"] = target_complete and incoming_complete
+
+
+def _normalize_hour_slice(item: object, *, day: date) -> Optional[dict]:
+    """Normalize one nested hourly slice, or drop it as corrupt."""
+
+    if not isinstance(item, dict):
+        return None
+    parts = _hour_key_parts(item.get("key"), day=day)
+    if parts is None:
+        return None
+    key, _start = parts
+    counters: dict[str, int] = {}
+    for counter_key in _COUNTER_KEYS:
+        value = item.get(counter_key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        if value > USAGE_COUNTER_CEILING:
+            return None
+        counters[counter_key] = value
+    for subset, superset in _COUNTER_SUBSETS:
+        if counters[subset] > counters[superset]:
+            return None
+    return {
+        "key": key,
+        **counters,
+        "last_metered_at": _timestamp(item.get("last_metered_at")),
+    }
+
+
 def _normalize_row(row: object) -> Optional[dict]:
     """Project one persisted row onto the current shape, or drop it.
 
@@ -309,6 +430,61 @@ def _normalize_row(row: object) -> Optional[dict]:
     for subset, superset in _COUNTER_SUBSETS:
         normalized[subset] = min(normalized[subset], normalized[superset])
     normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
+    raw_hours = row.get("hours")
+    if isinstance(raw_hours, list):
+        by_key: dict[str, dict] = {}
+        invalid_hour = False
+        duplicate_hour = False
+        over_capacity = False
+        for item in raw_hours:
+            normalized_hour = _normalize_hour_slice(item, day=calendar_day)
+            if normalized_hour is None:
+                invalid_hour = True
+                continue
+            key = normalized_hour["key"]
+            if key in by_key:
+                # A duplicate key is ambiguous persisted evidence. Discard the
+                # nested history immediately so an unbounded duplicate list
+                # cannot consume memory or be counted repeatedly.
+                duplicate_hour = True
+                invalid_hour = True
+                break
+            by_key[key] = normalized_hour
+            if len(by_key) > USAGE_HOURLY_RETENTION_HOURS:
+                # A corrupt file can contain arbitrarily many unique slices.
+                # Once the explicit capacity is exceeded, no temporal subset is
+                # authoritative enough to repair, so stop retaining them.
+                over_capacity = True
+                invalid_hour = True
+                break
+        if duplicate_hour or over_capacity:
+            hours = []
+        else:
+            hours = list(by_key.values())
+        nested_totals = _empty_totals()
+        for item in hours:
+            _accumulate(nested_totals, item)
+        if any(nested_totals[key] > counters[key] for key in _COUNTER_KEYS):
+            # The daily row is the authoritative released aggregate. A nested
+            # corruption that exceeds it cannot be repaired by clamping one
+            # arbitrary hour, so discard all hourly slices and report the
+            # temporal history as unavailable.
+            hours = []
+            invalid_hour = True
+        if not hours and any(counters[key] > 0 for key in _COUNTER_KEYS):
+            # An explicit empty list is not the released daily-only shape. When
+            # the daily owner carries usage, an empty nested history is missing
+            # temporal evidence and must not claim complete hourly coverage.
+            invalid_hour = True
+        normalized["hours"] = sorted(hours, key=lambda item: item["key"])
+        normalized["hourly_history_complete"] = (
+            row.get("hourly_history_complete") is True and not invalid_hour
+        )
+    else:
+        # Released files have no hourly field. Their daily totals remain valid,
+        # but no hour may be invented from the daily row's last timestamp.
+        normalized["hours"] = None
+        normalized["hourly_history_complete"] = False
     return normalized
 
 
@@ -453,6 +629,51 @@ def _newer_timestamp(current: Optional[str], candidate: Optional[str]) -> Option
     return candidate if candidate_instant > current_instant else current
 
 
+def _retain_hour_slices(row: dict, measured: datetime) -> dict:
+    """Keep only the recent, usable hour slices needed by the 24-hour report."""
+
+    hours = row.get("hours")
+    if hours is None:
+        return row
+
+    current_start = _hour_start(measured).astimezone(timezone.utc)
+    oldest_start = current_start - timedelta(hours=USAGE_HOURLY_RETENTION_HOURS - 1)
+    retained: dict[str, dict] = {}
+    incomplete = row.get("hourly_history_complete") is not True
+    for item in hours:
+        parts = _hour_key_parts(item.get("key"), day=_calendar_day(row["day"]))
+        if parts is None:
+            incomplete = True
+            continue
+        key, start = parts
+        instant = start.astimezone(timezone.utc)
+        if instant > measured.astimezone(timezone.utc):
+            # Future slices cannot be evidence of usage and must not occupy the
+            # bounded recent history.
+            incomplete = True
+            continue
+        if instant < oldest_start:
+            # The daily row survives longer than its nested hourly horizon. Once
+            # an older slice is evicted, this row no longer has complete hourly
+            # evidence even if the remaining list is otherwise valid.
+            incomplete = True
+            continue
+        retained[key] = {**item, "key": key}
+    if len(retained) > USAGE_HOURLY_RETENTION_HOURS:
+        retained = dict(
+            sorted(
+                retained.items(),
+                key=lambda item: _hour_key_parts(item[0])[1],
+            )[-USAGE_HOURLY_RETENTION_HOURS:]
+        )
+        incomplete = True
+    return {
+        **row,
+        "hours": sorted(retained.values(), key=lambda item: item["key"]),
+        "hourly_history_complete": not incomplete,
+    }
+
+
 class BoundedUsageLedger:
     """Persist metered upstream-call token counts as a bounded daily aggregate."""
 
@@ -537,6 +758,7 @@ class BoundedUsageLedger:
                 existing["last_metered_at"],
                 row["last_metered_at"],
             )
+            _merge_hour_slices(existing, row)
         if dropped:
             logger.warning(
                 "Model Hub usage ledger %s dropped %d unusable row(s)", self.path, dropped
@@ -582,7 +804,7 @@ class BoundedUsageLedger:
         holdable: list[dict] = []
         for row in rows:
             if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
-                holdable.append(row)
+                holdable.append(_retain_hour_slices(row, measured))
                 continue
             logger.warning(
                 "Model Hub usage ledger %s dropped row %s: counters outgrew what the "
@@ -666,6 +888,18 @@ class BoundedUsageLedger:
                             "cached_input_tokens": usage.cached_input_tokens if usage else 0,
                             "output_tokens": usage.output_tokens if usage else 0,
                             "last_metered_at": metered_at.isoformat(),
+                            "hours": [
+                                {
+                                    "key": _hour_key(metered_at),
+                                    "requests": call.requests,
+                                    "token_reports": call.requests if usage is not None else 0,
+                                    "input_tokens": usage.input_tokens if usage else 0,
+                                    "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+                                    "output_tokens": usage.output_tokens if usage else 0,
+                                    "last_metered_at": metered_at.isoformat(),
+                                }
+                            ],
+                            "hourly_history_complete": True,
                         }
                     )
                 if increment is None:
@@ -688,6 +922,7 @@ class BoundedUsageLedger:
                         existing["last_metered_at"],
                         increment["last_metered_at"],
                     )
+                    _merge_hour_slices(existing, increment)
                 folded = True
             if not folded:
                 return
@@ -726,7 +961,7 @@ class BoundedUsageLedger:
             metered = _instant(row["last_metered_at"])
             if metered is not None and metered > measured:
                 row = {**row, "last_metered_at": ceiling}
-            placed.append(row)
+            placed.append(_retain_hour_slices(row, measured))
         return placed
 
     def window(self, *, days: int, now: datetime) -> list[dict]:
@@ -791,6 +1026,25 @@ class BoundedUsageLedger:
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
         rows = self.window(days=bounded_days, now=now)
+        return self._summary_from_rows(
+            rows,
+            window_days=bounded_days,
+            from_day=(today - timedelta(days=bounded_days - 1)).isoformat(),
+            to_day=today.isoformat(),
+            identities=identities,
+        )
+
+    def _summary_from_rows(
+        self,
+        rows: Sequence[dict],
+        *,
+        window_days: int,
+        from_day: str,
+        to_day: str,
+        identities: Optional[Sequence[SourceIdentity]],
+    ) -> dict:
+        """Aggregate one exact set of daily or hourly rows."""
+
         keyed_source_labels, keyed_model_labels = _keyed_identities(identities)
 
         totals = _empty_totals()
@@ -828,9 +1082,9 @@ class BoundedUsageLedger:
             _accumulate(day, row)
 
         return {
-            "window_days": bounded_days,
-            "from_day": (today - timedelta(days=bounded_days - 1)).isoformat(),
-            "to_day": today.isoformat(),
+            "window_days": window_days,
+            "from_day": from_day,
+            "to_day": to_day,
             "totals": totals,
             "sources": [
                 {
@@ -846,6 +1100,188 @@ class BoundedUsageLedger:
                 )
             ],
             "days": [by_day[day] for day in sorted(by_day)],
+        }
+
+    def report(
+        self,
+        *,
+        window: str,
+        now: datetime,
+        identities: Optional[Sequence[SourceIdentity]] = None,
+    ) -> dict:
+        """Build one modern dense report without reallocating daily history."""
+
+        if window not in USAGE_WINDOW_KEYS:
+            raise ValueError(f"unsupported usage window: {window!r}")
+        if window == "24h":
+            return self._hourly_report(now=now, identities=identities)
+        days = int(window[:-1])
+        bounded_days = max(1, min(days, self.retention_days))
+        report_local = _local(now)
+        today = report_local.date()
+        from_day = today - timedelta(days=bounded_days - 1)
+        rows = self.window(days=bounded_days, now=now)
+        summary = self._summary_from_rows(
+            rows,
+            window_days=bounded_days,
+            from_day=from_day.isoformat(),
+            to_day=today.isoformat(),
+            identities=identities,
+        )
+        by_day = {
+            row["day"]: []
+            for row in rows
+            if from_day.isoformat() <= row["day"] <= today.isoformat()
+        }
+        for row in rows:
+            if row["day"] in by_day:
+                by_day[row["day"]].append(
+                    {
+                        "source_id": row["source_id"],
+                        "model_id": row["model_id"],
+                        **{key: row[key] for key in _COUNTER_KEYS},
+                    }
+                )
+        buckets = []
+        for index in range(bounded_days):
+            bucket_day = from_day + timedelta(days=index)
+            start = _local_midnight(bucket_day)
+            end = (
+                report_local
+                if bucket_day == today
+                else _local_midnight(bucket_day + timedelta(days=1))
+            )
+            buckets.append(
+                {
+                    "key": bucket_day.isoformat(),
+                    "start_at": start.isoformat(),
+                    "end_at": end.isoformat(),
+                    "history_complete": True,
+                    "rows": sorted(
+                        by_day.get(bucket_day.isoformat(), []),
+                        key=lambda row: (row["source_id"], row["model_id"]),
+                    ),
+                }
+            )
+        return {
+            **summary,
+            "window_key": window,
+            "granularity": "day",
+            "from_at": buckets[0]["start_at"],
+            "to_at": report_local.isoformat(),
+            "buckets": buckets,
+        }
+
+    def _hourly_report(
+        self,
+        *,
+        now: datetime,
+        identities: Optional[Sequence[SourceIdentity]],
+    ) -> dict:
+        """Project only measured nested slices onto 24 actual consecutive hours."""
+
+        report_instant = _aware(now)
+        starts = _hour_starts(now)
+        interval_by_instant = {
+            start.astimezone(timezone.utc): (start, index)
+            for index, start in enumerate(starts)
+        }
+        first_start = starts[0]
+        last_start = starts[-1]
+        rows = self.window(days=2, now=now)
+        measured_by_bucket: list[dict[tuple[str, str], dict]] = [
+            {} for _ in starts
+        ]
+        incomplete: set[int] = set()
+
+        for row in rows:
+            if row["requests"] <= 0:
+                continue
+            row_day = _calendar_day(row["day"])
+            if row_day is None:
+                continue
+            if row.get("hourly_history_complete") is not True:
+                for index, start in enumerate(starts):
+                    end = (
+                        starts[index + 1]
+                        if index + 1 < len(starts)
+                        else _local(report_instant)
+                    )
+                    if start.date() == row_day and start < end and end > first_start:
+                        incomplete.add(index)
+            for item in row.get("hours") or ():
+                parts = _hour_key_parts(item.get("key"), day=row_day)
+                if parts is None:
+                    continue
+                _key, start = parts
+                bucket = interval_by_instant.get(start.astimezone(timezone.utc))
+                if bucket is None:
+                    continue
+                start_local, index = bucket
+                if start_local < first_start or start_local > last_start:
+                    continue
+                if start.astimezone(timezone.utc) > report_instant:
+                    incomplete.add(index)
+                    continue
+                key = (row["source_id"], row["model_id"])
+                projected = measured_by_bucket[index].get(key)
+                if projected is None:
+                    projected = {
+                        "day": start_local.date().isoformat(),
+                        "source_id": row["source_id"],
+                        "model_id": row["model_id"],
+                        **{counter: 0 for counter in _COUNTER_KEYS},
+                        "last_metered_at": None,
+                    }
+                    measured_by_bucket[index][key] = projected
+                _accumulate(projected, item)
+                projected["last_metered_at"] = _newer_timestamp(
+                    projected["last_metered_at"],
+                    item.get("last_metered_at"),
+                )
+
+        report_local = _local(now)
+        bucket_rows = []
+        summary_rows = []
+        for index, start in enumerate(starts):
+            end = starts[index + 1] if index + 1 < len(starts) else report_local
+            projected_rows = [
+                {
+                    "source_id": row["source_id"],
+                    "model_id": row["model_id"],
+                    **{counter: row[counter] for counter in _COUNTER_KEYS},
+                }
+                for row in sorted(
+                    measured_by_bucket[index].values(),
+                    key=lambda row: (row["source_id"], row["model_id"]),
+                )
+            ]
+            bucket_rows.append(
+                {
+                    "key": start.isoformat(timespec="seconds"),
+                    "start_at": start.isoformat(),
+                    "end_at": end.isoformat(),
+                    "history_complete": index not in incomplete,
+                    "rows": projected_rows,
+                }
+            )
+            summary_rows.extend(measured_by_bucket[index].values())
+
+        days = sorted({start.date().isoformat() for start in starts})
+        summary = self._summary_from_rows(
+            summary_rows,
+            window_days=len(days),
+            from_day=days[0],
+            to_day=days[-1],
+            identities=identities,
+        )
+        return {
+            **summary,
+            "window_key": "24h",
+            "granularity": "hour",
+            "from_at": first_start.isoformat(),
+            "to_at": report_local.isoformat(),
+            "buckets": bucket_rows,
         }
 
 
@@ -944,17 +1380,17 @@ class UsageCall:
 
     @property
     def fold_key(self) -> tuple[str, str, str, bool]:
-        """What makes two calls one row, in the terms available before the write.
+        """What makes two calls one daily row and one hourly slice.
 
         The ledger's own row key plus whether tokens were reported, which is the
         part that keeps a fold arithmetically identical to the calls it replaces.
-        The day is this call's own bucket, exactly as `record` describes: the write
-        may still clamp it to the moment it persists, and two buckets clamped onto
-        one day meet again in `record_many`, which folds by row key regardless.
+        The hour is part of the queue key so a flush cannot merge calls from
+        different hours before the ledger sees their temporal identity. The ledger
+        still folds their daily totals together in one atomic write.
         """
 
         return (
-            local_usage_day(_aware(self.at)).isoformat(),
+            _hour_key(self.at),
             self.source_id,
             self.model_id,
             self.usage is not None,

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -561,6 +562,277 @@ def test_summary_reports_a_day_range_even_when_it_carries_no_turn(tmp_path: Path
     assert summary["sources"] == []
     assert summary["totals"]["requests"] == 0
     assert summary["from_day"] < summary["to_day"]
+
+
+def test_modern_hourly_report_is_dense_and_keeps_source_model_identity(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-BACKEND-001: modern windows reconcile measured hourly usage."""
+
+    ledger = _ledger(tmp_path, now=_Clock(NOW + timedelta(hours=3)))
+    unicode_model = "模型🧪/e\u0301"
+    ledger.record(
+        source_id="src_a",
+        model_id=unicode_model,
+        usage=ProtocolUsageReport(input_tokens=100, cached_input_tokens=40, output_tokens=7),
+        at=NOW,
+    )
+    ledger.record(
+        source_id="src_b",
+        model_id=unicode_model,
+        usage=ProtocolUsageReport(input_tokens=12, output_tokens=3),
+        at=NOW + timedelta(hours=1),
+    )
+    ledger.record(
+        source_id="src_a",
+        model_id="model-missing-report",
+        usage=None,
+        at=NOW + timedelta(hours=2),
+    )
+    ledger.record(
+        source_id="src_a",
+        model_id=unicode_model,
+        usage=ProtocolUsageReport(input_tokens=999, output_tokens=1),
+        at=NOW - timedelta(hours=48),
+    )
+
+    report = ledger.report(
+        window="24h",
+        now=NOW + timedelta(hours=3),
+        identities=[
+            SourceIdentity(source_id="src_a", label="same label", model_ids=[unicode_model]),
+            SourceIdentity(source_id="src_b", label="same label", model_ids=[unicode_model]),
+        ],
+    )
+
+    assert report["window_key"] == "24h"
+    assert report["granularity"] == "hour"
+    assert len(report["buckets"]) == 24
+    assert report["buckets"] == sorted(report["buckets"], key=lambda bucket: bucket["start_at"])
+    assert report["totals"] == {
+        "requests": 3,
+        "token_reports": 2,
+        "input_tokens": 112,
+        "cached_input_tokens": 40,
+        "output_tokens": 10,
+    }
+    measured = {
+        (row["source_id"], row["model_id"]): row
+        for bucket in report["buckets"]
+        for row in bucket["rows"]
+    }
+    assert measured[("src_a", unicode_model)]["input_tokens"] == 100
+    assert measured[("src_b", unicode_model)]["input_tokens"] == 12
+    assert measured[("src_a", "model-missing-report")]["token_reports"] == 0
+    assert {source["label"] for source in report["sources"]} == {"same label"}
+    assert report["totals"]["input_tokens"] + report["totals"]["output_tokens"] == 122
+
+    daily = ledger.report(
+        window="60d",
+        now=NOW + timedelta(hours=3),
+        identities=[
+            SourceIdentity(source_id="src_a", label="same label", model_ids=[unicode_model]),
+            SourceIdentity(source_id="src_b", label="same label", model_ids=[unicode_model]),
+        ],
+    )
+    assert daily["totals"]["requests"] == 4
+    assert daily["totals"]["input_tokens"] == 1111
+    assert len(daily["buckets"]) == 60
+
+
+def test_usage_writer_never_coalesces_different_hours_before_persistence(tmp_path: Path) -> None:
+    """MH-USAGE-BACKEND-002: queued calls retain distinct hourly identity."""
+
+    async def exercise() -> dict:
+        ledger = _ledger(tmp_path, now=_Clock(NOW + timedelta(hours=2)))
+        writer = UsageWriter(ledger)
+        writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        writer.record(
+            source_id="src_a",
+            model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=5),
+            at=NOW + timedelta(hours=1),
+        )
+        assert len(writer._pending) == 2
+        assert await writer.drain(timeout=5) == 0
+        return ledger.report(window="24h", now=NOW + timedelta(hours=2))
+
+    report = asyncio.run(exercise())
+    nonempty = [bucket for bucket in report["buckets"] if bucket["rows"]]
+    assert len(nonempty) == 2
+    assert sum(bucket["rows"][0]["requests"] for bucket in nonempty) == 2
+    assert sum(bucket["rows"][0]["token_reports"] for bucket in nonempty) == 1
+
+
+def test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-BACKEND-003: released daily-only rows stay daily-only."""
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_legacy",
+                    "model_id": "model-legacy",
+                    "requests": 2,
+                    "token_reports": 2,
+                    "input_tokens": 10,
+                    "cached_input_tokens": 3,
+                    "output_tokens": 4,
+                    "last_metered_at": NOW.isoformat(),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    hourly = ledger.report(window="24h", now=NOW)
+    daily = ledger.report(window="7d", now=NOW)
+
+    assert hourly["totals"]["requests"] == 0
+    assert all(not bucket["rows"] for bucket in hourly["buckets"])
+    assert any(not bucket["history_complete"] for bucket in hourly["buckets"])
+    assert daily["totals"]["requests"] == 2
+    assert daily["totals"]["input_tokens"] == 10
+    assert all(bucket["history_complete"] for bucket in daily["buckets"])
+
+
+def test_corrupt_nested_hours_are_deduplicated_bounded_and_marked_unavailable(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-BACKEND-004: corrupt nested slices cannot overstate usage."""
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True)
+    key = NOW.astimezone().replace(minute=0, second=0, microsecond=0).isoformat()
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_corrupt",
+                    "model_id": "model-corrupt",
+                    "requests": 2,
+                    "token_reports": 2,
+                    "input_tokens": 10,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 2,
+                    "last_metered_at": NOW.isoformat(),
+                    "hourly_history_complete": True,
+                    "hours": [
+                        {
+                            "key": key,
+                            "requests": 2,
+                            "token_reports": 2,
+                            "input_tokens": 9,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 1,
+                        },
+                        {
+                            "key": key,
+                            "requests": 2,
+                            "token_reports": 2,
+                            "input_tokens": 9,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 1,
+                        },
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = ledger.report(window="24h", now=NOW)
+
+    assert report["totals"]["requests"] == 0
+    assert all(not bucket["rows"] for bucket in report["buckets"])
+    assert any(not bucket["history_complete"] for bucket in report["buckets"])
+    assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 2
+
+
+@pytest.mark.parametrize(
+    "hours",
+    [
+        [{"key": "2026-07-23T12:00", "requests": 1}],
+        [
+            {
+                "key": "2026-07-23T12:00+00:00",
+                "requests": 1,
+                "token_reports": "one",
+                "input_tokens": 4,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+            }
+        ],
+        [
+            {
+                "key": "2026-07-23T12:00+00:00",
+                "requests": 1,
+                "token_reports": 1,
+                "input_tokens": 4,
+                "cached_input_tokens": 5,
+                "output_tokens": 1,
+            }
+        ],
+    ],
+)
+def test_malformed_nested_hours_are_unavailable_without_inventing_usage(
+    tmp_path: Path,
+    hours: list[dict],
+) -> None:
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_corrupt",
+                    "model_id": "model-corrupt",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": 4,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "last_metered_at": NOW.isoformat(),
+                    "hourly_history_complete": True,
+                    "hours": hours,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = ledger.report(window="24h", now=NOW)
+
+    assert report["totals"]["requests"] == 0
+    assert all(not bucket["rows"] for bucket in report["buckets"])
+    assert any(not bucket["history_complete"] for bucket in report["buckets"])
+    assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 1
+
+
+def test_daily_midnight_uses_the_date_specific_local_offset() -> None:
+    from core.handlers.model_hub.usage import _local_midnight
+
+    previous_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        winter = _local_midnight(date(2026, 1, 15))
+        summer = _local_midnight(date(2026, 7, 15))
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert winter.utcoffset() != summer.utcoffset()
 
 
 def test_a_window_excludes_days_outside_it(tmp_path: Path) -> None:

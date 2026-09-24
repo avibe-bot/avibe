@@ -4915,14 +4915,25 @@ async def model_hub_usage_get(starlette_request: FastAPIRequest):
     # `rpc.py`, which keeps the read off the event loop there.
     async def handler():
         from core.handlers.model_hub import ModelHubError
-        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
+        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS, USAGE_WINDOW_KEYS
 
         try:
-            days = int(starlette_request.query_params.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
-        except (TypeError, ValueError):
-            days = USAGE_DEFAULT_WINDOW_DAYS
-        try:
-            usage = await _model_hub_service().usage_summary(days=days)
+            query = starlette_request.query_params
+            has_days = "days" in query
+            has_window = "window" in query
+            if has_days and has_window:
+                raise ModelHubError("invalid_parameter", status=400)
+            if has_window:
+                window = query.get("window")
+                if window not in USAGE_WINDOW_KEYS:
+                    raise ModelHubError("invalid_parameter", status=400)
+                usage = await _model_hub_service().usage_summary(window=window)
+            else:
+                try:
+                    days = int(query.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
+                except (TypeError, ValueError):
+                    days = USAGE_DEFAULT_WINDOW_DAYS
+                usage = await _model_hub_service().usage_summary(days=days)
             return _model_hub_success(usage=usage)
         except ModelHubError as exc:
             return _model_hub_error(exc)

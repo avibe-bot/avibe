@@ -61,7 +61,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
-| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary}` | Bounded metered token report over a trailing local-day window. `days` is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. |
+| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
@@ -78,6 +78,25 @@ The removed product-global route `PUT /api/models/priority` has no replacement. 
 PUT and compatibility chains/reorder share backend-default semantics and effective guards,
 preserving all manual arrays. Exact manual order is saved through the chain resource;
 DELETE restores automatic and POST preview evaluates the draft without a write.
+
+### Usage report windows
+
+`GET /api/models/usage?days=<n>` keeps the released daily-only response shape.
+`days` remains the only selector in that compatibility form; malformed values keep
+the released defaulting behavior.
+
+`GET /api/models/usage?window=<key>` is the modern form. Its `window` is one of
+`24h`, `7d`, `30d`, or `60d`, and it is mutually exclusive with `days`. The response
+keeps the legacy `UsageSummary` fields and adds `window_key`, `granularity`,
+`from_at`, `to_at`, and a dense chronological `buckets` matrix. The 24-hour report
+has 24 actual consecutive hourly buckets, including the current partial hour. The
+daily reports have one bucket per server-local calendar day.
+
+Each bucket carries `history_complete` independently of `token_reports`. A legacy
+daily-only ledger can therefore contribute to daily reports while leaving affected
+hourly buckets incomplete; its daily count is never assigned to an hour using
+`last_metered_at`. Bucket rows are sparse `(source_id, model_id)` pairs, and the
+`totals`, `sources`, and `days` fields aggregate those same measured bucket rows.
 
 ### Native migration terminal recovery
 

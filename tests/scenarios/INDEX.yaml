@@ -74,6 +74,7 @@ capabilities:
       - tests/test_model_hub_request_body_budget.py
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_usage.py
+      - tests/test_ui_server_fastapi.py
       - tests/test_local_deps.py
       - tests/test_opencode_server.py
       - tests/test_runtime_activation.py

@@ -23,6 +23,7 @@ capability:
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
+    - tests/test_ui_server_fastapi.py
     - tests/test_local_deps.py
     - tests/test_opencode_server.py
     - tests/test_runtime_activation.py
@@ -678,6 +679,36 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-027
+  - id: MH-USAGE-BACKEND-001
+    name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_modern_hourly_report_is_dense_and_keeps_source_model_identity
+  - id: MH-USAGE-BACKEND-002
+    name: UsageWriter preserves temporal identity when a flush spans different hours
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_usage_writer_never_coalesces_different_hours_before_persistence
+  - id: MH-USAGE-BACKEND-003
+    name: Released daily-only usage remains available while hourly history stays unavailable
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour
+  - id: MH-USAGE-BACKEND-004
+    name: Corrupt nested hourly slices cannot duplicate or exceed their daily owner
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_corrupt_nested_hours_are_deduplicated_bounded_and_marked_unavailable
+  - id: MH-USAGE-BACKEND-005
+    name: Modern usage selector reaches the controller RPC and rejects invalid query combinations
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_ui_server_fastapi.py::test_the_usage_route_forwards_a_modern_window_and_rejects_selector_conflicts
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

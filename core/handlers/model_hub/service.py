@@ -143,7 +143,13 @@ from .resolver import (
 )
 from .revocations import CredentialRevocationJournal
 from .retry import RECOVERY_EXHAUSTED_CODE, RecoveryPolicy, RecoveryRequest, RETRY_DELAYS, source_identity
-from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
+from .usage import (
+    USAGE_DEFAULT_WINDOW_DAYS,
+    USAGE_WINDOW_KEYS,
+    BoundedUsageLedger,
+    SourceIdentity,
+    UsageWriter,
+)
 
 CONTRACT_VERSION = 10
 
@@ -5339,7 +5345,12 @@ class ModelHubService:
                 "interrupted": would_interrupt,
             }
 
-    def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+    def usage_summary(
+        self,
+        *,
+        days: Optional[int] = None,
+        window: Optional[str] = None,
+    ) -> dict:
         """Report metered token usage, labelled from current Source config.
 
         Config is what this method owns: which identities exist right now and what
@@ -5355,18 +5366,27 @@ class ModelHubService:
         Source an ID came from, and answers for one Source with another's models.
         """
 
+        if window is not None and days is not None:
+            raise ModelHubError("invalid_parameter", status=400)
+        if window is not None and window not in USAGE_WINDOW_KEYS:
+            raise ModelHubError("invalid_parameter", status=400)
+
         config = self.store.load()
+        identities = [
+            SourceIdentity(
+                source_id=source.id,
+                label=source.display_name,
+                model_ids=[model.id for model in source.models],
+            )
+            for source in config.sources
+        ]
+        now = self.now()
+        if window is not None:
+            return self.usage.report(window=window, now=now, identities=identities)
         return self.usage.summary(
-            days=days,
-            now=self.now(),
-            identities=[
-                SourceIdentity(
-                    source_id=source.id,
-                    label=source.display_name,
-                    model_ids=[model.id for model in source.models],
-                )
-                for source in config.sources
-            ],
+            days=USAGE_DEFAULT_WINDOW_DAYS if days is None else days,
+            now=now,
+            identities=identities,
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:

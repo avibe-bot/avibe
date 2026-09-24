@@ -4315,6 +4315,27 @@ def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):
     assert summarised_on and loop_thread not in summarised_on
 
 
+def test_usage_summary_rpc_forwards_the_modern_window_without_days(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    observed: list[dict] = []
+
+    def usage_summary(**kwargs):
+        observed.append(kwargs)
+        return {"window_key": kwargs["window"]}
+
+    service.usage_summary = usage_summary
+
+    async def exercise():
+        return await dispatch_model_hub_rpc(service, "usage_summary", {"window": "24h"})
+
+    payload = asyncio.run(exercise())
+
+    assert payload == {"window_key": "24h"}
+    assert observed == [{"window": "24h"}]
+
+
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.requested_model = lambda backend: {
