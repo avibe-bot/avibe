@@ -1,0 +1,441 @@
+{
+  "description": "One shared table for the address a link destination arrives at.\n\nA destination is delivered to readers with different dialects, and each writes it in the spelling its own surface can hold. Two spellings are not evidence that they name one page, so this file asserts the relationship instead of listing two strings: tests/test_link_unit_delivery.py renders `markdown` through the real Slack adapter and asserts the address it decodes out of the wrapper is `address`, and ui/src/components/ui/markdown.test.tsx renders the same `markdown` through the real Markdown component and asserts the browser URL parser resolves that anchor's href and `address` to the same URL. Neither side can drift without the other failing.\n\nNavigation equivalence is all this table claims. The exact bytes each surface puts on its own wire are asserted separately, beside the adapter that writes them.",
+  "cases": [
+    {
+      "markdown": "[x](https://example.com/p[q)",
+      "address": "https://example.com/p%5Bq"
+    },
+    {
+      "markdown": "[x](https://example.com/p]q)",
+      "address": "https://example.com/p%5Dq"
+    },
+    {
+      "markdown": "[x](https://example.com/p%q)",
+      "address": "https://example.com/p%25q"
+    },
+    {
+      "markdown": "[x](https://example.com/p%2q)",
+      "address": "https://example.com/p%2q"
+    },
+    {
+      "markdown": "[x](https://example.com/p%3Eq)",
+      "address": "https://example.com/p%3Eq"
+    },
+    {
+      "markdown": "[x](https://example.com/p%zzq)",
+      "address": "https://example.com/p%zzq"
+    },
+    {
+      "markdown": "[x](https://example.com/p%2gq)",
+      "address": "https://example.com/p%2gq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\\>q)",
+      "address": "https://example.com/p%3Eq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\\<q)",
+      "address": "https://example.com/p%3Cq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\\|q)",
+      "address": "https://example.com/p%7Cq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\\\\q)",
+      "address": "https://example.com/p%5Cq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\\`q)",
+      "address": "https://example.com/p%60q"
+    },
+    {
+      "markdown": "[x](https://example.com/p^q)",
+      "address": "https://example.com/p%5Eq"
+    },
+    {
+      "markdown": "[x](https://example.com/p{q)",
+      "address": "https://example.com/p%7Bq"
+    },
+    {
+      "markdown": "[x](https://example.com/p}q)",
+      "address": "https://example.com/p%7Dq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\"q)",
+      "address": "https://example.com/p%22q"
+    },
+    {
+      "markdown": "[x](https://example.com/p'q)",
+      "address": "https://example.com/p'q"
+    },
+    {
+      "markdown": "[x](https://example.com/p&amp;q)",
+      "address": "https://example.com/p&q"
+    },
+    {
+      "markdown": "[x](https://example.com/p\\&amp;q)",
+      "address": "https://example.com/p&amp;q"
+    },
+    {
+      "markdown": "[x](https://example.com/p&amp;amp;q)",
+      "address": "https://example.com/p&amp;q"
+    },
+    {
+      "markdown": "[x](https://example.com/p&#10;q)",
+      "address": "https://example.com/p%0Aq"
+    },
+    {
+      "markdown": "[x](https://example.com/p&#9;q)",
+      "address": "https://example.com/p%09q"
+    },
+    {
+      "markdown": "[x](https://example.com/p\u00a0q)",
+      "address": "https://example.com/p%C2%A0q"
+    },
+    {
+      "markdown": "[x](https://example.com/p\u200bq)",
+      "address": "https://example.com/p%E2%80%8Bq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\u4e2dq)",
+      "address": "https://example.com/p%E4%B8%ADq"
+    },
+    {
+      "markdown": "[x](https://example.com/p\ud83d\ude00q)",
+      "address": "https://example.com/p%F0%9F%98%80q"
+    },
+    {
+      "markdown": "[x](https://example.com/p\ud800q)",
+      "address": "https://example.com/p%EF%BF%BDq"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p[q&y=1)",
+      "address": "https://example.com/p?x=p%5Bq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p]q&y=1)",
+      "address": "https://example.com/p?x=p%5Dq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p%q&y=1)",
+      "address": "https://example.com/p?x=p%25q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p%2q&y=1)",
+      "address": "https://example.com/p?x=p%2q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p%3Eq&y=1)",
+      "address": "https://example.com/p?x=p%3Eq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p%zzq&y=1)",
+      "address": "https://example.com/p?x=p%zzq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p%2gq&y=1)",
+      "address": "https://example.com/p?x=p%2gq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\\>q&y=1)",
+      "address": "https://example.com/p?x=p%3Eq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\\<q&y=1)",
+      "address": "https://example.com/p?x=p%3Cq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\\|q&y=1)",
+      "address": "https://example.com/p?x=p%7Cq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\\\\q&y=1)",
+      "address": "https://example.com/p?x=p%5Cq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\\`q&y=1)",
+      "address": "https://example.com/p?x=p%60q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p^q&y=1)",
+      "address": "https://example.com/p?x=p%5Eq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p{q&y=1)",
+      "address": "https://example.com/p?x=p%7Bq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p}q&y=1)",
+      "address": "https://example.com/p?x=p%7Dq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\"q&y=1)",
+      "address": "https://example.com/p?x=p%22q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p'q&y=1)",
+      "address": "https://example.com/p?x=p'q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p&amp;q&y=1)",
+      "address": "https://example.com/p?x=p&q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\\&amp;q&y=1)",
+      "address": "https://example.com/p?x=p&amp;q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p&amp;amp;q&y=1)",
+      "address": "https://example.com/p?x=p&amp;q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p&#10;q&y=1)",
+      "address": "https://example.com/p?x=p%0Aq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p&#9;q&y=1)",
+      "address": "https://example.com/p?x=p%09q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\u00a0q&y=1)",
+      "address": "https://example.com/p?x=p%C2%A0q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\u200bq&y=1)",
+      "address": "https://example.com/p?x=p%E2%80%8Bq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\u4e2dq&y=1)",
+      "address": "https://example.com/p?x=p%E4%B8%ADq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\ud83d\ude00q&y=1)",
+      "address": "https://example.com/p?x=p%F0%9F%98%80q&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p?x=p\ud800q&y=1)",
+      "address": "https://example.com/p?x=p%EF%BF%BDq&y=1"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p[q)",
+      "address": "https://example.com/p#p%5Bq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p]q)",
+      "address": "https://example.com/p#p%5Dq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p%q)",
+      "address": "https://example.com/p#p%25q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p%2q)",
+      "address": "https://example.com/p#p%2q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p%3Eq)",
+      "address": "https://example.com/p#p%3Eq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p%zzq)",
+      "address": "https://example.com/p#p%zzq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p%2gq)",
+      "address": "https://example.com/p#p%2gq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\\>q)",
+      "address": "https://example.com/p#p%3Eq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\\<q)",
+      "address": "https://example.com/p#p%3Cq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\\|q)",
+      "address": "https://example.com/p#p%7Cq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\\\\q)",
+      "address": "https://example.com/p#p%5Cq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\\`q)",
+      "address": "https://example.com/p#p%60q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p^q)",
+      "address": "https://example.com/p#p%5Eq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p{q)",
+      "address": "https://example.com/p#p%7Bq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p}q)",
+      "address": "https://example.com/p#p%7Dq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\"q)",
+      "address": "https://example.com/p#p%22q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p'q)",
+      "address": "https://example.com/p#p'q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p&amp;q)",
+      "address": "https://example.com/p#p&q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\\&amp;q)",
+      "address": "https://example.com/p#p&amp;q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p&amp;amp;q)",
+      "address": "https://example.com/p#p&amp;q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p&#10;q)",
+      "address": "https://example.com/p#p%0Aq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p&#9;q)",
+      "address": "https://example.com/p#p%09q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\u00a0q)",
+      "address": "https://example.com/p#p%C2%A0q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\u200bq)",
+      "address": "https://example.com/p#p%E2%80%8Bq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\u4e2dq)",
+      "address": "https://example.com/p#p%E4%B8%ADq"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\ud83d\ude00q)",
+      "address": "https://example.com/p#p%F0%9F%98%80q"
+    },
+    {
+      "markdown": "[x](https://example.com/p#p\ud800q)",
+      "address": "https://example.com/p#p%EF%BF%BDq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p[q)",
+      "address": "https://[::1]:8443/p%5Bq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p]q)",
+      "address": "https://[::1]:8443/p%5Dq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p%q)",
+      "address": "https://[::1]:8443/p%25q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p%2q)",
+      "address": "https://[::1]:8443/p%2q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p%3Eq)",
+      "address": "https://[::1]:8443/p%3Eq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p%zzq)",
+      "address": "https://[::1]:8443/p%zzq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p%2gq)",
+      "address": "https://[::1]:8443/p%2gq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\\>q)",
+      "address": "https://[::1]:8443/p%3Eq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\\<q)",
+      "address": "https://[::1]:8443/p%3Cq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\\|q)",
+      "address": "https://[::1]:8443/p%7Cq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\\\\q)",
+      "address": "https://[::1]:8443/p%5Cq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\\`q)",
+      "address": "https://[::1]:8443/p%60q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p^q)",
+      "address": "https://[::1]:8443/p%5Eq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p{q)",
+      "address": "https://[::1]:8443/p%7Bq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p}q)",
+      "address": "https://[::1]:8443/p%7Dq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\"q)",
+      "address": "https://[::1]:8443/p%22q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p'q)",
+      "address": "https://[::1]:8443/p'q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p&amp;q)",
+      "address": "https://[::1]:8443/p&q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\\&amp;q)",
+      "address": "https://[::1]:8443/p&amp;q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p&amp;amp;q)",
+      "address": "https://[::1]:8443/p&amp;q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p&#10;q)",
+      "address": "https://[::1]:8443/p%0Aq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p&#9;q)",
+      "address": "https://[::1]:8443/p%09q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\u00a0q)",
+      "address": "https://[::1]:8443/p%C2%A0q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\u200bq)",
+      "address": "https://[::1]:8443/p%E2%80%8Bq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\u4e2dq)",
+      "address": "https://[::1]:8443/p%E4%B8%ADq"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\ud83d\ude00q)",
+      "address": "https://[::1]:8443/p%F0%9F%98%80q"
+    },
+    {
+      "markdown": "[x](https://[::1]:8443/p\ud800q)",
+      "address": "https://[::1]:8443/p%EF%BF%BDq"
+    },
+    {
+      "markdown": "[x](https://u:p@[::1]:8443/a[b]?x=[c]#f[d])",
+      "address": "https://u:p@[::1]:8443/a%5Bb%5D?x=%5Bc%5D#f%5Bd%5D"
+    }
+  ]
+}

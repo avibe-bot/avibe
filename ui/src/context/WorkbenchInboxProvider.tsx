@@ -7,6 +7,7 @@ import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext'
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
 import { useConsumerActivation } from '../lib/useConsumerActivation';
+import { onPageReactivated } from '../lib/pageActivity';
 import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
@@ -572,7 +573,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // cursor, so activating the feed later still starts from a real first page.
   // (The server clamps `limit` to at least 1; a true zero-row read would need an
   // API change, deliberately out of scope here.)
-  const refreshUnread = useCallback(async function refreshUnread() {
+  const refreshUnread = useCallback(async function refreshUnread(backgroundPush = false) {
     if (unreadReadInFlightRef.current) {
       unreadReadPendingRef.current = true;
       return;
@@ -600,6 +601,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
             limit: 1,
             cache: false,
             handleError: false,
+            backgroundPush,
           });
           if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
             applyWholeUnreadRead(read, result.unread_by_session ?? {});
@@ -919,6 +921,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // ``totalUnread`` is just the default 0, and clearing here would wipe a badge
   // the service worker set while the app was closed if that initial load is slow,
   // fails, or redirects on an expired session. Once loaded, a real 0 clears it.
+  // A fresh authoritative map reasserts the badge even when its numeric sum
+  // is unchanged: a worker may have written an older sum between reads.
   useEffect(() => {
     const nav = navigator as Navigator & {
       setAppBadge?: (contents?: number) => Promise<void>;
@@ -928,7 +932,34 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     if (!unreadLoaded) return;
     const op = totalUnread > 0 ? nav.setAppBadge?.(totalUnread) : nav.clearAppBadge?.();
     void op?.catch?.(() => {});
-  }, [totalUnread, unreadLoaded]);
+    // Fence a background worker read that started before this authoritative
+    // map arrived. The worker serializes its own setter after this message, so
+    // a late Push response cannot be the final badge write.
+    try {
+      navigator.serviceWorker?.controller?.postMessage({
+        type: 'vibe.app-badge-current',
+        count: totalUnread,
+      });
+    } catch {
+      // The direct badge write above still works without a controlling worker.
+    }
+  }, [unreadBySession, totalUnread, unreadLoaded]);
+
+  // A worker can finish a background badge write after this page's last
+  // unread update. Revalidate on its completion signal and whenever the page
+  // returns from suspension, even if the local unread total did not change.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator) || !('setAppBadge' in navigator)) return;
+    const onWorkerMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'vibe.push-badge-refresh') void refreshUnread(true);
+    };
+    const unsubscribeResume = onPageReactivated(() => void refreshUnread());
+    navigator.serviceWorker.addEventListener('message', onWorkerMessage);
+    return () => {
+      unsubscribeResume();
+      navigator.serviceWorker.removeEventListener('message', onWorkerMessage);
+    };
+  }, [refreshUnread]);
 
   // Browser tabs have no Badging API. Keep their favicon useful while the
   // Inbox map is authoritative, and restore the original icon after reading.

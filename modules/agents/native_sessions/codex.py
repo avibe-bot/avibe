@@ -67,6 +67,34 @@ class CodexNativeSessionProvider(NativeSessionProvider):
             logger.warning("Failed to list Codex sessions for %s: %s", working_path, exc)
         return items
 
+    def rollout_path(self, native_session_id: str) -> Path | None:
+        """Return the native history file Codex recorded for one thread.
+
+        ``threads.rollout_path`` is Codex's own index of where a thread's
+        transcript lives, so a caller that needs to read that history never has
+        to guess a filename or walk the sessions tree. Deliberately unfiltered
+        by ``cwd``/``archived``: the thread id already identifies the thread,
+        and history stays readable after the thread is archived.
+        """
+        if not native_session_id or not self.db_path.exists():
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT rollout_path FROM threads WHERE id = ? LIMIT 1",
+                    (native_session_id,),
+                ).fetchone()
+        except Exception as exc:
+            logger.warning(
+                "Failed to read Codex rollout path for %s: %s", native_session_id, exc
+            )
+            return None
+        raw = str((row[0] if row else "") or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        return path if path.is_file() else None
+
     def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
         preview = ""
         rollout_path_raw = str(item.locator.get("rollout_path") or "").strip()

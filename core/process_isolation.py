@@ -42,6 +42,9 @@ class ProcessIdentity:
     pid: int
     create_time: float
     worker_fingerprint: str | None
+    # False when the environment could not be read: the marker is unknown, which
+    # is not the same as absent (``worker_fingerprint`` is then ``None`` too).
+    marker_readable: bool = True
 
 
 @dataclass(frozen=True)
@@ -95,7 +98,7 @@ def serialize_process_identity(identity: PersistedProcessIdentity) -> dict[str, 
     }
 
 
-def _valid_worker_fingerprint(value: Any) -> bool:
+def is_valid_worker_fingerprint(value: Any) -> bool:
     if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
         return False
     return all(char in "0123456789abcdef" for char in value[7:])
@@ -130,7 +133,7 @@ def process_identity_from_payload(
         or isinstance(create_time, bool)
         or not math.isfinite(normalized_create_time)
         or normalized_create_time <= 0
-        or not _valid_worker_fingerprint(worker_fingerprint)
+        or not is_valid_worker_fingerprint(worker_fingerprint)
     ):
         return None
     return PersistedProcessIdentity(
@@ -140,35 +143,56 @@ def process_identity_from_payload(
     )
 
 
+def _marker_matches(expected: PersistedProcessIdentity, live: ProcessIdentity) -> bool:
+    return live.worker_fingerprint is not None and hmac.compare_digest(
+        expected.worker_fingerprint,
+        live.worker_fingerprint,
+    )
+
+
 def process_identity_matches(
     expected: PersistedProcessIdentity,
     live: ProcessIdentity,
 ) -> bool:
-    return (
-        expected.pid == live.pid
-        and expected.create_time == live.create_time
-        and live.worker_fingerprint is not None
-        and hmac.compare_digest(
-            expected.worker_fingerprint,
-            live.worker_fingerprint,
-        )
-    )
+    """Whether ``live`` is the recorded process, by its inherited marker.
+
+    The marker is the authority, not the birth time: on macOS psutil's displayed
+    create time can shift while the same execution keeps running, and a 256-bit
+    marker only the managed tree inherits cannot be carried by a stranger holding
+    a recycled pid.
+    """
+
+    return expected.pid == live.pid and _marker_matches(expected, live)
+
+
+def process_identity_recycled(expected: PersistedProcessIdentity, live: ProcessIdentity) -> bool:
+    """Whether the recorded pid now provably belongs to another process.
+
+    Only a different birth time AND a readable environment without the matching
+    marker says so; a marker match wins over a shifted birth time, and an
+    unreadable marker proves nothing either way.
+    """
+
+    return live.marker_readable and live.create_time != expected.create_time and not _marker_matches(expected, live)
 
 
 def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
     process = psutil.Process(pid)
     create_time = float(process.create_time())
     worker_fingerprint = None
+    marker_readable = True
     try:
         marker = process.environ().get(PROCESS_IDENTITY_ENV)
     except (psutil.Error, OSError):
         marker = None
+        marker_readable = False
     if isinstance(marker, str) and marker:
         worker_fingerprint = fingerprint_process_marker(marker)
     return process, ProcessIdentity(
         pid=pid,
         create_time=create_time,
         worker_fingerprint=worker_fingerprint,
+        marker_readable=marker_readable,
     )
 
 
@@ -386,6 +410,8 @@ def process_group_identity_status(
                 )
                 continue
             live_identity = inspect_process_identity(pid)
+            if live_identity is not None and _marker_matches(expected_identity, live_identity):
+                return "match"
             if (
                 live_identity is None
                 or live_identity.create_time < expected_identity.create_time
@@ -394,11 +420,6 @@ def process_group_identity_status(
                 saw_unverified_member = True
                 continue
             saw_marker = True
-            if hmac.compare_digest(
-                expected_identity.worker_fingerprint,
-                live_identity.worker_fingerprint,
-            ):
-                return "match"
     except Exception:
         logger.debug(
             "Failed to enumerate %s process group pgid=%s",
@@ -528,7 +549,7 @@ def _terminate_windows_process_tree(
     except (psutil.Error, OSError, ValueError):
         logger.debug("Failed to revalidate Windows supervisor for %s", label, exc_info=True)
         return False
-    if live_identity.create_time != expected_identity.create_time:
+    if process_identity_recycled(expected_identity, live_identity):
         return True
     if not process_identity_matches(expected_identity, live_identity):
         logger.warning("Refusing to signal %s because its supervisor marker changed", label)
@@ -602,7 +623,7 @@ def terminate_process_tree_by_pid(
     except (psutil.Error, OSError, ValueError):
         logger.debug("Failed to inspect %s pid=%s before termination", label, pid, exc_info=True)
         return False
-    if live_identity.create_time != expected_identity.create_time:
+    if process_identity_recycled(expected_identity, live_identity):
         logger.warning("Refusing to terminate %s pid=%s because its process identity changed", label, pid)
         return True
     if not process_identity_matches(expected_identity, live_identity):
@@ -793,6 +814,84 @@ def reap_orphaned_process_tree(
             return "reaped"
     except Exception:
         logger.exception("Unexpected error terminating %s process group pgid=%s", label, pid)
+    return "unconfirmed"
+
+
+def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process]:
+    """This user's live, inspectable processes whose marker hashes to ``worker_fingerprint``.
+
+    Best effort by design. The marked tree is a same-user, non-setuid process
+    this service spawned, so its ownership and environment are readable; a process
+    whose ownership or environment cannot be read (another user's, a setuid
+    ``login``, a non-dumpable Linux daemon) is not one of ours and is skipped. No
+    birth-time heuristic is applied: create_time can drift, the marker cannot.
+    """
+
+    own_pid = os.getpid()
+    own_uid = os.getuid() if hasattr(os, "getuid") else None
+    own_user = None if own_uid is not None else psutil.Process(own_pid).username()
+    found: list[psutil.Process] = []
+    for process in psutil.process_iter(["uids", "username"]):
+        if process.pid == own_pid:
+            continue
+        if own_uid is not None:
+            uids = process.info.get("uids")
+            if uids is None or {uids.real, uids.effective, uids.saved} != {own_uid}:
+                continue
+        elif process.info.get("username") != own_user:
+            continue
+        try:
+            marker = process.environ().get(PROCESS_IDENTITY_ENV)
+        except (psutil.Error, OSError):
+            # Exited, or not inspectable and therefore not a tree this service spawned.
+            continue
+        try:
+            fingerprint = fingerprint_process_marker(marker) if isinstance(marker, str) and marker else None
+        except UnicodeError:
+            continue
+        if fingerprint is not None and hmac.compare_digest(fingerprint, worker_fingerprint):
+            found.append(process)
+    return found
+
+
+def reap_marked_processes(
+    logger: logging.Logger,
+    label: str,
+    *,
+    worker_fingerprint: str,
+    terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
+) -> ProcessReapOutcome:
+    """Stop every process that inherited a managed tree's marker, wherever it is.
+
+    Needs no pid: this finds a tree whose owner died before recording one, and
+    members that left the leader's process group. Each victim is signalled through
+    its retained ``psutil.Process``, which refuses a pid reused since the scan.
+    ``unconfirmed`` only when a found process could not be confirmed stopped.
+    """
+
+    if not is_valid_worker_fingerprint(worker_fingerprint):
+        return "gone"
+    try:
+        victims = _processes_carrying_marker(worker_fingerprint)
+        if not victims:
+            return "gone"
+        logger.warning("Reaping %d %s process(es) found by their identity marker", len(victims), label)
+        for victim in victims:
+            try:
+                victim.terminate()
+            except psutil.NoSuchProcess:
+                continue
+        _gone, alive = psutil.wait_procs(victims, timeout=terminate_timeout)
+        for victim in alive:
+            try:
+                victim.kill()
+            except psutil.NoSuchProcess:
+                continue
+        _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
+        if not alive and not _processes_carrying_marker(worker_fingerprint):
+            return "reaped"
+    except Exception:
+        logger.warning("Could not confirm every %s process carrying its marker exited", label, exc_info=True)
     return "unconfirmed"
 
 

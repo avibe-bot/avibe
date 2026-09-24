@@ -426,8 +426,8 @@ describe('MigrationDialog — persisted authentication', () => {
     {
       reason: 'transport',
       path: '/home/用户/.bashrc',
-      en: /cannot send.*saved authentication in the same way.*original files are unchanged.*permissions will not fix/,
-      zh: /无法按此接口原有的方式发送认证.*原配置文件未改动.*修改文件权限不能解决/,
+      en: /can't use this authentication method yet.*file is unchanged.*standard API key/,
+      zh: /暂不支持这里的认证方式.*原文件未改动.*标准 API Key 重新添加/,
     },
   ] as const;
 
@@ -798,7 +798,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
     expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
-    expect(within(dialog).queryByText(/complete API-key groups only/)).toBeNull();
+    expect(within(dialog).queryByText(/Only API keys can be migrated here/)).toBeNull();
   });
 
   it('still takes a key standing beside a subscription, because its scope is everything', async () => {
@@ -879,8 +879,8 @@ describe('MigrationDialog — the setup scope', () => {
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Migrate to Model Hub')).toBeTruthy();
-    expect(within(dialog).getByText('After migration, CLI authentication will be managed entirely by Model Hub.')).toBeTruthy();
-    expect(within(dialog).getByText(/complete API-key groups only/)).toBeTruthy();
+    expect(within(dialog).getByText(/After migration, these assistants connect through Model Hub/)).toBeTruthy();
+    expect(within(dialog).getByText(/Only API keys can be migrated here/)).toBeTruthy();
     expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeTruthy();
     expect(scan).not.toHaveBeenCalled();
   });

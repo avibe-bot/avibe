@@ -331,104 +331,6 @@ def test_setup_callbacks_gates_work_admission_but_not_runtime_evidence():
     assert registered["on_transport_ready"][0::2] == ("controller", False)
 
 
-def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
-    """Scenario: MEMORY-INDEP-008."""
-
-    controller = Controller.__new__(Controller)
-    loop = asyncio.new_event_loop()
-    controller._loop = loop
-    stopped: dict[str, bool] = {
-        "watch": False,
-        "tasks": False,
-        "supervisor": False,
-        "runtime": False,
-        "capture": False,
-        "capture-registration": False,
-    }
-    stop_order: list[str] = []
-
-    class _Stopper:
-        def __init__(self, key: str) -> None:
-            self.key = key
-
-        async def stop(self) -> None:
-            stopped[self.key] = True
-            stop_order.append(self.key)
-
-    class _Supervisor(_Stopper):
-        def quiesce(self) -> None:
-            stop_order.append("quiesce")
-
-        async def run_sync(self, operation):  # noqa: ANN001, ANN202
-            assert not stopped["supervisor"]
-            return operation()
-
-    class _WatchStopper(_Stopper):
-        async def stop(self) -> None:
-            await controller.runtime_work_supervisor.run_sync(lambda: None)
-            await super().stop()
-
-    class _MemoryRuntime:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def begin_close(self) -> None:
-            memory_adapter.quiesce_memory_capture_tasks()
-
-        async def close(self, **_kwargs: object) -> None:
-            await memory_adapter.cancel_memory_capture_tasks()
-            assert stopped["capture"] is True
-            self.closed = True
-            stopped["runtime"] = True
-            stop_order.append("memory-runtime")
-
-    class _MemoryAdapter:
-        def quiesce_memory_capture_tasks(self) -> None:
-            if stopped["capture-registration"]:
-                return
-            stopped["capture-registration"] = True
-            stop_order.append("capture-registration")
-
-        async def cancel_memory_capture_tasks(self) -> None:
-            assert stopped["capture-registration"] is True
-            stopped["capture"] = True
-            stop_order.append("capture")
-
-    controller.scheduled_task_service = _Stopper("tasks")
-    controller.runtime_work_supervisor = _Supervisor("supervisor")
-    controller.watch_service = _WatchStopper("watch")
-    controller.runtime_command_watcher = _Stopper("runtime")
-    memory_adapter = _MemoryAdapter()
-    controller.memory_adapter = memory_adapter
-    memory_runtime = _MemoryRuntime()
-    controller.memory_runtime = memory_runtime
-
-    loop.run_until_complete(asyncio.sleep(0))
-    controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
-    controller.receiver_tasks = {}
-    controller.im_client = None
-    controller._im_thread = None
-
-    try:
-        controller.cleanup_sync()
-    finally:
-        loop.close()
-
-    assert stopped["tasks"] is True
-    assert stopped["watch"] is True
-    assert stopped["supervisor"] is True
-    assert stopped["runtime"] is True
-    assert stopped["capture"] is True
-    assert stopped["capture-registration"] is True
-    assert memory_runtime.closed is True
-    assert stop_order[0] == "quiesce"
-    assert set(stop_order[1:3]) == {"tasks", "watch"}
-    assert stop_order[3] == "supervisor"
-    assert stop_order[-3:] == [
-        "capture-registration",
-        "capture",
-        "memory-runtime",
-    ]
 @pytest.mark.anyio
 async def test_runtime_work_stack_stops_supervisor_after_service_failure() -> None:
     controller = Controller.__new__(Controller)
@@ -844,52 +746,61 @@ def test_cleanup_sync_settles_the_internal_server_task(tmp_path, monkeypatch) ->
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
 
 
-def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
+def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
+    """Shutdown settles consumers before their shared supervisor."""
+
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()
     controller._loop = loop
-    controller.cleanup_task = None
+    stopped: dict[str, bool] = {
+        "watch": False,
+        "tasks": False,
+        "supervisor": False,
+        "runtime": False,
+    }
+    stop_order: list[str] = []
 
     class _Stopper:
-        async def stop(self) -> None:
-            return None
+        def __init__(self, key: str) -> None:
+            self.key = key
 
-    controller.scheduled_task_service = _Stopper()
-    controller.watch_service = _Stopper()
-    controller.runtime_command_watcher = _Stopper()
+        async def stop(self) -> None:
+            stopped[self.key] = True
+            stop_order.append(self.key)
+
+    class _Supervisor(_Stopper):
+        def quiesce(self) -> None:
+            stop_order.append("quiesce")
+
+        async def run_sync(self, operation):  # noqa: ANN001, ANN202
+            assert not stopped["supervisor"]
+            return operation()
+
+    class _WatchStopper(_Stopper):
+        async def stop(self) -> None:
+            await controller.runtime_work_supervisor.run_sync(lambda: None)
+            await super().stop()
+
+    controller.scheduled_task_service = _Stopper("tasks")
+    controller.runtime_work_supervisor = _Supervisor("supervisor")
+    controller.watch_service = _WatchStopper("watch")
+    controller.runtime_command_watcher = _Stopper("runtime")
+
+    loop.run_until_complete(asyncio.sleep(0))
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
     controller.im_client = None
     controller._im_thread = None
-
-    async def never_returns() -> None:
-        await asyncio.Event().wait()
-
-    reconcile_task = loop.create_task(never_returns())
-    controller._memory_reconcile_task = reconcile_task
-    cleanup_order: list[str] = []
-
-    async def join_destructive_transactions() -> None:
-        cleanup_order.append("destructive-transactions")
-
-    controller._join_memory_destructive_transactions = join_destructive_transactions
-
-    class _MemoryRuntime:
-        def begin_close(self) -> None:
-            assert reconcile_task.cancelled()
-
-        async def close(self, **_kwargs: object) -> None:
-            assert reconcile_task.cancelled()
-            assert cleanup_order == ["destructive-transactions"]
-            cleanup_order.append("runtime")
-
-    controller.memory_runtime = _MemoryRuntime()
 
     try:
         controller.cleanup_sync()
     finally:
         loop.close()
 
-    assert reconcile_task.cancelled()
-    assert controller._memory_reconcile_task is None
-    assert cleanup_order == ["destructive-transactions", "runtime"]
+    assert stopped["tasks"] is True
+    assert stopped["watch"] is True
+    assert stopped["supervisor"] is True
+    assert stopped["runtime"] is True
+    assert stop_order[0] == "quiesce"
+    assert set(stop_order[1:3]) == {"tasks", "watch"}
+    assert stop_order[3] == "supervisor"

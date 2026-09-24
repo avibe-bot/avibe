@@ -50,6 +50,7 @@ def _persisted_remote_record(tmp_path: Path, url: str) -> dict:
 
 def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
     assert backend_model_catalog.REASONING_EFFORT_VOCABULARY == (
+        "none",
         "minimal",
         "low",
         "medium",
@@ -64,7 +65,7 @@ def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
         "anthropic": ("low", "medium", "high", "xhigh", "max"),
     }
     assert all(
-        "ultra" not in efforts
+        not {"none", "ultra"}.intersection(efforts)
         for efforts in backend_model_catalog.PROTOCOL_REASONING_EFFORT_DEFAULTS.values()
     )
 
@@ -880,6 +881,16 @@ def test_claude_snapshot_ignores_native_default_models(monkeypatch, tmp_path):
         "xhigh",
         "max",
     ]
+    assert snapshot["models"][2] == "claude-opus-5-5"
+    assert snapshot["model_labels"]["claude-opus-5-5"] == "claude-opus-5-5 [1M]"
+    assert [option["value"] for option in snapshot["reasoning_options"]["claude-opus-5-5"]] == [
+        "__default__",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
     assert snapshot["model_labels"]["claude-opus-5"] == "claude-opus-5 [1M]"
     assert snapshot["model_labels"]["claude-opus-4-6"] == "claude-opus-4-6 [1M]"
 
@@ -905,6 +916,146 @@ def test_remote_hidden_tombstone_overrides_stale_local_visible(monkeypatch, tmp_
     snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
 
     assert "retired-model" not in snapshot["models"]
+
+
+def test_gpt_6_sol_and_luna_follow_astra_in_the_bundled_catalog():
+    codex = {
+        entry["id"]: entry
+        for entry in backend_model_catalog.visible_backend_model_entries(
+            "codex", backend_model_catalog.load_bundled_catalog()
+        )
+    }
+    ordered = sorted(codex.values(), key=lambda entry: entry["priority"])
+
+    assert [entry["id"] for entry in ordered[:3]] == ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
+    for model in ("gpt-6-sol", "gpt-6-luna"):
+        assert codex[model]["visibility"] == "list"
+        assert codex[model]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+
+
+RETIRED_CLAUDE_MODELS = (
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-haiku-4",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-20250514",
+    "claude-sonnet-3-7",
+    "claude-haiku-3-5",
+)
+
+
+def test_retired_claude_models_are_tombstoned_in_the_bundled_catalog():
+    entries = backend_model_catalog.backend_model_entries(
+        "claude", backend_model_catalog.load_bundled_catalog()
+    )
+    by_id = {entry["id"]: entry for entry in entries}
+    for model in RETIRED_CLAUDE_MODELS:
+        assert model in by_id, f"{model} must stay declared so the tombstone can suppress it"
+        assert by_id[model].get("visibility") == "hide", model
+
+
+def test_retired_claude_models_leave_the_merged_listing(monkeypatch):
+    catalog = backend_model_catalog.load_bundled_catalog()
+    monkeypatch.setattr(
+        backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: catalog
+    )
+
+    snapshot = backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=False)
+
+    for model in RETIRED_CLAUDE_MODELS:
+        assert model not in snapshot["models"], model
+        assert model not in snapshot["reasoning_options"], model
+    # Survivors that the retired ids sit next to must be untouched.
+    for model in ("claude-opus-5", "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"):
+        assert model in snapshot["models"], model
+
+
+def test_retired_models_stay_in_the_fixed_menu_for_released_configs():
+    """Persisted-shape rule: released configs imply the fixed menu, retired ids included."""
+
+    from config.v2_config import model_hub_fixed_menu_ids
+
+    fixed_menu = set(model_hub_fixed_menu_ids("claude"))
+
+    assert set(RETIRED_CLAUDE_MODELS) <= fixed_menu
+    assert "claude-opus-5" in fixed_menu
+    # The bare aliases are why claude_builtin_ids exists: they carry no
+    # "claude-"/"anthropic-" prefix, so dropping them would make every persisted
+    # alias selection inadmissible.
+    assert {"opus", "sonnet", "haiku", "opus[1m]", "sonnet[1m]"} <= fixed_menu
+
+
+def test_retiring_a_model_keeps_persisted_selections_admissible():
+    """Persisted-shape rule: a released version may already have written these ids."""
+
+    from config.v2_config import model_hub_fixed_menu_ids
+    from core.handlers.model_hub.catalog_admission import backend_model_admission_error
+
+    builtin_ids = model_hub_fixed_menu_ids("claude")
+    for model in (*RETIRED_CLAUDE_MODELS, "opus", "sonnet", "haiku"):
+        assert (
+            backend_model_admission_error("claude", model, claude_builtin_ids=builtin_ids)
+            is None
+        ), model
+
+    assert backend_model_admission_error("claude", "grok-4.7") is None
+    assert backend_model_admission_error("claude", "default") == "backend_model_id_invalid"
+
+
+def test_visible_backend_model_entries_drops_only_hidden_rows():
+    catalog = {
+        "backends": {
+            "claude": {
+                "models": [
+                    {"id": "claude-opus-5"},
+                    {"id": "claude-gone", "visibility": "hide"},
+                    {"id": "claude-also-gone", "visibility": "hidden"},
+                    {"id": "claude-kept", "visibility": "list"},
+                ]
+            }
+        }
+    }
+
+    visible = backend_model_catalog.visible_backend_model_entries("claude", catalog)
+
+    assert [entry["id"] for entry in visible] == ["claude-opus-5", "claude-kept"]
+
+
+def test_bundled_retirements_outrank_a_remote_catalog_cached_before_them():
+    import copy
+
+    bundled = backend_model_catalog.load_bundled_catalog()
+    stale = copy.deepcopy(bundled)
+    stale["backends"]["claude"]["models"] = [
+        {"id": "claude-opus-4"},
+        {"id": "claude-sonnet-4", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "claude-opus-5"},
+    ]
+
+    blocked = backend_model_catalog._claude_blocked_model_ids(stale, bundled)
+    merged = backend_model_catalog.merge_model_sources(
+        backend_model_catalog._claude_sources(stale, bundled),
+        blocked_model_ids=blocked,
+    )
+
+    ids = {entry["id"] for entry in merged}
+    assert "claude-opus-5" in ids
+    assert not ids & set(RETIRED_CLAUDE_MODELS)
+
+
+def test_an_explicitly_listed_remote_row_can_revive_a_retired_model():
+    import copy
+
+    bundled = backend_model_catalog.load_bundled_catalog()
+    remote = copy.deepcopy(bundled)
+    remote["backends"]["claude"]["models"] = [{"id": "claude-opus-4", "visibility": "list"}]
+
+    merged = backend_model_catalog.merge_model_sources(
+        backend_model_catalog._claude_sources(remote, bundled),
+        blocked_model_ids=backend_model_catalog._claude_blocked_model_ids(remote, bundled),
+    )
+
+    assert "claude-opus-4" in {entry["id"] for entry in merged}
 
 
 def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp_path):
@@ -1494,3 +1645,73 @@ def test_builtin_snapshot_rereads_remote_cache_file_and_changes_generation(
     assert first["generation"] != second["generation"]
     assert first["models"][0]["id"] == "gpt-file-generation-one"
     assert second["models"][0]["id"] == "gpt-file-generation-two"
+
+
+RETIRED_CODEX_MODELS = (
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.4-nano",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1",
+    "gpt-5",
+)
+
+
+def test_codex_retirements_outrank_stale_remote_and_local_caches(monkeypatch, tmp_path):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-5.2", "visibility": "list"},
+                    {"slug": "gpt-5.1-codex-mini", "visibility": "list"},
+                    {"slug": "gpt-5.3-codex", "visibility": "list"},
+                    {"slug": "gpt-5.4", "visibility": "list"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    stale_remote = {"backends": {"codex": {"models": [{"id": "gpt-5.2"}, {"id": "gpt-6-sol"}]}}}
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **_kwargs: stale_remote)
+
+    models = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
+
+    assert {"gpt-6-sol", "gpt-5.4", "gpt-5.3-codex-spark"} <= set(models)
+    assert not set(models) & set(RETIRED_CODEX_MODELS)
+
+
+def test_an_explicitly_listed_remote_row_can_revive_a_retired_codex_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    remote = {"backends": {"codex": {"models": [{"id": "gpt-5.2", "visibility": "list"}]}}}
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **_kwargs: remote)
+
+    models = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
+
+    assert "gpt-5.2" in models
+
+
+def test_a_revived_gpt_5_2_keeps_its_bundled_metadata():
+    from config.v2_config import _default_backend_models
+
+    row = next(model for model in _default_backend_models("codex") if model.id == "gpt-5.2")
+
+    assert row.display_name == "GPT-5.2"
+    assert row.reasoning_efforts == ["low", "medium", "high", "xhigh"]
+
+
+def test_retired_codex_models_stay_in_the_fixed_menu_for_released_configs():
+    from config.v2_config import model_hub_fixed_menu_ids
+
+    # Only gpt-5.2 ever shipped in the bundled menu; the legacy-only ids are
+    # dropped outright, so the fixed menu gains no never-released rows.
+    fixed_menu = set(model_hub_fixed_menu_ids("codex"))
+
+    assert set(RETIRED_CODEX_MODELS) & fixed_menu == {"gpt-5.2"}
+    assert backend_model_catalog.retired_backend_model_ids(
+        "codex", backend_model_catalog.load_bundled_catalog()
+    ) == {"gpt-5.2"}

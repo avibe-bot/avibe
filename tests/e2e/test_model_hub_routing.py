@@ -201,8 +201,8 @@ def test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
 @pytest.mark.parametrize("disconnect", [False, True], ids=["complete", "client-close"])
-def test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock(tmp_path, monkeypatch, protocol, disconnect):
-    """MH-ROUTING-009: Save waits for real stream completion or client close, then serves the new target without deadlock."""
+def test_mh_routing_009_save_during_active_stream_hot_reloads_without_restart_or_truncation(tmp_path, monkeypatch, protocol, disconnect):
+    """MH-ROUTING-009: Save hot-reloads the live engine during active output; the stream is neither awaited nor truncated."""
     async def exercise(adapter, mock):
         service, menu, target, sources = _real_route_service(tmp_path, adapter, [mock], protocol, [])
         await service.runtime_start()
@@ -234,16 +234,15 @@ def test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock
                     save = asyncio.create_task(service.set_agent_chain("opencode", menu, {
                         "hops": [{"source_id": sources[0].id, "model_id": next_target}],
                     }))
-                    await asyncio.sleep(0.05)
-                    assert not save.done(), "Save must wait for the active transport to finish"
+                    saved = await asyncio.wait_for(save, timeout=10)
                     assert adapter.supervisor.client_if_running().connection == old_connection
+                    assert adapter._active_transports == 1
                     if disconnect:
                         response.close()
-                        saved = await asyncio.wait_for(save, timeout=15)
                         mock.configure(stream="healthy")
                     else:
                         mock.configure(stream="healthy")
-                        saved, tail = await asyncio.wait_for(asyncio.gather(save, response.read()), timeout=15)
+                        tail = await asyncio.wait_for(response.read(), timeout=15)
                         assert terminal in prefix + tail
                     assert saved["chain"]["manual_override"] == {"hops": [{"source_id": sources[0].id, "model_id": next_target}]}
                 async with client.post(f"{base_url}/v1/{path}", json={**payload, "stream": False},
@@ -253,6 +252,7 @@ def test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock
             captured = [row["body"]["model"] for row in mock.requests() if row["path"] == f"/v1/{path}"]
             assert captured == [target, next_target]
             assert service.store.load().sources[0].models == []
+            assert adapter.supervisor.client_if_running().connection == old_connection
         finally:
             mock.configure(stream="healthy")
             if save is not None and not save.done():

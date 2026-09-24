@@ -15,6 +15,7 @@ import {
   getExistingWebPushSubscription,
   getWebPushSupportState,
   rememberWebPushEndpoint,
+  webPushSubscriptionUsesVapidKey,
   type WebPushSupportState,
 } from '@/lib/webPush';
 
@@ -39,20 +40,55 @@ export const WebPushControl: React.FC = () => {
       return;
     }
     const existing = await getExistingWebPushSubscription();
+    const previousEndpoints = await getRememberedWebPushEndpoints();
+    const rememberedEndpoint = previousEndpoints[0];
     const serverStatus = await api
       .getWebPushStatus(
         existing
           ? {
               endpoint: existing.endpoint,
               subscription: existing.toJSON(),
-              device_id: getWebPushDeviceId(),
-              previous_endpoints: getRememberedWebPushEndpoints(),
+              device_id: await getWebPushDeviceId(),
+              previous_endpoints: previousEndpoints,
             }
-          : undefined,
+          : rememberedEndpoint ? { endpoint: rememberedEndpoint } : undefined,
       )
       .catch(() => null);
+    const repairable = Boolean(serverStatus && (
+      serverStatus.current_subscription_repairable
+      || (!existing && Boolean(rememberedEndpoint) && serverStatus.current_subscription_enabled)
+      || (existing && serverStatus.current_subscription_enabled
+        && !webPushSubscriptionUsesVapidKey(existing, serverStatus.public_key))
+    ));
+    if (
+      repairable
+      && typeof Notification !== 'undefined'
+      && Notification.permission === 'granted'
+    ) {
+      try {
+        await enableWebPush(api, { forceResubscribe: Boolean(existing), recoverOnly: true });
+        const repaired = await getExistingWebPushSubscription();
+        if (repaired) {
+          const repairedStatus = await api.getWebPushStatus({
+            endpoint: repaired.endpoint,
+            subscription: repaired.toJSON(),
+            device_id: await getWebPushDeviceId(),
+            previous_endpoints: await getRememberedWebPushEndpoints(),
+          });
+          if (repairedStatus.current_subscription_enabled) {
+            await rememberWebPushEndpoint(repaired.endpoint);
+            setStatus('enabled');
+            return;
+          }
+        }
+      } catch {
+        // Keep the control recoverable; the user can still retry manually.
+      }
+      setStatus('disabled');
+      return;
+    }
     if (existing && serverStatus?.current_subscription_enabled) {
-      rememberWebPushEndpoint(existing.endpoint);
+      await rememberWebPushEndpoint(existing.endpoint);
     }
     setStatus(existing && serverStatus?.current_subscription_enabled ? 'enabled' : 'disabled');
   };

@@ -2,6 +2,8 @@ import type { Page, Route } from '@playwright/test';
 
 export const ORIGIN = 'http://127.0.0.1:5212';
 
+export const isRetiredMemoryPath = (pathname: string) => pathname === '/api/memory' || pathname.startsWith('/api/memory/');
+
 /** Every phase of the authored 8.9s loop, addressed by the elapsed time it freezes at. */
 export const PHASES = {
   'pm-working': 600,
@@ -116,6 +118,12 @@ export async function serveProduct(page: Page) {
   await page.route('**/api/opencode/permission-status', (route) =>
     route.fulfill({ json: { ok: true, permission_allowed: true } }),
   );
+  await page.route('**/*', (route) => {
+    const request = route.request();
+    if (!isRetiredMemoryPath(new URL(request.url()).pathname)) return route.fallback();
+    denied.push(`${request.method()} ${request.url()}`);
+    return route.abort();
+  });
   return denied;
 }
 
@@ -233,6 +241,13 @@ export async function setDocumentHidden(page: Page, hidden: boolean) {
 export async function openSetup(page: Page, lang: string) {
   await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
   // The handoff timer uses the same browser clock as the story in deterministic runs.
+  await page.clock.runFor(950);
+  // Providers is the first step now. This fixture answers「no sources」and leaves the
+  // Hub unready, so the connection action is disabled and the way on the screen states
+  // is the only control that leaves it — which is how a person gets to the assistants
+  // here, and so how the capture does. Addressed by the hint's own class rather than
+  // its sentence, because these captures run in both languages.
+  await page.locator('.onboarding-setup-hint button').click();
   await page.clock.runFor(950);
   await page.locator('[data-setup-screen="assistants"]').waitFor();
   await page.locator('.onboarding-assistants').waitFor();

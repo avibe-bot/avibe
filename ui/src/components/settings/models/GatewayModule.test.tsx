@@ -84,4 +84,31 @@ describe('GatewayModule region failure treatment', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
     expect(onRetry).toHaveBeenCalledOnce();
   });
+
+  it('disables the page retry while route reconciliation is pending', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <GatewayModule
+          supply={failRegionRead(readyRegion([agent]))}
+          retryDisabled
+          onRetry={vi.fn()}
+          runtime={null}
+          runtimeSnapshot={null}
+          sources={[]}
+          chains={{}}
+          pendingBackends={new Set()}
+          switchFailures={new Set()}
+          connectingBackend={null}
+          onConnectHub={vi.fn()}
+          onSwitchDirect={vi.fn()}
+          onOpenModels={vi.fn()}
+          onOpenOrder={vi.fn()}
+          onOpenRoute={vi.fn()}
+          onProbeSettled={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    expect((screen.getByRole('button', { name: /^Retry$|^重试$/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

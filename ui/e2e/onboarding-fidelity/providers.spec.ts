@@ -102,21 +102,18 @@ test.describe('providers screen', () => {
     expect(denied).toEqual([]);
   });
 
-  test('the badge, the summary and the capsule each count their own set', async ({ page }) => {
+  test('the badge and the summary each count their own set', async ({ page }) => {
     const denied = await serveProduct(page);
     const server = await serveProviders(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await openProviders(page);
 
     const summary = page.locator('.setup-provider-summary');
-    const capsule = page.locator('.onboarding-import-notice-text');
     const badge = page.locator('.setup-provider-badge');
 
     // ── Nothing yet ─────────────────────────────────────────────────────────
     expect(vendorCount(server.facts())).toBe(0);
     await expect(badge).toHaveCount(0);
-    // Three importable keys on the machine, and the capsule says so.
-    expect(numbers(await capsule.textContent())).toEqual([importableCount(server.facts())]);
 
     // ── An import ───────────────────────────────────────────────────────────
     // Every proposed row arrives consented to, as the shipped takeover opens it.
@@ -139,13 +136,9 @@ test.describe('providers screen', () => {
     await takeover.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
 
-    const imported = server.facts().applied.flat().length;
     // The summary counts providers that EXIST, so an import moves it.
     await expect.poll(async () => numbers(await summary.textContent())[0])
       .toBe(vendorCount(server.facts()));
-    // The capsule reports what landed and what the refreshed scan still holds.
-    await expect.poll(async () => numbers(await capsule.textContent()))
-      .toEqual([imported, importableCount(server.facts())]);
     // The badge counts what was added THROUGH 「Add more」, and an import is not that.
     // A badge that moved here would be counting sources.
     await expect(badge).toHaveCount(0);
@@ -168,28 +161,6 @@ test.describe('providers screen', () => {
     await expect.poll(async () => numbers(await summary.textContent())[0])
       .toBe(vendorCount(server.facts()));
     expect(vendorCount(server.facts())).toBeGreaterThan(server.facts().written.length);
-    expect(denied).toEqual([]);
-  });
-
-  test('dismissing the import capsule leaves the primary action where it was', async ({ page }) => {
-    const denied = await serveProduct(page);
-    await serveProviders(page);
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await openProviders(page);
-    await page.locator('.onboarding-import-notice').waitFor();
-    await settleEffects(page);
-
-    const before = { slot: await rect(page.locator('.setup-provider-offer')), action: await rect(primaryAction(page)) };
-
-    await page.getByRole('button', { name: 'Dismiss import notice' }).click();
-    await expect(page.locator('.onboarding-import-notice')).toHaveCount(0);
-    await settleEffects(page);
-
-    // The offer is an optional sentence in a slot that is not optional. Letting the
-    // slot collapse would pull the button someone was about to press up under their
-    // cursor — which is the whole reason the slot is reserved rather than conditional.
-    expect(await rect(page.locator('.setup-provider-offer'))).toEqual(before.slot);
-    expect((await rect(primaryAction(page))).y).toBe(before.action.y);
     expect(denied).toEqual([]);
   });
 

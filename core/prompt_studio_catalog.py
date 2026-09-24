@@ -223,7 +223,7 @@ def _render_options(raw: object) -> dict[str, Any]:
 def render_prompt_context(request: dict[str, Any]) -> dict[str, Any]:
     """Render explicit builder inputs, not a guessed or recorded native session.
 
-    No backend is started and no Memory admission/configuration is performed.
+    No backend is started and no admission/configuration is performed.
     Skill discovery, when requested through skills_cwd, uses the production
     resolver and its ordinary built-in snapshot maintenance.
     """

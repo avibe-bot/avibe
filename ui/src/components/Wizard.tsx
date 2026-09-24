@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
-import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
+import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { AccessTiles } from './onboarding/AccessTiles';
 import { RouteSurfaceActiveContext, useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
-import { loadingRegion, beginRegionRead, failRegionRead } from './settings/models/regionRead';
+import { loadingRegion, readyRegion, beginRegionRead, failRegionRead } from './settings/models/regionRead';
+import { modelsApi } from './settings/models/modelsApi';
+import { apiFetch } from '@/lib/apiFetch';
 import { INITIAL_SETUP_FLOW_STATE, setupBackTarget, setupCapability, setupNavigationReady, type SetupAction, type SetupCapability, type SetupScreenId, type SetupScreenHandle, type SetupScreenProps } from './onboarding/setupFlow';
-import { mediaQuery, playSetupHandoff, setupHandoffAllowed } from './onboarding/setupHandoff';
+import { captureSetupCards, mediaQuery, playSetupHandoff, setupHandoffAllowed, type SetupSnapshot } from './onboarding/setupHandoff';
 import { fetchSetupConfig, type SetupConfigRead, type SetupConfigSnapshot } from './onboarding/setupConfig';
 import { SETUP_REGISTERED_SCREENS } from './onboarding/setupScreenRegistry';
 import './onboarding/onboarding.css';
@@ -14,17 +16,21 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Welcome } from './steps/Welcome';
 import { AgentDetection } from './steps/AgentDetection';
+import { ProvidersScreen, type ProvidersScreenProps } from './onboarding/providers/ProvidersScreen';
+import {
+  GatewayBootstrapError,
+  bootstrapGateway,
+  readRuntimeObservation,
+  type GatewayBootstrapDeps,
+} from './onboarding/providers/gatewayBootstrap';
 import logoImg from '@/assets/logo.png';
 import { LanguageSwitcher } from './LanguageSwitcher';
-import { useApi, type VibeAgentBrief } from '../context/ApiContext';
+import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
-import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
-import { SetupPlatformRecovery, type SavedPlatformRecovery } from './onboarding/SetupPlatformRecovery';
-import { getEnabledPlatforms, getPlatformCatalog, platformHasRunnableConfig } from '../lib/platforms';
-import { SetupModelRecovery } from './onboarding/SetupModelRecovery';
-import { readOpencodeSetupRoutes } from './onboarding/opencodeSetupRoutes';
 import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
+import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
+import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
 
 /**
  * The setup's top bar, drawn as the design draws it at every size: the brand lockup —
@@ -65,6 +71,13 @@ export type SetupReadFailure = {
   message: string;
   detail?: string;
 };
+
+/** Each C4 refusal keeps the sentence its own situation already had. */
+const REFUSAL_MESSAGE = {
+  entryFailed: 'onboarding.connection.entryFailed',
+  applyPending: 'onboarding.connection.applyPending',
+  modelUnavailable: 'onboarding.connection.modelUnavailable',
+} as const satisfies Record<EntryRefusal, string>;
 
 type FlowShellProps = {
   sequence: readonly SetupScreenId[];
@@ -108,11 +121,30 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   const current = useRef(activation);
   const transition = useRef<(() => void) | null>(null);
   const transitioning = useRef(false);
+  /** A flight waiting for the screen it lands on to be on screen. */
+  const flight = useRef<{ snapshot: SetupSnapshot; to: SetupScreenId } | null>(null);
   const ready = setupNavigationReady(capability, gatewayEnabled);
   const policy = useRef({ ready, sequence, locked: navigationLocked, routeActive });
   useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence, locked: navigationLocked, routeActive }; });
   useLayoutEffect(() => {
+    if (handoff || !routeActive) return;
     roots.current[activation.id]?.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
+  }, [activation, handoff, routeActive]);
+  // The screens swap first and the identities fly afterwards, onto the screen that is
+  // now really there. Landing into a live diagram is what the reference does, and it
+  // is what keeps the wires, the summary and the action from appearing in one jump
+  // once the flight is already over.
+  useLayoutEffect(() => {
+    const pending = flight.current;
+    const incoming = roots.current[activation.id];
+    if (!pending || pending.to !== activation.id || !host.current || !incoming) return;
+    flight.current = null;
+    const finish = () => {
+      transition.current = null;
+      transitioning.current = false;
+      setHandoff(false);
+    };
+    transition.current = playSetupHandoff(host.current, pending.snapshot, incoming, pending.to, finish);
   }, [activation]);
   useEffect(() => () => transition.current?.(), []);
 
@@ -133,29 +165,28 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
     const backwards = policy.current.sequence.indexOf(target) < policy.current.sequence.indexOf(previous.id);
     if (!backwards && !policy.current.ready) return;
     const next = { id: target, epoch: previous.epoch + 1 };
-    const finish = () => {
-      transition.current = null;
-      transitioning.current = false;
-      current.current = next;
-      setAction(null);
-      setHandoff(false);
-      setActivation(next);
-    };
     if (mediaQuery('(max-width: 759px)')) {
       host.current?.closest('.onboarding-shell')?.scrollTo({ top: 0, behavior: 'instant' });
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
-    if (backwards || !setupHandoffAllowed(paused) || !host.current || !roots.current[previous.id] || !roots.current[target]) {
-      finish(); return;
+    // Every arrival flies, as the reference's do: the identities that grew into
+    // assistants shrink back into the diagram's destinations on the way out, and that
+    // row grows back into the story cards it was folded from.
+    const animated = setupHandoffAllowed(paused)
+      && !!host.current && !!roots.current[previous.id] && !!roots.current[target];
+    if (animated) {
+      transitioning.current = true;
+      flight.current = { snapshot: captureSetupCards(roots.current[previous.id]!, previous.id), to: target };
     }
-    transitioning.current = true;
-    setHandoff(target === 'intro' ? false : target);
-    transition.current = playSetupHandoff(host.current, roots.current[previous.id]!, roots.current[target]!, previous.id, target, finish);
+    current.current = next;
+    setAction(null);
+    setHandoff(animated ? target : false);
+    setActivation(next);
   }, [paused]);
   // A callback belongs to this activation, even if an asynchronous consumer saves it.
   const feeds = useMemo(() => Object.fromEntries(sequence.map((id) => [id, {
     onActionChange: (next: SetupAction) => {
-      if (current.current.id === id && current.current.epoch === activation.epoch && !transitioning.current) setAction(next);
+      if (current.current.id === id && current.current.epoch === activation.epoch) setAction(next);
     },
     onNavigate: (target: SetupScreenId) => {
       if (current.current.id === id && current.current.epoch === activation.epoch) navigate(target);
@@ -167,32 +198,40 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   return <div className="onboarding-step" data-setup-sequence={sequence.join(' ')} data-setup-screen={activation.id} data-handoff={handoff || undefined}>
     <div className="onboarding-screens" ref={host}>
       {sequence.map((id) => {
-        const active = routeActive && id === activation.id;
+        const active = routeActive && id === activation.id && !handoff;
         return <div key={id} ref={(node) => { roots.current[id] = node; }} data-setup-screen-root={id}
           hidden={id !== activation.id} inert={!active || !!handoff}>
-          <RouteSurfaceActiveContext.Provider value={active && !handoff}>
+          <RouteSurfaceActiveContext.Provider value={active}>
             <SetupScreenContent id={id} screenProps={{ active, handoff, capability, gatewayEnabled, runtimeRead,
               onRetrySetup, flowState, setFlowState, ...feeds[id] }} renderScreen={renderScreen}
               ref={(handle) => { handles.current[id] = handle; }} />
           </RouteSurfaceActiveContext.Provider>
         </div>;
       })}
+      {/* Where a screen puts what is ancillary to the pair below: in the cell the screens
+          share, resting on its bottom edge and growing upward into the room the screen
+          leaves above the action. In the cell rather than in the column, because the
+          column is centred in the window — a caption in it would move the heading, the
+          cards and the action by half of its own height, which is what made the
+          assistants step sit 9px higher than the two before it. */}
+      <div className="onboarding-action-aside" data-setup-action-aside="" />
     </div>
     <div className="onboarding-setup-footer">
       <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action"
-        disabled={loading || !!handoff || navigationLocked || (!retry && (!action || action.disabled || action.busy || !ready))}
+        disabled={loading || !!handoff || (!retry && (!action || action.disabled || action.busy || !ready))}
         onClick={() => { if (transitioning.current || policy.current.locked) return; if (retry) onRetrySetup(); else if (ready && action && !action.disabled && !action.busy) handles.current[current.current.id]?.activate(); }}>
         {t(loading ? 'common.loading' : retry ? 'common.retry' : action?.labelKey ?? 'common.loading', action?.labelArgs)}
-        {(loading || action?.busy || action?.icon === 'spinner') ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
+        {(loading || action?.busy || action?.icon === 'spinner')
+          ? activation.id === 'providers'
+            ? <LoaderCircle size={16} className="motion-safe:animate-spin" />
+            : <RefreshCw size={16} className="motion-safe:animate-spin" />
+          : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
       </Button>
       <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" style={{ visibility: back ? 'visible' : 'hidden' }}
         disabled={!back || !!handoff || !!action?.busy || navigationLocked} onClick={() => { if (back) navigate(back); }}>
         <ArrowLeft size={14} />{t(back === 'providers' ? 'onboarding.flow.backToProviders' : 'onboarding.flow.backToIntro')}
       </Button>
     </div>
-    {/* Where a screen puts what is ancillary to the pair above: below it, in normal flow,
-        so a caption that grows can neither move the anchor nor cover it. */}
-    <div className="onboarding-action-aside" data-setup-action-aside="" />
     {(authoritativeBlock || (!!error && !loading)) && <div className="onboarding-flow-error" role="alert">
       <p>{authoritativeBlock ? t('onboarding.flow.gatewayRequired') : error?.message ?? t('onboarding.connection.readFailed')}</p>
       {/* Same shape the detection failure already uses one screen over: the sentence
@@ -207,21 +246,37 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   </div>;
 }
 
+/**
+ * The providers screen, plus the one fact about it the shell's props cannot state:
+ * that this journey has ARRIVED here.
+ *
+ * D11 is an entry event, not a condition. Every screen is mounted from the first
+ * render — that is how drafts survive leaving one — so a mount says nothing about
+ * where the person is, and `active` turning true again on the way back from the
+ * assistants must not seed a config or start a controller a second time. So the edge
+ * is reported once, from inside the tree that knows it, and what to do with it stays
+ * with the shell's single runtime owner.
+ */
+const ProvidersEntry = forwardRef<SetupScreenHandle, ProvidersScreenProps & { onEnter: () => void }>(
+  function ProvidersEntry({ onEnter, ...props }, ref) {
+    const { active } = props;
+    useEffect(() => { if (active) onEnter(); }, [active, onEnter]);
+    return <ProvidersScreen ref={ref} {...props} />;
+  },
+);
+
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
-  const { capabilities } = useInstanceAuthorization();
-  const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
-  const [recovery, setRecovery] = useState<VibeAgentBrief | null>(null);
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
   const [loading, setLoading] = useState(true);
   const [capability, setCapability] = useState<SetupCapability>('pending');
   const [gatewayEnabled, setGatewayEnabled] = useState<boolean | null>(null);
   const configGeneration = useRef(0);
-  // The shell owns the region and its request generation. L2 integrates a stateless
-  // D11 loader here on active provider entry; it returns a validated RuntimeDependency.
-  // Until that screen is registered, config reads authorize no runtime read/bootstrap.
+  // The shell owns the region and its request generation; the stateless D11 sequence
+  // below is what fills it, once the journey actually reaches the provider screen.
+  // A config read on its own authorizes no runtime read and no bootstrap.
   const [runtimeRead, setRuntimeRead] = useState<SetupScreenProps['runtimeRead']>(() => loadingRegion());
   const completing = useRef(false);
   /**
@@ -257,7 +312,6 @@ export function Wizard() {
   }, [t]);
   const load = useCallback(async () => {
     const generation = ++configGeneration.current;
-    setRuntimeRead((previous) => beginRegionRead(previous));
     setLoading(true); setError(null); setCapability('pending'); setGatewayEnabled(null);
     const result = await fetchSetupConfig();
     // A newer read — another Retry, or a completion boundary — already owns the state.
@@ -266,6 +320,98 @@ export function Wizard() {
     setLoading(false);
   }, [applyRead]);
   useEffect(() => { void load(); return () => { configGeneration.current += 1; }; }, [load]);
+  // ── The runtime region's one owner ────────────────────────────────────────
+  //
+  // `load` deliberately does not touch the region. It re-runs for reasons that have
+  // nothing to do with the machine — a language change re-resolves the copy a failed
+  // read is reported in — and marking a ready region as refreshing there would strand
+  // it: nothing would re-observe the runtime, because nothing asked anything to.
+  // Reporting a read in flight belongs to whoever is actually reading, which is here.
+  //
+  // One ticket covers both reasons the runtime is read: arriving at the provider
+  // screen, and an explicit retry. They are the same request — "observe the machine
+  // now" — and keeping them as one number is also what keeps them countable: an
+  // effect that re-runs for a config read landing, a capability arriving or a
+  // re-render cannot turn one request into several, because only a new ticket is a
+  // new request. Ticket 0 is "the journey has not been here yet".
+  const [entryTicket, setEntryTicket] = useState(0);
+  const enterProviders = useCallback(() => setEntryTicket((previous) => previous + 1), []);
+  const attemptedTicket = useRef(-1);
+  // Whether the sequence has already established what it establishes. Afterwards a
+  // refresh is the observation alone: the config exists and the controller is up, so
+  // re-seeding or re-starting would act on state that is already proven.
+  //
+  // Establishing once is not observing once. Coming back to the provider screen must
+  // show the machine as it is now — something may have changed it while the journey
+  // was on the assistants — so every arrival reads the runtime again, and only the
+  // writes are what happen a single time.
+  const bootstrapped = useRef(false);
+  const runtimeGeneration = useRef(0);
+  const bootstrapDeps = useMemo<GatewayBootstrapDeps>(() => ({
+    // Wrapped rather than passed by reference: the sequence is a dependency injection
+    // seam, and a test that spies on a module after this tree rendered must still be
+    // the thing that runs.
+    fetch: (input, init) => apiFetch(input, init),
+    getBackendConnection: (backend) => api.getBackendConnection(backend),
+    control: (action) => control(action),
+    getRuntimeStatus: () => modelsApi.getRuntimeStatus(),
+  }), [api, control]);
+  // C4 names one owner for every setup supply read, and this is it: the provider
+  // screen's adoption reads and the completion gate's corroboration share a single
+  // generation, so a read one of them superseded cannot come back as evidence for
+  // the other.
+  const [setupAgentReads] = useState(createAgentCollectionReadAuthority);
+  const entryDeps = useMemo<EntryGateDeps>(() => ({
+    listAgents: () => api.listVibeAgents({ cache: false }),
+    getBackendConnection: (backend) => api.getBackendConnection(backend),
+    agentReads: setupAgentReads,
+    getRuntimeStatus: () => modelsApi.getRuntimeStatus(),
+    getVibeAgent: (name, params) => api.getVibeAgent(name, { ...params, cache: false }),
+    detectCli: (binary) => api.detectCli(binary),
+  }), [api, setupAgentReads]);
+  const retrySetup = useCallback(() => {
+    // Order matters only in what it means: re-read the configuration, and let the
+    // runtime owner resume from whatever that read says — which, when it says the
+    // gateway is off, is nothing at all.
+    setEntryTicket((previous) => previous + 1);
+    void load();
+  }, [load]);
+  useEffect(() => {
+    if (entryTicket === 0 || loading) return;
+    // C2's boundary, read from the shell's own config state rather than assumed: a
+    // disabled deployment or a gateway somebody turned off authorizes no attempt.
+    if (!setupNavigationReady(capability, gatewayEnabled)) return;
+    if (attemptedTicket.current === entryTicket) return;
+    attemptedTicket.current = entryTicket;
+    const generation = ++runtimeGeneration.current;
+    setRuntimeRead((previous) => beginRegionRead(previous));
+    void (async () => {
+      try {
+        const runtime = bootstrapped.current
+          ? await readRuntimeObservation(bootstrapDeps)
+          : (await bootstrapGateway(bootstrapDeps, ASSISTANT_ORDER[0])).runtime;
+        if (generation !== runtimeGeneration.current) return;
+        bootstrapped.current = true;
+        setRuntimeRead(readyRegion(runtime));
+      } catch (cause) {
+        if (generation !== runtimeGeneration.current) return;
+        if (cause instanceof GatewayBootstrapError && cause.reason === 'disabled') {
+          // The sequence read a configuration this shell does not have yet, and the
+          // answer a person is owed is the configuration path rather than a retry.
+          // Re-reading is how that arrives: the config owner is the only thing that
+          // may set capability and saved intent, so the alert and the disabled cards
+          // come from the same authoritative read as everything else, and nothing
+          // here invents a flag or turns one back on.
+          void load();
+          return;
+        }
+        // Everything else is the region's own failure, and the provider screen's
+        // gateway card owns what to offer for it. Raising a second flow-level error
+        // beside that card would put two Retrys on screen for one machine.
+        setRuntimeRead((previous) => failRegionRead(previous));
+      }
+    })();
+  }, [loading, capability, gatewayEnabled, entryTicket, bootstrapDeps, load]);
   /**
    * Read the prerequisite as it is now, and answer whether setup may still act on it.
    *
@@ -306,53 +452,47 @@ export function Wizard() {
       // Writes already issued cannot be recalled; the lease is what stops the next one.
       let lease = entry.lease;
       const holds = () => lease === configGeneration.current;
-      const enabledPlatforms = getEnabledPlatforms(entry.config.raw);
-      const missing = getPlatformCatalog(entry.config.raw).find((platform) => enabledPlatforms.includes(platform.id) && !platformHasRunnableConfig(entry.config.raw, platform.id));
-      if (missing) {
-        setPlatformRecovery({ config: entry.config.raw, descriptor: missing });
-        return;
-      }
-      const readCandidates = async () => {
-        const results = await Promise.allSettled(ASSISTANT_ORDER.map((name) => api.getBackendConnection(name)));
-        return results.flatMap((result) => result.status === 'fulfilled' && result.value.ok ? [result.value] : []);
-      };
-      let connections = await readCandidates();
+      // C4. The gate is correlated over ONE assistant, so the reads that feed it are
+      // taken together and judged together; what the browser must not do is assemble a
+      // verdict out of three facts about three different machines.
+      let evidenceOptions = { config: entry.config.raw };
+      let evidence = await readEntryEvidence(entryDeps, evidenceOptions);
       if (!holds()) return;
-      if (!connections.some((connection) => connection.entry_eligible)) throw new Error(t('onboarding.connection.entryFailed'));
-      if (!connections.some((connection) => connection.ready)) {
-        // Only confirmed stopped state allows this explicit start. Pending or
-        // unknown IPC never becomes a restart request from the browser.
-        if (!connections.some((connection) => connection.entry_eligible && connection.application === 'stopped')) throw new Error(t('onboarding.connection.applyPending'));
+      // A superseded supply read is neither an answer nor a failure — a newer
+      // generation of the shared authority is already reading, and that read is what
+      // will settle this. Nothing is written and nothing is claimed.
+      if (!evidence) return;
+      let admission = admitEntry(evidence);
+      if (admission.kind === 'refused' && admission.startable) {
+        // Connection and Agent reads can outlast the saved-intent read that authorised
+        // this click. A generation lease only notices a newer read in THIS shell; another
+        // browser can turn the gateway off while those waits are open. Recheck the
+        // persisted prerequisite immediately before the start, refuse unread/disabled/
+        // superseded, and use the refreshed config for the post-recovery CLI evidence.
+        const stillAuthorised = await readPrerequisite(lease);
+        if (!stillAuthorised) return;
+        lease = stillAuthorised.lease;
+        evidenceOptions = { config: stillAuthorised.config.raw };
+        // Only a connection the server confirmed `stopped` reaches here, and only
+        // once: the re-read below is what admits, not this call's own answer, so a
+        // machine that recovered on its own is never sent a second start. Startup
+        // itself has no assistant or source prerequisite.
         const started = await control('start');
         if (!holds()) return;
         if (started?.ok === false) throw new Error(started.message || t('onboarding.connection.entryFailed'));
-        connections = await readCandidates();
+        const recovered = await readEntryEvidence(entryDeps, evidenceOptions);
         if (!holds()) return;
+        if (!recovered) return;
+        evidence = recovered;
+        admission = admitEntry(evidence);
       }
-      const ready = new Set(connections.filter((connection) => connection.ready).map((connection) => connection.backend));
-      if (!ready.size) throw new Error(t('onboarding.connection.entryFailed'));
-      const agents = await api.listVibeAgents({ cache: false });
-      if (!holds()) return;
-      const candidates = agents.agents.filter((agent) => agent.enabled && !agent.archived && ready.has(agent.backend as typeof ASSISTANT_ORDER[number]));
-      if (!agents.ok || !candidates.length) throw new Error(t('onboarding.connection.entryFailed'));
-      let available = candidates.filter((agent) => agent.backend !== 'opencode');
-      const opencode = candidates.filter((agent) => agent.backend === 'opencode');
-      if (opencode.length) {
-        try {
-          const routes = await readOpencodeSetupRoutes(api);
-          if (!holds()) return;
-          available = [...available, ...opencode.filter((agent) => routes.accepts(agent.model))];
-          if (!available.length && routes.mode === 'direct' && capabilities.can_manage_agents) {
-            setPlatformRecovery(null);
-            setRecovery(opencode.find((agent) => agent.name === agents.default_agent_name) || opencode[0]);
-            return;
-          }
-        } catch (cause) {
-          // An unused OpenCode failure cannot block another usable backend.
-          if (!available.length) throw cause;
-        }
+      if (admission.kind === 'refused') {
+        // No detour. Setup's own contract is that the Hub serves the assistants, so a
+        // machine with no routable assistant is repaired where routes are configured —
+        // the route editor on this screen, or the providers screen behind it — not by a
+        // completion-time form that could only reach a backend the gate cannot admit.
+        throw new Error(t(REFUSAL_MESSAGE[admission.reason]));
       }
-      if (!available.length) throw new Error(t('onboarding.connection.modelUnavailable'));
       // Everything above was awaited — a start, several connection reads, an Agent
       // listing — so the prerequisite is read once more before the writes that end
       // setup. A recovery's completion callback re-enters here and passes the same
@@ -361,20 +501,42 @@ export function Wizard() {
       const settled = await readPrerequisite(lease);
       if (!settled) return;
       lease = settled.lease;
-      // Preserve a usable selected Agent. First setup may have auto-seeded a
-      // default for a missing backend; choose a real enabled Agent in that case.
-      if (!available.some((agent) => agent.name === agents.default_agent_name)) {
-        const selected = await api.setDefaultVibeAgent(available[0].name);
+      const choice = chooseEntryDefault(admission.candidates, evidence);
+      if (choice) {
+        const selected = await api.setDefaultVibeAgent(choice.agent.name);
         // The default write is itself a wait, and the answer that authorised it can
         // stop being the current one inside that wait. What was written stands; what
         // it was written for — finishing setup — does not follow from it.
         if (!holds()) return;
         if (!selected.ok) throw new Error(t('onboarding.connection.entryFailed'));
+        // Confirmed by a fresh read rather than by the write's own answer: the next
+        // screen runs on whatever the server thinks the default is.
+        const confirmed = await api.listVibeAgents({ cache: false });
+        if (!holds()) return;
+        if (!confirmed.ok || confirmed.default_agent_name !== choice.agent.name) {
+          throw new Error(t('onboarding.connection.entryFailed'));
+        }
       }
       // Persist completion last: failed start/readiness leaves AuthGuard's
       // existing setup gate intact. The locked config API validates existing IM.
-      await api.mutateConfig([setConfigField(['setup_completed'], true)]);
+      //
+      // Issued once, and settled by a read. A write that lost its reply on the way
+      // back is indistinguishable here from one that never arrived, so it is neither
+      // believed nor sent again — the config itself is the only thing that can say
+      // which happened, and it is read uncached because a cached answer from before
+      // the write cannot settle anything about it.
+      try {
+        await api.mutateConfig([setConfigField(['setup_completed'], true)]);
+      } catch {
+        // Unknown, not failed. The readback below is what decides.
+      }
       if (!holds()) return;
+      const persisted = await fetchSetupConfig();
+      if (persisted.state !== 'read' || !persisted.config.setup_completed) {
+        throw new Error(t('onboarding.flow.completionUnconfirmed'));
+      }
+      // Confirmed persisted, so the journey is over whatever else changed meanwhile:
+      // the lease exists to stop the next write, not to take back a finished setup.
       navigate('/', { state: { onboardingCompleted: true } });
     } finally { completing.current = false; }
   };
@@ -382,12 +544,14 @@ export function Wizard() {
     <SetupHeader />
     <main className="onboarding-shell-content">
       <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}
-        runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={() => void load()}
-        navigationLocked={Boolean(platformRecovery || recovery)} renderScreen={(id, props, ref) => id === 'intro'
+        runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={retrySetup}
+        renderScreen={(id, props, ref) => id === 'intro'
           ? <Welcome ref={ref} data={data ?? undefined} active={props.active} onActionChange={props.onActionChange}
               onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
+          : id === 'providers'
+          ? <ProvidersEntry ref={ref} {...props} agentReads={setupAgentReads} onEnter={enterProviders} />
           : <AgentDetection ref={ref} data={data ?? {}} active={props.active} onActionChange={props.onActionChange}
-              completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined}
+              flowState={props.flowState} setFlowState={props.setFlowState} onNavigate={props.onNavigate} agentReads={setupAgentReads}
               onNext={complete} />}
       />
     </main>

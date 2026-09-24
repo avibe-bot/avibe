@@ -1,0 +1,248 @@
+{
+  "description": "One shared table for the brackets a destination's authority is allowed to keep.\n\n`[` and `]` are the syntax of an IPv6 host and ordinary data everywhere else in a URL, and a URI is spelled before it is delivered - `spell_uri` on the backend, `normalizeUri` in the Web pipeline - which writes every bracket that is data as `%5B`/`%5D`. Deciding afterwards which ones to put back cannot work: by then `https://[::1]/admin`, whose host is a literal address, and `https://%5B::1%5D/admin`, whose host is the nine characters `%5B::1%5D`, are the same string. Restoring both gives the second one a live loopback address its author never wrote. So the question is asked of the destination the Markdown parser resolved, before spelling, and the answer is carried through to the surface.\n\nThree readers measure three separate facts about each row, and a row is only evidence because they are separate:\n\n- `tests/test_citations.py` calls `safe_url(destination)` and asserts `safe_url`. `null` means the value is rejected outright - reported as an unresolved citation - rather than repaired into a link.\n- `ui/src/components/ui/markdown.test.tsx` renders `markdown` through the real Markdown component and asserts the anchor's `href` exactly, then asserts `navigates`: the URL a browser resolves from that href, or `null` when a browser refuses it. `null` rows are asserted as refusals, not skipped - `new URL('https://%5B::1%5D/admin')` throws, and omitting the row because the assertion is awkward is how the repair got in.\n- `tests/test_link_unit_delivery.py` renders `markdown` through the real Slack adapter and asserts `slack`, the destination a client decodes back out of the `<url|label>` wrapper.\n\n`destination` and `markdown` differ only in the row whose `why` says so: `safe_url` receives a citation's url as data, the other two receive Markdown. Agreement between the three on repairing an encoded wrapper would be agreement on the bug, so each column is measured against its own surface and none is derived from another.",
+  "cases": [
+    {
+      "why": "a valid IPv6 literal is an address a browser opens, and spelling a destination must not be what takes it away",
+      "destination": "https://[::1]/admin",
+      "markdown": "[h](https://[::1]/admin)",
+      "safe_url": "https://[::1]/admin",
+      "href": "https://[::1]/admin",
+      "navigates": "https://[::1]/admin",
+      "slack": "https://[::1]/admin"
+    },
+    {
+      "why": "%5B is a character of the host, not a bracket the destination ever had: restoring it would mint a live loopback address nobody wrote",
+      "destination": "https://%5B::1%5D/admin",
+      "markdown": "[h](https://%5B::1%5D/admin)",
+      "safe_url": null,
+      "href": "https://%5B::1%5D/admin",
+      "navigates": null,
+      "slack": "https://%5B::1%5D/admin"
+    },
+    {
+      "why": "the escape is the same escape in lower case, and so is the address it does not name",
+      "destination": "https://%5b::1%5d/admin",
+      "markdown": "[h](https://%5b::1%5d/admin)",
+      "safe_url": null,
+      "href": "https://%5b::1%5d/admin",
+      "navigates": null,
+      "slack": "https://%5b::1%5d/admin"
+    },
+    {
+      "why": "one literal bracket is not a wrapper, and half of one is not completed into a whole",
+      "destination": "https://[::1%5D/admin",
+      "markdown": "[h](https://[::1%5D/admin)",
+      "safe_url": null,
+      "href": "https://%5B::1%5D/admin",
+      "navigates": null,
+      "slack": "https://%5B::1%5D/admin"
+    },
+    {
+      "why": "the same from the other end - the closing bracket alone buys nothing either",
+      "destination": "https://%5B::1]/admin",
+      "markdown": "[h](https://%5B::1]/admin)",
+      "safe_url": null,
+      "href": "https://%5B::1%5D/admin",
+      "navigates": null,
+      "slack": "https://%5B::1%5D/admin"
+    },
+    {
+      "why": "mixing the two spellings of the escape changes neither answer",
+      "destination": "https://%5B::1%5d/admin",
+      "markdown": "[h](https://%5B::1%5d/admin)",
+      "safe_url": null,
+      "href": "https://%5B::1%5d/admin",
+      "navigates": null,
+      "slack": "https://%5B::1%5d/admin"
+    },
+    {
+      "why": "%255B spells the text %5B, which is one layer further from a bracket still",
+      "destination": "https://%255B::1%255D/admin",
+      "markdown": "[h](https://%255B::1%255D/admin)",
+      "safe_url": null,
+      "href": "https://%255B::1%255D/admin",
+      "navigates": null,
+      "slack": "https://%255B::1%255D/admin"
+    },
+    {
+      "why": "userinfo and a port belong to a valid literal authority, and keeping brackets is not a reason to drop them",
+      "destination": "https://u:p@[::1]:8443/x",
+      "markdown": "[h](https://u:p@[::1]:8443/x)",
+      "safe_url": "https://u:p@[::1]:8443/x",
+      "href": "https://u:p@[::1]:8443/x",
+      "navigates": "https://u:p@[::1]:8443/x",
+      "slack": "https://u:p@[::1]:8443/x"
+    },
+    {
+      "why": "userinfo and a port in front of an encoded wrapper do not make it a host",
+      "destination": "https://u:p@%5B::1%5D:8443/x",
+      "markdown": "[h](https://u:p@%5B::1%5D:8443/x)",
+      "safe_url": null,
+      "href": "https://u:p@%5B::1%5D:8443/x",
+      "navigates": null,
+      "slack": "https://u:p@%5B::1%5D:8443/x"
+    },
+    {
+      "why": "an empty userinfo is carried by the renderer and dropped by the citation's canonical form; the literal address both name is the same one",
+      "destination": "https://@[::1]/x",
+      "markdown": "[h](https://@[::1]/x)",
+      "safe_url": "https://[::1]/x",
+      "href": "https://@[::1]/x",
+      "navigates": "https://[::1]/x",
+      "slack": "https://[::1]/x"
+    },
+    {
+      "why": "a port a browser accepts leaves the authority valid, brackets and all",
+      "destination": "https://[::1]:8443/x",
+      "markdown": "[h](https://[::1]:8443/x)",
+      "safe_url": "https://[::1]:8443/x",
+      "href": "https://[::1]:8443/x",
+      "navigates": "https://[::1]:8443/x",
+      "slack": "https://[::1]:8443/x"
+    },
+    {
+      "why": "a port past 65535 makes the whole authority one no parser reads, so there is no valid literal left to preserve",
+      "destination": "https://[::1]:99999/x",
+      "markdown": "[h](https://[::1]:99999/x)",
+      "safe_url": null,
+      "href": "https://%5B::1%5D:99999/x",
+      "navigates": null,
+      "slack": "https://%5B::1%5D:99999/x"
+    },
+    {
+      "why": "an empty port is no port, and the literal address survives it",
+      "destination": "https://[::1]:/x",
+      "markdown": "[h](https://[::1]:/x)",
+      "safe_url": "https://[::1]:/x",
+      "href": "https://[::1]:/x",
+      "navigates": "https://[::1]/x",
+      "slack": "https://[::1]:/x"
+    },
+    {
+      "why": "literal brackets around something that is not an address are not an authority, so they are spelled like any other data",
+      "destination": "https://[nope]/x",
+      "markdown": "[h](https://[nope]/x)",
+      "safe_url": null,
+      "href": "https://%5Bnope%5D/x",
+      "navigates": null,
+      "slack": "https://%5Bnope%5D/x"
+    },
+    {
+      "why": "and the encoded spelling of the same non-address is not repaired into one",
+      "destination": "https://%5Bnope%5D/x",
+      "markdown": "[h](https://%5Bnope%5D/x)",
+      "safe_url": null,
+      "href": "https://%5Bnope%5D/x",
+      "navigates": null,
+      "slack": "https://%5Bnope%5D/x"
+    },
+    {
+      "why": "an unclosed bracket is not an address",
+      "destination": "https://[::1/x",
+      "markdown": "[h](https://[::1/x)",
+      "safe_url": null,
+      "href": "https://%5B::1/x",
+      "navigates": null,
+      "slack": "https://%5B::1/x"
+    },
+    {
+      "why": "a dotted IPv4 tail is a valid literal address; how a browser compresses it for display is a separate question",
+      "destination": "https://[::ffff:1.2.3.4]/x",
+      "markdown": "[h](https://[::ffff:1.2.3.4]/x)",
+      "safe_url": "https://[::ffff:1.2.3.4]/x",
+      "href": "https://[::ffff:1.2.3.4]/x",
+      "navigates": "https://[::ffff:102:304]/x",
+      "slack": "https://[::ffff:1.2.3.4]/x"
+    },
+    {
+      "why": "a bracket in the path is data - it is spelled, never preserved",
+      "destination": "https://example.com/[x]",
+      "markdown": "[h](https://example.com/[x])",
+      "safe_url": "https://example.com/%5Bx%5D",
+      "href": "https://example.com/%5Bx%5D",
+      "navigates": "https://example.com/%5Bx%5D",
+      "slack": "https://example.com/%5Bx%5D"
+    },
+    {
+      "why": "path data already spelled is left exactly as written rather than decoded first",
+      "destination": "https://example.com/%5Bx%5D",
+      "markdown": "[h](https://example.com/%5Bx%5D)",
+      "safe_url": "https://example.com/%5Bx%5D",
+      "href": "https://example.com/%5Bx%5D",
+      "navigates": "https://example.com/%5Bx%5D",
+      "slack": "https://example.com/%5Bx%5D"
+    },
+    {
+      "why": "query and fragment are data too, and structure around them survives",
+      "destination": "https://example.com/p?x=[c]#f[d]",
+      "markdown": "[h](https://example.com/p?x=[c]#f[d])",
+      "safe_url": "https://example.com/p?x=%5Bc%5D#f%5Bd%5D",
+      "href": "https://example.com/p?x=%5Bc%5D#f%5Bd%5D",
+      "navigates": "https://example.com/p?x=%5Bc%5D#f%5Bd%5D",
+      "slack": "https://example.com/p?x=%5Bc%5D#f%5Bd%5D"
+    },
+    {
+      "why": "the host's wrapper is preserved while a bracket in the userinfo beside it is still spelled: only the authority's brackets qualify, and only where they are structure",
+      "destination": "https://a[b@[::1]/x",
+      "markdown": "[h](https://a[b@[::1]/x)",
+      "safe_url": "https://a%5Bb@[::1]/x",
+      "href": "https://a%5Bb@[::1]/x",
+      "navigates": "https://a%5Bb@[::1]/x",
+      "slack": "https://a%5Bb@[::1]/x"
+    },
+    {
+      "why": "a bracket in the userinfo is no reason to promote an encoded wrapper into a host",
+      "destination": "https://a[b@%5B::1%5D/x",
+      "markdown": "[h](https://a[b@%5B::1%5D/x)",
+      "safe_url": null,
+      "href": "https://a%5Bb@%5B::1%5D/x",
+      "navigates": null,
+      "slack": "https://a%5Bb@%5B::1%5D/x"
+    },
+    {
+      "why": "a numeric character reference resolves to a literal bracket before any spelling happens, so the address it names is the address delivered",
+      "destination": "https://&#91;::1&#93;/admin",
+      "markdown": "[h](https://&#91;::1&#93;/admin)",
+      "safe_url": "https://[::1]/admin",
+      "href": "https://[::1]/admin",
+      "navigates": "https://[::1]/admin",
+      "slack": "https://[::1]/admin"
+    },
+    {
+      "why": "the one row where the two readers are handed different inputs: a Markdown escape resolves to a literal bracket for a renderer parsing Markdown, while safe_url is given a citation's url as data, where a backslash is a character of the host and no address",
+      "destination": "https://\\[::1\\]/admin",
+      "markdown": "[h](https://\\[::1\\]/admin)",
+      "safe_url": null,
+      "href": "https://[::1]/admin",
+      "navigates": "https://[::1]/admin",
+      "slack": "https://[::1]/admin"
+    },
+    {
+      "why": "the path's bracket is spelled and the encoded wrapper is still not a host: one destination, two brackets, two answers",
+      "destination": "https://%5B::1%5D/a[b]",
+      "markdown": "[h](https://%5B::1%5D/a[b])",
+      "safe_url": null,
+      "href": "https://%5B::1%5D/a%5Bb%5D",
+      "navigates": null,
+      "slack": "https://%5B::1%5D/a%5Bb%5D"
+    }
+  ],
+  "per_occurrence": {
+    "why": "Two links in one body whose hrefs are identical after naive spelling. A qualification kept per occurrence keeps them apart; anything keyed by the spelled URL - a cache, a set, a second pass over the finished text - collapses them into whichever answer it saw first.",
+    "markdown": "[lit](https://[::1]/admin) and [enc](https://%5B::1%5D/admin)",
+    "links": [
+      {
+        "href": "https://[::1]/admin",
+        "label": "lit"
+      },
+      {
+        "href": "https://%5B::1%5D/admin",
+        "label": "enc"
+      }
+    ],
+    "slack": [
+      "https://[::1]/admin",
+      "https://%5B::1%5D/admin"
+    ]
+  }
+}

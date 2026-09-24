@@ -1,4 +1,5 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
+import type { CitationSource } from './citations';
 import { specFor } from './messageTypes';
 import { timestampOrderTimeMs } from './transcriptOrder';
 
@@ -12,6 +13,9 @@ export type ActivityRow = {
   text: string;
   created_at: string;
   order_micros?: number; // authoritative durable key; absent on live SSE rows
+  // Source sidecar for an agent narration row whose text carries citation links
+  // (see lib/citations). Absent on every other row, live or durable.
+  citations?: CitationSource[];
 };
 
 // Storage owns persisted order, including clocks recovered from migration metadata.
@@ -83,7 +87,14 @@ export type TurnActivityGroupWire = {
   duration_ms: number | null;
   started_at?: string | null;
   ended_at?: string | null;
-  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string; order_micros?: number }>;
+  rows?: Array<{
+    id: string;
+    kind: 'assistant' | 'tool_call';
+    text: string;
+    created_at: string;
+    order_micros?: number;
+    citations?: CitationSource[];
+  }>;
 };
 
 export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
@@ -97,6 +108,7 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   startedAt: wire.started_at ?? null,
   rows: wire.rows?.map((r) => ({
     id: r.id, kind: r.kind, text: r.text, created_at: r.created_at, order_micros: r.order_micros,
+    citations: r.citations,
   })),
 });
 
@@ -107,6 +119,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
   kind: msg.type === 'tool_call' ? 'tool_call' : 'assistant',
   text: msg.text ?? '',
   created_at: msg.created_at,
+  citations: (msg.content as { citations?: CitationSource[] } | null | undefined)?.citations,
 });
 
 // ===== Live running-card buffer: a pure state machine (state, not timing) =====

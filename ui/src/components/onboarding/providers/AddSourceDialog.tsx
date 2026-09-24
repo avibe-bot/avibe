@@ -60,7 +60,7 @@ import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
 import type { TranslationKey } from '@/i18n/types';
 
-import { usableSource, type ProviderSlot } from './providerStage';
+import { type ProviderSlot } from './providerStage';
 
 /**
  * The subscriptions setup offers.
@@ -99,9 +99,8 @@ const subscriptionBrand = (vendor: string): string =>
 const DetectedRow: React.FC<{
   slot: ProviderSlot;
   selected: boolean;
-  added: boolean;
   onToggle: () => void;
-}> = ({ slot, selected, added, onToggle }) => {
+}> = ({ slot, selected, onToggle }) => {
   const { t } = useTranslation();
   // Detected, and not takeable from here. The row stays — this list is what the
   // screen found, and a credential that vanished because nobody may act on it is a
@@ -116,10 +115,10 @@ const DetectedRow: React.FC<{
       type="button"
       className="setup-add-row"
       data-provider={slot.vendor}
-      data-state={added ? 'added' : 'detected'}
+      data-state="detected"
       {...(blocked ? { 'data-blocked': 'true' } : {})}
-      disabled={added || blocked}
-      {...(added || blocked ? {} : { 'aria-pressed': selected })}
+      disabled={blocked}
+      {...(blocked ? {} : { 'aria-pressed': selected })}
       aria-label={blocked
         ? [slot.label, detail].filter(Boolean).join(' · ')
         : t('onboarding.providers.addDetectedSelectNamed', { name: slot.label })}
@@ -132,9 +131,7 @@ const DetectedRow: React.FC<{
         <span className="setup-add-row-name">{slot.label}</span>
         {detail && <span className="setup-add-row-detail">{detail}</span>}
       </span>
-      {added
-        ? <span className="setup-add-row-tag">{t('onboarding.providers.addDetectedAdded')}</span>
-        : selected && <Check className="setup-add-row-check" strokeWidth={2.2} aria-hidden="true" />}
+      {selected && <Check className="setup-add-row-check" strokeWidth={2.2} aria-hidden="true" />}
     </button>
   );
 };
@@ -229,20 +226,6 @@ export const AddSourceDialog: React.FC<{
   // while the dialog was open — falls back rather than rendering nothing.
   const active = methods.includes(method) ? method : methods[0];
 
-  // 「已添加」 is a claim about a credential, not about a brand. The scan reads native
-  // stores and never sees the Hub's inventory, so the only evidence that a detected
-  // row and a connected source are one key is the mask — and it is real evidence:
-  // both sides come from the server's single masking function. Marking by vendor
-  // instead would disable the second key someone keeps under a provider they have
-  // already connected, while the capsule behind this pane goes on counting it.
-  const addedCredentials = React.useMemo(
-    () => new Set(
-      sources.filter(usableSource)
-        .map((source) => source.masked_credential?.trim())
-        .filter((mask): mask is string => Boolean(mask)),
-    ),
-    [sources],
-  );
 
   const land = React.useCallback(async (seq: ContinuationTicket, created: SourceCreated | null) => {
     if (continuation.settle(seq, () => setPhase({ kind: 'checking' })) === 'stale') return;
@@ -475,7 +458,6 @@ export const AddSourceDialog: React.FC<{
                     key={slot.vendor}
                     slot={slot}
                     selected={isSelected(slot)}
-                    added={slot.mask !== null && addedCredentials.has(slot.mask)}
                     onToggle={() => onToggleDetected(slot)}
                   />
                 ))}

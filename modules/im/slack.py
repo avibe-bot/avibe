@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import aiohttp
-from typing import Dict, Any, Optional, Callable, List, Tuple
+from typing import Dict, Any, Callable, List, Mapping, Optional, Tuple
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -29,7 +29,15 @@ from .message_facts import (
 from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
-from .formatters import SlackFormatter
+from .formatters import (
+    SlackFormatter,
+    encode_slack_delimiters,
+    hold_links,
+    hold_markdown_escapes,
+    resolve_character_references,
+    restore_held,
+    spell_uri_escapes,
+)
 from .slack_modal import parse_routing_modal_selection
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
@@ -53,6 +61,9 @@ _SLACK_SECTION_TEXT_LIMIT = 3000
 _SLACK_MARKDOWN_TEXT_LIMIT = 12000
 _BARE_HTTP_URL_RE = re.compile(r"https?://[^\s<>\|]+")
 _TRAILING_URL_PUNCTUATION = ".,!?;:"
+# A line break inside a link label: one space to a Markdown reader, and the
+# only way a two-line label can reach Slack as one link.
+_SOFT_LINE_BREAK_RE = re.compile(r"[ \t]*(?:\r\n|\r|\n)[ \t]*")
 _EVENT_TASK_SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 70.0
 
 
@@ -374,6 +385,61 @@ class SlackBot(BaseIMClient):
             pattern = rf"^\s*<@{re.escape(user_id)}>\s*"
         return re.sub(pattern, "", text, count=1).strip()
 
+    def _render_slack_link(self, label: str, destination: str, escaped: Mapping[str, str]) -> str:
+        """Spell one Markdown link the way Slack reads one.
+
+        ``<destination|label>`` is a single unit, so whatever formatting the
+        label carried has to be mrkdwn by the time it lands inside: the
+        converter formats a label in place, and it no longer sees this one.
+        A label written across two lines is one line to a Markdown reader and
+        has to be one here too, because a newline inside the angle brackets is
+        not a link on Slack. A link spelling no label at all is sent bare
+        rather than with an empty one.
+
+        BOTH halves are finished here rather than left half-built, and for the
+        same reason. Slack reads ``&``, ``<`` and ``>`` as markup of its own -
+        a bare ``>`` ends the link at that character, so the rest of the link
+        is shown as plain text - and the characters a backslash escape
+        protected only come back when ``escaped`` is restored. Restoring them
+        inside the wrapper's fields, before those fields are spelled for Slack,
+        is the difference between the reader seeing ``a > b`` and seeing the
+        link fall apart: restoring them after the wrapper is built puts a raw
+        delimiter inside it with nothing left to encode it. Finishing only the
+        label left exactly that hole on the other side, where the address is.
+
+        A destination is not text, though, so it is not finished the way a
+        label is. Its characters were never markup to interpret; what it needs
+        is to be spelled as a URI may spell it, which is where ``>``, ``|`` and
+        a control character go, and to have Slack's own three read as
+        characters rather than markup. Those are two jobs and stay two: the
+        escape keeps the address the reader reaches, and the encoding keeps
+        Slack from reading it. A query's ``&`` survives both - the first leaves
+        a separator alone, the second spells it ``&amp;``, and one pass of
+        Slack's decoding hands the reader back the address that was resolved.
+        """
+        label = self.markdown_converter.convert(_SOFT_LINE_BREAK_RE.sub(" ", label))
+        # Markdown's own two spellings of a literal character, resolved in the
+        # order that keeps them apart. A character reference is resolved after
+        # the converter ran - before it, ``&lt;em&gt;`` would be handed to the
+        # converter as a tag it reads rather than as the text it is - and only
+        # then are the escaped characters restored, because what a backslash
+        # protected is literal text that merely looks like a reference.
+        label = resolve_character_references(label)
+        label = restore_held(label, escaped)
+        # ``&#10;`` and ``&NewLine;`` spell a line break, so the label is only
+        # known to be one line once every spelling of its characters has been
+        # read. The same policy runs again over the finished text - an escaped
+        # ``\&NewLine;`` stayed literal and has no break to fold.
+        label = _SOFT_LINE_BREAK_RE.sub(" ", label)
+        label = encode_slack_delimiters(label)
+        # The address, restored before the wrapper closes over it rather than
+        # after. What a backslash protected is a character of the address, so
+        # it is put back as it stands and not read again - the destination a
+        # Markdown reader resolved already interpreted its references.
+        destination = restore_held(destination, escaped)
+        destination = encode_slack_delimiters(spell_uri_escapes(destination))
+        return f"<{destination}|{label}>" if label else f"<{destination}>"
+
     def _convert_markdown_to_slack_mrkdwn(self, text: str) -> str:
         """Convert standard markdown to Slack mrkdwn format using third-party library
 
@@ -387,9 +453,30 @@ class SlackBot(BaseIMClient):
         - Headers, lists, quotes, and more
         """
         try:
-            # Use the third-party converter for comprehensive markdown to mrkdwn conversion
-            converted_text = self.markdown_converter.convert(text)
-            return converted_text
+            # A CommonMark backslash escape means the character after it is not
+            # syntax, and the converter does not know that: it reads an escaped
+            # ``*`` as emphasis and emits ``_`` for it, changing the characters
+            # the reader sees. Resolving the escapes first and holding what they
+            # protected keeps the converter off exactly the text that was marked
+            # as literal.
+            held_text, escaped = hold_markdown_escapes(text)
+            # A link is not text to format either, and the converter scanned
+            # both halves of one: ``https://a*b*.example/x`` came back as
+            # ``https://a_b_.example/x``, a link to a different site, and a
+            # bracket it paired with the wrong text sent a footnote definition
+            # out labelled ``^f]: [p``. Slack spells a link itself below.
+            held_text, links = hold_links(
+                held_text,
+                render=lambda label, destination: self._render_slack_link(label, destination, escaped),
+            )
+            converted_text = self.markdown_converter.convert(held_text)
+            # Links first, and by then a rendered link owes this pass nothing:
+            # both of its fields resolved their own escapes while the wrapper
+            # was open, so the last restoration reaches only the text around
+            # them. A placeholder left inside a wrapper would come back as a
+            # raw character with nothing able to encode it any more.
+            converted_text = restore_held(converted_text, links)
+            return restore_held(converted_text, escaped)
         except Exception as e:
             logger.warning(f"Error converting markdown to mrkdwn: {e}, using original text")
             # Fallback to original text if conversion fails
@@ -2316,7 +2403,6 @@ class SlackBot(BaseIMClient):
                 "clear",
                 "cwd",
                 "queue",
-                "memory",
             ]:
                 await self.send_slash_response(
                     response_url, f"⏳ {self._t('common.processing', channel_id, command=command)}"

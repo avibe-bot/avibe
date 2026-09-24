@@ -4,41 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
-import hashlib
-import hmac
-import secrets
 import os
 from typing import Any, Mapping, Optional
-
-AVIBE_CALLER_SESSION_PROOF_ENV = "AVIBE_CALLER_SESSION_PROOF"
-_SESSION_PROOF_KEY = secrets.token_bytes(32)
-
-
-def _session_owner_proof(session_id: str, owner: Mapping[str, Any]) -> str:
-    identity = json.dumps([session_id, owner["platform"], owner["user_id"]], separators=(",", ":"))
-    return hmac.new(_SESSION_PROOF_KEY, identity.encode(), hashlib.sha256).hexdigest()
-
-
-def issue_caller_session_proof(session_id: str, *, turn_id: str | None = None) -> str | None:
-    """Host-only proof of the exact execution's owner, stable across its turns."""
-    from storage.message_deliveries import current_delivery_memory_owner
-
-    from sqlalchemy.exc import SQLAlchemyError
-
-    try:
-        owner = current_delivery_memory_owner(session_id, turn_id=turn_id)
-    except SQLAlchemyError:
-        # Missing/unavailable durable execution identity must not interrupt an
-        # ordinary Agent launch, and cannot authorize Memory delegation.
-        return None
-    return _session_owner_proof(session_id, owner) if owner else None
-
-
-def verify_caller_session_proof(session_id: str, proof: str, owner: Mapping[str, Any] | None) -> bool:
-    return bool(session_id and proof and owner) and hmac.compare_digest(
-        _session_owner_proof(session_id, owner).encode(), proof.encode()
-    )
-
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
@@ -304,7 +271,7 @@ def environment_without_caller_context(env: Optional[Mapping[str, str]] = None) 
     source = os.environ if env is None else env
     return {
         key: value for key, value in source.items()
-        if key not in CALLER_CONTEXT_ENV_NAMES and key != AVIBE_CALLER_SESSION_PROOF_ENV
+        if key not in CALLER_CONTEXT_ENV_NAMES
     }
 
 
@@ -320,7 +287,7 @@ def background_command_env(
     A command is not the human turn that created its definition. Its current
     binding owns CLI defaults and callbacks; creator metadata is not a fallback.
     Only the definition's resource snapshot carries remote authority, rechecked
-    by runtime admission and the CLI, never a transient human/Memory proof.
+    by runtime admission and the CLI.
     """
 
     env = environment_without_caller_context()
@@ -353,6 +320,35 @@ def _scope_id_from_session_key(session_key: str) -> Optional[str]:
     if len(parts) != 5:
         return None
     return "::".join(parts[:3])
+
+
+def _harness_resource_context(
+    source: str, platform: str, user_id: str, message_metadata: object,
+) -> Optional[dict[str, Any]]:
+    """Recover durable remote authority for synthetic Harness turns.
+
+    Avibe Harness authors are synthetic (normally ``scheduled``), so matching
+    ``message.user_id`` cannot identify the Workbench editor who created the
+    definition.  Only the persisted resource snapshot is an authority source;
+    malformed snapshots become an anonymous remote caller and are rejected by
+    the existing ACL checks rather than falling back to local Owner authority.
+    """
+
+    if (
+        platform != "avibe"
+        or user_id != "scheduled"
+        or not isinstance(message_metadata, Mapping)
+    ):
+        return None
+    if _RESOURCE_USER_CONTEXT_METADATA_KEY not in message_metadata:
+        return None
+    snapshot = message_metadata.get(_RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return {}
+    subject = _clean(snapshot.get("sub"))
+    if not subject:
+        return {}
+    return dict(snapshot)
 
 
 def _origin_thread_id(
@@ -523,12 +519,7 @@ def caller_context_from_platform_payload(
         workspace_id = _origin_workspace_id(platform, payload)
 
     message_metadata = payload.get("message_metadata")
-    owner = message_metadata.get("delegated_memory_owner") if isinstance(message_metadata, Mapping) else None
-    authorization_user_id = (
-        _clean(owner.get("user_id"))
-        if isinstance(owner, Mapping) and owner.get("platform") == platform
-        else user_id
-    )
+    authorization_user_id = user_id
     is_remote = platform == "avibe" and authorization_user_id.startswith("remote:")
     resource_user_context: Optional[dict[str, Any]] = None
     if is_remote and isinstance(message_metadata, Mapping):
@@ -537,6 +528,16 @@ def caller_context_from_platform_payload(
             subject = _clean(raw_resource_context.get("sub"))
             if subject and authorization_user_id == f"remote:{subject}":
                 resource_user_context = dict(raw_resource_context)
+
+    harness_resource_context = _harness_resource_context(
+        source, platform, user_id, message_metadata
+    )
+    if harness_resource_context is not None:
+        # Keep ``is_remote`` true even for an invalid snapshot.  An empty remote
+        # context fails closed in resource ACLs; treating it as local would grant
+        # the installation Owner authority to a deferred command.
+        is_remote = True
+        resource_user_context = harness_resource_context
 
     return CallerContext(
         session_id=session_id,
@@ -578,8 +579,4 @@ def caller_env_for_platform_payload(
         return {}
     if session_stable_only:
         context = context.session_stable()
-    env = context.to_env()
-    proof = issue_caller_session_proof(context.session_id, turn_id=_clean((payload or {}).get("turn_token")) or None)
-    if proof:
-        env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
-    return env
+    return context.to_env()

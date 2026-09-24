@@ -8,115 +8,18 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
-  - id: memory_runtime_install
-    name: Memory Runtime artifact installation
+  - id: memory_upgrade_compatibility
+    name: Memory retirement and official release upgrade compatibility
     status: active
-    catalog: tests/scenarios/memory_runtime_install/catalog.yaml
-    observations: tests/scenarios/memory_runtime_install/observations.yaml
+    catalog: tests/scenarios/memory_upgrade_compatibility/catalog.yaml
+    observations: tests/scenarios/memory_upgrade_compatibility/observations.yaml
     scenario_tests:
-      - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
-      - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py
+      - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
+      - tests/e2e/test_retired_updater_bridge.py
+      - tests/test_memory_removal.py
+      - tests/test_memory_runtime_release_guard.py
     unit_or_contract_tests:
-      - tests/test_memory_artifact_contract.py
-      - tests/test_managed_runtime.py
-      - tests/test_memory_runtime_release.py
-      - tests/test_ui_server_install.py
-      - ui/src/components/settings/SettingsDependenciesPage.test.tsx
-  - id: memory_delete_data
-    name: Explicit confirmed deletion of confined Memory data
-    status: active
-    catalog: tests/scenarios/memory_delete_data/catalog.yaml
-    observations: tests/scenarios/memory_delete_data/observations.yaml
-    scenario_tests:
-      - tests/test_ui_memory_routes.py
-    unit_or_contract_tests:
-      - tests/test_controller_memory_data_reset.py
-      - tests/test_internal_client.py
-      - tests/test_internal_server.py
-  - id: memory_search
-    name: Default Memory project and explicit named projects
-    status: active
-    catalog: tests/scenarios/memory_search/catalog.yaml
-    scenario_tests:
-      - tests/test_memory_admission.py
-      - tests/test_memory_store.py
-    unit_or_contract_tests:
-      - tests/test_memory_project_ids.py
-      - tests/test_memory_sidecar.py
-      - tests/test_ui_memory_routes.py
-  - id: memory_list
-    name: Scoped processed Memory episode listing
-    status: active
-    catalog: tests/scenarios/memory_list/catalog.yaml
-    observations: tests/scenarios/memory_list/observations.yaml
-    scenario_tests:
-      - tests/scenarios/memory_list/test_memory_list_scenarios.py
-    unit_or_contract_tests:
-      - tests/test_memory_runtime.py
-      - tests/test_internal_server.py
-      - tests/test_internal_client.py
-      - tests/test_memory_cli.py
-      - ui/src/components/settings/memory/MemorySearchPanel.test.tsx
-      - ui/src/context/ApiContext.memoryList.test.tsx
-  - id: memory_independence
-    name: Memory remains optional across delivery and session lifecycle
-    status: active
-    catalog: tests/scenarios/memory_independence/catalog.yaml
-    observations: tests/scenarios/memory_independence/observations.yaml
-    scenario_tests:
-      - tests/test_session_delivery_fsm.py
-    unit_or_contract_tests:
-      - tests/test_message_handler_typing.py
-      - tests/test_command_handler_user_names.py
-      - tests/test_memory_runtime.py
-      - tests/test_internal_server.py
-      - tests/test_memory_admission.py
-      - tests/test_memory_slice3.py
-      - tests/test_controller_dispatch_loop.py
-      - tests/test_native_session_providers.py
-      - tests/test_core_services_dispatch.py
-      - tests/test_admin_notifications.py
-      - tests/test_memory_loader.py
-      - tests/test_local_deps.py
-      - tests/test_memory_upgrade_packaged.py
-      - tests/test_upgrade_flow.py
-  - id: memory_im_attachment_capture
-    name: Bound-DM attachment capture through EverOS multimodal ingest
-    status: active
-    catalog: tests/scenarios/memory_im_attachment_capture/catalog.yaml
-    observations: tests/scenarios/memory_im_attachment_capture/observations.yaml
-    scenario_tests:
-      - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py
-    harness:
-      - tests/scenario_harness/memory_im_attachments.py
-    unit_or_contract_tests:
-      - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
-      - tests/test_vibe_cli.py
-      - tests/test_memory_admission.py
-      - tests/test_memory_im_attachments.py
-      - tests/test_inbound_attachments.py
-      - tests/test_memory_runtime.py
-      - tests/test_memory_slice3.py
-      - tests/test_message_handler_typing.py
-      - tests/test_slack_dm_mentions.py
-      - tests/test_ui_memory_routes.py
-  - id: memory_repair
-    name: Unified non-destructive Wake and destructive Memory Repair
-    status: active
-    catalog: tests/scenarios/memory_repair/catalog.yaml
-    observations: tests/scenarios/memory_repair/observations.yaml
-    scenario_tests:
-      - tests/test_ui_memory_routes.py
-    unit_or_contract_tests:
-      - tests/test_vibe_cli.py
-      - tests/test_memory_wake.py
-      - tests/test_memory_supervisor.py
-      - tests/test_memory_confined_filesystem.py
-      - tests/test_controller_memory_data_reset.py
-      - tests/test_memory_store.py
-      - tests/test_internal_client.py
-      - tests/test_internal_server.py
-      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
+      - tests/test_release_verification.py
   - id: model_hub
     name: Model Hub configured routes and turn outcomes
     status: active
@@ -181,7 +84,8 @@ capabilities:
       - ui/src/components/settings/models/AgentCard.test.tsx
       - ui/src/components/settings/models/MigrationDialog.test.tsx
       - ui/src/components/settings/models/migrationScan.test.ts
-      - ui/src/components/onboarding/ImportKeysNotice.test.tsx
+      - ui/src/components/onboarding/providers/providerStage.test.ts
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
       - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

@@ -349,21 +349,19 @@ describe('AddSourceDialog — detected', () => {
     expect(onAdded).not.toHaveBeenCalled();
   });
 
-  it('marks what is already there and offers no choice about it', async () => {
+  it('keeps both detected keys selectable even when one mask matches a Hub source', async () => {
     renderDialog({
       detected: [slot('openai'), slot('gemini', { mask: 'sk-…3456' })],
-      // The same credential, not merely the same brand: both masks come from the
-      // server's one masking function, so this is the only evidence either side has
-      // that the native store and the Hub hold one key.
       sources: [source({ id: 'src_openai', vendor: 'openai', masked_credential: 'sk-…9f21' })],
     });
     const user = userEvent.setup();
-    const [added, open] = [...document.querySelectorAll<HTMLButtonElement>('.setup-add-row')];
+    const [sameMask, open] = [...document.querySelectorAll<HTMLButtonElement>('.setup-add-row')];
 
-    expect(added.dataset.state).toBe('added');
-    expect(within(added).getByText('Added')).toBeTruthy();
-    expect(added.disabled).toBe(true);
-    expect(added.getAttribute('aria-pressed')).toBeNull();
+    expect(sameMask.dataset.state).toBe('detected');
+    expect(sameMask.disabled).toBe(false);
+    await user.click(sameMask);
+    expect(onToggleDetected).toHaveBeenCalledWith(expect.objectContaining({ vendor: 'openai' }));
+    onToggleDetected.mockClear();
 
     await user.click(open);
     expect(onToggleDetected).toHaveBeenCalledTimes(1);
@@ -385,7 +383,6 @@ describe('AddSourceDialog — detected', () => {
     expect(second.dataset.state).toBe('detected');
     expect(second.disabled).toBe(false);
     expect(second.getAttribute('aria-pressed')).toBe('false');
-    expect(within(second).queryByText('Added')).toBeNull();
 
     await user.click(second);
     expect(onToggleDetected).toHaveBeenCalledTimes(1);

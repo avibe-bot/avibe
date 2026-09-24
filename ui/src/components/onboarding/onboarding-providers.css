@@ -31,30 +31,48 @@
  * the story's `--ob-wire` family. Active and hover wear `--ob-active-shadow`.
  */
 
-.setup-provider-stage {
+/* The handoff layer holds clones of this stage's own parts, and it hangs off the
+   shared screens region rather than off the stage — so without this it resolves none
+   of the names below. A `width: var(--obp-logo) !important` that cannot resolve is not
+   ignored: it computes to `auto` and outranks the inline size the flight measured,
+   which is what drew a 32px mark at 200px mid-flight. */
+.setup-provider-stage,
+.onboarding-handoff-layer {
   /* Behind every `--ob-*` name L1 owns or may promote, the value this screen was
      measured at. Reading through the token first means a promotion upstream lands
      here automatically and a missing token never silently drops the diagram. */
   --obp-card-h: var(--ob-provider-card-h, calc(88 * var(--ob-u)));
-  --obp-card-pv: var(--ob-provider-card-pad-v, calc(14 * var(--ob-u)));
-  --obp-card-ph: var(--ob-provider-card-pad-h, calc(16 * var(--ob-u)));
+  /* L1 authors one inset per tier for this card — the reference pads all four sides
+     equally — so both axes read that token and only fall back to the scaled default. */
+  --obp-card-pv: var(--ob-provider-card-pad, calc(14 * var(--ob-u)));
+  --obp-card-ph: var(--ob-provider-card-pad, calc(14 * var(--ob-u)));
   --obp-card-gap: var(--ob-provider-card-gap, calc(10 * var(--ob-u)));
+  /* L1 authors this tier by tier — 18 here, 20 on the tall tier, 13 on phones, which
+     is the reference's own ladder. Reading the story's `--ob-card-name` instead left
+     every name on this stage two pixels short of the frame it was measured against. */
+  --obp-card-name: var(--ob-provider-card-name, var(--ob-card-name));
   --obp-card-key: var(--ob-provider-card-key, calc(var(--ob-cap-fs) - 1px));
   --obp-check: var(--ob-provider-card-check, calc(20 * var(--ob-u)));
   --obp-add: var(--ob-provider-card-add, calc(28 * var(--ob-u)));
+  --obp-logo: var(--ob-provider-card-logo, calc(32 * var(--ob-u)));
   --obp-wire-h: var(--ob-wire-h, calc(40 * var(--ob-u)));
   --obp-gateway-h: var(--ob-gateway-h, calc(72 * var(--ob-u)));
   --obp-gateway-name: var(--ob-gateway-name, calc(var(--ob-card-name) + 2px));
-  --obp-destination-h: var(--ob-destination-h, calc(84 * var(--ob-u)));
+  --obp-destination-h: var(--ob-destination-h, calc(76 * var(--ob-u)));
   --obp-summary-h: var(--ob-summary-h, calc(34 * var(--ob-u)));
-  --obp-offer-gap: var(--ob-gap, calc(16 * var(--ob-u)));
+}
 
+.setup-provider-stage {
   width: 100%;
   display: flex;
   flex-direction: column;
   /* The reference stacks the six diagram bands with no gap at all — each one's top is
      the previous one's bottom — and spends its only gap above the capsule. */
   gap: 0;
+}
+
+.onboarding-step[data-setup-screen="providers"] .onboarding-primary-action:disabled {
+  opacity: 0.4;
 }
 
 /* ---- Provider sources ---------------------------------------------------- */
@@ -86,24 +104,33 @@
 .setup-provider-card[data-state='connected'],
 .setup-provider-card[aria-pressed='true'] {
   border-color: var(--mint);
-  background: var(--card-wash);
+  background: var(--mint-soft);
+  box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
 .setup-provider-card[aria-pressed]:hover:not(:disabled),
 .setup-provider-card[aria-pressed]:focus-visible {
   border-color: var(--mint);
   box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
+/* Greying a card out and showing the no-entry cursor says the person is being kept
+   from acting. A connected card is disabled for a purely mechanical reason — there is
+   nothing left to press — and the reference draws it at full strength beside the rest.
+   Only a blocked card, which the person really is being held out of, wears the denial. */
 .setup-provider-card:disabled {
+  cursor: default;
+}
+.setup-provider-card[data-blocked]:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
-/* The third card is an invitation rather than a thing that exists, so it is drawn as
-   an outline on nothing: no fill, and the dashed edge the handoff asks for in place of
-   the reference's solid one. */
+/* The third card is an invitation rather than a thing that exists, but it is one of
+   the row's three cards: the reference gives it the same shell as the two beside it,
+   so it carries the same surface as the two beside it and says what it is on its
+   edge: the reference keeps this one card's border dashed. */
 .setup-provider-card[data-state='add'] {
   border-style: dashed;
-  border-color: var(--border-strong);
-  background: transparent;
+  border-color: var(--ob-card-border);
+  background: var(--ob-card);
 }
 .setup-provider-card[data-state='add']:hover,
 .setup-provider-card[data-state='add']:focus-visible {
@@ -127,8 +154,8 @@
 .setup-provider-logo,
 .setup-destination-logo,
 .setup-destination-logo > span {
-  width: var(--ob-card-logo) !important;
-  height: var(--ob-card-logo) !important;
+  width: var(--obp-logo) !important;
+  height: var(--obp-logo) !important;
 }
 /* The destination's mark is a full-bleed brand path and fills its box, exactly as
    the story card it morphs out of does. */
@@ -137,18 +164,13 @@
   height: 100%;
   display: block;
 }
-/* A vendor mark is single-color ink, not a brand lockup, so it is drawn small in a
-   well rather than full-bleed — the same treatment, and the same 15-in-28 ink, the
-   provider picker already gives it. The descendant selector also settles the size
+/* A bare mark, like the destination's and like the reference's: no well, no border
+   and no second scale inside the box. The descendant selector also settles the size
    without depending on whether the Model Hub sheet is loaded on this route. */
-.setup-provider-logo {
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--logo-well-background);
-}
 .setup-provider-logo svg {
-  height: calc(var(--ob-card-logo) * 15 / 28);
-  width: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   display: block;
   color: var(--foreground);
 }
@@ -156,7 +178,7 @@
   flex-shrink: 0;
   width: var(--obp-add);
   height: var(--obp-add);
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 .setup-provider-copy {
   flex: 1 1 0;
@@ -166,9 +188,9 @@
   gap: calc(3 * var(--ob-u));
 }
 .setup-provider-name {
-  font-size: var(--ob-card-name);
-  font-weight: 600;
-  line-height: 1.45;
+  font-size: var(--obp-card-name);
+  font-weight: 550;
+  line-height: 1.3333;
   color: var(--foreground);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -177,17 +199,21 @@
 .setup-provider-key {
   font-size: var(--obp-card-key);
   line-height: 1.45;
-  color: var(--muted-foreground);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.setup-provider-check {
+.setup-provider-check,
+.setup-provider-add-mark {
   flex-shrink: 0;
   width: var(--obp-check);
   height: var(--obp-check);
-  color: var(--mint-ink);
 }
+.setup-provider-check { color: var(--mint-ink); }
+/* The plus states an offer, not a decision, so it is drawn in the same quiet ink the
+   third card's plus wears rather than in the mint the check owns. */
+.setup-provider-add-mark { color: var(--muted); }
 /* The count of what was added through Add more rides the card it describes. */
 .setup-provider-badge {
   flex-shrink: 0;
@@ -204,6 +230,15 @@
    real cards. Stretching one viewBox over the whole diagram — which is how the
    story draws its fixed circuit — would skew every curve the moment the column
    width changed. */
+/* The reference overrides the story's port fill for the setup screens — `setup-flow`
+   sets `#D6EEE5` over `welcome`'s translucent mint — because a translucent dot on a
+   card edge reads as a hole in the wire rather than as a terminal. Same token, this
+   screen's scope; the story's own circuit keeps the value it was measured at. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .setup-provider-stage { --ob-port: #d6eee5; }
+}
+[data-theme="light"] .setup-provider-stage { --ob-port: #d6eee5; }
+
 .setup-wires {
   position: relative;
   width: 100%;
@@ -214,37 +249,33 @@
   display: block;
   width: 100%;
   height: 100%;
-  overflow: visible;
+  /* The reference clips its band (`.gateway-lines`): a port sits on the edge the
+     wire leaves from, and the half outside the band is meant to be cut rather than
+     to ring above the card it hangs from. */
+  overflow: hidden;
   pointer-events: none;
 }
-.setup-wire {
-  fill: none;
-  stroke: var(--ob-wire);
-  stroke-width: 1;
+/* What a wire, a port and a pulse *are* is the story's, by class. This band only says
+   where they run and when they move: one 3.8s cycle carries the arrival at the gateway
+   and the departure from it, so the two bands read as one route rather than two loops
+   that happen to overlap. Paused holds the frame; `.onboarding-shell`'s reduced-motion
+   rule stops it outright, and a stopped pulse is already invisible. */
+.setup-wires .onboarding-pulse-core {
+  /* The reference's own weight for this band: one 2-unit stroke carrying a 14-of-100
+     segment. The story's 1.6 is sized to a taller diagram; here it arrives with a
+     wider glow beneath it, and the two together blur the moment of arrival that this
+     screen exists to show. */
+  --ob-pulse-dash: 14;
+  stroke-width: 2;
+  animation-duration: 3800ms;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-play-state: paused;
 }
-/* One 16-unit segment of a 100-unit path: the pulse crosses once and leaves, the
-   same signature the story's circuit uses. */
-.setup-wire-pulse {
-  fill: none;
-  stroke: var(--ob-pulse);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-dasharray: 16 116;
-  stroke-dashoffset: 16;
-  opacity: 0;
-}
-.setup-wire-pulse-halo {
-  stroke: var(--ob-pulse-glow);
-  stroke-width: 4;
-}
-.setup-provider-stage[data-motion='running'] .setup-wire-pulse {
-  animation: setup-wire-pulse 1100ms ease-in-out var(--setup-pulse-delay, 0ms) 1 both;
-}
-@keyframes setup-wire-pulse {
-  0% { stroke-dashoffset: 16; opacity: 0; }
-  15% { opacity: 1; }
-  85% { opacity: 1; }
-  100% { stroke-dashoffset: -116; opacity: 0; }
+.setup-wires--inbound .onboarding-pulse-core { animation-name: onboarding-pulse-converge; }
+.setup-wires--outbound .onboarding-pulse-core { animation-name: onboarding-pulse-distribute; }
+.setup-provider-stage[data-motion='running'] .setup-wires .onboarding-pulse-core {
+  animation-play-state: running;
 }
 
 /* ---- Gateway ------------------------------------------------------------- */
@@ -265,12 +296,7 @@
   border: 1px solid var(--ob-card-border);
   background: var(--ob-card);
   text-align: center;
-  transition: border-color 150ms, background 150ms;
-}
-/* Running — including degraded but routable — is the state the diagram is drawn in. */
-.setup-gateway[data-state='running'] {
-  border-color: var(--mint);
-  background: var(--card-wash);
+  transition: border-color 150ms, box-shadow 150ms;
 }
 /* The one place the band's fixed height gives way, because what replaces the tagline
    is two sentences and a way out of them. The wires re-measure on the stage's resize,
@@ -309,7 +335,7 @@
   max-width: 100%;
   font-size: var(--obp-card-key);
   line-height: 1.45;
-  color: var(--muted-foreground);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -344,22 +370,21 @@
   align-items: center;
   justify-content: center;
   gap: var(--obp-card-gap);
-  padding: 0 var(--obp-card-ph);
-  border-radius: 12px;
-  border: 1px solid var(--border-strong);
-  background: transparent;
+  border-radius: 9px;
+  border: 1px solid var(--ob-card-border);
+  background: var(--ob-card);
 }
 .setup-destination-name {
-  font-size: var(--ob-card-name);
-  font-weight: 600;
-  line-height: 1.45;
+  font-size: var(--obp-card-name);
+  font-weight: 550;
+  line-height: 1.3333;
   color: var(--foreground);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* ---- Summary and the offer's reserved slot ------------------------------- */
+/* ---- Summary ------------------------------------------------------------- */
 
 .setup-provider-summary {
   height: var(--obp-summary-h);
@@ -368,22 +393,11 @@
   justify-content: center;
   padding: 0 var(--obp-card-ph);
   font-size: var(--ob-cap-fs);
-  line-height: 1.45;
-  color: var(--muted-foreground);
+  line-height: 1.5;
+  color: var(--muted);
   text-align: center;
 }
 .setup-provider-summary[data-tone='error'] { color: var(--destructive-ink); }
-
-/* The slot, not the capsule: it keeps its height whether the offer is showing, was
-   dismissed, or was never made, so the footer action cannot move under the hand of
-   someone who just declined it (C3, handoff §4). */
-.setup-provider-offer {
-  margin-top: var(--obp-offer-gap);
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
 
 /* ---- Add-source dialog --------------------------------------------------- */
 
@@ -438,7 +452,7 @@
 .setup-add-subtitle {
   font-size: 12.5px;
   line-height: 1.5;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 /* The same segmented control `ApiKeySourceForm` uses for protocol, at this
@@ -460,7 +474,7 @@
   border-radius: 7px;
   font-size: 12.5px;
   font-weight: 500;
-  color: var(--muted-foreground);
+  color: var(--muted);
   transition: background 0.15s ease, color 0.15s ease;
 }
 .setup-add-method:hover:not(:disabled) { color: var(--foreground); }
@@ -484,13 +498,13 @@
 .setup-add-note {
   font-size: 12px;
   line-height: 1.55;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-group {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-row {
@@ -549,7 +563,7 @@
 .setup-add-row-detail {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 11px;
-  color: var(--muted-foreground);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -565,7 +579,7 @@
 .setup-add-row-tag {
   flex: none;
   font-size: 11px;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-foot {
@@ -588,7 +602,7 @@
   gap: 6px;
   font-size: 11.5px;
   line-height: 1.4;
-  color: var(--muted-foreground);
+  color: var(--muted);
 }
 
 .setup-add-status-icon {
@@ -628,7 +642,6 @@
   .setup-wires { display: none; }
   .setup-gateway { height: calc(64 * var(--ob-u)); }
   .setup-provider-summary { height: auto; min-height: var(--obp-summary-h); }
-  .setup-provider-offer { margin-top: 0; }
 
   /* Tighter insets and the phone's full width. The height stays one value and
      stays independent of the method — clamped harder against a short viewport,
@@ -639,7 +652,4 @@
     width: calc(100vw - 24px);
     max-height: calc(100dvh - 32px);
   }
-}
-@media (prefers-reduced-motion: reduce) {
-  .setup-wire-pulse { animation: none !important; }
 }

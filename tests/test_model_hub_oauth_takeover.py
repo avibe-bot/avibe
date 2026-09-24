@@ -161,6 +161,9 @@ class _FakeSupervisor:
     def client(self) -> _FakeEngineClient:
         return self.client_value
 
+    def with_engine_excluded(self, operation):
+        return operation(self.client_value)
+
     def restart_if_running(self) -> None:
         if self.client_value.on_restart is not None:
             self.client_value.on_restart()
@@ -178,6 +181,40 @@ class _FakeSupervisor:
                 "id_token": {"chatgpt_account_id": payload.get("account_id")},
             }
         ]
+
+
+@pytest.mark.asyncio
+async def test_activation_publishes_the_grant_only_under_the_engine_exclusion(
+    tmp_path: Path,
+) -> None:
+    # An engine a previous service left running must be reaped before the grant is
+    # visible in the watched auth dir, or it could load and rotate it.
+    store = EngineStateStore(tmp_path / "engine")
+
+    class _ExcludingSupervisor:
+        state_store = store
+
+        def __init__(self) -> None:
+            self.excluded = False
+
+        def with_engine_excluded(self, operation):
+            assert not list(store.auth_dir.glob("*.json"))
+            self.excluded = True
+            try:
+                return operation(None)
+            finally:
+                self.excluded = False
+
+        def client_if_running(self):
+            raise AssertionError("activation must learn the engine state under the exclusion")
+
+    supervisor = _ExcludingSupervisor()
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)  # type: ignore[arg-type]
+    ref = await adapter.provision_oauth_credential("src_fixture123", "openai", _oauth_material())
+
+    await adapter.activate_oauth_credential(ref)
+
+    assert len(list(store.auth_dir.glob("*.json"))) == 1
 
 
 @pytest.mark.asyncio

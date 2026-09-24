@@ -21,21 +21,9 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from packaging.requirements import InvalidRequirement, Requirement
-from packaging.utils import (
-    InvalidSdistFilename,
-    InvalidWheelFilename,
-    canonicalize_name,
-    parse_sdist_filename,
-    parse_wheel_filename,
-)
-from packaging.version import InvalidVersion, Version
+from packaging.utils import canonicalize_name
 
-from vibe.package_shape import (
-    CORE_PACKAGE_NAME,
-    LEGACY_CORE_PACKAGE_NAME,
-    MEMORY_PACKAGE_NAME as SHAPE_MEMORY_PACKAGE_NAME,
-)
+from vibe.package_shape import CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME
 
 from config import paths as config_paths
 from core.caller_context import environment_without_caller_context
@@ -53,11 +41,7 @@ logger = logging.getLogger(__name__)
 
 PACKAGE_NAME = CORE_PACKAGE_NAME
 LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
-MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
-# Core is on PyPI; Memory is a same-version GitHub Release companion. A recorded
-# GitHub core origin preserves its exact release tag, including gh-v previews.
-RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
@@ -95,10 +79,6 @@ _PRE_ORDER = {
     "pre": 2,
     "preview": 2,
 }
-
-
-class MemoryRequirementUnreadableError(ValueError):
-    """Persisted configuration cannot safely decide Memory package shape."""
 
 
 class RestartState(str, Enum):
@@ -1069,56 +1049,23 @@ def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
     return f"/uv/tools/{LEGACY_PACKAGE_NAME}/" in executable
 
 
-def memory_package_installed() -> bool:
-    """Return whether the optional Memory distribution is installed."""
-
-    try:
-        from importlib.metadata import PackageNotFoundError, distribution
-
-        distribution(MEMORY_PACKAGE_NAME)
-    except PackageNotFoundError:
-        return False
-    except Exception:
-        logger.warning("Could not inspect %s metadata; preserving package shape", MEMORY_PACKAGE_NAME, exc_info=True)
-        return True
-    return True
-
-
-def configured_memory_enabled() -> bool:
-    """Read the persisted Memory switch for an explicit upgrade action."""
-
-    try:
-        from config.v2_config import V2Config
-
-        required = V2Config.load().memory_required
-    except FileNotFoundError:
-        return False
-    except Exception as exc:
-        raise MemoryRequirementUnreadableError(
-            "The persisted Memory requirement could not be read"
-        ) from exc
-    if required is None:
-        raise MemoryRequirementUnreadableError(
-            "The persisted Memory requirement could not be read"
-        )
-    return required
-
-
 def _distributions_providing_this_package() -> list[str]:
-    """Every installed distribution that provides the package this module is in."""
+    """Installed core providers, excluding the retained legacy companion.
+
+    Its manifest shared the vibe namespace, but never described core code.
+    Read distribution metadata only; do not load or modify that package.
+    """
 
     try:
         from importlib.metadata import packages_distributions
-        from packaging.utils import canonicalize_name
     except ImportError:  # pragma: no cover - importlib.metadata ships with 3.10+
         return []
     try:
-        memory_name = canonicalize_name(MEMORY_PACKAGE_NAME)
         return sorted(
             {
                 name
                 for name in packages_distributions().get(__name__.split(".")[0], [])
-                if canonicalize_name(name) != memory_name
+                if canonicalize_name(name) != "avibe-memory"
             }
         )
     except Exception:  # pragma: no cover - a broken environment answers nothing
@@ -1213,8 +1160,8 @@ def _names_a_published_release(version: str) -> bool:
 
     Public dev versions are supported by the official release producer too.
     Only local labels identify source builds; a dev suffix is not provenance.
-    Eligibility does not prove availability: installer preflights must still
-    resolve the matching core/companion pair before activation.
+    Eligibility does not prove availability: exact repair preflights must still
+    resolve the selected core artifact before installation.
 
     Asking the property instead of listing the strings is what stops the next
     unlisted shape from costing the same attempt. Unparseable reads as
@@ -1228,175 +1175,12 @@ def _names_a_published_release(version: str) -> bool:
     return not match.group("local")
 
 
-def _published_version(value: str | None) -> str | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        version = str(Version(value))
-    except InvalidVersion:
-        return None
-    return version if _names_a_published_release(version) else None
-
-
-def _memory_target_version(package_spec: str, target_version: str | None) -> str | None:
-    """Choose the Memory pin from the artifact being installed or valid metadata."""
-
-    try:
-        requirement = Requirement(package_spec)
-    except InvalidRequirement:
-        artifact = package_spec
-    else:
-        if requirement.url is None:
-            specifiers = list(requirement.specifier)
-            if (
-                len(specifiers) == 1
-                and specifiers[0].operator == "=="
-                and "*" not in specifiers[0].version
-            ):
-                return _published_version(specifiers[0].version)
-            candidate = _published_version(target_version)
-            if candidate is not None and requirement.specifier.contains(candidate, prereleases=True):
-                return candidate
-            return None
-        artifact = requirement.url
-
-    if artifact.startswith(("git+", "hg+", "svn+", "bz+")):
-        return None
-    try:
-        parsed = urllib.parse.urlsplit(artifact)
-    except ValueError:
-        return None
-    filename = Path(urllib.parse.unquote(parsed.path if parsed.scheme else artifact)).name
-    try:
-        _, version, _, _ = parse_wheel_filename(filename)
-    except InvalidWheelFilename:
-        try:
-            _, version = parse_sdist_filename(filename)
-        except InvalidSdistFilename:
-            return None
-    return _published_version(str(version))
-
-
-def _wheel_distribution(package_name: str) -> str:
-    """Spell one distribution name the way a wheel filename does."""
-
-    return canonicalize_name(package_name).replace("-", "_")
-
-
-def _recorded_install_origin(package_name: str) -> str | None:
-    """The URL an installed distribution was taken from, per PEP 610.
-
-    Installers write `direct_url.json` only when the distribution came from
-    somewhere other than an index, so its absence is itself the answer: this
-    copy was resolved by name and can be repaired the same way.
-    """
-
-    try:
-        from importlib.metadata import PackageNotFoundError, distribution
-
-        recorded = distribution(package_name).read_text("direct_url.json")
-    except PackageNotFoundError:
-        return None
-    except Exception:
-        logger.warning("Could not read %s install origin; assuming an index install", package_name, exc_info=True)
-        return None
-    if not recorded:
-        return None
-    try:
-        url = json.loads(recorded).get("url")
-    except (ValueError, AttributeError):
-        return None
-    return url if isinstance(url, str) else None
-
-
-def release_asset_specs(version: str) -> tuple[str, str] | None:
-    """Preserve a verified GitHub core origin during an exact package repair."""
-
-    return _release_asset_pair(version, _recorded_install_origin(PACKAGE_NAME))
-
-
-def _release_asset_pair(version: str, origin: str | None) -> tuple[str, str] | None:
-    if not origin:
-        return None
-    try:
-        parsed_version = Version(version)
-    except InvalidVersion:
-        return None
-    if parsed_version.local is not None:
-        return None
-    normalized = str(parsed_version)
-    prefix = f"{RELEASE_DOWNLOAD_BASE_URL}/"
-    if not origin.startswith(prefix):
-        return None
-    # Exactly one tag segment and one filename: anything else is not an asset of
-    # this repository's releases, whatever it may resemble.
-    segments = origin[len(prefix) :].split("/")
-    if len(segments) != 2:
-        return None
-    tag, asset = segments
-    if not tag.startswith(("v", "gh-v")):
-        return None
-    tag_version = tag.removeprefix("gh-").removeprefix("v")
-    try:
-        normalized_tag_version = str(Version(tag_version))
-    except InvalidVersion:
-        return None
-    if normalized_tag_version != normalized:
-        return None
-    if asset != f"{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl":
-        return None
-    # One release directory, so the companion cannot come from another release.
-    return (
-        origin,
-        f"{prefix}{tag}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
-    )
-
-
-def memory_release_spec(version: str, core_spec: str) -> str:
-    """Name the companion explicitly, without consulting a package index.
-
-    PyPI core releases use official v-tags. An explicitly selected core wheel
-    from this repository preserves its own tag instead (including previews).
-    Other artifact origins cannot redirect the companion to an untrusted host.
-    """
-
-    try:
-        requirement = Requirement(core_spec)
-    except InvalidRequirement:
-        origin = core_spec
-    else:
-        origin = requirement.url
-    pair = _release_asset_pair(version, origin)
-    if pair:
-        return pair[1]
-    normalized = _published_version(version)
-    if normalized is None:
-        raise ValueError("A Memory install requires a published target release version")
-    return (
-        f"{RELEASE_DOWNLOAD_BASE_URL}/v{normalized}/"
-        f"{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl"
-    )
-
-
-def pinned_package_spec(
-    version: str,
-    *,
-    package_name: str,
-) -> str:
-    """Pin one explicit distribution name to one exact published version.
-
-    The explicit Memory install uses this to reinstall the running core release
-    together with its matching optional package. The distribution name must be a
-    bare package name; direct URLs and pre-versioned requirements are rejected.
-
-    The message never quotes the spec. An operator-supplied spec can be an index
-    URL carrying credentials.
-    """
-
-    spec = package_name
-    if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
+def pinned_package_spec(version: str | None, *, package_name: str) -> str:
+    if not version:
+        return package_name
+    if _BARE_PACKAGE_NAME_RE.fullmatch(package_name) is None:
         raise ValueError("The configured upgrade package spec cannot carry a version pin")
-    return f"{spec}=={version}"
+    return f"{package_name}=={version}"
 
 
 def build_upgrade_plan(
@@ -1408,38 +1192,13 @@ def build_upgrade_plan(
     version: str | None = None,
     target_version: str | None = None,
     package_name: str | None = None,
-    memory_enabled: bool = False,
-    memory_package: bool | None = None,
-    memory_version: str | None = None,
     package_spec: str | None = None,
     core_spec: str | None = None,
-    memory_spec: str | None = None,
 ) -> UpgradePlan:
-    """How to install avibe: the newest release, or `version` exactly.
-
-    Exact-version plans support the explicit Memory package install action. They
-    replace the ordinary upgrade request and force the installer so the matching
-    optional distribution is applied even when core is already satisfied.
-
-    Memory always comes from the target's GitHub Release, not an index.
-    Exact repairs may supply the recorded core/companion pair. Forward plans
-    derive the companion from the selected target version and core artifact.
-    """
-
-    if (core_spec or memory_spec) and not version:
-        raise ValueError("Explicit install sources require an exact target version")
+    """How to install avibe: the newest release, or `version` exactly."""
 
     executable = python_executable or sys.executable
-    # A caller targeting another interpreter (for example a test-owned venv)
-    # can provide an explicit package-shape measurement.  Only infer from this
-    # process when the caller did not provide one; otherwise ambient metadata
-    # would leak into the target plan and turn an intentional core-only install
-    # into a Memory install.
-    include_memory = (
-        bool(memory_package)
-        if version or memory_package is not None
-        else bool(memory_enabled or memory_package_installed())
-    )
+    # Explicit target specs belong to the selected interpreter, not the caller.
     package_spec = (
         (
             core_spec
@@ -1451,21 +1210,7 @@ def build_upgrade_plan(
         if version
         else (package_spec or get_upgrade_package_spec())
     )
-    if not version and include_memory:
-        target_version = _memory_target_version(package_spec, target_version)
-        if target_version is None:
-            raise ValueError("A Memory-preserving upgrade requires a target release version")
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
-    memory_target = (memory_version or version) if version else target_version
-    # The URL form stays a named requirement so every installer still reads it
-    # as "this distribution, from here" rather than as an anonymous artifact.
-    pinned_memory_spec = None
-    if include_memory:
-        if memory_spec:
-            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_spec}"
-        elif memory_target:
-            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_release_spec(memory_target, package_spec)}"
-
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
         preflight_error = None
@@ -1478,20 +1223,11 @@ def build_upgrade_plan(
             env["UV_TOOL_DIR"] = str(tool_dir)
             env["UV_TOOL_BIN_DIR"] = str(bin_dir)
         command = [uv_binary, "tool", "install", package_spec]
-        if pinned_memory_spec:
-            command.extend(["--with", pinned_memory_spec])
         if not version:
             command.append("--upgrade")
         if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
             command.append("--force")
         preflight_command = None
-        if include_memory:
-            preflight_command = [uv_binary, "pip", "install", "--dry-run", "--python", executable]
-            if not version:
-                preflight_command.append("--upgrade")
-            preflight_command.append(package_spec)
-            if pinned_memory_spec:
-                preflight_command.append(pinned_memory_spec)
         return UpgradePlan(
             command=command,
             env=env,
@@ -1504,44 +1240,16 @@ def build_upgrade_plan(
     command = [executable, "-m", "pip", "install"]
     if not version:
         command.append("--upgrade")
-    # pip decides whether to act from metadata. Exact installs always force so a
-    # matching optional package is applied even when core is already satisfied;
-    # forward installs force only when published provider metadata disagrees with
-    # the running files.
+    # Exact repairs reinstall even when metadata already matches. Forward
+    # installs force only when metadata disagrees with the running files.
     if version or not installed_metadata_describes_running_code():
         command.append("--force-reinstall")
     command.append(package_spec)
-    if pinned_memory_spec:
-        command.append(pinned_memory_spec)
     preflight_command = None
-    # Preflight only when the optional package shape is part of the operation.
-    # Core-only forward installs retain the origin/dev synchronous behavior: the
-    # service is still running while pip resolves, so a second resolver pass is
-    # unnecessary general-updater machinery.
+    # A forward core-only install needs a single resolver pass. Exact repairs
+    # retain their availability check before changing the installed version.
     preflight_fallback_command = None
-    if include_memory and not version:
-        preflight_command = [
-            executable,
-            "-m",
-            "pip",
-            "install",
-            "--dry-run",
-            "--upgrade",
-            package_spec,
-        ]
-        preflight_fallback_command = [
-            executable,
-            "-m",
-            "pip",
-            "download",
-            "--dest",
-            PIP_DOWNLOAD_DEST_PLACEHOLDER,
-            package_spec,
-        ]
-        if pinned_memory_spec:
-            preflight_command.append(pinned_memory_spec)
-            preflight_fallback_command.append(pinned_memory_spec)
-    elif include_memory:
+    if version:
         preflight_command = [
             executable,
             "-m",
@@ -1551,8 +1259,6 @@ def build_upgrade_plan(
             PIP_DOWNLOAD_DEST_PLACEHOLDER,
         ]
         preflight_command.extend(["--no-deps", package_spec])
-        if pinned_memory_spec:
-            preflight_command.append(pinned_memory_spec)
     return UpgradePlan(
         command=command,
         env=dict(base_env or os.environ),

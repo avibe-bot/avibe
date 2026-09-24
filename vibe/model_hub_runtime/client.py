@@ -29,12 +29,14 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
+from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
     JSONScope,
     project_json_reader,
 )
+from core.message_output import plain_untrusted_text
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
@@ -47,6 +49,8 @@ from vibe.model_hub_runtime.state import SourceRecord
 
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+# Upper bound on upstream error text shown to the user in a terminal message.
+_UPSTREAM_DETAIL_CHARS = 400
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
@@ -351,6 +355,56 @@ class EngineClient:
             timeout=timeout,
         )
 
+    def put_config_yaml(self, text: str, *, timeout: float | None = None) -> dict[str, Any]:
+        """Replace the running engine config through its hot-reload endpoint."""
+        return self._request_json_projection(
+            "PUT",
+            "/v0/management/config.yaml",
+            _load_json_object,
+            data=text.encode(),
+            content_type="application/yaml",
+            headers={"X-Management-Key": self.connection.management_key},
+            timeout=timeout,
+        )
+
+    def list_model_ids(self, *, timeout: float | None = None) -> frozenset[str]:
+        payload = self._request_json(
+            "GET",
+            "/v1/models",
+            headers={"Authorization": f"Bearer {self.connection.gateway_token}"},
+            timeout=timeout,
+        )
+        entries = payload.get("data")
+        if not isinstance(entries, list):
+            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json")
+        return frozenset(
+            str(entry["id"]) for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        )
+
+    def list_model_names(self, *, timeout: float | None = None) -> dict[str, str]:
+        """Routed model ID to registered display name.
+
+        CPA's default OpenAI listing drops display names; its Grok-client
+        listing keeps the routed ID and names every provider's registration.
+        """
+        payload = self._request_json(
+            "GET",
+            "/v1/models",
+            headers={
+                "Authorization": f"Bearer {self.connection.gateway_token}",
+                "User-Agent": "grok-shell",
+            },
+            timeout=timeout,
+        )
+        entries = payload.get("data")
+        if not isinstance(entries, list):
+            raise EngineClientError("engine API returned an invalid payload", error_type="invalid_json")
+        return {
+            str(entry["id"]): str(entry.get("name") or "")
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        }
+
     async def invoke(
         self,
         source: SourceRecord,
@@ -361,6 +415,7 @@ class EngineClient:
         request_protocol: str | None = None,
         request_headers: Mapping[str, str] | None = None,
         on_transport_done: Callable[[], None] | None = None,
+        on_request_sent: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
         request_protocol = request_protocol or source.protocol
         endpoint = _endpoint_for_protocol(request_protocol)
@@ -389,7 +444,21 @@ class EngineClient:
         # Connecting to the local engine is bounded. Once connected, headers
         # and response bytes can wait on upstream inference for any duration;
         # completion, transport failure, or owner cancellation ends that wait.
-        session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
+        trace_configs: list[aiohttp.TraceConfig] = []
+        if on_request_sent is not None:
+            # CPA resolves the route as soon as it reads the body, while a
+            # config write only applies after its 150ms reload debounce, so a
+            # body written to the loopback socket precedes any route removal.
+            # CPA sends no earlier acknowledgment: response headers wait for
+            # the upstream's first chunk, which a save must never wait on.
+            trace = aiohttp.TraceConfig()
+
+            async def request_sent(*_args: Any) -> None:
+                on_request_sent()
+
+            trace.on_request_chunk_sent.append(request_sent)
+            trace_configs.append(trace)
+        session = aiohttp.ClientSession(timeout=timeout, trust_env=False, trace_configs=trace_configs)
         response: aiohttp.ClientResponse | None = None
         retry_after: str | None = None
         response_received_at: datetime | None = None
@@ -682,16 +751,19 @@ class EngineClient:
         *,
         query: Mapping[str, str] | None = None,
         payload: Mapping[str, Any] | None = None,
+        data: bytes | None = None,
+        content_type: str = "application/json",
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> _ProjectedJSON:
         url = self._url(path, query=query)
         request_timeout = timeout or self.timeout
         deadline = time.monotonic() + request_timeout
-        data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        if payload is not None:
+            data = json.dumps(payload, separators=(",", ":")).encode()
         request_headers = dict(headers or {})
         if data is not None:
-            request_headers["Content-Type"] = "application/json"
+            request_headers["Content-Type"] = content_type
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
         try:
             opener = urllib.request.build_opener(
@@ -1507,6 +1579,14 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
+            upstream_detail=(
+                _bounded_upstream_detail(observation.error_message)
+                if observation.error_message is not None
+                else _upstream_error_detail(
+                    observation.error_payload or b"",
+                    observation.error_envelope_paths or (("error",),),
+                )
+            ),
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1582,6 +1662,7 @@ def _outcome(
     stream_started: bool = False,
     usage: ProtocolUsageReport | None = None,
     recovery_verified: bool = False,
+    upstream_detail: str | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1595,6 +1676,7 @@ def _outcome(
         error_candidates=error_candidates,
         usage=usage,
         recovery_verified=recovery_verified,
+        upstream_detail=upstream_detail,
     )
 
 
@@ -1613,6 +1695,45 @@ def _raw_error_fields(
     envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
     return _project_raw_error_fields(io.BytesIO(payload), envelope_paths)
+
+
+def _upstream_error_detail(
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+) -> str | None:
+    """Project the first envelope's ``message`` as bounded, redacted display text."""
+
+    message_paths = tuple((*path, "message") for path in envelope_paths)
+    values: dict[JSONPath, str] = {}
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar" and isinstance(value, str):
+            values[path] = value
+
+    if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
+        return None
+    for path in message_paths:
+        text = _bounded_upstream_detail(values.get(path, ""))
+        if text:
+            return text
+    return None
+
+
+def _bounded_upstream_detail(message: str) -> str | None:
+    text = " ".join(message.split())
+    if not text:
+        return None
+    text = plain_untrusted_text(redact_untrusted_text(text))
+    if len(text) > _UPSTREAM_DETAIL_CHARS:
+        text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def _safe_error_code(value: object) -> str | None:

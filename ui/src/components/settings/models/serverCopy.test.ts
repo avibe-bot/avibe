@@ -54,7 +54,7 @@ describe('serverText', () => {
   });
 
   it.each(['en', 'zh'] as const)('rejects existing objects and arrays as server text in %s', (lng) => {
-    for (const key of ['common', 'memory.settings.disclosure']) {
+    for (const key of ['common']) {
       expect(serverText(t(lng), key)).toBeNull();
       expect(serverText(t(lng), key, 'settings.models.oauth.error.generic')).toBe(t(lng)('settings.models.oauth.error.generic'));
     }
@@ -170,7 +170,6 @@ describe('catalogSaveFailureKey', () => {
     ['backend_model_in_route', 'saveRouted'],
     ['candidate_suppliers_changed', 'saveSuppliersChanged'],
     ['backend_model_conflict', 'saveConflict'],
-    ['backend_model_id_prefix', 'saveIdPrefix'],
     ['backend_model_id_invalid', 'saveIdInvalid'],
     ['backend_model_duplicate', 'saveDuplicate'],
     ['backend_model_locked', 'saveLocked'],
@@ -197,12 +196,9 @@ describe('catalogSaveFailureKey', () => {
     expect(texts).not.toContain(t('en')('settings.models.gateway.catalog.saveFailed'));
   });
 
-  it('asks for a re-add where the ID rule is broken, because the field is read-only', () => {
+  it('asks for a re-add where the ID is invalid, because the field is read-only', () => {
     // Edit mode keeps the backend model id read-only, so 「fix the ID」 would be
     // advice this dialog refuses to take.
-    const prefix = catalogSaveFailureKey('modelHub.errors.backend_model_id_prefix');
-    expect(t('en')(prefix)).toMatch(/add it again/i);
-    expect(t('zh')(prefix)).toContain('重新添加');
     const invalid = catalogSaveFailureKey('modelHub.errors.backend_model_id_invalid');
     expect(t('en')(invalid)).toMatch(/add it again/i);
     expect(t('zh')(invalid)).toContain('重新添加');

@@ -402,12 +402,16 @@ def test_repeated_real_upgrade_callers_are_bounded(installation, monkeypatch, su
 
     root, launcher = installation
     caller = cli if surface == "manual" else api
-    monkeypatch.setattr(caller, "configured_memory_enabled", lambda: False)
     monkeypatch.setattr(caller, "_runtime_process_was_running", lambda: surface == "automatic")
     monkeypatch.setattr(caller, "schedule_restart", lambda **kwargs: {"job_id": "test"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "99"})
+    monkeypatch.setattr(
+        api,
+        "get_version_info",
+        lambda: {"error": None, "has_update": True, "latest": "99"},
+    )
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_: None)
     for index in range(5):
         candidate = _candidate(root, f"{index:032x}")

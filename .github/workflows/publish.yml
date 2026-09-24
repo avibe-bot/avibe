@@ -158,55 +158,10 @@ jobs:
             show-runtime-ref-${{ matrix.artifact }}.txt
             show-router-${{ matrix.artifact }}.tsx
 
-  memory-runtime-bundles:
-    needs: resolve-tag
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux-x64
-          - os: ubuntu-24.04-arm
-            artifact: linux-arm64
-          - os: macos-14
-            artifact: darwin-arm64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          ref: ${{ needs.resolve-tag.outputs.tag }}
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          version: "0.9.18"
-
-      - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-
-      - name: Build Memory Runtime bundle
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: |
-          python scripts/build_memory_runtime.py \
-            --output-dir runtime-artifacts \
-            --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.2.3-${{ matrix.artifact }}.json"
-
-      - name: Upload Memory Runtime bundle
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
-        with:
-          name: memory-runtime-${{ matrix.artifact }}
-          path: |
-            runtime-artifacts/memory-runtime-*.tar.gz
-            runtime-artifacts/memory-runtime-*.json
-
   build:
     needs:
       - resolve-tag
       - show-runtime-bundles
-      - memory-runtime-bundles
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -215,6 +170,24 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - name: Checkout release automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
+          path: release-automation
+          sparse-checkout: |
+            scripts/github_release.py
+            scripts/show_runtime_manifest_asset.py
+            scripts/build_retired_companion.py
+            scripts/release_package_version.py
+            tests/test_distribution_artifacts.py
+            tests/__init__.py
+            tests/e2e/test_retired_updater_bridge.py
+            tests/e2e/test_install_command.py
+            tests/e2e/retired_updater_probe.py
+            tests/e2e/github_release_fixture.py
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
@@ -247,22 +220,6 @@ jobs:
             --router-output vibe/show_router.tsx
           cp vibe/show_runtime_manifest.json runtime-artifacts/show-runtime-manifest.json
 
-      - name: Download Memory Runtime bundles
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
-        with:
-          pattern: memory-runtime-*
-          path: runtime-artifacts
-          merge-multiple: true
-
-      - name: Generate Memory Runtime manifest
-        run: |
-          python scripts/generate_memory_runtime_manifest.py \
-            --archive-dir runtime-artifacts \
-            --tag "${{ needs.resolve-tag.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --output vibe/memory_runtime_manifest.json
-          cp vibe/memory_runtime_manifest.json runtime-artifacts/memory-runtime-manifest.json
-
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
@@ -276,7 +233,6 @@ jobs:
           PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
-          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
       - name: Verify Show Runtime release assets
         run: |
@@ -326,7 +282,6 @@ jobs:
 
       - name: Build Python distributions
         run: |
-          python -m build --outdir dist packaging/avibe-memory
           python -m build
 
       - name: Verify Python distribution asset matrix
@@ -335,8 +290,6 @@ jobs:
           from pathlib import Path
 
           patterns = (
-              "avibe_memory-*.whl",
-              "avibe_memory-*.tar.gz",
               "avibe_os-*.whl",
               "avibe_os-*.tar.gz",
           )
@@ -348,7 +301,21 @@ jobs:
                   )
           PY
 
+      - name: Build and verify inert old-updater bridge
+        env:
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG"
+          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG" --verify
+
+      - name: Verify built distribution contracts
+        run: |
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
+            pytest release-automation/tests/test_distribution_artifacts.py -v
+
       - name: Build 3.0 compatibility legacy PyPI shim
+        # Artifact acceptance runs before adding the separately named legacy shim.
         shell: bash
         run: |
           TAG="${{ needs.resolve-tag.outputs.tag }}"
@@ -359,91 +326,44 @@ jobs:
             echo "Skipping legacy vibe-remote shim for $TAG"
           fi
 
-      - name: Verify package runtime manifests
-        run: |
-          python - <<'PY'
-          import zipfile
-          from pathlib import Path
-
-          core_wheels = [
-              wheel
-              for wheel in sorted(Path("dist").glob("*.whl"))
-              if wheel.name.startswith("avibe_os-")
-          ]
-          memory_wheels = [
-              wheel
-              for wheel in sorted(Path("dist").glob("*.whl"))
-              if wheel.name.startswith("avibe_memory-")
-          ]
-          if len(core_wheels) != 1:
-              raise SystemExit(f"Expected exactly one avibe-os wheel, found {len(core_wheels)}")
-          if len(memory_wheels) != 1:
-              raise SystemExit(f"Expected exactly one avibe-memory wheel, found {len(memory_wheels)}")
-
-          with zipfile.ZipFile(core_wheels[0]) as wheel:
-              core_names = set(wheel.namelist())
-              archives = {
-                  name for name in core_names
-                  if name.startswith("vibe/show_runtime/") and name.endswith(".tgz")
-              }
-
-          if archives:
-              raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
-          if "vibe/show_runtime_manifest.json" not in core_names:
-              raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in core_names):
-              raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
-          if "vibe/memory_runtime_manifest.json" in core_names:
-              raise SystemExit("avibe-os wheel unexpectedly owns the Memory Runtime manifest")
-
-          with zipfile.ZipFile(memory_wheels[0]) as wheel:
-              memory_names = set(wheel.namelist())
-          if "vibe/memory_runtime_manifest.json" not in memory_names:
-              raise SystemExit("avibe-memory wheel is missing vibe/memory_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in memory_names):
-              raise SystemExit("avibe-memory wheel unexpectedly contains Memory Runtime archives")
-          PY
-
-      - name: Checkout release automation
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
-          path: release-automation
-          sparse-checkout: |
-            scripts/github_release.py
-            scripts/release_package_version.py
-            tests/test_memory_distribution.py
-          sparse-checkout-cone-mode: false
-
-      - name: Verify distribution package matrix
-        run: |
-          # Use workflow-owned verification only AFTER building the tagged source.
-          # Keep its location so source comparisons still inspect that source.
-          cp release-automation/tests/test_memory_distribution.py tests/test_memory_distribution.py
-          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
-          AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)" \
-            pytest tests/test_memory_distribution.py -v
-
-      - name: Run Memory Runtime release guard before publication
-        run: |
-          rm -rf memory-release-guard-assets
-          mkdir -p memory-release-guard-assets
-          cp vibe/memory_runtime_manifest.json memory-release-guard-assets/memory-runtime-manifest.json
-          cp runtime-artifacts/memory-runtime-*.tar.gz memory-release-guard-assets/
-          python scripts/memory_runtime_release_guard.py \
-            --manifest vibe/memory_runtime_manifest.json \
-            verify --asset-dir memory-release-guard-assets
-
       - name: Run release install and upgrade regressions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
+          set -euo pipefail
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
+          export AVIBE_CORE_WHEEL="$(realpath "$VIBE_INSTALL_TEST_WHEEL")"
+          export AVIBE_BRIDGE_WHEEL="$(realpath "$(ls dist/avibe_memory-*.whl)")"
+          mkdir -p old-release
+          for asset in avibe_os-3.1.0-py3-none-any.whl avibe_memory-3.1.0-py3-none-any.whl; do
+            gh release download v3.1.0 --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir old-release
+          done
+          echo '7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924  old-release/avibe_os-3.1.0-py3-none-any.whl' | sha256sum -c -
+          echo 'ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0  old-release/avibe_memory-3.1.0-py3-none-any.whl' | sha256sum -c -
+          export AVIBE_OLD_CORE_WHEEL="$(realpath old-release/avibe_os-3.1.0-py3-none-any.whl)"
+          export AVIBE_OLD_COMPANION_WHEEL="$(realpath old-release/avibe_memory-3.1.0-py3-none-any.whl)"
+          export AVIBE_RELEASE_GATE=1
           pytest \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
-            tests/e2e/test_upgrade_command.py \
             -v
+          TARGET_VERSION="$(python release-automation/scripts/release_package_version.py "$RELEASE_TAG")"
+          export TARGET_VERSION
+          UPGRADE_DIRECTION="$(python - <<'PY'
+          import os
+          from packaging.version import Version
+
+          print("forward" if Version(os.environ["TARGET_VERSION"]) > Version("3.1.0") else "historical")
+          PY
+          )"
+          if [ "$UPGRADE_DIRECTION" = forward ]; then
+            (cd release-automation && pytest tests/e2e/test_retired_updater_bridge.py -v)
+          else
+            echo "No forward Memory retirement upgrade from v3.1.0 to $RELEASE_TAG"
+          fi
 
       - name: Upload GitHub release assets
         env:
@@ -467,7 +387,7 @@ jobs:
           package_to_upload=()
           package_paths=(
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
-            dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz
+            dist/avibe_memory-*-py3-none-any.whl
           )
           # The existing v3.0.x shim remains part of those releases only.
           for path in dist/vibe_remote-*.whl dist/vibe_remote-*.tar.gz; do
@@ -476,8 +396,6 @@ jobs:
           for path in \
             runtime-artifacts/vibe-show-runtime-node-*.tgz \
             runtime-artifacts/show-runtime-manifest.json \
-            runtime-artifacts/memory-runtime-*.tar.gz \
-            runtime-artifacts/memory-runtime-manifest.json \
             "${package_paths[@]}"; do
             if [ ! -s "$path" ]; then
               echo "::error::Missing or empty release asset: $path" >&2
@@ -515,61 +433,10 @@ jobs:
           name: dist
           path: dist/
 
-  verify-avibe-memory-release:
-    needs:
-      - resolve-tag
-      - build
-      - finalize-github-release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          ref: ${{ needs.resolve-tag.outputs.tag }}
-
-      - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-
-      - name: Download staged distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
-        with:
-          name: dist
-          path: dist/
-
-      - name: Verify public GitHub companion distributions
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          package_version="$(python scripts/release_package_version.py "$RELEASE_TAG")"
-          download_dir="$(mktemp -d "$RUNNER_TEMP/avibe-memory-release.XXXXXXXX")"
-          trap 'rm -r -- "$download_dir"' EXIT
-          for asset in "avibe_memory-${package_version}-py3-none-any.whl" "avibe_memory-${package_version}.tar.gz"; do
-            test -s "dist/$asset"
-            # Anonymous HTTPS fetch proves availability to end-user installers,
-            # not merely to the workflow's authenticated GitHub identity.
-            # Fresh public URLs may briefly return 404. Retry only this
-            # idempotent download, within finite attempt and time bounds.
-            curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
-              --retry-max-time 60 --connect-timeout 10 --max-time 30 \
-              --proto '=https' --proto-redir '=https' \
-              --output "$download_dir/$asset" \
-              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${asset}"
-            if ! cmp -s "dist/$asset" "$download_dir/$asset"; then
-              echo "::error::GitHub serves a non-identical companion asset: $asset" >&2
-              exit 1
-            fi
-          done
-          echo "GitHub serves both exact staged companion distributions for $package_version."
-
   publish-avibe-os:
     needs:
       - build
       - finalize-github-release
-      - verify-avibe-memory-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

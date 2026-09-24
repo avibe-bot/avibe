@@ -527,7 +527,6 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
-| `vibe memory ...` | Read scoped Memory or submit context for best-effort, process-local capture through the running controller; acceptance does not guarantee delivery or persistence |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
@@ -929,7 +928,7 @@ direct Agent Run calls.
 | --- | --- |
 | `vibe runs list` | List recent runs |
 | `vibe runs show <run_id>` | Show one run |
-| `vibe runs cancel <run_id>` | Request cancellation |
+| `vibe runs cancel <run_id>` | Request cancellation; once the run's input reached the live Session turn, this stops that turn like Session Stop, including other runs sharing it |
 
 ## 6. Recommended Mental Model
 

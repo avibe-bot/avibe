@@ -11,7 +11,11 @@ import html
 import re
 import uuid
 
-from .base_formatter import BaseMarkdownFormatter
+from .base_formatter import (
+    BaseMarkdownFormatter,
+    hold_markdown_escapes,
+    restore_held,
+)
 
 
 class TelegramFormatter(BaseMarkdownFormatter):
@@ -80,7 +84,12 @@ class TelegramFormatter(BaseMarkdownFormatter):
                 continue
 
             url_start = label_end + 2
-            if not text.startswith(("http://", "https://"), url_start):
+            # A scheme is case-insensitive, and a link whose scheme is spelled
+            # ``HTTPS://`` is still a link: missing it here left the raw
+            # Markdown in the message instead of a hyperlink.
+            if not text[url_start : url_start + 8].lower().startswith(
+                ("http://", "https://")
+            ):
                 rendered_parts.append(self._apply_inline_formatting(text[cursor : start + 1]))
                 cursor = start + 1
                 continue
@@ -154,12 +163,23 @@ class TelegramFormatter(BaseMarkdownFormatter):
         def render_inline_code(match: re.Match[str]) -> str:
             return f"<code>{html.escape(match.group(1))}</code>"
 
-        rendered = self._CODE_BLOCK_RE.sub(lambda m: stash(render_code_block(m)), text)
+        # First, because every pass below reads the text as markup and a
+        # backslash escape exists to say one character is not: an escaped
+        # bracket would otherwise end a link label here and leak raw Markdown,
+        # and an escaped ``*`` or backtick would be read as emphasis or code
+        # that the writer had explicitly turned off.
+        rendered, escaped = hold_markdown_escapes(
+            text,
+            render=lambda character: stash(html.escape(character)),
+        )
+
+        rendered = self._CODE_BLOCK_RE.sub(lambda m: stash(render_code_block(m)), rendered)
         rendered = self._INLINE_CODE_RE.sub(lambda m: stash(render_inline_code(m)), rendered)
         rendered = html.escape(rendered)
 
         rendered = self._render_links(rendered)
 
+        rendered = restore_held(rendered, escaped)
         for token, replacement in placeholders.items():
             rendered = rendered.replace(token, replacement)
         return rendered

@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   isLocalOnlyMessagingField,
-  isMemorySettingsPath,
   isOwnerOnlyPath,
   SETTINGS_LANDING_PATH,
 } from './adminNavigation';
@@ -12,7 +11,6 @@ import {
 beforeEach(() => {
   window.localStorage.clear();
 });
-
 describe('isOwnerOnlyPath', () => {
   it('covers canonical machine-management destinations and their details', () => {
     const ownerOnly = [
@@ -22,7 +20,6 @@ describe('isOwnerOnlyPath', () => {
       '/settings/backends/claude',
       '/settings/models',
       '/settings/dependencies',
-      '/settings/memory',
       '/settings/diagnostics/logs',
     ];
     expect(ownerOnly.every(isOwnerOnlyPath)).toBe(true);
@@ -40,7 +37,6 @@ describe('isOwnerOnlyPath', () => {
     expect(isOwnerOnlyPath('/admin/permissions')).toBe(false);
   });
 });
-
 describe('settings landing', () => {
   it('opens General, which every role can read', () => {
     expect(SETTINGS_LANDING_PATH).toBe('/settings/general');
@@ -54,13 +50,5 @@ describe('isLocalOnlyMessagingField', () => {
     expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
     expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
     expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
-  });
-});
-
-describe('isMemorySettingsPath', () => {
-  it('matches the canonical Memory route at a path boundary', () => {
-    expect(isMemorySettingsPath('/settings/memory')).toBe(true);
-    expect(isMemorySettingsPath('/settings/memory/details')).toBe(true);
-    expect(isMemorySettingsPath('/settings/memory-tools')).toBe(false);
   });
 });

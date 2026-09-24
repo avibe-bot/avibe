@@ -15,7 +15,6 @@ from config.v2_config import (
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
     V2Config,
-    atomic_update_memory,
     update_config_fields,
 )
 from core.handlers.model_hub.adapter import EngineHealth, EngineStatus
@@ -120,7 +119,7 @@ def observe(reader, monkeypatch):
         runtime.ensure_config()
     else:
         assert reader == "upgrade_preflight"
-        upgrade.configured_memory_enabled()
+        pass
 
 
 @pytest.mark.parametrize("reader", READERS)
@@ -233,7 +232,7 @@ def test_rejected_service_cannot_reach_migration(monkeypatch):
     assert not list(path.parent.glob("config.json.bak-*"))
 
 
-@pytest.mark.parametrize("writer", ("transaction", "save", "settings_api", "memory"))
+@pytest.mark.parametrize("writer", ("transaction", "save", "settings_api"))
 @pytest.mark.parametrize("marker", ("absent", False))
 @pytest.mark.parametrize("enabled", (False, True))
 def test_unrelated_writer_keeps_upgrade_pending_until_startup(writer, marker, enabled):
@@ -253,16 +252,13 @@ def test_unrelated_writer_keeps_upgrade_pending_until_startup(writer, marker, en
         config.save()
     elif writer == "settings_api":
         api.save_config({"language": "zh"}, validate_remote_access_network=False)
-    else:
-        atomic_update_memory(lambda memory: memory)
 
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written["model_hub"]["runtime_default_applied"] is False
     assert written["model_hub"]["enabled"] is enabled
     assert written["model_hub"]["sources"] == original["model_hub"]["sources"]
     assert written["model_hub"]["agents"] == original["model_hub"]["agents"]
-    if writer != "memory":
-        assert written["language"] == "zh"
+    assert written["language"] == "zh"
     assert V2ModelHubConfigStore().load().runtime_default_applied is False
     assert not list(path.parent.glob("config.json.bak-*"))
     pending = path.read_bytes()

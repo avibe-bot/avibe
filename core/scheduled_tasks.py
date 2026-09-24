@@ -112,9 +112,6 @@ from storage.background import (
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
-    SWEEP_REASON_ORPHANED,
-    SWEEP_REASON_QUEUE_HOLD_EXPIRED,
-    SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
@@ -1619,11 +1616,7 @@ class ScheduledTaskStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-        metadata = metadata_with_delegated_memory_owner(
-            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
-        )
+        metadata = metadata_with_resource_user_context(metadata, user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1779,11 +1772,6 @@ class ScheduledTaskStore:
         task.metadata = metadata_with_resource_user_context(
             metadata if metadata is not None else task.metadata,
             user_context,
-        )
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-        task.metadata = metadata_with_delegated_memory_owner(
-            task.metadata, session_id=session_id
         )
         task.updated_at = _utc_now_iso()
         if not self._write_task(
@@ -10880,7 +10868,7 @@ class ScheduledTaskService:
                 "is_dm": target.is_dm,
                 "message_metadata": {
                     key: value for key, value in (metadata or {}).items()
-                    if key in {"delegated_memory_owner", "resource_user_context"}
+                    if key == "resource_user_context"
                 },
                 "turn_source": "scheduled",
                 "agent_session_id": session_id,

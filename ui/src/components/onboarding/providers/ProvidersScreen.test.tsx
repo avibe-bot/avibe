@@ -21,12 +21,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import {
   beginRegionRead,
+  loadingRegion,
   readyRegion,
   unreadRegion,
   type RegionRead,
 } from '@/components/settings/models/regionRead';
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
+import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import type {
+  AgentBackend,
   AgentSupply,
   MigrationItem,
   RuntimeDependency,
@@ -250,6 +253,9 @@ const Harness: React.FC<ScreenOptions & { handle: React.RefObject<SetupScreenHan
   const [flowState, setFlowState] = React.useState<SetupFlowState>({ ...INITIAL_SETUP_FLOW_STATE, ...flow });
   return (
     <I18nextProvider i18n={i18n}>
+      {/* The shell's half of the anchor, not decoration: what is ancillary to the
+          pair is portaled into this slot, so a host without it sees none of it. */}
+      <div className="onboarding-step">
       <ProvidersScreen
         ref={handle}
         active={active}
@@ -263,6 +269,8 @@ const Harness: React.FC<ScreenOptions & { handle: React.RefObject<SetupScreenHan
         onActionChange={(action) => { actions.push(action); }}
         onNavigate={(screen) => { navigated.push(screen); }}
       />
+      <div className="onboarding-action-aside" data-setup-action-aside="" />
+      </div>
     </I18nextProvider>
   );
 };
@@ -290,7 +298,6 @@ const gatewayCard = () => {
   return card;
 };
 const summary = () => document.querySelector<HTMLElement>('.setup-provider-summary');
-const offerSlot = () => document.querySelector<HTMLElement>('.setup-provider-offer');
 const lastAction = () => actions[actions.length - 1];
 const activate = async (handle: React.RefObject<SetupScreenHandle | null>) => {
   await act(async () => { handle.current?.activate(); });
@@ -447,7 +454,7 @@ describe('ProvidersScreen — the stage', () => {
     await settled();
 
     await waitFor(() => expect(cardFor('anthropic').dataset.state).toBe('connected'));
-    expect(within(cardFor('anthropic')).getByText('Subscription · max@example.com')).toBeTruthy();
+    expect(within(cardFor('anthropic')).getByText('Subscription · max@example.com · In Model Hub')).toBeTruthy();
     expect(within(cardFor('anthropic')).queryByText(/Add a .* API Key/)).toBeNull();
   });
 
@@ -457,8 +464,9 @@ describe('ProvidersScreen — the stage', () => {
     await settled();
 
     await waitFor(() => expect(cardFor('openai').dataset.state).toBe('connected'));
-    // No account either: the line is the kind alone rather than a stray separator.
-    expect(within(cardFor('openai')).getByText('API key')).toBeTruthy();
+    // No account either: the line is the kind, then the word that says it is already
+    // supplying models — no stray separator where the account would have been.
+    expect(within(cardFor('openai')).getByText('API key · In Model Hub')).toBeTruthy();
   });
 
   it('says a source was written even when the read that would show it fails', async () => {
@@ -521,6 +529,35 @@ describe('ProvidersScreen — the stage', () => {
     // install or a start from here, would be a mutation nobody asked for.
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
     expect(retrySetup).not.toHaveBeenCalled();
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
+  });
+
+  it('re-reads supply for a new observation, and not for the same one re-reported', async () => {
+    // The shell owns the runtime region and hands one down on every render it makes.
+    // What this screen takes its inventory against is the machine that answers it, not
+    // the object that described the machine — a refresh that confirmed nothing changed,
+    // or a parent that rebuilt its props, is the same observation said twice. Reading
+    // again for one of those does not merely waste a request: every answer publishes
+    // selection state, which is another render, which is another carrier.
+    serve();
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    await settled();
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+
+    // A genuinely different machine is the other half, and the half that matters: the
+    // engine that could not answer the first read is why it failed, and the sequence
+    // that fixes one publishes into the shell's region rather than into this screen.
+    await show({
+      runtimeRead: readyRegion(runtimeOf('ok', {
+        status: { verified: true, health: 'ok', installed_version: '2.0.0' },
+      })),
+    });
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    // A read is all it is. Nothing here authorizes a mutation of the engine.
     expect(modelsApi.installRuntime).not.toHaveBeenCalled();
     expect(modelsApi.startRuntime).not.toHaveBeenCalled();
   });
@@ -609,7 +646,6 @@ describe('ProvidersScreen — the stage', () => {
 
     await waitFor(() => expect(cardFor('openai').dataset.state).toBe('connected'));
     expect(cards().filter((card) => card.dataset.state === 'detected')).toHaveLength(0);
-    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
 
     const addMore = cards().find((card) => card.dataset.state === 'add');
     await user.click(addMore as HTMLElement);
@@ -633,48 +669,6 @@ describe('ProvidersScreen — the stage', () => {
 
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
     expect(lastAction().labelArgs).toEqual({ count: 1 });
-  });
-});
-
-describe('ProvidersScreen — the import capsule', () => {
-  it('counts the keys the import list would offer, not the rows the scan returned', async () => {
-    serve({ scan: [CODEX_KEY, OPENCODE_KEY, CLAUDE_SUBSCRIPTION] });
-    renderScreen();
-
-    expect(await screen.findByText('Found 2 API keys to import into Model Hub')).toBeTruthy();
-  });
-
-  it('keeps its slot when the offer is dismissed, so the action below cannot move', async () => {
-    serve({ scan: [CODEX_KEY] });
-    renderScreen();
-    await settled();
-    const user = userEvent.setup();
-
-    const slot = offerSlot();
-    expect(slot).toBeTruthy();
-    expect(slot?.closest('.setup-provider-stage')).toBeTruthy();
-    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
-
-    await user.click(screen.getByRole('button', { name: 'Dismiss import notice' }));
-
-    await waitFor(() => expect(screen.queryByText(/API key to import/)).toBeNull());
-    // The capsule went; the box it sat in did not.
-    expect(offerSlot()).toBe(slot);
-  });
-
-  it('hands its review to the screen rather than opening a second dialog', async () => {
-    serve({ scan: [CODEX_KEY] });
-    renderScreen();
-    await settled();
-    const user = userEvent.setup();
-
-    await user.click(await screen.findByRole('button', { name: 'Review migration' }));
-
-    const dialog = await screen.findByRole('dialog');
-    // The screen's own scan, in the screen's own dialog: a capsule that scanned
-    // again could offer rows the stage and the footer never counted.
-    expect(within(dialog).getByText('Migrate to Model Hub')).toBeTruthy();
-    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -704,11 +698,8 @@ describe('ProvidersScreen — what it found but may not take', () => {
 
     await user.click(card);
     expect(screen.queryByRole('dialog')).toBeNull();
-    // Nothing to import, so the footer asks for a provider instead of offering a
-    // batch, and the capsule — whose whole sentence is a count — says nothing.
+    // Nothing to import, so the footer asks for a provider instead of offering a batch.
     expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd');
-    expect(screen.queryByText(/to import into Model Hub/)).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
   });
 
   it('counts the takeable group beside it, and only that one', async () => {
@@ -725,8 +716,7 @@ describe('ProvidersScreen — what it found but may not take', () => {
     expect(cardFor('anthropic').dataset.blocked).toBe('true');
     expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true');
 
-    // One number, three readings: the card that is ticked, the sentence, the footer.
-    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+    // One number, two readings: the card that is ticked and the footer.
     expect(lastAction()).toMatchObject({
       labelKey: 'onboarding.providers.actionImport',
       labelArgs: { count: 1 },
@@ -740,7 +730,7 @@ describe('ProvidersScreen — what it found but may not take', () => {
     expect(lastAction().labelArgs).toEqual({ count: 1 });
   });
 
-  it('submits the batch it counted, and keeps the blocked card after the rescan', async () => {
+  it('MH-MIG-004: submits the batch it counted, and keeps the blocked card after the rescan', async () => {
     serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION, CODEX_KEY] });
     const { handle } = renderScreen();
     await settled();
@@ -754,15 +744,14 @@ describe('ProvidersScreen — what it found but may not take', () => {
     // No half group and no sign-in: one row, from the one group that consented.
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).toEqual([CODEX_KEY.id]);
-    expect(await screen.findByText('Migrated 1 API key into Model Hub')).toBeTruthy();
 
     // The rescan still finds the Claude store, so the card is still there, still
     // saying why. Settings is where it is resolved; forgetting it is not.
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(cardFor('anthropic').dataset.blocked).toBe('true'));
     expect(within(cardFor('anthropic')).getByText(new RegExp(BLOCKED_SENTENCE))).toBeTruthy();
-    // And nothing left to offer: the receipt is the whole sentence now.
-    expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
+    // And nothing left to take over: the footer stops offering a batch.
+    await waitFor(() => expect(lastAction().labelKey).not.toBe('onboarding.providers.actionImport'));
   });
 
   it('names a credential the server did not name, rather than guessing a brand', async () => {
@@ -779,7 +768,6 @@ describe('ProvidersScreen — what it found but may not take', () => {
     // Unnamed is not blocked: it is still a key this entry may take over.
     expect(card.getAttribute('aria-pressed')).toBe('true');
     expect(card.dataset.blocked).toBeUndefined();
-    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
   });
 });
 
@@ -840,6 +828,104 @@ describe('ProvidersScreen — the action the shell renders', () => {
     // lost behind a navigation.
     expect(navigated).toEqual([]);
   });
+
+  // The invariant rather than the symptom: the shell draws the action this screen
+  // published, and a press is made against the one drawn. So an action that became
+  // pressable may only stop being pressable because something new arrived — someone
+  // asking for a read again, a write going out, an engine going down. A retraction
+  // nobody caused is a press that reaches nothing: `activate` sees the state the
+  // screen is really in and drops it, and the person is given no reason to press a
+  // second time.
+  //
+  // Judged over the published SEQUENCE, not over a rendered frame, because the frame
+  // a retraction leaves behind is identical to the settled one — the action comes
+  // back to exactly what it was a commit later. Only the order the shell was told
+  // about tells the two apart.
+  it('never takes a pressable action back on its own once a new observation lands', async () => {
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    // Arriving before the runtime read has landed is the ordinary way in: the supply
+    // read answers first, so the action already names the way on while the engine is
+    // still unknown — stated, and not yet pressable.
+    const { show } = renderScreen({ runtimeRead: loadingRegion<RuntimeDependency>() });
+    await settled();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(lastAction().disabled).toBe(true);
+
+    // The only new input in this case, and the last one: the engine is observed
+    // serving. It admits the press AND is a new observation for the supply read, which
+    // is exactly why the retraction it used to cause was invisible — the same input
+    // produced both halves.
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    await waitFor(() => expect(lastAction().disabled).toBe(false));
+    // The refresh that observation starts has to have been made and settled before the
+    // sequence means anything; otherwise this passes on a read that never happened.
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(cards()[0].dataset.state).toBe('connected'));
+
+    const pressable = actions.findIndex((action) => !action.disabled && !action.busy);
+    expect(pressable).toBeGreaterThanOrEqual(0);
+    expect(actions.slice(pressable).every((action) => !action.disabled && !action.busy)).toBe(true);
+  });
+});
+
+describe('ProvidersScreen — the way on when nothing is connected', () => {
+  it('states a way on beside the take-over it found, and only navigates', async () => {
+    serve({ scan: [CLAUDE_KEY] });
+    renderScreen();
+    await settled();
+
+    // The take-over keeps the footer: whoever came here to connect something is
+    // still offered the thing they came for. The way on is beside it, not instead.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    const onward = screen.getByRole('button', { name: 'Continue to assistants' });
+    expect((onward as HTMLButtonElement).disabled).toBe(false);
+
+    await userEvent.setup().click(onward);
+
+    // Navigating is the whole action. Nothing was added, taken over or installed
+    // on the way out, and the review that was on offer is still only on offer.
+    expect(navigated).toEqual(['assistants']);
+    expect(server.sources).toEqual([]);
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('leaves the single action alone once a source is really there', async () => {
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+  });
+
+  it('takes the way on back when the shell hides the screen, and returns it on re-entry', async () => {
+    serve();
+    const { show } = renderScreen();
+    await settled();
+    expect(screen.getByRole('button', { name: 'Continue to assistants' })).toBeTruthy();
+
+    // It leaves the screen root to reach the shell's slot, so nothing else would
+    // take it out of reach of a reader on the step after this one.
+    await show({ active: false });
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+
+    await show({ active: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue to assistants' })).toBeTruthy());
+    expect(navigated).toEqual([]);
+  });
+
+  it('says nothing about a way on while the inventory is unread, which is not an empty one', async () => {
+    serve();
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('common.retry'));
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+  });
 });
 
 describe('ProvidersScreen — what an import leaves behind', () => {
@@ -859,7 +945,7 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     // One atomic batch, holding exactly the rows the count promised.
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).toEqual([CODEX_KEY.id, OPENCODE_KEY.id]);
-    expect(await screen.findByText('Migrated 2 API keys into Model Hub')).toBeTruthy();
+    expect(await screen.findByText('Migrated 2 configuration items')).toBeTruthy();
     // The batch is spent in the tick it landed, not a round trip later: until the
     // rescan answers, the old scan still names rows that are now imported.
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
@@ -956,8 +1042,89 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     expect(within(screen.getByRole('dialog')).getByText(CODEX_KEY.masked_detail!)).toBeTruthy();
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Not now' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Nothing was consumed: the offer is exactly the one it was.
-    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
+    // Declining the review lets setup continue without changing the native key.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+  });
+
+  it('remembers Not now across reloads and offers newly discovered keys', async () => {
+    serve({ scan: [CODEX_KEY] });
+    const first = renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(first.handle);
+    await userEvent.setup().click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    first.unmount();
+
+    const again = renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    again.unmount();
+
+    server.scan = [CODEX_KEY, OPENCODE_KEY];
+    renderScreen();
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } }));
+  });
+
+  it('keeps a declined key dismissed when a different newly found key is selected', async () => {
+    serve({ scan: [CODEX_KEY] });
+    const first = renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(first.handle);
+    await userEvent.setup().click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    first.unmount();
+
+    server.scan = [CODEX_KEY, { ...OPENCODE_KEY, selected: false }];
+    const second = renderScreen();
+    await settled();
+    expect(cardFor('openai').getAttribute('aria-pressed')).not.toBe('true');
+    await waitFor(() => expect(cardFor('gemini').dataset.state).toBe('detected'));
+    await userEvent.setup().click(cardFor('gemini'));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } }));
+    second.unmount();
+
+    server.scan = [CODEX_KEY];
+    renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+  });
+
+  it('keeps A dismissed when the review unchecks A and migrates only B', async () => {
+    serve({ scan: [CODEX_KEY, OPENCODE_KEY] });
+    writeMigrationDismissed([CODEX_KEY]);
+    const { handle } = renderScreen({ flow: {
+      providerSelection: { scan: { items: [CODEX_KEY, OPENCODE_KEY] }, selectedBackends: ['codex', 'opencode'] },
+    } });
+    await settled();
+    await activate(handle);
+    const dialog = await screen.findByRole('dialog');
+    const [a, b] = within(dialog).getAllByRole('checkbox');
+    expect(a.getAttribute('aria-checked')).toBe('true');
+    expect(b.getAttribute('aria-checked')).toBe('true');
+    await userEvent.setup().click(a);
+    expect(a.getAttribute('aria-checked')).toBe('false');
+    expect(b.getAttribute('aria-checked')).toBe('true');
+    await userEvent.setup().click(within(dialog).getByRole('button', { name: /Start migration/ }));
+    await waitFor(() => expect(applied).toEqual([[OPENCODE_KEY.id]]));
+    expect(isMigrationDismissed([CODEX_KEY])).toBe(true);
+    cleanup();
+
+    renderScreen();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(isMigrationDismissed([CODEX_KEY])).toBe(true);
+  });
+
+  it('clears only the identities in a linked group when its card is explicitly selected', async () => {
+    const linkedA = { ...CODEX_KEY, required_backends: ['codex', 'opencode'] as AgentBackend[] };
+    const linkedB = { ...OPENCODE_KEY, required_backends: ['codex', 'opencode'] as AgentBackend[] };
+    serve({ scan: [linkedA, linkedB] });
+    writeMigrationDismissed([linkedA, linkedB]);
+    renderScreen();
+    await settled();
+    expect(cardFor('openai').getAttribute('aria-pressed')).toBe('false');
+    await userEvent.setup().click(cardFor('openai'));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 2 } }));
+    expect(isMigrationDismissed([linkedA])).toBe(false);
+    expect(isMigrationDismissed([linkedB])).toBe(false);
   });
 
   it('refuses a take-over the host cannot install an engine for, and still writes a key', async () => {
@@ -1031,7 +1198,7 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await show({ runtimeRead: unreadRegion<RuntimeDependency>() });
     await act(async () => { gate.resolve(); });
 
-    expect(await screen.findByText('Migrated 1 API key into Model Hub')).toBeTruthy();
+    expect(await screen.findByText('Migrated 1 configuration item')).toBeTruthy();
     expect(modelsApi.applyMigration).toHaveBeenCalledTimes(1);
     // Reported once, counted once — and a screen that no longer admits a write does
     // not offer the spent batch again either.

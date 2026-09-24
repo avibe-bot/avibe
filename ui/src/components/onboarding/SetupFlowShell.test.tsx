@@ -22,7 +22,11 @@ function Screen({ id, ref, ...props }: SetupScreenProps & { id: SetupScreenId; r
     }
   }, [props.active, props.onActionChange]);
   useImperativeHandle(ref, () => ({ activate: () => props.onNavigate(id === 'intro' ? 'providers' : 'assistants') }));
-  return <><h1 tabIndex={-1}>{id}</h1><input aria-label={`${id} draft`} value={value} onChange={(event) => setValue(event.target.value)} /></>;
+  return <><h1 tabIndex={-1}>{id}</h1>
+    {id === 'providers' && <><div className="setup-provider-stage" data-testid="incoming-diagram" />
+      <div className="setup-destinations" data-testid="incoming-destinations" /></>}
+    {id === 'assistants' && <div className="onboarding-assistant" data-testid="incoming-assistant" />}
+    <input aria-label={`${id} draft`} value={value} onChange={(event) => setValue(event.target.value)} /></>;
 }
 const show = (capability: SetupScreenProps['capability'] = 'enabled', gatewayEnabled: boolean | null = true,
   extra: { navigationLocked?: boolean; onRetrySetup?: () => void } = {}) =>
@@ -36,10 +40,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it('derives the interim and complete journey from a static registry alone', () => {
-  expect(SETUP_REGISTERED_SCREENS).toEqual(['intro', 'assistants']);
-  expect(setupBackTarget(SETUP_REGISTERED_SCREENS, 'assistants')).toBe('intro');
-  expect(registeredSetupSequence({ intro: true, providers: true, assistants: true })).toEqual(SETUP_SCREENS);
+it('derives the journey from a static registry alone, in the contract order', () => {
+  expect(SETUP_REGISTERED_SCREENS).toEqual(SETUP_SCREENS);
+  expect(setupBackTarget(SETUP_REGISTERED_SCREENS, 'assistants')).toBe('providers');
+  expect(setupBackTarget(SETUP_REGISTERED_SCREENS, 'intro')).toBeNull();
+  // Registration is build-time membership, not order: a registry written in any order
+  // still yields the one journey C2 declares, and an unregistered screen leaves no slot.
+  expect(registeredSetupSequence({ assistants: true, providers: true, intro: true })).toEqual(SETUP_SCREENS);
+  expect(registeredSetupSequence({ intro: true, assistants: true })).toEqual(['intro', 'assistants']);
 });
 it.each(['pending', 'disabled', 'enabled'] as const)('policy %s never removes a registered screen', (capability) => {
   const { container } = render(show(capability, false));
@@ -50,7 +58,7 @@ it.each(['pending', 'disabled', 'enabled'] as const)('policy %s never removes a 
 it('a held journey refuses the screen own navigate, not only the buttons', () => {
   const { container, rerender } = render(show('enabled', true, { navigationLocked: true }));
   const current = () => container.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
-  expect(screen.getByRole('button', { name: 'Get started' }).hasAttribute('disabled')).toBe(true);
+  expect(screen.getByRole('button', { name: 'Get started' }).hasAttribute('disabled')).toBe(false);
   // Held, not busy: nothing is running, so nothing spins. The spinner carries Tailwind's
   // `motion-safe:` variant, so the token in the DOM is the whole `motion-safe:animate-spin`
   // — feeding a genuinely busy action proves this selector can find one, which is what
@@ -70,7 +78,7 @@ it('a held journey does not hand the shared primary to the config retry either',
   const onRetrySetup = vi.fn();
   render(show('disabled', false, { navigationLocked: true, onRetrySetup }));
   const primary = screen.getByRole('button', { name: en.common.retry });
-  expect(primary.hasAttribute('disabled')).toBe(true);
+  expect(primary.hasAttribute('disabled')).toBe(false);
   fireEvent.click(primary);
   expect(onRetrySetup).not.toHaveBeenCalled();
 });
@@ -97,4 +105,35 @@ it('keeps drafts and DOM identity, focuses each heading, and rejects old activat
   await waitFor(() => expect(document.activeElement?.textContent).toBe('intro'));
   expect(container.querySelectorAll('.onboarding-setup-footer')).toHaveLength(1);
   expect(container.querySelectorAll('.onboarding-primary-action')).toHaveLength(1);
+});
+
+it('focuses the arriving heading only after its animated handoff clears inert', () => {
+  vi.useFakeTimers();
+  const originalAnimate = HTMLElement.prototype.animate;
+  Object.defineProperty(HTMLElement.prototype, 'animate', {
+    configurable: true,
+    value: vi.fn(() => ({ cancel: vi.fn() })),
+  });
+  try {
+    const { container } = render(show());
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'intro' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    const arriving = container.querySelector<HTMLElement>('[data-setup-screen-root="providers"]')!;
+    expect(arriving.hasAttribute('hidden')).toBe(false);
+    expect(arriving.querySelector('h1')?.textContent).toBe('providers');
+    expect(arriving.querySelector('[data-testid="incoming-diagram"]')).toBeTruthy();
+    expect(container.querySelector('[data-handoff="providers"] .setup-destinations')).toBeTruthy();
+    expect(arriving.hasAttribute('inert')).toBe(true);
+    expect(savedFeeds).toHaveLength(1);
+    expect(document.activeElement).not.toBe(arriving.querySelector('h1'));
+    act(() => vi.advanceTimersByTime(900));
+    expect(container.querySelector('[data-handoff]')).toBeNull();
+    expect(arriving.querySelector('[data-testid="incoming-destinations"]')).toBeTruthy();
+    expect(arriving.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(arriving.querySelector('h1'));
+  } finally {
+    vi.useRealTimers();
+    if (originalAnimate) Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: originalAnimate });
+    else Reflect.deleteProperty(HTMLElement.prototype, 'animate');
+  }
 });

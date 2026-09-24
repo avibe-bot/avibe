@@ -103,58 +103,6 @@ def test_disabled_agent_cannot_run(tmp_path: Path, sqlite_schema_db_factory) -> 
     assert payload["error"] == "agent 'worker' is disabled"
 
 
-def test_task_resume_rejects_orphaned_owner_without_execution_target(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """A migrated orphan cannot resume into an invisible firing state."""
-
-    from storage.importer import ensure_sqlite_state
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    store = cli.ScheduledTaskStore()
-    task = store.add_task(
-        name="Orphaned command",
-        session_key="",
-        prompt="",
-        schedule_type="cron",
-        cron="0 * * * *",
-        timezone_name="UTC",
-        shell_command="true",
-        metadata={
-            "orphaned_task_owner": {
-                "reason_code": "task_owner_session_unavailable",
-                "owner_session_id": "ses-removed",
-            }
-        },
-    )
-    task.enabled = False
-    store.upsert_task(task)
-
-    with (
-        patch("vibe.cli._task_store", return_value=store),
-        patch("vibe.cli._memory_cli_language", return_value="zh"),
-    ):
-        result, payload = _capture_stderr_json(
-            cli.cmd_task_set_enabled,
-            task.id,
-            True,
-        )
-
-    assert result == 1
-    assert payload["code"] == "task_owner_session_unavailable"
-    assert payload["error"] == "这个 Task 的管理 Session 已不可用。"
-    assert payload["hint"] == (
-        "请从可用的 Agent Session 创建替代 Task，再用 "
-        f"`vibe task remove {task.id}` 删除这条失去管理者的定义。"
-    )
-    assert payload["details"] == {
-        "task_id": task.id,
-        "owner_session_id": "ses-removed",
-    }
-    assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
-
-
 def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
     monkeypatch,
     tmp_path: Path,
@@ -2446,7 +2394,7 @@ def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Pat
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
         patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
-        patch("vibe.cli.SettingsStore.get_instance", return_value=fake_store),
+        patch("core.services.settings.get_settings_store", return_value=fake_store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -2981,7 +2929,7 @@ def test_hook_send_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Pa
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
         patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(request_root)),
-        patch("vibe.cli.SettingsStore.get_instance", return_value=fake_store),
+        patch("core.services.settings.get_settings_store", return_value=fake_store),
     ):
         result = cli.cmd_hook_send(args)
 
@@ -5478,3 +5426,54 @@ def test_documented_task_command_examples_stay_parseable() -> None:
 
     for example in examples:
         parser.parse_args(shlex.split(example)[1:])
+
+def test_task_resume_rejects_orphaned_owner_without_execution_target(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A migrated orphan cannot resume into an invisible firing state."""
+
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        name="Orphaned command",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        shell_command="true",
+        metadata={
+            "orphaned_task_owner": {
+                "reason_code": "task_owner_session_unavailable",
+                "owner_session_id": "ses-removed",
+            }
+        },
+    )
+    task.enabled = False
+    store.upsert_task(task)
+
+    with (
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._configured_cli_language", return_value="zh"),
+    ):
+        result, payload = _capture_stderr_json(
+            cli.cmd_task_set_enabled,
+            task.id,
+            True,
+        )
+
+    assert result == 1
+    assert payload["code"] == "task_owner_session_unavailable"
+    assert payload["error"] == "这个 Task 的管理 Session 已不可用。"
+    assert payload["hint"] == (
+        "请从可用的 Agent Session 创建替代 Task，再用 "
+        f"`vibe task remove {task.id}` 删除这条失去管理者的定义。"
+    )
+    assert payload["details"] == {
+        "task_id": task.id,
+        "owner_session_id": "ses-removed",
+    }
+    assert cli.ScheduledTaskStore().get_task(task.id).enabled is False

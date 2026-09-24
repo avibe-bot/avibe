@@ -22,7 +22,6 @@ from core.backend_failure import emit_backend_failure
 from core.agent_input import AgentInputMetadata
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
-from core.memory_cli_access import configure_memory_cli_access
 from core.managed_skills import (
     managed_skill_claude_cli_path,
     managed_skill_environment,
@@ -54,7 +53,6 @@ from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
     RuntimeSessionBinding,
-    SessionRuntimeDisposition,
     wake_runtime_ownership,
 )
 from modules.agents.base import AgentRequest, BaseAgent
@@ -531,7 +529,7 @@ class CodexAgent(BaseAgent):
                         await self._remove_ack_reaction(interrupted_request)
 
                 # Render once at the actual Turn boundary. Besides keeping the
-                # payload byte-stable, this avoids repeating Memory admission
+                # payload byte-stable, this avoids repeating admission
                 # side effects while the same request refreshes and starts.
                 if not prompt_rendered:
                     developer_instructions = await self._build_thread_developer_instructions(request)
@@ -2950,11 +2948,6 @@ class CodexAgent(BaseAgent):
             or self.controller.config.platform
         )
 
-        # Resolve admission once: it associates or clears this turn's Memory CLI
-        # session scope as a side effect, so a second call per turn would repeat
-        # that write.
-        configure_memory_cli_access(self.controller, request.context)
-
         skill_catalog_sink: list[dict] = []
         instructions = await asyncio.to_thread(
             build_system_prompt_injection,
@@ -2963,12 +2956,6 @@ class CodexAgent(BaseAgent):
             include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
             and platform != "wechat",
             include_codex_generated_images=True,
-                memory_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
-                ),
-                profile_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
-                ),
             context=request.context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
@@ -3021,9 +3008,8 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh mutable non-prompt thread config before starting a Turn."""
         self.ensure_agent_session_id(request)
-        # The caller invokes this after prompt rendering grants or revokes the
-        # per-turn Memory CLI capability, so the environment observes that
-        # decision without rendering the prompt a second time.
+        # Refresh caller environment and git path after prompt rendering,
+        # without rendering the prompt a second time.
         caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 

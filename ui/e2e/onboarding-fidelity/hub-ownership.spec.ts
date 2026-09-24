@@ -4,13 +4,17 @@ import { ORIGIN, serveProduct } from './support';
 // Exercise the actual App/AuthGuard/Settings overlay/Wizard boundary. All
 // server responses are fixture-owned; the Vite server has a dead backend.
 // The Python connection tests separately establish the readiness producer.
+//
+// Setup migrates a discovered key from Providers before entering Assistants.
+// The Hub owns authentication, and completion stays gated on a fresh readiness answer.
 for (const width of [1200, 390]) {
-  test(`Hub takeover returns to the same setup step and permits completion at ${width}px`, async ({ page }, info) => {
+  test(`Hub owns assistant authentication and its take-over completes inside setup at ${width}px`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 844 });
     const denied = await serveProduct(page);
     const nativeRequests: string[] = [];
     const writes: string[] = [];
     const applied: string[][] = [];
+    const configWrites: unknown[] = [];
     const observedReady: boolean[] = [];
     const pageErrors: string[] = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -39,10 +43,17 @@ for (const width of [1200, 390]) {
       agent: { default_cwd: '/fixture/work' },
       model_hub: { enabled: true, runtime_default_applied: true },
     });
+    // The gate joins the route to the named Agent it would enter on, so a taken-over
+    // credential is only half the answer: the backend also has to say which model this
+    // name resolves to. That row is what the server writes when the take-over lands,
+    // and without it this machine has a source it cannot run a turn with.
     const supply = () => ({
       backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed',
       sources: { order: migrated ? [source.id] : [], eligibility: [] },
-      routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null,
+      routes: {}, builtin_models: [], catalog_models: [], menu: null,
+      named_agents: migrated
+        ? [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok', route_reason: null }]
+        : [],
       model_supply: [], supply_status: migrated ? 'ok' : 'unavailable',
     });
     const items = () => migrated ? [] : [{
@@ -64,6 +75,7 @@ for (const width of [1200, 390]) {
       if (path === '/api/config') {
         if (request.method() === 'POST') {
           const body = request.postDataJSON();
+          configWrites.push(body);
           if (body.setup_completed === true) completed = true;
         }
         return answer(config());
@@ -110,7 +122,6 @@ for (const width of [1200, 390]) {
         }],
       });
       // These unrelated app-shell reads are empty, not live-service fallbacks.
-      if (path === '/api/memory/status') return answer({ ok: true, enabled: false });
       if (path === '/api/projects') return answer({ ok: true, projects: [] });
       if (path === '/api/scopes') return answer({ ok: true, scopes: [] });
       if (path === '/api/inbox') return answer({
@@ -123,29 +134,24 @@ for (const width of [1200, 390]) {
 
     await page.goto('/setup');
     await page.getByRole('button', { name: 'Get started', exact: true }).click();
-    const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
-    await expect(enter).toBeDisabled();
-    await expect.poll(() => observedReady.length).toBeGreaterThan(0);
-    const wizard = await page.locator('.onboarding-assistants').elementHandle();
-    const claude = page.getByLabel('Claude Code', { exact: true });
-    await expect(claude.getByRole('button', { name: 'Add API Key', exact: true })).toHaveCount(0);
-    await claude.getByRole('button', { name: 'Open Model Hub', exact: true }).click();
-    await expect(page).toHaveURL(/\/settings\/models$/);
-    await page.getByRole('button', { name: 'Migrate configuration', exact: true }).click();
-    const migration = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Migrate to the Model Hub', exact: true }) });
+    await expect(page.locator('[data-setup-screen="providers"]')).toBeVisible();
+    await page.getByRole('button', { name: 'Migrate 1 key and continue', exact: true }).click();
+    const migration = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Migrate to Model Hub', exact: true }) });
     await expect(migration).toBeVisible();
     await migration.getByRole('button', { name: 'Start migration', exact: true }).click();
     await expect.poll(() => applied).toEqual([['mig_claude_fixture']]);
+    await migration.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(migration).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`hub-migrated-${width}.png`) });
 
-    // Actual browser history closes both the desktop sheet and mobile surface.
-    await page.goBack();
-    await expect(page).toHaveURL(/\/setup$/);
+    await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
     await expect(page.locator('.onboarding-assistants')).toBeVisible();
-    expect(await wizard!.evaluate((node) => node.isConnected)).toBe(true);
+    const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
+    const claude = page.getByLabel('Claude Code', { exact: true });
+    await expect(claude.getByRole('button', { name: 'Add API Key', exact: true })).toHaveCount(0);
+
+    // Enter is admitted only after the backend reports readiness with the migrated key.
     await expect(enter).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Review and migrate', exact: true })).toHaveCount(0);
     expect(observedReady).toContain(true);
     await page.screenshot({ path: info.outputPath(`setup-hub-ready-${width}.png`), fullPage: true });
     await enter.click();
@@ -154,9 +160,16 @@ for (const width of [1200, 390]) {
     expect(pageErrors).toEqual([]);
     expect(nativeRequests).toEqual([]);
     expect(writes.filter((write) => !write.endsWith('/api/models/migration/scan'))).toEqual([
+      'POST /api/config',
       'POST /api/models/migration/apply',
       'POST /api/config',
     ]);
+    // The two config writes are not the same write. The first is the provider screen's
+    // bootstrap seed — an empty patch whose only effect is a config file the controller
+    // can load — and the second is the completion itself. Reading their payloads is what
+    // keeps this an exact account rather than a count: the take-over writes the Hub's
+    // sources and nothing else, and no screen slipped a preference in along the way.
+    expect(configWrites).toEqual([{}, { setup_completed: true }]);
     // Initial/return flow must never need a running backend. App-shell reads
     // after completion are not part of this test's connection contract.
     expect(denied.filter((request) => /\/backend\/.*\/auth/.test(request))).toEqual([]);

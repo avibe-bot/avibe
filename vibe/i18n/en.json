@@ -171,7 +171,13 @@
         "failed": "The run failed before producing a result."
       },
       "bindingUnresolvedRetry": "Pinned agent session {session} cannot accept a turn ({attempt}/{threshold}). This definition will be paused after {threshold} consecutive unresolvable-target failures. Re-point it with: vibe task update {id} --session-id <id>.",
-      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}."
+      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}.",
+      "cli": {
+        "help": {
+          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop"
+        },
+        "canceledBeforeLiveTurn": "Run was canceled before its input reached the live Session turn."
+      }
     },
     "notice": {
       "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
@@ -427,8 +433,8 @@
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
     "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
     "opencodeBackendError": "OpenCode error: {error}",
-        "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted.",
-        "opencodePollTransportFailure": "OpenCode was unreachable after {count} consecutive polling failures; the native turn was aborted and recorded as failed."
+    "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted.",
+    "opencodePollTransportFailure": "OpenCode was unreachable after {count} consecutive polling failures; the native turn was aborted and recorded as failed."
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
@@ -477,7 +483,6 @@
     "infoUnavailable": "Update information unavailable. Please try again later.",
     "upgradeFailed": "Upgrade failed. Please check logs.",
     "upgradeFailedShort": "Upgrade failed",
-    "memoryRequirementUnreadable": "Upgrade blocked because the persisted Memory requirement could not be read safely.",
     "upgradeFailedSlack": "❌ *Upgrade Failed*\n\nPlease check the logs for details.",
     "updating": "Updating Avibe...",
     "updatingSlack": "⏳ *Updating Avibe...*\n\nPlease wait, the service will restart shortly.",
@@ -743,7 +748,8 @@
   },
   "message": {
     "ack": "{agent} received, processing...",
-    "quickReplyNote": "Reply: {text}"
+    "quickReplyNote": "Reply: {text}",
+    "citationUnresolved": "(source unavailable)"
   },
   "backend": {
     "claude": "ClaudeCode",
@@ -812,117 +818,6 @@
       }
     }
   },
-  "memory": {
-    "sender": {
-      "user": "User",
-      "agent": "Agent"
-    },
-    "cli": {
-      "help": {
-        "command": "Use local Memory through the running controller",
-        "status": "Show Memory status",
-        "profile": "Show the Memory profile",
-        "list": "List processed Memory episodes",
-        "search": "Search local Memory",
-        "remember": "Submit personal context for best-effort capture",
-        "query": "Search query",
-        "project": "Memory project: default or a named slug such as billing",
-        "page": "Page number (1-based)",
-        "pageLimit": "Episodes per page (1-100)",
-        "limit": "Maximum results (1-100)",
-        "mode": "Recall mode (default: hybrid)",
-        "text": "Text to remember",
-        "json": "Print machine-readable output"
-      },
-      "error": "Memory {operation} failed: {code}",
-      "status": "Memory: {state}",
-      "provider": "EverOS {version}: {state}",
-      "attachmentCapture": "IM attachment capture: {state}",
-      "sourceReason": "Source reason: {reason}",
-      "runtimeState": {
-        "disabled": "disabled",
-        "starting": "starting",
-        "running": "running",
-        "degraded": "degraded",
-        "needsRepair": "needs repair",
-        "unknown": "unknown"
-      },
-      "providerState": {
-        "ok": "healthy",
-        "unknown": "unknown"
-      },
-      "attachmentCaptureState": {
-        "ready": "ready",
-        "notConfigured": "not configured",
-        "unavailable": "unavailable",
-        "unknown": "unknown"
-      },
-      "unknownVersion": "unknown version",
-      "reason": {
-        "memoryDisabled": "Memory is disabled",
-        "invalidInput": "invalid Memory input",
-        "accessDenied": "Memory access denied",
-        "inputTooLarge": "Memory input is too large",
-        "queueFull": "Memory queue is full",
-        "lowDiskSpace": "low disk space",
-        "storeUnavailable": "Memory store unavailable",
-        "runtimeMissing": "Memory runtime missing",
-        "runtimeUnsupported": "Memory runtime unsupported",
-        "runtimeInstallFailed": "Memory runtime installation failed",
-        "runtimeInstallRequiresStoppedMemory": "Memory is running. Turn it off in Settings > Memory before repairing the runtime.",
-        "runtimePreparationImportTimeout": "Memory runtime import readiness check timed out",
-        "runtimePreparationImportFailed": "Memory runtime import readiness check failed",
-        "runtimePreparationScrubberTimeout": "Memory runtime error-scrubber readiness check timed out",
-        "runtimePreparationScrubberFailed": "Memory runtime error-scrubber readiness check failed",
-        "runtimePreparationSyncContractFailed": "Memory runtime sync contract verification failed",
-        "runtimePreparationFailed": "Memory runtime preparation failed",
-        "reconcileFailed": "Memory reconciliation failed",
-        "wakeFailed": "Memory wake failed without deleting data",
-        "runtimeBusy": "Memory could not stop safely",
-        "permissionDenied": "Memory data-path permission denied",
-        "diskUnavailable": "Memory disk unavailable",
-        "localDataUnusable": "local Memory data needs repair",
-        "legacyRecoveryRequired": "legacy recovery state needs explicit repair",
-        "sidecarUnavailable": "Memory sidecar unavailable",
-        "providerTimeout": "Memory provider timed out",
-        "providerResponseInvalid": "invalid Memory provider response",
-        "capabilityUnavailable": "Memory capability unavailable",
-        "processingFailed": "Memory processing failed",
-        "lossConfirmationRequired": "Memory data loss confirmation is required",
-        "embeddingUnavailable": "Memory embedding is unavailable",
-        "llmUnavailable": "Memory language model is unavailable",
-        "rerankUnavailable": "Memory reranking is unavailable",
-        "multimodalUnavailable": "Memory multimodal processing is unavailable",
-        "repairFailed": "Memory repair failed",
-        "repairNotRequired": "Memory repair is not required",
-        "deleteDataFailed": "Memory data deletion failed",
-        "reconfigureFailed": "Memory reconfiguration failed",
-        "operationInProgress": "another Memory operation is in progress",
-        "implementationUnavailable": "Memory implementation unavailable",
-        "implementationIncompatible": "Memory implementation is incompatible",
-        "unknown": "unknown reason"
-      },
-      "fault": {
-        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
-        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
-      },
-      "empty": "No memory items found.",
-      "originPrefix": "[{origin}] ",
-      "origin": {
-        "user": "User memory",
-        "agent": "Agent memory",
-        "both": "User + Agent"
-      },
-      "remembered": "Memory request acknowledged for best-effort processing; persistence is not guaranteed.",
-      "listWarning": {
-        "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."
-      },
-      "readWarning": {
-        "partial": "Some user, Agent, or project Memory sources could not be loaded. Results may be incomplete."
-      },
-      "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
-    }
-  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
@@ -973,7 +868,6 @@
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "backend_model_catalog_invalid": "The backend model list contains invalid fields.",
       "backend_model_id_invalid": "This backend model ID is invalid.",
-      "backend_model_id_prefix": "Claude Code custom model IDs must start with claude- or anthropic-.",
       "backend_model_duplicate": "Each backend model ID may appear only once.",
       "backend_model_locked": "Claude Code Default and built-in model origins cannot be changed.",
       "backend_model_in_route": "Clear this model's route before removing it from the backend model list.",
@@ -1035,7 +929,8 @@
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help."
+      "request_incompatible": "This request is incompatible; switching Sources will not help.",
+      "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"
     }
   },
   "remote_access": {
@@ -1056,11 +951,31 @@
       "oauth_time_mismatch_body": "Avibe Cloud finished the sign-in, but this machine rejected the security token because the local clock appears out of sync. Correct the system time, then try again.",
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
+    },
+    "cli": {
+      "pairHelpEpilog": "Guidance:\n  This is the direct pairing command for users who already have a pairing key.\n  For the guided setup flow, run `vibe remote`.\n  Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.\n  To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.\n  Pairing saves the remote-access config and then starts the managed tunnel automatically.\n  The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.\n\nExamples:\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
+      "localWriteUnavailableTitle": "Remote access setup stopped before contacting Avibe Cloud.",
+      "localWriteUnavailableBody": "The local config cannot durably accept a pairing, so no pairing key was consumed.",
+      "saveFailedAfterRedeemTitle": "The pairing was redeemed cloud-side but could not be saved locally.",
+      "orphanedBinding": "Orphaned binding: instance {instance_id} (device {device_name}).",
+      "recoveryRetained": "The redeemed credentials are kept on this host, so no new pairing key is needed.",
+      "retryAfterLocalFix": "Fix the local config problem, then run:",
+      "recoveryInvalid": "The saved pairing recovery record is invalid and cannot be replayed.",
+      "recoveryUnavailable": "Local pairing recovery could not start. No new pairing key was consumed.",
+      "recoveryNotReady": "A pairing operation has no durably recorded response. It may still be running or may have consumed the key. A keyless retry cannot recover it.",
+      "recoveryRevoked": "The saved pairing recovery was invalidated by a local unpair operation.",
+      "recoveryIndeterminate": "The pairing outcome is uncertain or was superseded locally. No recoverable response is guaranteed; do not reuse the submitted key.",
+      "replacePendingPairing": "Check the cloud console and ensure no pairing is still running. To explicitly replace the pending attempt, substitute a fresh key and the intended backend URL in this command (the default backend is https://avibe.bot):",
+      "retirementFailed": "Pairing was applied, but its recovery record could not be retired. Retry without a new key.",
+      "failedClaimCleanup": "This pairing attempt failed and was not applied. Fix local storage, then retry without a key to clear its failed-operation record.",
+      "failedClaimUnrecorded": "This pairing attempt failed and was not applied. Its cleanup could not be recorded. After fixing local storage, supply a fresh pairing key explicitly to 'vibe remote pair'; a keyless retry cannot recover this result.",
+      "failedClaimRetired": "The failed pairing record was cleared. Get a fresh pairing key, then run the following command to enter it securely:",
+      "retryPairCommand": "Retry local pairing recovery with:"
     }
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
+      "serviceRestart": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
     }
   },
   "runtime": {
@@ -1075,7 +990,7 @@
       "modelHubEngineNotReady": "Model Hub engine not ready: {reason}"
     },
     "clean": {
-      "commandHelp": "Remove stale Show, Git, Memory, Model Hub, and tmux runtime installs and archives; exit nonzero if any cleanup fails.",
+      "commandHelp": "Remove stale Show, Git, Model Hub, and tmux runtime installs and archives; exit nonzero if any cleanup fails.",
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
       "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
       "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",
@@ -1130,7 +1045,6 @@
       "unknown": "unknown",
       "unknownError": "unknown error",
       "missing": "missing",
-      "memoryRuntime": "Memory Runtime",
       "modelHubEngine": "Model Hub engine (CPA)",
       "currentPlatform": "this platform",
       "selectedDependencyUrl": "the selected dependency URL",
@@ -1229,8 +1143,6 @@
       "dependencyPlatformUnsupported": "{label} is not published for this platform",
       "dependencyArchiveUrlUnsupported": "{label} archive URL uses an unsupported scheme: {url}",
       "dependencyNotReady": "{label} is not ready",
-      "memoryRuntimeMissing": "Memory Runtime is missing: {reason}",
-      "memoryRuntimeError": "Memory Runtime failed readiness: {reason}",
       "dependencyReachable": "{label} download endpoint is reachable: {url}",
       "dependencyProbeUnsupported": "{label} server does not support a body-free probe",
       "dependencyProbeUnavailable": "{label} archive could not be resolved",
@@ -1416,10 +1328,6 @@
       "dependencyReadyDefault": "Dependency is ready.",
       "dependencyResultFailed": "{target} repair failed: {detail}",
       "dependencyException": "{target} installer failed: {error}",
-      "dryMemoryRuntime": "Would ask the running Avibe controller to install or repair Memory Runtime.",
-      "memoryRuntimeReady": "Memory Runtime was installed or repaired through the running Avibe controller.",
-      "memoryRuntimeFailed": "Memory Runtime repair failed: {reason}",
-      "memoryRuntimeControllerUnavailable": "The running Avibe controller could not be reached for Memory Runtime repair: {reason}",
       "dependencyDownloadHttp": "Dependency download returned HTTP {status} after {attempts} attempts.",
       "dependencyDownloadDns": "Dependency host DNS lookup failed after {attempts} attempts.",
       "dependencyDownloadTls": "Dependency TLS verification failed.",

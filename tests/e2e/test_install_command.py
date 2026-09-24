@@ -72,6 +72,10 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
         )
         install_as_user = (
             "set -euo pipefail; "
+            "report_failure() { local probe_status=$1; set +e; if [ $probe_status -ne 0 ]; then "
+            "for log in /home/installer/.avibe/runtime/*stderr.log /home/installer/.avibe/logs/vibe_remote.log; do "
+            'if [ -f "$log" ]; then printf "\\n%s\\n" "$log"; tail -c 32768 "$log"; fi; '
+            "done; fi; return $probe_status; }; trap 'report_failure \"$?\"' EXIT; "
             "export PATH=/usr/bin:/bin; "
             "export VIBE_INSTALL_SKIP_NODE=1; "
             "export VIBE_INSTALL_SKIP_SHOW_RUNTIME=1; "
@@ -81,7 +85,9 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
             "! command -v vibe; "
             "/home/installer/.local/bin/vibe version; "
             "sleep 2; "
-            "/home/installer/.local/bin/vibe status; "
+            'status=$(/home/installer/.local/bin/vibe status); '
+            'printf "%s\\n" "$status"; '
+            'echo "$status" | grep -q \'"running": true\'; '
             # This runtime belongs to the disposable container. Stop it before
             # checking the two-generation bound without live interpreter pins.
             "/home/installer/.local/bin/vibe stop; "
@@ -106,9 +112,9 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
                     container_name,
                     "--rm",
                     "-v",
-                    f"{REPO_ROOT}:/work",
+                    f"{REPO_ROOT}:/work:ro",
                     "-v",
-                    f"{wheel_path.parent}:/fixtures",
+                    f"{wheel_path.parent}:/fixtures:ro",
                     "-w",
                     "/work",
                     BASE_IMAGE,
