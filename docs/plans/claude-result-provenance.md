@@ -23,9 +23,11 @@ owner signal in this interleaved stream; Assistant frames do not carry that fiel
   evidence exists; otherwise preserve it as detached output and leave the pending
   human request untouched.
 - Keep a synthetic owner for detached output until the durable emit succeeds.
-  A failed emit retains the text and idempotency identity for receiver-end
-  retry; it must not be replaced by a generic EOF failure or release the runtime
-  gate early.
+  A failed emit retains the selected text, claimed Activity batch, and
+  idempotency identity for retry while the receiver is still open or after an
+  EOF/error. The recovery owner, rather than receiver cleanup, releases the
+  runtime gate after durable local settlement; a generic EOF failure must not
+  replace or release it early.
 - Preserve durable prewrite evidence so a write that definitely did not happen can
   be explicitly retried without replaying an attempted or ambiguous native write.
 
@@ -40,8 +42,10 @@ Turn, Run, or delivery ownership.
    and tool/task identity. `run_in_background` describes execution mode only;
    it is not provenance.
 2. While the phase is provisional, Activity flushes may retain completed
-   outputs but cannot pop or settle a pending human request. Uncorrelated task
-   events remain unattributed.
+   outputs but cannot pop or settle a pending human request. Completed,
+   failed, stopped, and killed provisional Activities remain addressable as
+   terminal snapshots until classification; uncorrelated task events remain
+   unattributed.
 3. A human Result resolves only the positively correlated provisional tool/task
    facts to the pending request's captured Turn, Run, and delivery identity.
    This resolution happens before terminal Run settlement. A human-created
@@ -61,6 +65,18 @@ Turn, Run, or delivery ownership.
 7. Provenance classification updates the in-memory Activity ownership before its
    durable snapshot. A persistence failure records retryable recovery evidence
    and cannot cause the already-consumed terminal Result to be skipped.
+8. A detached terminal Result selects one existing Activity receipt batch. Its
+   exact output text and batch identity remain together until the dispatcher and
+   local Activity settlement both succeed. A later Assistant frame cannot
+   replace that selected text with a CLI summary, and a retry never claims a
+   second batch.
+9. A synthetic agent-initiated request is an explicit terminal owner even when
+   its output is detached. Receiver EOF/error and generation cleanup may close
+   native admission, but they retain the synthetic request and its gate while
+   durable recovery is pending. Only the successful recovery path retires that
+   owner and admits the next human Turn. Detached output that arrives while a
+   real human request is pending retains its own retry payload, but does not
+   become a synthetic owner or hold the human request's runtime gate.
 
 The registry uses one FIFO candidate-selection and receipt-binding algorithm
 for metadata eligibility, Turn constraints, retries, and persisted local-only
@@ -71,10 +87,12 @@ create a second batching path or absorb a previously bound receipt.
 
 Consumer tests cover both terminal result orders, notification-before-human-result,
 multiple Activity completion aggregation, Assistant buffering, flush-vs-Result
-races, buffered replay failure, unknown origin, client replacement and Stop races,
-exactly-once output, and durable unsent-input recovery. A hermetic Claude Agent SDK
-0.2.158 plus bundled CLI probe verifies the outgoing origin shape and real Result
-provenance against the local mock upstream.
+races, retained Activity text during a long-lived receiver retry, receiver
+error recovery ownership, failed/stopped/killed/completed provisional terminal
+lineage, buffered replay failure, unknown origin, client replacement and Stop
+races, exactly-once output, and durable unsent-input recovery. A hermetic Claude
+Agent SDK 0.2.158 plus bundled CLI probe verifies the outgoing origin shape and
+real Result provenance against the local mock upstream.
 
 The current implementation scope is the Claude receiver and existing Activity,
 dispatcher, receipt, steering, and generation owners only. It does not add a

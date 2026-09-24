@@ -617,6 +617,82 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(human_calls), 1)
                 self.assertEqual(human_calls[0].args[1], "human reply")
 
+    async def test_terminal_provisional_activity_statuses_rebind_before_run_settlement(
+        self,
+    ):
+        for status in ("failed", "stopped", "killed", "completed"):
+            with self.subTest(status=status):
+                key = f"session-terminal-lineage-{status}:/tmp/work"
+                agent, service = _build_agent()
+                context = _context(key)
+                request = _pending_request(key)
+                request.context.platform_specific.update(
+                    {
+                        "task_trigger_kind": "agent_run",
+                        "task_execution_id": "human-run",
+                        "accepted_agent_run_ids": ["human-run"],
+                        "delivery_key_external": "human-delivery",
+                    }
+                )
+                agent._pending_requests[key] = [request]
+                agent._get_formatter = lambda _context: SimpleNamespace(
+                    format_toolcall=lambda *_args, **_kwargs: "fixture tool",
+                    format_toolcall_label=lambda *_args, **_kwargs: "fixture tool",
+                    format_assistant_message=lambda parts: "\n".join(parts),
+                )
+                settle_activity = Mock()
+                service.controller.scheduled_task_service = SimpleNamespace(
+                    settle_activity_runs=settle_activity,
+                )
+                agent.emit_result_message = AsyncMock(return_value="message-id")
+
+                tool = _block(
+                    ToolUseBlock,
+                    id=f"tool-{status}",
+                    name="Bash",
+                    input={"command": "fixture"},
+                )
+                started = TaskStartedMessage(
+                    f"task-{status}",
+                    tool_use_id=f"tool-{status}",
+                )
+                terminal = TaskNotificationMessage(
+                    f"task-{status}",
+                    "terminal fixture",
+                )
+                terminal.status = status
+
+                await agent._receive_messages(
+                    _client(
+                        [
+                            AssistantMessage(tool),
+                            started,
+                            terminal,
+                            ResultMessage("human reply", origin={"kind": "human"}),
+                        ]
+                    ),
+                    f"sess-terminal-lineage-{status}",
+                    "/tmp/work",
+                    context,
+                    composite_key=key,
+                )
+
+                settle_activity.assert_called_once()
+                settled = settle_activity.call_args.args[0]
+                self.assertEqual(settled.run_id, "human-run")
+                self.assertEqual(settled.turn_id, "human-turn")
+                self.assertEqual(
+                    settled.metadata["delivery_key_external"],
+                    "human-delivery",
+                )
+                self.assertFalse(
+                    service.activities.terminal_snapshots_for_runtime(
+                        "claude",
+                        key,
+                    )
+                )
+                self.assertFalse(agent._has_pending_requests(key))
+
     async def test_detached_tool_output_cannot_replace_following_human_result(self):
         key = "session-detached-tool-before-human:/tmp/work"
         agent, service = _build_agent()
@@ -1743,6 +1819,71 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(next_token)
         service.release_runtime_turn(next_context)
+
+    async def test_failed_detached_output_does_not_hold_human_turn_after_receiver_error(
+        self,
+    ):
+        key = "session-detached-output-with-human-pending:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 60
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n".join(parts),
+            format_toolcall=lambda *_args, **_kwargs: "",
+            format_toolcall_label=lambda *_args, **_kwargs: "",
+        )
+        agent.controller.agent_auth_service = SimpleNamespace(
+            maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
+        )
+        agent.controller.session_handler.handle_session_error = AsyncMock(
+            return_value=False,
+        )
+        allow_retry = asyncio.Event()
+        attempts: list[str] = []
+
+        async def emit_result(_context, text, **_kwargs):
+            attempts.append(text)
+            if not allow_retry.is_set():
+                raise RuntimeError("detached delivery unavailable")
+            return "message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=emit_result)
+
+        await agent._receive_messages(
+            _failing_client(
+                [
+                    AssistantMessage(_block(TextBlock, text="detached output")),
+                    ResultMessage(
+                        "detached result",
+                        origin={"kind": "task-notification"},
+                    ),
+                ],
+                RuntimeError("receiver transport failed"),
+            ),
+            "sess-detached-output-with-human-pending",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(attempts, ["detached result", "detached result"])
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertFalse(service.runtime_turn_active(key))
+        self.assertIn(key, agent._detached_unsolicited_outputs)
+        self.assertEqual(agent._detached_unsolicited_text[key], "detached result")
+
+        allow_retry.set()
+        self.assertFalse(
+            await agent._flush_detached_unsolicited_output(key, context)
+        )
+        self.assertNotIn(key, agent._detached_unsolicited_outputs)
+        self.assertNotIn(key, agent._detached_unsolicited_text)
+        self.assertEqual(
+            attempts,
+            ["detached result", "detached result", "detached result"],
+        )
 
     async def test_proven_human_background_activity_keeps_run_lineage(self):
         key = "session-positive-background-lineage:/tmp/work"

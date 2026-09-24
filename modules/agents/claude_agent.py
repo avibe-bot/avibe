@@ -956,6 +956,10 @@ class ClaudeAgent(BaseAgent):
         reason: str = "claude_agent_cleanup",
     ) -> None:
 
+        preserve_synthetic_delivery = self._has_synthetic_delivery_pending(composite_key)
+        preserve_pending_request_state = (
+            preserve_pending_request_state or preserve_synthetic_delivery
+        )
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
         self._buffered_assistant_messages.pop(composite_key, None)
@@ -975,7 +979,8 @@ class ClaudeAgent(BaseAgent):
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
         self._suppressed_synthetic_error_text.pop(composite_key, None)
-        self._synthetic_pending_owners.pop(composite_key, None)
+        if not preserve_synthetic_delivery:
+            self._synthetic_pending_owners.pop(composite_key, None)
         if not preserve_pending_request_state:
             self._pending_reactions.pop(composite_key, None)
             pending_requests = self._pending_requests.pop(composite_key, None) or []
@@ -1176,7 +1181,8 @@ class ClaudeAgent(BaseAgent):
         if ambiguous_interrupts is not None:
             ambiguous_interrupts.discard(composite_key)
         self._stop_owned_terminal_keys.discard(composite_key)
-        self._synthetic_pending_owners.pop(composite_key, None)
+        if not self._has_synthetic_delivery_pending(composite_key):
+            self._synthetic_pending_owners.pop(composite_key, None)
         self._activity_provenance_barriers.discard(composite_key)
         self._activity_provenance_barrier_owners.pop(composite_key, None)
         self._steering_closing_keys().discard(composite_key)
@@ -1916,7 +1922,9 @@ class ClaudeAgent(BaseAgent):
                                 self._detached_unsolicited_text[composite_key] = assistant_text
                             continue
                         if composite_key in self._detached_activity_outputs:
-                            if assistant_text:
+                            if assistant_text and not self._detached_assistant_text.get(
+                                composite_key
+                            ):
                                 self._detached_assistant_text[composite_key] = assistant_text
                             continue
                         failure_disposition = await self._process_assistant_terminal_frame(
@@ -2086,9 +2094,8 @@ class ClaudeAgent(BaseAgent):
                         result_text = raw_result_text
                         detached_activities = None
                         if output_mode == "activity":
-                            detached_activities = self._detached_activity_outputs.pop(
-                                composite_key,
-                                None,
+                            detached_activities = self._detached_activity_outputs.get(
+                                composite_key
                             )
                         if detached_activities:
                             detached_activity = detached_activities[-1]
@@ -2101,7 +2108,11 @@ class ClaudeAgent(BaseAgent):
                                 raw_result_text,
                                 detached_text,
                             )
-                            self._detached_assistant_text.pop(composite_key, None)
+                            # Keep the selected terminal payload beside the
+                            # claimed Activity batch until the durable output
+                            # boundary succeeds.  A retry must not fall back to
+                            # the CLI summary after a transient emit failure.
+                            self._detached_assistant_text[composite_key] = result_text
                             try:
                                 await self._emit_activity_result(
                                     context,
@@ -2114,48 +2125,39 @@ class ClaudeAgent(BaseAgent):
                                     activities=detached_activities,
                                 )
                             except ActivityOutputDeliveryError as err:
-                                if not err.delivered or err.durable:
-                                    registry = self._activity_registry()
-                                    if registry is not None:
-                                        self._requeue_activities(
-                                            registry,
-                                            detached_activities,
-                                        )
-                                    self._schedule_completed_activity_flush(
-                                        composite_key,
-                                        context,
-                                    )
-                                    raise
-                                logger.error(
-                                    "Delivered Claude Activity batch remains fail-closed "
-                                    "after incomplete local settlement (runtime=%s error=%s)",
-                                    composite_key,
-                                    err,
-                                )
-                                registry = self._activity_registry()
-                                if (
-                                    registry is not None
-                                    and self._requeue_activities_for_local_settlement(
-                                        registry,
-                                        detached_activities,
-                                    )
-                                ):
-                                    self._schedule_completed_activity_flush(
-                                        composite_key,
-                                        context,
-                                    )
-                            except Exception:
-                                registry = self._activity_registry()
-                                if registry is not None:
-                                    self._requeue_activities(
-                                        registry,
-                                        detached_activities,
-                                    )
+                                # Keep the same claimed batch and payload in
+                                # memory.  The dispatcher has already recorded
+                                # the stable output identity; a later attempt
+                                # can complete local settlement without a
+                                # second external message.
                                 self._schedule_completed_activity_flush(
                                     composite_key,
                                     context,
                                 )
-                                raise
+                                logger.warning(
+                                    "Retaining detached Claude Activity output "
+                                    "for retry after delivery boundary failure "
+                                    "(runtime=%s delivered=%s durable=%s)",
+                                    composite_key,
+                                    err.delivered,
+                                    err.durable,
+                                    exc_info=True,
+                                )
+                                continue
+                            except Exception:
+                                self._schedule_completed_activity_flush(
+                                    composite_key,
+                                    context,
+                                )
+                                logger.warning(
+                                    "Retaining detached Claude Activity output "
+                                    "after transient delivery failure for %s",
+                                    composite_key,
+                                    exc_info=True,
+                                )
+                                continue
+                            self._detached_activity_outputs.pop(composite_key, None)
+                            self._detached_assistant_text.pop(composite_key, None)
                             self._retire_synthetic_pending_owner(
                                 composite_key,
                                 context,
@@ -2540,11 +2542,8 @@ class ClaudeAgent(BaseAgent):
             )
             eof_steering_generation = self._steering_generation(composite_key)
             pending_requests = self._pending_requests.get(composite_key) or []
-            synthetic_owner = self._synthetic_pending_owners.get(composite_key)
-            synthetic_delivery_pending = (
-                synthetic_owner is not None
-                and pending_requests == [synthetic_owner]
-                and composite_key in self._detached_unsolicited_outputs
+            synthetic_delivery_pending = self._has_synthetic_delivery_pending(
+                composite_key
             )
             # A failed detached emit still has a live synthetic owner. It is not
             # an EOF-without-result turn: settle the retained output first so
@@ -2632,19 +2631,23 @@ class ClaudeAgent(BaseAgent):
             self._foreground_tool_use_ids.pop(composite_key, None)
             self._turns_with_foreground_tools.discard(composite_key)
             self._clear_detached_foreground_tool_state(composite_key)
-            detached_activities = self._detached_activity_outputs.pop(composite_key, None)
+            detached_activities = self._detached_activity_outputs.get(composite_key)
             if detached_activities:
-                registry = self._activity_registry()
-                if registry is not None:
-                    self._requeue_activities(registry, detached_activities)
-                    self._schedule_completed_activity_flush(composite_key, context)
-            self._detached_assistant_text.pop(composite_key, None)
+                # Keep the claimed batch and selected payload owned by the
+                # recovery path. Requeueing here would make a later retry race
+                # a second claimant and could lose the Result text.
+                self._schedule_completed_activity_flush(composite_key, context)
+            elif composite_key not in self._detached_unsolicited_outputs:
+                self._detached_assistant_text.pop(composite_key, None)
             # A detached synthetic owner is still holding the runtime gate when
             # delivery failed. Preserve its payload and stable output identity so
             # the receiver-end retry (or the next recovery pass) can finish the
             # same durable output exactly once. Successful delivery clears these
             # maps before reaching this finally block.
-            if composite_key not in self._synthetic_pending_owners:
+            if (
+                composite_key not in self._synthetic_pending_owners
+                and composite_key not in self._detached_unsolicited_outputs
+            ):
                 self._detached_unsolicited_outputs.discard(composite_key)
                 self._detached_unsolicited_text.pop(composite_key, None)
                 self._detached_unsolicited_message_outputs.pop(composite_key, None)
@@ -2938,6 +2941,7 @@ class ClaudeAgent(BaseAgent):
         *,
         buffered_failure: _BufferedClaudeFailureReplay | None = None,
     ) -> None:
+        retain_runtime_turn = False
         # A receiver exception retires this client generation.  Close native
         # write admission before any replay or cleanup awaits so a concurrent
         # primary/steer cannot enter the dying receiver.  Keep the steering
@@ -2957,8 +2961,32 @@ class ClaudeAgent(BaseAgent):
         # Clearing reactions can touch the IM adapter, so keep that await out of
         # the admission fence as well.  The fence is already closed and the
         # state snapshot above identifies the failed turn.
+        synthetic_delivery_pending = self._has_synthetic_delivery_pending(composite_key)
         try:
-            await self._clear_pending_reactions(composite_key, context)
+            if synthetic_delivery_pending:
+                await self._clear_pending_reactions(
+                    composite_key,
+                    context,
+                    preserve_pending_requests=True,
+                )
+            else:
+                await self._clear_pending_reactions(composite_key, context)
+
+            if (
+                buffered_failure is None
+                and synthetic_delivery_pending
+            ):
+                # The receiver is gone, but the detached output still has a
+                # durable recovery owner. Do not replace it with a generic
+                # receiver error or retire the gate before its retry settles.
+                retain_runtime_turn = True
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    preserve_pending_request_state=True,
+                    reason="receiver_error_with_retained_detached_output",
+                )
+                return
 
             if buffered_failure is not None:
                 if buffered_failure.auth_handled:
@@ -3124,7 +3152,8 @@ class ClaudeAgent(BaseAgent):
                     contained=contained is True,
                 )
         finally:
-            self._release_service_runtime_turn(context)
+            if not retain_runtime_turn:
+                self._release_service_runtime_turn(context)
 
     async def _handle_assistant_terminal_failure(
         self,
@@ -3447,6 +3476,27 @@ class ClaudeAgent(BaseAgent):
 
         synthetic = self._synthetic_pending_owners.pop(composite_key, None)
         if synthetic is None:
+            pending = self._pending_requests.get(composite_key) or []
+            candidate = pending[0] if pending else None
+            if candidate is not None and getattr(
+                candidate,
+                "_claude_synthetic_owner",
+                False,
+            ):
+                synthetic = candidate
+        if (
+            synthetic is not None
+            and (
+                self._detached_activity_outputs.get(composite_key)
+                or composite_key in self._detached_unsolicited_outputs
+                or composite_key in self._detached_unsolicited_text
+            )
+        ):
+            # Delivery has not crossed the durable boundary. Keep the same
+            # owner responsible for the retained payload and its gate.
+            self._synthetic_pending_owners[composite_key] = synthetic
+            return False
+        if synthetic is None:
             return False
         pending = self._pending_requests.get(composite_key) or []
         if pending and pending[0] is synthetic:
@@ -3457,6 +3507,53 @@ class ClaudeAgent(BaseAgent):
             getattr(synthetic, "context", None) or context
         )
         return True
+
+    def _has_synthetic_delivery_pending(self, composite_key: str) -> bool:
+        """Whether a synthetic turn still owns retained detached output."""
+
+        synthetic = self._synthetic_pending_owners.get(composite_key)
+        pending = self._pending_requests.get(composite_key) or []
+        if synthetic is None and pending:
+            candidate = pending[0]
+            if getattr(candidate, "_claude_synthetic_owner", False):
+                synthetic = candidate
+                self._synthetic_pending_owners[composite_key] = candidate
+        if synthetic is None:
+            # Detached output can coexist with a real pending human request.
+            # That output needs retry, but it does not own the human turn or
+            # its runtime gate. Only an explicit synthetic owner may hold the
+            # gate across receiver cleanup.
+            return False
+        return bool(
+            self._request_activities(synthetic)
+            or self._detached_activity_outputs.get(composite_key)
+            or composite_key in self._detached_unsolicited_outputs
+            or composite_key in self._detached_unsolicited_text
+        )
+
+    def _notify_classified_terminal_activities(
+        self,
+        activities: list[SessionActivity],
+    ) -> None:
+        """Hand deferred terminal Activities to their existing Run owner."""
+
+        service = getattr(self.controller, "agent_service", None)
+        notify = getattr(service, "on_activity_terminal", None)
+        if not callable(notify):
+            return
+        for activity in activities:
+            status = str(getattr(activity, "status", "") or "").strip().lower()
+            if status not in {
+                "completed",
+                "failed",
+                "stopped",
+                "killed",
+                "disconnected",
+            }:
+                continue
+            if getattr(activity, "completed_at", None) is None:
+                continue
+            notify(activity)
 
     def _attach_request_activities(
         self,
@@ -3838,6 +3935,8 @@ class ClaudeAgent(BaseAgent):
                 exc_info=True,
             )
             classification_failed = True
+        if not classification_failed and classified:
+            self._notify_classified_terminal_activities(classified)
         if owner == "human":
             # Keep uncorrelated task facts provisional for a later detached
             # Result. Only a TaskStarted tied to a tool phase proves that the
@@ -3908,6 +4007,7 @@ class ClaudeAgent(BaseAgent):
             elif owner == "detached" and claimed:
                 self._detached_activity_outputs[composite_key] = claimed
                 self._provenance_recovery_evidence.pop(composite_key, None)
+        self._refresh_activity_provenance_barrier(composite_key)
 
     def _select_terminal_text(
         self,
@@ -4090,7 +4190,8 @@ class ClaudeAgent(BaseAgent):
                 if detached:
                     if assistant_text:
                         if composite_key in self._detached_activity_outputs:
-                            self._detached_assistant_text[composite_key] = assistant_text
+                            if not self._detached_assistant_text.get(composite_key):
+                                self._detached_assistant_text[composite_key] = assistant_text
                         else:
                             self._detached_unsolicited_text[composite_key] = assistant_text
                     continue
@@ -4390,7 +4491,13 @@ class ClaudeAgent(BaseAgent):
         # belongs to it. Keep all newly-created Activities provisional until
         # Result.origin classifies the phase, even when a buffered foreground
         # ToolUseBlock already supplied an operational foreground hint.
-        provenance_pending = bool(pending and existing_activity is None)
+        provenance_pending = bool(
+            (pending and existing_activity is None)
+            or (
+                existing_activity is not None
+                and existing_activity.metadata.get("provenance_pending")
+            )
+        )
         phase_id = None
         if provenance_pending:
             self._activity_provenance_barriers.add(composite_key)
@@ -4551,8 +4658,19 @@ class ClaudeAgent(BaseAgent):
             activity_id=task_id,
             status=status,
             metadata=metadata,
-            expects_output=status == "completed" and not foreground,
-            retain_terminal_snapshot=status != "completed" and not foreground,
+            expects_output=(
+                status == "completed"
+                and not foreground
+            ),
+            retain_terminal_snapshot=(
+                status != "completed"
+                and (not foreground or bool(metadata.get("provenance_pending")))
+            )
+            or (
+                status == "completed"
+                and foreground
+                and bool(metadata.get("provenance_pending"))
+            ),
             activation_identity=activation_identity,
         )
         if completed is not None and status == "completed" and not foreground:
@@ -4562,7 +4680,12 @@ class ClaudeAgent(BaseAgent):
                 notify(RuntimeWorkLane.ACTIVITY_OUTPUTS)
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
-        if completed is not None and not foreground and callable(on_terminal):
+        if (
+            completed is not None
+            and not foreground
+            and callable(on_terminal)
+            and not bool((completed.metadata or {}).get("provenance_pending"))
+        ):
             on_terminal(completed)
         if status != "completed" or foreground:
             self._mark_session_idle_if_runtime_free(composite_key)
@@ -4742,14 +4865,16 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         context: MessageContext,
-    ) -> None:
-        activities = self._detached_activity_outputs.pop(composite_key, None)
+    ) -> bool:
+        activities = self._detached_activity_outputs.get(composite_key)
         if not activities:
-            return
+            return False
         activity = activities[-1]
-        text = self._detached_assistant_text.pop(composite_key, "").strip()
+        text = self._detached_assistant_text.get(composite_key, "").strip()
         if not text:
             text = str(activity.metadata.get("summary") or "").strip()
+            if text:
+                self._detached_assistant_text[composite_key] = text
         try:
             await self._emit_activity_result(
                 context,
@@ -4760,46 +4885,31 @@ class ClaudeAgent(BaseAgent):
                 activities=activities,
             )
         except ActivityOutputDeliveryError as err:
-            if not err.delivered:
-                registry = self._activity_registry()
-                if registry is not None:
-                    self._requeue_activities(registry, activities)
-                raise
-            if err.durable:
-                registry = self._activity_registry()
-                if registry is not None:
-                    self._requeue_activities(registry, activities)
-                self._schedule_completed_activity_flush(
-                    composite_key,
-                    context,
-                )
-                return
-            logger.error(
-                "Delivered Claude Activity batch remains fail-closed after incomplete "
-                "local settlement (runtime=%s error=%s)",
+            self._schedule_completed_activity_flush(composite_key, context)
+            logger.warning(
+                "Retaining detached Claude Activity output for retry "
+                "(runtime=%s delivered=%s durable=%s)",
                 composite_key,
-                err,
+                err.delivered,
+                err.durable,
+                exc_info=True,
             )
-            registry = self._activity_registry()
-            if (
-                registry is not None
-                and self._requeue_activities_for_local_settlement(
-                    registry,
-                    activities,
-                )
-            ):
-                self._schedule_completed_activity_flush(
-                    composite_key,
-                    context,
-                )
+            return True
         except Exception:
-            registry = self._activity_registry()
-            if registry is not None:
-                self._requeue_activities(registry, activities)
-            raise
+            self._schedule_completed_activity_flush(composite_key, context)
+            logger.warning(
+                "Retaining detached Claude Activity output after transient "
+                "delivery failure for %s",
+                composite_key,
+                exc_info=True,
+            )
+            return True
+        self._detached_activity_outputs.pop(composite_key, None)
+        self._detached_assistant_text.pop(composite_key, None)
         self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)
         self._retire_synthetic_pending_owner(composite_key, context)
+        return False
 
     async def _flush_completed_activity_outputs(
         self,
@@ -4844,6 +4954,11 @@ class ClaudeAgent(BaseAgent):
         registry = self._activity_registry()
         if registry is None:
             return False
+        if self._detached_activity_outputs.get(composite_key):
+            # The detached Result already owns this exact claimed batch. Let
+            # _flush_detached_activity_output retry its retained payload instead
+            # of claiming a second batch or mixing receipt identities.
+            return False
         if expected_steering_generation is None:
             expected_steering_generation = self._steering_generation(composite_key)
         while True:
@@ -4883,13 +4998,15 @@ class ClaudeAgent(BaseAgent):
                     and bool(self._request_activities(pending_request))
                 )
                 if synthetic_pending_owner:
-                    activities = registry.claim_completed_output_batch(
-                        self.name,
-                        composite_key,
-                    )
+                    activities = self._request_activities(pending_request)
+                    if not activities:
+                        activities = registry.claim_completed_output_batch(
+                            self.name,
+                            composite_key,
+                        )
                     if not activities:
                         return False
-                    self._detached_activity_outputs[composite_key] = activities
+                    self._detached_activity_outputs[composite_key] = list(activities)
                 elif pending_request is not None:
                     self._refresh_activity_provenance_barrier(composite_key)
                     if (
@@ -5057,7 +5174,10 @@ class ClaudeAgent(BaseAgent):
                     context,
                     expected_steering_generation=expected_steering_generation,
                 )
-                await self._flush_detached_activity_output(composite_key, context)
+                retry = (
+                    await self._flush_detached_activity_output(composite_key, context)
+                    or retry
+                )
                 retry = (
                     await self._flush_detached_unsolicited_output(
                         composite_key,
@@ -5171,12 +5291,11 @@ class ClaudeAgent(BaseAgent):
             return None
         if message_type == "result" and result_owner == "human":
             # No pending human request remains, so this is an unsolicited
-            # frame despite the SDK's human origin marker. Keep the historical
-            # detached lifecycle for that case without consuming any pending
-            # request (there is none to consume).
-            self._detached_unsolicited_outputs.add(composite_key)
-            return "detached"
-        if message_type == "result" and result_owner == "detached":
+            # frame despite the SDK's human origin marker. It still needs the
+            # same synthetic owner as any other unsolicited terminal frame so
+            # the runtime gate stays held until durable delivery.
+            result_owner = "detached"
+        if message_type == "result" and result_owner == "detached" and pending:
             resolved_phase = self._resolved_provisional_phase_ids.pop(
                 composite_key,
                 None,
@@ -5310,12 +5429,19 @@ class ClaudeAgent(BaseAgent):
             ),
             output_activities=completed_activities,
         )
+        request._claude_synthetic_owner = True
         self._pending_requests.setdefault(composite_key, []).append(request)
         self._synthetic_pending_owners[composite_key] = request
         logger.info(
             "Opened agent-initiated turn for session %s (unsolicited backend output)",
             composite_key,
         )
+        if message_type == "result" and result_owner == "detached":
+            if completed_activities:
+                self._detached_activity_outputs[composite_key] = completed_activities
+                return "activity"
+            self._detached_unsolicited_outputs.add(composite_key)
+            return "detached"
         return None
 
     def _mark_session_idle_if_no_pending_requests(self, composite_key: str) -> bool:
@@ -5387,10 +5513,20 @@ class ClaudeAgent(BaseAgent):
                     logger.debug(f"Failed to remove reaction ack: {err}")
                 return
 
-    async def _clear_pending_reactions(self, composite_key: str, context: MessageContext) -> None:
+    async def _clear_pending_reactions(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        *,
+        preserve_pending_requests: bool = False,
+    ) -> None:
         """Clear all pending reactions for a session (for error cleanup)."""
         reactions = self._pending_reactions.pop(composite_key, None)
-        requests = self._pending_requests.pop(composite_key, None)
+        requests = (
+            None
+            if preserve_pending_requests
+            else self._pending_requests.pop(composite_key, None)
+        )
         if reactions:
             for message_id, emoji in reactions:
                 try:

@@ -274,6 +274,12 @@ class SessionActivityRegistry:
             str, list[tuple[datetime, str]]
         ] = defaultdict(list)
         self._recovered_terminals: deque[SessionActivity] = deque()
+        # Failed/stopped/killed Activities can become terminal before the
+        # Claude Result that classifies their owner arrives. Keep those
+        # snapshots addressable until the terminal owner is known.
+        self._terminal_snapshots: dict[
+            tuple[str, str], dict[str, SessionActivity]
+        ] = defaultdict(dict)
         self._provenance_persistence_recovery: dict[
             tuple[str, str], dict[str, str]
         ] = {}
@@ -450,6 +456,9 @@ class SessionActivityRegistry:
             activity = claimed.entry.activity
             if (activity.backend, activity.runtime_key) == key and activity.id in pending:
                 activities[activity.id] = activity
+        for activity in self._terminal_snapshots.get(key, {}).values():
+            if activity.id in pending:
+                activities[activity.id] = activity
 
         for activity_id, activity in activities.items():
             phase = pending.get(activity_id, "awaiting_output").split(":", 1)[0]
@@ -566,6 +575,7 @@ class SessionActivityRegistry:
                     completed_at=now,
                 )
             )
+            self._terminal_snapshots[connection_key][recovered.id] = recovered
             self._recovered_terminals.append(recovered)
 
     def set_connection(
@@ -875,6 +885,7 @@ class SessionActivityRegistry:
             self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
             self._active.pop(key, None)
             self._active_identities.pop(key, None)
+            self._terminal_snapshots[(backend, runtime_key)][completed.id] = completed
         else:
             self._delete_activity(completed)
             self._active.pop(key, None)
@@ -1205,6 +1216,26 @@ class SessionActivityRegistry:
                         error=error,
                     )
                 classified.append(updated)
+            snapshots = self._terminal_snapshots.get(key)
+            if snapshots:
+                for activity_id, activity in list(snapshots.items()):
+                    if not matches(activity):
+                        continue
+                    updated = classify(activity)
+                    snapshots[activity_id] = updated
+                    try:
+                        self._persist_activity(updated, phase=TERMINAL_SNAPSHOT_PHASE)
+                        self._provenance_persistence_recovery.get(key, {}).pop(
+                            updated.id,
+                            None,
+                        )
+                    except Exception as error:
+                        self._record_provenance_persistence_recovery(
+                            updated,
+                            phase=TERMINAL_SNAPSHOT_PHASE,
+                            error=error,
+                        )
+                    classified.append(updated)
             if not self._provenance_persistence_recovery.get(key):
                 self._provenance_persistence_recovery.pop(key, None)
         return classified
@@ -1237,10 +1268,15 @@ class SessionActivityRegistry:
             for entry in self._completed_outputs.get(key) or ():
                 if competes(entry.activity):
                     return True
-            return any(
+            if any(
                 (claimed.entry.activity.backend, claimed.entry.activity.runtime_key) == key
                 and competes(claimed.entry.activity)
                 for claimed in self._claimed_completed_outputs.values()
+            ):
+                return True
+            return any(
+                competes(activity)
+                for activity in self._terminal_snapshots.get(key, {}).values()
             )
 
     def _bind_claimed_output_batch_or_requeue(
@@ -2115,15 +2151,43 @@ class SessionActivityRegistry:
 
     def drain_recovered_terminals(self) -> list[SessionActivity]:
         with self._lock:
-            values = list(self._recovered_terminals)
-            self._recovered_terminals.clear()
+            values = []
+            remaining = deque()
+            for previous in self._recovered_terminals:
+                current = self._terminal_snapshots.get(
+                    (previous.backend, previous.runtime_key), {}
+                ).get(previous.id)
+                if current is None:
+                    continue
+                if current.metadata.get("provenance_pending"):
+                    remaining.append(current)
+                else:
+                    values.append(current)
+            self._recovered_terminals = remaining
         return values
+
+    def terminal_snapshots_for_runtime(
+        self, backend: str, runtime_key: str,
+    ) -> list[SessionActivity]:
+        """Return retained terminals without consuming classification evidence."""
+
+        with self._lock:
+            self._retry_provenance_persistence_locked((backend, runtime_key))
+            return list(self._terminal_snapshots.get((backend, runtime_key), {}).values())
 
     def ack_recovered_terminal(self, activity: SessionActivity) -> None:
         """Delete a recovered live snapshot only after its Run policy settles."""
 
         with self._lock:
+            if activity.metadata.get("provenance_pending"):
+                return
             self._delete_activity(activity)
+            key = (str(activity.backend), str(activity.runtime_key))
+            snapshots = self._terminal_snapshots.get(key)
+            if snapshots is not None:
+                snapshots.pop(str(activity.id), None)
+                if not snapshots:
+                    self._terminal_snapshots.pop(key, None)
 
     def has_backend_work(self, backend: str) -> bool:
         """Whether a backend has live Activities or undelivered completions."""
@@ -2137,6 +2201,7 @@ class SessionActivityRegistry:
                     for key, queue in self._completed_outputs.items()
                 )
                 or any(key[0] == identity for key in self._claimed_completed_outputs)
+                or any(key[0] == identity for key in self._terminal_snapshots)
             )
 
     def end_backend(self, backend: str, *, status: str = "killed") -> list[SessionActivity]:
@@ -2162,6 +2227,11 @@ class SessionActivityRegistry:
             runtime_keys.update(
                 runtime_key
                 for item_backend, runtime_key, _activity_id in self._claimed_completed_outputs
+                if item_backend == identity
+            )
+            runtime_keys.update(
+                runtime_key
+                for item_backend, runtime_key in self._terminal_snapshots
                 if item_backend == identity
             )
         completed: list[SessionActivity] = []
@@ -2207,6 +2277,19 @@ class SessionActivityRegistry:
                 self._claimed_completed_outputs.pop(key, None)
             for activity in terminated_pending:
                 self._discard_recovered_output_id(self._activity_key(activity))
+            # Backend-wide force termination has no later Claude Result that
+            # could classify an Activity which was not already provisional.
+            # Keep only those explicit provenance snapshots addressable; the
+            # ordinary terminal records were already durably written above and
+            # must not keep the backend looking active forever.
+            for key, snapshots in list(self._terminal_snapshots.items()):
+                if key[0] != identity:
+                    continue
+                for activity_id, activity in list(snapshots.items()):
+                    if not activity.metadata.get("provenance_pending"):
+                        snapshots.pop(activity_id, None)
+                if not snapshots:
+                    self._terminal_snapshots.pop(key, None)
         completed.extend(terminated_pending)
         return completed
 
