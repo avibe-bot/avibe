@@ -336,6 +336,7 @@ def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home
     '{ env_http_headers = ["X_KEY"] }',
     '{ base_url = 1 }',
     '{ stream_max_retries = "3" }',
+    '{ wire_api = "bogus" }',
 ])
 def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
     _write(home / ".codex/config.toml", f"model_providers = {{ relay = {entry} }}\n")

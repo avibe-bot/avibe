@@ -795,7 +795,9 @@ def _codex_provider_well_typed(provider: object) -> bool:
         for key in _CODEX_PROVIDER_COUNTS
     ):
         return False
-    if "wire_api" in provider and not isinstance(provider["wire_api"], str):
+    if "wire_api" in provider and provider["wire_api"] not in ("chat", "responses"):
+        # An unknown variant fails deserialization. `chat` stays accepted:
+        # older CLIs still run it, and migration carries it as openai_chat.
         return False
     return "requires_openai_auth" not in provider or isinstance(provider["requires_openai_auth"], bool)
 
