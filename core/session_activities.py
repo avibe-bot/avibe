@@ -914,8 +914,9 @@ class SessionActivityRegistry:
         Explicit ``turn_ids`` select every matching completion in FIFO order,
         even when unrelated output is interleaved. Without them, the queue head
         defines the batch; turn-less legacy completions remain single-item.
-        ``metadata_match`` selects a producer-defined provisional batch without
-        borrowing a human Turn identity.
+        ``metadata_match`` is an eligibility predicate for the same FIFO and
+        persisted-receipt selection rules; it never creates a second batching
+        algorithm.
         """
 
         key = (str(backend), str(runtime_key))
@@ -929,13 +930,6 @@ class SessionActivityRegistry:
                 for claimed in self._claimed_completed_outputs.values()
             ):
                 return []
-            if metadata_match is not None:
-                claimed = self._claim_completed_outputs(
-                    backend,
-                    runtime_key,
-                    metadata_match=metadata_match,
-                )
-                return self._bind_claimed_output_batch_or_requeue(claimed)
             queue = self._completed_outputs.get(key)
             if not queue:
                 return []
@@ -954,6 +948,11 @@ class SessionActivityRegistry:
                     for entry in queue
                     if identities is None
                     or str(entry.activity.turn_id or "").strip() in identities
+                    if metadata_match is None
+                    or not any(
+                        entry.activity.metadata.get(name) != value
+                        for name, value in metadata_match.items()
+                    )
                 ),
                 None,
             )
@@ -973,11 +972,15 @@ class SessionActivityRegistry:
                 if identities is None:
                     head_turn_id = str(candidate.turn_id or "").strip()
                     if not head_turn_id:
+                        phase_id = str(
+                            (metadata_match or {}).get("provenance_phase_id") or ""
+                        ).strip()
                         claimed = self._claim_completed_outputs(
                             backend,
                             runtime_key,
                             unbound_only=True,
-                            limit=1,
+                            metadata_match=metadata_match,
+                            limit=None if phase_id else 1,
                         )
                         return self._bind_claimed_output_batch_or_requeue(claimed)
                     identities = {head_turn_id}
@@ -986,8 +989,163 @@ class SessionActivityRegistry:
                     runtime_key,
                     turn_ids=identities,
                     unbound_only=True,
+                    metadata_match=metadata_match,
                 )
             return self._bind_claimed_output_batch_or_requeue(claimed)
+
+    def classify_provisional_provenance(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        activity_ids: set[str],
+        parent_activity_ids: set[str],
+        turn_id: str | None = None,
+        run_ids: list[str] | tuple[str, ...] = (),
+        delivery_key_external: str | None = None,
+        phase_id: str | None = None,
+        detached: bool,
+    ) -> list[SessionActivity]:
+        """Classify only the provisional Activity phase named by its producer.
+
+        The receiver may know that a buffered phase is human-owned or detached
+        before a completion receipt is emitted.  Update active, queued, and
+        already-claimed entries in place without changing receipt membership,
+        sequence, or idempotency metadata.
+        """
+
+        normalized_ids = {str(value or "").strip() for value in activity_ids}
+        normalized_parents = {
+            str(value or "").strip() for value in parent_activity_ids
+        }
+        normalized_ids.discard("")
+        normalized_parents.discard("")
+        normalized_run_ids = tuple(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in run_ids
+                if str(value or "").strip()
+            )
+        )
+        normalized_turn_id = str(turn_id or "").strip() or None
+        normalized_delivery_key = str(delivery_key_external or "").strip() or None
+        normalized_phase_id = str(phase_id or "").strip() or None
+        key = (str(backend), str(runtime_key))
+        classified: list[SessionActivity] = []
+
+        def matches(activity: SessionActivity) -> bool:
+            if not activity.metadata.get("provenance_pending"):
+                return False
+            return (
+                activity.id in normalized_ids
+                or str(activity.parent_activity_id or "").strip()
+                in normalized_parents
+            )
+
+        def classify(activity: SessionActivity) -> SessionActivity:
+            metadata = dict(activity.metadata)
+            metadata.pop("provenance_pending", None)
+            metadata.pop("provenance_human", None)
+            metadata.pop("provenance_detached", None)
+            if normalized_phase_id:
+                metadata["provenance_phase_id"] = normalized_phase_id
+            if detached:
+                metadata["provenance_detached"] = True
+                metadata.pop("delivery_key_external", None)
+                metadata.pop("run_ids", None)
+                return replace(
+                    activity,
+                    foreground=False,
+                    detached_from_run=True,
+                    turn_id=None,
+                    run_id=None,
+                    metadata=metadata,
+                    updated_at=_now_iso(),
+                )
+
+            metadata["provenance_human"] = True
+            if normalized_delivery_key:
+                metadata["delivery_key_external"] = normalized_delivery_key
+            if normalized_run_ids:
+                metadata["run_ids"] = list(normalized_run_ids)
+            else:
+                metadata.pop("run_ids", None)
+            return replace(
+                activity,
+                detached_from_run=False,
+                turn_id=normalized_turn_id,
+                run_id=normalized_run_ids[0] if normalized_run_ids else None,
+                metadata=metadata,
+                updated_at=_now_iso(),
+            )
+
+        with self._lock:
+            for activity_key, activity in list(self._active.items()):
+                if activity_key[:2] != key or not matches(activity):
+                    continue
+                updated = classify(activity)
+                self._persist_activity(updated, phase="active")
+                self._active[activity_key] = updated
+                classified.append(updated)
+
+            queue = self._completed_outputs.get(key)
+            if queue:
+                updated_entries: deque[_CompletedOutputEntry] = deque()
+                for entry in queue:
+                    if entry.activity and matches(entry.activity):
+                        updated = classify(entry.activity)
+                        self._persist_activity(updated, phase="awaiting_output")
+                        entry = replace(entry, activity=updated)
+                        classified.append(updated)
+                    updated_entries.append(entry)
+                self._completed_outputs[key] = updated_entries
+
+            for activity_key, claimed in list(self._claimed_completed_outputs.items()):
+                activity = claimed.entry.activity
+                if (activity.backend, activity.runtime_key) != key or not matches(activity):
+                    continue
+                updated = classify(activity)
+                self._persist_activity(updated, phase="awaiting_output")
+                self._claimed_completed_outputs[activity_key] = replace(
+                    claimed,
+                    entry=replace(claimed.entry, activity=updated),
+                )
+                classified.append(updated)
+        return classified
+
+    def has_competing_output(
+        self,
+        backend: str,
+        runtime_key: str,
+        *,
+        current_turn_id: str | None = None,
+    ) -> bool:
+        """Whether output exists that is not already bound to this human Turn."""
+
+        key = (str(backend), str(runtime_key))
+        normalized_turn_id = str(current_turn_id or "").strip()
+
+        def competes(activity: SessionActivity) -> bool:
+            if (
+                activity.metadata.get("provenance_human")
+                and normalized_turn_id
+                and activity.turn_id == normalized_turn_id
+            ):
+                return False
+            return True
+
+        with self._lock:
+            for activity in self._active.values():
+                if (activity.backend, activity.runtime_key) == key and competes(activity):
+                    return True
+            for entry in self._completed_outputs.get(key) or ():
+                if competes(entry.activity):
+                    return True
+            return any(
+                (claimed.entry.activity.backend, claimed.entry.activity.runtime_key) == key
+                and competes(claimed.entry.activity)
+                for claimed in self._claimed_completed_outputs.values()
+            )
 
     def _bind_claimed_output_batch_or_requeue(
         self,

@@ -577,6 +577,99 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(human.kwargs["request"], request)
         self.assertFalse(agent._has_pending_requests("session-provenance:/tmp/work"))
 
+    async def test_terminal_task_without_output_keeps_phase_barrier_until_human_result(
+        self,
+    ):
+        for status in ("failed", "stopped", "killed"):
+            with self.subTest(status=status):
+                key = f"session-no-output-{status}:/tmp/work"
+                agent, _service = _build_agent()
+                context = _context(key)
+                request = _pending_request(key)
+                agent._pending_requests[key] = [request]
+                agent.emit_result_message = AsyncMock(return_value="message-id")
+                terminal = TaskNotificationMessage("task-no-output", "not user text")
+                terminal.status = status
+
+                await agent._receive_messages(
+                    _client(
+                        [
+                            TaskStartedMessage("task-no-output"),
+                            terminal,
+                            AssistantMessage(
+                                _block(TextBlock, text="detached failure detail")
+                            ),
+                            ResultMessage("unclassified result"),
+                            ResultMessage("human reply", origin={"kind": "human"}),
+                        ]
+                    ),
+                    "sess-no-output",
+                    "/tmp/work",
+                    context,
+                    composite_key=key,
+                )
+
+                human_calls = [
+                    call
+                    for call in agent.emit_result_message.await_args_list
+                    if call.kwargs.get("request") is request
+                ]
+                self.assertEqual(len(human_calls), 1)
+                self.assertEqual(human_calls[0].args[1], "human reply")
+
+    async def test_detached_tool_output_cannot_replace_following_human_result(self):
+        key = "session-detached-tool-before-human:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n".join(parts),
+            format_toolcall=lambda *_args, **_kwargs: "fixture tool",
+            format_toolcall_label=lambda *_args, **_kwargs: "fixture tool",
+        )
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-detached-tool-before-human",
+            activity_id="background",
+            kind="background_task",
+            turn_id="old-turn",
+        )
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(
+                        _block(
+                            ToolUseBlock,
+                            id="detached-tool",
+                            name="Bash",
+                            input={"command": "fixture", "run_in_background": False},
+                        )
+                    ),
+                    ResultMessage(
+                        "background text",
+                        origin={"kind": "task-notification"},
+                    ),
+                    ResultMessage("human reply", origin={"kind": "human"}),
+                ]
+            ),
+            "sess-detached-tool-before-human",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        human_calls = [
+            call
+            for call in agent.emit_result_message.await_args_list
+            if call.kwargs.get("request") is request
+        ]
+        self.assertEqual(len(human_calls), 1)
+        self.assertEqual(human_calls[0].args[1], "human reply")
+
     async def test_ambiguous_task_started_does_not_copy_human_harness_attribution(self):
         key = "session-ambiguous-harness:/tmp/work"
         agent, service = _build_agent()
@@ -1356,6 +1449,127 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(agent._has_pending_requests(key))
         agent.controller.emit_agent_message.assert_awaited()
+
+    async def test_stop_owned_result_during_reaction_cleanup_cannot_emit(self):
+        key = "session-stop-reaction-cleanup:/tmp/work"
+        agent, _service = _build_agent()
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        cleanup_entered = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        async def hold_reaction(*_args, **_kwargs):
+            cleanup_entered.set()
+            await release_cleanup.wait()
+
+        agent._remove_specific_pending_reaction = hold_reaction
+        agent._remove_ack_reaction = AsyncMock()
+        agent._cleanup_runtime_session = AsyncMock()
+        client = SimpleNamespace(interrupt=AsyncMock())
+        agent.claude_sessions[key] = client
+        stop_request = SimpleNamespace(
+            context=_context(key),
+            composite_session_id=key,
+            stop_failure_reason=None,
+        )
+
+        stop = asyncio.create_task(agent.handle_stop(stop_request))
+        try:
+            await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+            self.assertNotIn(key, agent._pending_requests)
+            await agent._receive_messages(
+                _client([ResultMessage("late human result", origin={"kind": "human"})]),
+                "sess-stop-reaction-cleanup",
+                "/tmp/work",
+                _context(key),
+                composite_key=key,
+            )
+        finally:
+            release_cleanup.set()
+            self.assertTrue(await asyncio.wait_for(stop, timeout=1))
+
+        agent.emit_result_message.assert_not_awaited()
+        terminal = [
+            call
+            for call in agent.controller.emit_agent_message.await_args_list
+            if len(call.args) > 1 and call.args[1] == "result"
+        ]
+        self.assertEqual(len(terminal), 1)
+        self.assertEqual(terminal[0].kwargs["level"], "silent")
+
+    async def test_proven_human_background_activity_keeps_run_lineage(self):
+        key = "session-positive-background-lineage:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        request.context.platform_specific.update(
+            {
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "human-run",
+                "accepted_agent_run_ids": ["human-run"],
+                "delivery_key_external": "human-delivery",
+            }
+        )
+        agent._pending_requests[key] = [request]
+
+        class _Formatter:
+            @staticmethod
+            def format_toolcall(*_args, **_kwargs):
+                return "fixture tool"
+
+            @staticmethod
+            def format_toolcall_label(*_args, **_kwargs):
+                return "fixture tool"
+
+        agent._get_formatter = lambda _context: _Formatter()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        snapshots = []
+
+        class _Client:
+            def receive_messages(self):
+                async def stream():
+                    yield AssistantMessage(
+                        _block(
+                            ToolUseBlock,
+                            id="human-background-tool",
+                            name="Bash",
+                            input={
+                                "command": "fixture",
+                                "run_in_background": True,
+                            },
+                        )
+                    )
+                    yield TaskStartedMessage(
+                        "human-background-task",
+                        tool_use_id="human-background-tool",
+                    )
+                    yield ResultMessage(
+                        "background started",
+                        origin={"kind": "human"},
+                    )
+                    snapshots.extend(
+                        service.activities.active_for_runtime("claude", key)
+                    )
+
+                return stream()
+
+        await agent._receive_messages(
+            _Client(),
+            "sess-positive-background-lineage",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].run_id, "human-run")
+        self.assertEqual(snapshots[0].turn_id, "human-turn")
+        self.assertEqual(
+            snapshots[0].metadata.get("delivery_key_external"),
+            "human-delivery",
+        )
+        self.assertFalse(snapshots[0].metadata.get("provenance_pending"))
 
 
 if __name__ == "__main__":

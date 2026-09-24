@@ -1506,3 +1506,52 @@ def test_force_end_backend_claimed_output_wins_late_delivery_race(tmp_path: Path
     assert records[0]["phase"] == "terminal"
     assert records[0]["activity"]["status"] == "killed"
     engine.dispose()
+
+
+def test_metadata_retry_preserves_persisted_receipt_batch_boundary():
+    registry = SessionActivityRegistry()
+
+    def complete(activity_id: str) -> None:
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            metadata={
+                "provenance_pending": True,
+                "provenance_phase_id": "phase-1",
+            },
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    complete("first")
+    first = registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        metadata_match={
+            "provenance_pending": True,
+            "provenance_phase_id": "phase-1",
+        },
+    )
+    receipt = first[0].metadata["output_batch_id"]
+    assert registry.requeue_completed_outputs(first) == 1
+
+    complete("later")
+    retry = registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        metadata_match={
+            "provenance_pending": True,
+            "provenance_phase_id": "phase-1",
+        },
+    )
+
+    assert [item.id for item in retry] == ["first"]
+    assert retry[0].metadata["output_batch_id"] == receipt

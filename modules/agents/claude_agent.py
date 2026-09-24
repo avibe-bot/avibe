@@ -113,6 +113,8 @@ class ClaudeAgent(BaseAgent):
         self._steering_input_shutdowns: set[str] = set()
         self._ambiguous_interrupts: set[str] = set()
         self._steering_closing: set[str] = set()
+        self._stop_owned_terminal_keys: set[str] = set()
+        self._stop_owned_terminal_epochs: dict[str, int] = {}
         self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
         self._detached_assistant_text: dict[str, str] = {}
@@ -122,8 +124,17 @@ class ClaudeAgent(BaseAgent):
         self._activity_settle_events: dict[str, asyncio.Event] = {}
         self._buffered_assistant_messages: dict[str, list[tuple[object, int | None]]] = {}
         self._activity_provenance_barriers: set[str] = set()
+        self._activity_provenance_barrier_owners: dict[str, int] = {}
         self._foreground_tool_use_ids: dict[str, set[str]] = {}
         self._turns_with_foreground_tools: set[str] = set()
+        self._provisional_tool_use_ids: dict[str, set[str]] = {}
+        self._provisional_unbound_tool_use_ids: dict[str, set[str]] = {}
+        self._provisional_foreground_tool_use_ids: dict[str, set[str]] = {}
+        self._provisional_activity_ids: dict[str, set[str]] = {}
+        self._provisional_unbound_activity_ids: dict[str, set[str]] = {}
+        self._provisional_foreground_task_ids: dict[str, set[str]] = {}
+        self._provisional_phase_ids: dict[str, str] = {}
+        self._resolved_provisional_phase_ids: dict[str, str] = {}
         self._detached_foreground_tool_use_ids: dict[str, set[str]] = {}
         self._detached_foreground_task_ids: dict[str, set[str]] = {}
 
@@ -940,8 +951,17 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message.pop(composite_key, None)
         self._buffered_assistant_messages.pop(composite_key, None)
         self._activity_provenance_barriers.discard(composite_key)
+        self._activity_provenance_barrier_owners.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
         self._turns_with_foreground_tools.discard(composite_key)
+        self._provisional_tool_use_ids.pop(composite_key, None)
+        self._provisional_unbound_tool_use_ids.pop(composite_key, None)
+        self._provisional_foreground_tool_use_ids.pop(composite_key, None)
+        self._provisional_activity_ids.pop(composite_key, None)
+        self._provisional_unbound_activity_ids.pop(composite_key, None)
+        self._provisional_foreground_task_ids.pop(composite_key, None)
+        self._provisional_phase_ids.pop(composite_key, None)
+        self._resolved_provisional_phase_ids.pop(composite_key, None)
         self._clear_detached_foreground_tool_state(composite_key)
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
@@ -1145,7 +1165,9 @@ class ClaudeAgent(BaseAgent):
         ambiguous_interrupts = getattr(self, "_ambiguous_interrupts", None)
         if ambiguous_interrupts is not None:
             ambiguous_interrupts.discard(composite_key)
+        self._stop_owned_terminal_keys.discard(composite_key)
         self._activity_provenance_barriers.discard(composite_key)
+        self._activity_provenance_barrier_owners.pop(composite_key, None)
         self._steering_closing_keys().discard(composite_key)
         self._steering_writer_keys().discard(composite_key)
 
@@ -1511,11 +1533,14 @@ class ClaudeAgent(BaseAgent):
                     self._steering_closing_keys().discard(composite_key)
                     self._ambiguous_interrupt_keys().add(composite_key)
                     raise
-                self._advance_steering_stop_epoch(composite_key)
+                stop_epoch = self._advance_steering_stop_epoch(composite_key)
                 # Claim the pending Result owner before releasing the lock. A
                 # terminal frame queued behind interrupt must not settle this
                 # stopped Turn as a successful result.
                 stopped_request = self._pop_pending_request(composite_key)
+                if stopped_request is not None:
+                    self._stop_owned_terminal_keys.add(composite_key)
+                    self._stop_owned_terminal_epochs[composite_key] = stop_epoch
         except Exception as err:
             request.stop_failure_reason = "interrupt_failed"
             logger.error(f"Failed to interrupt Claude session {composite_key}: {err}")
@@ -1624,6 +1649,7 @@ class ClaudeAgent(BaseAgent):
             if receiver_activation_identity is None:
                 receiver_activation_identity = self._client_activation_identity(client)
             receiver_steering_lock = self._steering_lock(composite_key)
+            receiver_stop_epoch = self._steering_stop_epoch(composite_key)
             self._set_activity_connection(
                 composite_key,
                 context,
@@ -1763,6 +1789,22 @@ class ClaudeAgent(BaseAgent):
                     result_owner = "agent"
                     if message_type == "result":
                         result_owner = self._result_owner(composite_key, message)
+                        if self._stop_owned_result_for_receiver(
+                            composite_key,
+                            receiver_stop_epoch,
+                        ):
+                            self._clear_result_phase_state(composite_key)
+                            self._stop_owned_terminal_keys.discard(composite_key)
+                            logger.info(
+                                "Suppressing Claude terminal result owned by Stop for %s",
+                                composite_key,
+                            )
+                            continue
+                        self._resolve_provisional_phase(
+                            composite_key,
+                            context,
+                            owner=result_owner,
+                        )
                     if (
                         message_type == "assistant"
                         and self._should_buffer_assistant_message(composite_key)
@@ -1777,6 +1819,7 @@ class ClaudeAgent(BaseAgent):
                                     composite_key,
                                     block,
                                     detached=False,
+                                    provisional=True,
                                 )
                         self._buffered_assistant_messages.setdefault(
                             composite_key,
@@ -1815,6 +1858,11 @@ class ClaudeAgent(BaseAgent):
                                     detached=(
                                         output_mode == "detached"
                                         or composite_key in self._detached_activity_outputs
+                                    ),
+                                    provisional=bool(
+                                        self._pending_requests.get(composite_key)
+                                        and output_mode
+                                        not in {"detached", "activity"}
                                     ),
                                 )
                                 # AskUserQuestion handling disabled - tool is disallowed via ClaudeAgentOptions
@@ -2099,6 +2147,10 @@ class ClaudeAgent(BaseAgent):
                             self._mark_session_idle_if_runtime_free(composite_key)
                             self._signal_activity_output_settled(composite_key)
                             self._clear_detached_foreground_tool_state(composite_key)
+                            self._resolved_provisional_phase_ids.pop(
+                                composite_key,
+                                None,
+                            )
                             continue
                         if output_mode == "detached":
                             detached_text = self._detached_unsolicited_text.get(
@@ -2122,6 +2174,10 @@ class ClaudeAgent(BaseAgent):
                                     output=self._unsolicited_message_output(message),
                                 )
                             self._clear_detached_foreground_tool_state(composite_key)
+                            self._resolved_provisional_phase_ids.pop(
+                                composite_key,
+                                None,
+                            )
                             continue
                         terminal_superseded = False
                         superseded_result_text = ""
@@ -3499,6 +3555,7 @@ class ClaudeAgent(BaseAgent):
         block: ToolUseBlock,
         *,
         detached: bool = False,
+        provisional: bool = False,
     ) -> None:
         """Remember which Claude task frames belong to foreground tool steps."""
 
@@ -3515,6 +3572,18 @@ class ClaudeAgent(BaseAgent):
         runs_in_background = bool(
             isinstance(tool_input, dict) and tool_input.get("run_in_background") is True
         )
+        if provisional:
+            self._provisional_tool_use_ids.setdefault(
+                composite_key,
+                set(),
+            ).add(tool_use_id)
+            if runs_in_background:
+                return
+            self._provisional_foreground_tool_use_ids.setdefault(
+                composite_key,
+                set(),
+            ).add(tool_use_id)
+            return
         if runs_in_background:
             return
         if detached:
@@ -3531,6 +3600,148 @@ class ClaudeAgent(BaseAgent):
     def _clear_detached_foreground_tool_state(self, composite_key: str) -> None:
         self._detached_foreground_tool_use_ids.pop(composite_key, None)
         self._detached_foreground_task_ids.pop(composite_key, None)
+
+    def _ensure_provisional_phase(self, composite_key: str) -> str:
+        phase_id = self._provisional_phase_ids.get(composite_key)
+        if phase_id is None:
+            phase_id = f"{composite_key}:provisional:{uuid.uuid4().hex}"
+            self._provisional_phase_ids[composite_key] = phase_id
+        return phase_id
+
+    def _provisional_phase_tool_ids(self, composite_key: str) -> set[str]:
+        tool_ids = set(
+            self._provisional_tool_use_ids.get(composite_key) or ()
+        )
+        for message, _generation in self._buffered_assistant_messages.get(
+            composite_key,
+            (),
+        ):
+            for block in getattr(message, "content", []) or []:
+                if not isinstance(block, ToolUseBlock):
+                    continue
+                tool_id = str(getattr(block, "id", "") or "").strip()
+                if tool_id:
+                    tool_ids.add(tool_id)
+        return tool_ids
+
+    def _resolve_provisional_phase(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        *,
+        owner: str,
+    ) -> None:
+        """Classify buffered tool/task facts before terminal output can await."""
+
+        provisional_activity_ids = set(
+            self._provisional_activity_ids.get(composite_key) or ()
+        )
+        unbound_activity_ids = set(
+            self._provisional_unbound_activity_ids.get(composite_key) or ()
+        )
+        provisional_tool_ids = self._provisional_phase_tool_ids(composite_key)
+        unbound_tool_ids = set(
+            self._provisional_unbound_tool_use_ids.get(composite_key) or ()
+        )
+        provisional_foreground_tool_ids = set(
+            self._provisional_foreground_tool_use_ids.get(composite_key) or ()
+        )
+        phase_id = self._provisional_phase_ids.get(composite_key)
+        if owner not in {"human", "detached"}:
+            return
+        if phase_id:
+            self._resolved_provisional_phase_ids[composite_key] = phase_id
+
+        registry = self._activity_registry()
+        pending = self._pending_requests.get(composite_key) or []
+        pending_request = pending[0] if pending else None
+        turn_id = self._current_turn_id(composite_key, context) if pending else None
+        run_ids = self._activity_run_ids(composite_key, context) if pending else []
+        source = (
+            getattr(pending_request, "context", None)
+            if pending_request is not None
+            else context
+        )
+        delivery_key = str(
+            (getattr(source, "platform_specific", None) or {}).get(
+                "delivery_key_external"
+            )
+            or ""
+        ).strip()
+
+        if owner == "human":
+            if provisional_foreground_tool_ids:
+                self._foreground_tool_use_ids.setdefault(
+                    composite_key,
+                    set(),
+                ).update(provisional_foreground_tool_ids)
+                self._turns_with_foreground_tools.add(composite_key)
+            activity_ids = provisional_activity_ids - unbound_activity_ids
+            detached = False
+        else:
+            detached_tool_ids = self._detached_foreground_tool_use_ids.setdefault(
+                composite_key,
+                set(),
+            )
+            detached_tool_ids.update(provisional_foreground_tool_ids)
+            activity_ids = provisional_activity_ids
+            detached = True
+
+        if registry is None or not activity_ids and not provisional_tool_ids:
+            return
+        classified = registry.classify_provisional_provenance(
+            self.name,
+            composite_key,
+            activity_ids=activity_ids,
+            parent_activity_ids=(
+                provisional_tool_ids
+                if owner == "detached"
+                else provisional_tool_ids - unbound_tool_ids
+            ),
+            turn_id=turn_id,
+            run_ids=run_ids,
+            delivery_key_external=delivery_key,
+            phase_id=phase_id,
+            detached=detached,
+        )
+        if owner == "human":
+            # Keep uncorrelated task facts provisional for a later detached
+            # Result. Only a TaskStarted tied to a tool phase proves that the
+            # human terminal owns that Activity.
+            self._provisional_foreground_tool_use_ids.pop(composite_key, None)
+            self._provisional_foreground_task_ids.pop(composite_key, None)
+            if not unbound_activity_ids:
+                self._provisional_activity_ids.pop(composite_key, None)
+                self._provisional_unbound_activity_ids.pop(composite_key, None)
+                self._provisional_tool_use_ids.pop(composite_key, None)
+                self._provisional_unbound_tool_use_ids.pop(composite_key, None)
+                self._provisional_phase_ids.pop(composite_key, None)
+                self._resolved_provisional_phase_ids.pop(composite_key, None)
+        elif owner == "detached":
+            self._provisional_activity_ids.pop(composite_key, None)
+            self._provisional_unbound_activity_ids.pop(composite_key, None)
+            self._provisional_tool_use_ids.pop(composite_key, None)
+            self._provisional_unbound_tool_use_ids.pop(composite_key, None)
+            self._provisional_foreground_tool_use_ids.pop(composite_key, None)
+            self._provisional_foreground_task_ids.pop(composite_key, None)
+            self._provisional_phase_ids.pop(composite_key, None)
+        if classified and phase_id:
+            claimed = registry.claim_completed_output_batch(
+                self.name,
+                composite_key,
+                metadata_match={
+                    "provenance_phase_id": phase_id,
+                    (
+                        "provenance_human"
+                        if owner == "human"
+                        else "provenance_detached"
+                    ): True,
+                },
+            )
+            if owner == "human" and pending_request is not None and claimed:
+                self._attach_request_activities(pending_request, claimed)
+            elif owner == "detached" and claimed:
+                self._detached_activity_outputs[composite_key] = claimed
 
     def _select_terminal_text(
         self,
@@ -3562,32 +3773,52 @@ class ClaudeAgent(BaseAgent):
         if (
             composite_key in self._detached_activity_outputs
             or composite_key in self._detached_unsolicited_outputs
+            or composite_key in self._activity_provenance_barriers
         ):
             return True
         registry = self._activity_registry()
-        has_active = getattr(registry, "has_active", None) if registry is not None else None
-        has_completed_output = (
-            getattr(registry, "has_completed_output", None)
+        pending = self._pending_requests.get(composite_key) or []
+        current_turn_id = (
+            self._current_turn_id(composite_key, pending[0].context)
+            if pending
+            else None
+        )
+        has_competing_output = (
+            getattr(registry, "has_competing_output", None)
             if registry is not None
             else None
         )
         return bool(
-            (callable(has_active) and has_active(self.name, composite_key))
-            or (
-                callable(has_completed_output)
-                and has_completed_output(self.name, composite_key)
+            callable(has_competing_output)
+            and has_competing_output(
+                self.name,
+                composite_key,
+                current_turn_id=current_turn_id,
             )
         )
 
     def _refresh_activity_provenance_barrier(self, composite_key: str) -> None:
         """Track a pending human turn whose terminal owner is not classified."""
 
-        if self._pending_requests.get(composite_key) and self._has_competing_activity(
-            composite_key
+        pending = self._pending_requests.get(composite_key) or []
+        if not pending:
+            self._activity_provenance_barriers.discard(composite_key)
+            self._activity_provenance_barrier_owners.pop(composite_key, None)
+            return
+        owner = id(pending[0])
+        previous_owner = self._activity_provenance_barrier_owners.get(composite_key)
+        if previous_owner != owner:
+            self._activity_provenance_barriers.discard(composite_key)
+            self._activity_provenance_barrier_owners.pop(composite_key, None)
+        if composite_key in self._activity_provenance_barriers:
+            return
+        if (
+            composite_key in self._detached_activity_outputs
+            or composite_key in self._detached_unsolicited_outputs
+            or self._has_competing_activity(composite_key)
         ):
             self._activity_provenance_barriers.add(composite_key)
-        else:
-            self._activity_provenance_barriers.discard(composite_key)
+            self._activity_provenance_barrier_owners[composite_key] = owner
 
     def _should_buffer_assistant_message(self, composite_key: str) -> bool:
         """Hold an origin-less Assistant frame while Activity ownership is open."""
@@ -3597,7 +3828,10 @@ class ClaudeAgent(BaseAgent):
             or composite_key in self._detached_unsolicited_outputs
         ):
             return False
-        return self._has_competing_activity(composite_key)
+        return (
+            composite_key in self._activity_provenance_barriers
+            or self._has_competing_activity(composite_key)
+        )
 
     def _result_owner(self, composite_key: str, message) -> str:
         """Classify a terminal frame before it can claim shared state."""
@@ -3608,8 +3842,36 @@ class ClaudeAgent(BaseAgent):
         if origin_kind:
             return "detached"
         if self._pending_requests.get(composite_key):
+            if (
+                self._provisional_foreground_task_ids.get(composite_key)
+                or self._foreground_tool_use_ids.get(composite_key)
+            ):
+                # Older SDK fixtures and a few legacy transports omit
+                # Result.origin. A positively correlated foreground tool phase
+                # is sufficient evidence for compatibility; an uncorrelated
+                # Activity remains fail-closed below.
+                return "human"
             return "detached" if self._has_competing_activity(composite_key) else "human"
         return "agent"
+
+    def _stop_owned_result_for_receiver(
+        self,
+        composite_key: str,
+        receiver_stop_epoch: int,
+    ) -> bool:
+        """Whether this receiver predates a Stop that already settled its turn."""
+
+        stop_epoch = self._stop_owned_terminal_epochs.get(composite_key)
+        return (
+            (
+                stop_epoch is not None
+                and stop_epoch > receiver_stop_epoch
+            )
+            or (
+                composite_key in self._stop_owned_terminal_keys
+                and composite_key in self._steering_closing_keys()
+            )
+        )
 
     async def _flush_buffered_assistant_messages(
         self,
@@ -3737,9 +3999,17 @@ class ClaudeAgent(BaseAgent):
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
         self._buffered_assistant_messages.pop(composite_key, None)
-        self._refresh_activity_provenance_barrier(composite_key)
+        self._provisional_tool_use_ids.pop(composite_key, None)
+        self._provisional_unbound_tool_use_ids.pop(composite_key, None)
+        self._provisional_foreground_tool_use_ids.pop(composite_key, None)
+        self._provisional_activity_ids.pop(composite_key, None)
+        self._provisional_unbound_activity_ids.pop(composite_key, None)
+        self._provisional_foreground_task_ids.pop(composite_key, None)
+        self._provisional_phase_ids.pop(composite_key, None)
+        self._resolved_provisional_phase_ids.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
         self._turns_with_foreground_tools.discard(composite_key)
+        self._refresh_activity_provenance_barrier(composite_key)
 
     async def _emit_primary_phase_output(
         self,
@@ -3862,7 +4132,7 @@ class ClaudeAgent(BaseAgent):
             return sdk_result or assistant_text
         if assistant_text:
             return assistant_text
-        if composite_key in self._detached_foreground_tool_use_ids:
+        if self._detached_foreground_tool_use_ids.get(composite_key):
             return "<silent>Claude turn completed without assistant text.</silent>"
         return sdk_result
 
@@ -3948,9 +4218,13 @@ class ClaudeAgent(BaseAgent):
             )
             return True
         foreground_tool_ids = self._foreground_tool_use_ids.get(composite_key) or set()
+        provisional_foreground_tool_ids = (
+            self._provisional_foreground_tool_use_ids.get(composite_key) or set()
+        )
         foreground = bool(
             (existing_activity is not None and existing_activity.foreground)
             or (tool_use_id and tool_use_id in foreground_tool_ids)
+            or (tool_use_id and tool_use_id in provisional_foreground_tool_ids)
         )
         pending = self._pending_requests.get(composite_key) or []
         # A pending human request is not enough to prove that this Activity
@@ -3958,8 +4232,45 @@ class ClaudeAgent(BaseAgent):
         # Result.origin classifies the phase, even when a buffered foreground
         # ToolUseBlock already supplied an operational foreground hint.
         provenance_pending = bool(pending and existing_activity is None)
+        phase_id = None
         if provenance_pending:
             self._activity_provenance_barriers.add(composite_key)
+            self._activity_provenance_barrier_owners[composite_key] = id(pending[0])
+            phase_id = self._ensure_provisional_phase(composite_key)
+            self._provisional_activity_ids.setdefault(
+                composite_key,
+                set(),
+            ).add(task_id)
+            # A background tool is still positive phase evidence.  The
+            # ``run_in_background`` flag describes execution mode, not whether
+            # the resulting Activity belongs to the human Result or a detached
+            # task-notification Result.  Keep foreground-only tracking separate
+            # for output selection, but use every provisionally observed tool
+            # ID when correlating TaskStarted to its Assistant phase.
+            known_tool_ids = (
+                foreground_tool_ids
+                | provisional_foreground_tool_ids
+                | (self._provisional_tool_use_ids.get(composite_key) or set())
+            )
+            if not tool_use_id or tool_use_id not in known_tool_ids:
+                self._provisional_unbound_activity_ids.setdefault(
+                    composite_key,
+                    set(),
+                ).add(task_id)
+                if tool_use_id:
+                    self._provisional_unbound_tool_use_ids.setdefault(
+                        composite_key,
+                        set(),
+                    ).add(tool_use_id)
+            if foreground:
+                self._provisional_foreground_task_ids.setdefault(
+                    composite_key,
+                    set(),
+                ).add(task_id)
+        elif existing_activity is not None:
+            phase_id = str(
+                existing_activity.metadata.get("provenance_phase_id") or ""
+            ).strip() or None
         # The SDK task ``summary`` is a CLI-generated receipt such as
         # 'Background command "..." completed (exit code 0)'. It is not
         # assistant output, so it never becomes the Activity's visible
@@ -3975,6 +4286,8 @@ class ClaudeAgent(BaseAgent):
         }
         if provenance_pending:
             metadata["provenance_pending"] = True
+            if phase_id:
+                metadata["provenance_phase_id"] = phase_id
         if existing_activity is None:
             if provenance_pending:
                 # Activity ownership is provisional until Result.origin
@@ -4358,6 +4671,26 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                     )
                     return False
+                if composite_key in self._ambiguous_interrupt_keys():
+                    logger.info(
+                        "Deferring Claude Activity terminal output while interrupt "
+                        "ownership is ambiguous for %s",
+                        composite_key,
+                    )
+                    return True
+                steering_state = self._pending_steering_input_state(composite_key)
+                if (
+                    self._terminal_claim_superseded(
+                        composite_key,
+                        expected_steering_generation,
+                    )
+                    and steering_state != "unknown"
+                ):
+                    logger.info(
+                        "Ignoring Claude Activity terminal output superseded by steering for %s",
+                        composite_key,
+                    )
+                    return False
                 pending = self._pending_requests.get(composite_key) or []
                 pending_request = pending[0] if pending else None
                 if pending_request is not None:
@@ -4602,6 +4935,15 @@ class ClaudeAgent(BaseAgent):
             self._detached_unsolicited_outputs.add(composite_key)
             return "detached"
         if message_type == "result" and result_owner == "detached":
+            resolved_phase = self._resolved_provisional_phase_ids.pop(
+                composite_key,
+                None,
+            )
+            if resolved_phase is not None:
+                if self._detached_activity_outputs.get(composite_key):
+                    return "activity"
+                self._detached_unsolicited_outputs.add(composite_key)
+                return "detached"
             completed_activities = []
             if registry is not None and pending:
                 completed_activities = registry.claim_completed_output_batch(
