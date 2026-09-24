@@ -420,6 +420,50 @@ def test_completed_replay_rejects_a_config_blocker_written_after_cleanup(home, t
     assert caught.value.status == 409
 
 
+def test_invalid_codex_auth_file_blocks_hub_mode(home, tmp_path):
+    _write(home / ".codex/auth.json", "{1: 2}")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+def test_apply_rejects_a_config_blocker_found_by_the_guarded_rescan(home, tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    import core.handlers.model_hub.migration as migration
+
+    _seed(home, "codex-auth")
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    [item_id] = [row["id"] for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    draining = False
+    scan = migration.scan_native_configs
+
+    def rescan(*args, **kwargs):
+        # A real file edit also rebinds the selected row's revision, so inject
+        # the blocker beside an unchanged selection to reach the final check.
+        items = scan(*args, **kwargs)
+        if draining:
+            items.append(migration._blocked_item("codex", "drained", config_blocker=True))
+        return items
+
+    @asynccontextmanager
+    async def guard(backends):
+        nonlocal draining
+        draining = True
+
+        async def verify_idle():
+            return None
+
+        yield verify_idle
+
+    monkeypatch.setattr(migration, "scan_native_configs", rescan)
+    service.migration_guard = guard
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.migration_apply([item_id]))
+    assert caught.value.status == 409
+    assert not store.config.sources and not adapter.provisioned
+    assert KEY.encode() in (home / ".codex/auth.json").read_bytes()
+
+
 def test_opencode_header_auth_in_one_layer_keeps_another_layers_endpoint(home, tmp_path):
     user = home / ".config/opencode/opencode.json"
     project = home / "project/opencode.json"

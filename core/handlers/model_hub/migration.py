@@ -500,6 +500,12 @@ def _native_store_items(
             native_store_revision=snapshot.revision,
             native_store_placeholder=placeholder,
             source_paths=source_paths,
+            # Codex parses its own auth.json before any Hub routing applies,
+            # so one it cannot read as JSON fails every launch.
+            config_blocker=(
+                backend == "codex" and payload.get("store") == "file"
+                and payload.get("status") == "invalid"
+            ),
         ))
     if secret:
         base_url = _oauth_text(state, "base_url")
@@ -2247,7 +2253,10 @@ async def apply_native_migration(
                     if (original.receipt_identity or original.id) in retained_inventory_ids:
                         retained_item_ids.update(item.id for item in resolved)
                 if any(
-                    item.backend in backends and item.proposed_action == "import" and item not in selected
+                    item.backend in backends and (
+                        (item.proposed_action == "import" and item not in selected)
+                        or item.config_blocker
+                    )
                     for item in rescanned
                 ):
                     raise MigrationConflictError
