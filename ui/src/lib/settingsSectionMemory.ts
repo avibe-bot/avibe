@@ -24,10 +24,8 @@ import { isApplicationRouteHref } from './applicationRoutes';
  * What may be resumed is a question about the route, not about the feature
  * flags: the value has to name a route this release still declares, and a
  * section this visitor's capabilities allow. A feature flag decides which rows
- * the rail advertises, not which pages a person may stand on — Memory with
- * memory switched off is the setup surface the Dependencies page's Configure
- * button links to, and Model Hub with the hub switched off redirects itself
- * (ModelHubCapabilityGate), which moves this memory to wherever it lands.
+ * the rail advertises, not which pages a person may stand on. Capability-gated
+ * pages handle their own redirects after navigation.
  * `pwaRouteMemory` restores the very same paths on the very same terms.
  */
 export const SETTINGS_LAST_SECTION_STORAGE_KEY = 'avibe.settings.last-section.v1';

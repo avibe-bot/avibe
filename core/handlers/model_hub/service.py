@@ -1340,7 +1340,7 @@ class ModelHubService:
         updated_bindings = self._bindings(updated)
         # SourceBinding order is the engine-config serialization order. Agent
         # Route target order is not part of this projection, so a pure chain reorder
-        # compares equal and does not restart a healthy engine.
+        # compares equal and does not touch the engine.
         if previous_bindings == updated_bindings:
             self._save_config(updated)
             return

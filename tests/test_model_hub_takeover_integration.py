@@ -45,6 +45,9 @@ class FixtureSupervisor:
     def restart_if_running(self):
         pass
 
+    def reload_config_if_running(self, _previous=None):
+        pass
+
     def status(self):
         return {"status": {
             "health": "ok", "installed_version": "fixture", "verified": True,

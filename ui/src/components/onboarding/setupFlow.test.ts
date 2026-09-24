@@ -47,23 +47,17 @@ describe('one Hub setup journey', () => {
 });
 
 describe('shell-owned flow state', () => {
-  it('starts with nothing selected, imported, added or ordered, and no dirty draft', () => {
+  it('starts with nothing selected, imported or added', () => {
     expect(INITIAL_SETUP_FLOW_STATE).toEqual({
       providerSelection: { scan: null, selectedBackends: [] },
       importedCount: 0,
       addedThroughMore: [],
-      routeOrder: [],
-      routeOrderDirty: false,
     });
   });
 
   it('carries screen updates through navigation and composes a late functional update with newer state', async () => {
     let finishImport: (() => void) | undefined;
     const pendingImport = new Promise<void>((resolve) => { finishImport = resolve; });
-    const draft = [
-      { source_id: '来源-一', model_id: '模型-首选' },
-      { source_id: '来源-一', model_id: '模型-备用' },
-    ];
     const selection: SetupFlowState['providerSelection'] = {
       scan: { items: [
         { id: 'key-a', backend: 'opencode', kind: 'opencode_provider', masked_detail: 'fixture…0001', proposed_action: 'import', selected: true },
@@ -87,13 +81,12 @@ describe('shell-owned flow state', () => {
           setFlowState((previous) => ({ ...previous, addedThroughMore: ['新增来源'] }));
           onNavigate('assistants');
         } }, 'Add fixture source'));
-    const AssistantScreen = ({ active, flowState, setFlowState, onNavigate }: SetupScreenProps) =>
+    const AssistantScreen = ({ active, flowState, onNavigate }: SetupScreenProps) =>
       createElement('section', { hidden: !active, inert: !active, 'data-testid': 'assistants' },
         createElement('output', null, JSON.stringify(flowState)),
         createElement('button', { onClick: () => {
-          setFlowState((previous) => ({ ...previous, routeOrder: draft, routeOrderDirty: true }));
           onNavigate('providers');
-        } }, 'Edit fixture route'));
+        } }, 'Back to providers'));
     const Shell = () => {
       const [current, setCurrent] = useState<SetupScreenId>('providers');
       const [flowState, setFlowState] = useState(INITIAL_SETUP_FLOW_STATE);
@@ -110,13 +103,13 @@ describe('shell-owned flow state', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Start fixture import' }));
     expect(read('assistants').providerSelection).toEqual(selection);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit fixture route' }));
-    expect(read('providers')).toMatchObject({ providerSelection: selection, routeOrder: draft, routeOrderDirty: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }));
+    expect(read('providers')).toMatchObject({ providerSelection: selection });
     fireEvent.click(screen.getByRole('button', { name: 'Add fixture source' }));
     await act(async () => { finishImport!(); await pendingImport; });
     expect(read('assistants')).toEqual({
       providerSelection: { scan: null, selectedBackends: [] }, importedCount: 2,
-      addedThroughMore: ['新增来源'], routeOrder: draft, routeOrderDirty: true,
+      addedThroughMore: ['新增来源'],
     });
     expect((screen.getByTestId('providers') as HTMLElement).hidden).toBe(true);
     expect(screen.getByTestId('providers').hasAttribute('inert')).toBe(true);
@@ -167,8 +160,8 @@ function RuntimeConsumer({ active, capability, runtimeRead, flowState, setFlowSt
     createElement('output', { 'aria-label': 'capability' }, capability),
     createElement('output', { 'aria-label': 'runtime read' }, runtimeRead.kind),
     createElement('button', { onClick: () => setFlowState((previous) => ({
-      ...previous, routeOrder: [{ source_id: 'src_fixture1', model_id: '模型' }], routeOrderDirty: true,
-    })) }, 'Edit draft'),
+      ...previous, addedThroughMore: ['src_fixture1'],
+    })) }, 'Add source'),
     createElement('button', { onClick: onRetrySetup }, 'Recheck runtime'));
 }
 function RuntimeHarness({ capture, retry, install, complete, mode }: {
@@ -221,7 +214,7 @@ it('consumes unsupported admission without leaving providers, losing drafts or c
   act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: loadingRegion() }));
   fireEvent.click(primary()); // Support is first learned after provider bootstrap.
   expect(output('current screen')).toBe('providers');
-  fireEvent.click(screen.getByRole('button', { name: 'Edit draft' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
   const draft = output('draft');
   act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: readyRegion(runtime('unsupported')) }));
   expect(output('current screen')).toBe('providers');
@@ -303,7 +296,7 @@ it.each(['deployment', 'saved-intent'] as const)('holds disabled %s without skip
   // A disabled result arriving later holds the current screen, never redirects to Direct.
   act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: loadingRegion() }));
   fireEvent.click(primary());
-  fireEvent.click(screen.getByRole('button', { name: 'Edit draft' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
   const draft = output('draft');
   act(() => settle({ ...config, runtimeRead: readyRegion(runtime('resolved', 'ok')) }));
   expect(output('current screen')).toBe('providers');

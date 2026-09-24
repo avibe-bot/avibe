@@ -4,7 +4,7 @@ import { Folder, FolderOpen, Loader2, X } from 'lucide-react';
 
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
-import { DirectoryBrowser } from '../ui/directory-browser';
+import { FolderBrowser } from '../ui/folder-browser';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { errorMessage } from '@/lib/errorMessage';
@@ -21,7 +21,7 @@ interface NewProjectDialogProps {
   onCreated: (project: WorkbenchProject) => void;
 }
 
-// Two-phase modal: first the macOS-style DirectoryBrowser picks a folder,
+// Two-phase modal: first the shared Files-style FolderBrowser picks a folder,
 // then a compact confirm card lets the user override the display name and
 // fire the create call. The backend defaults display_name to the folder
 // basename — keep the input empty to accept that default.
@@ -59,7 +59,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
 
   if (phase === 'pick') {
     return (
-      <DirectoryBrowser
+      <FolderBrowser
         initialPath={folderPath || initialPath}
         onClose={close}
         onSelect={(path) => {

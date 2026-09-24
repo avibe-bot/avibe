@@ -527,7 +527,6 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
-| `vibe memory ...` | Read scoped Memory or submit context for best-effort, process-local capture through the running controller; acceptance does not guarantee delivery or persistence |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
@@ -890,6 +889,7 @@ Important options:
 - `--scope-id`
 - `--model`
 - `--reasoning-effort`
+- `--close-after`
 - `--sync`
 - `--message`
 - `--message-file`
@@ -901,6 +901,10 @@ Runs are asynchronous by default: the command queues the run, returns a payload
 with `run_id` / `session_id`, and uses the callback policy to deliver the final
 result later. Use `--sync` only when the terminal should wait for completion.
 `--async` is still accepted for older scripts but is no longer required.
+
+`--close-after` applies to a new or forked Session. It releases that Agent
+runtime after the Run settles while keeping the Session, transcript, and Run
+record. It cannot target an existing `--session-id`.
 
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
@@ -929,7 +933,7 @@ direct Agent Run calls.
 | --- | --- |
 | `vibe runs list` | List recent runs |
 | `vibe runs show <run_id>` | Show one run |
-| `vibe runs cancel <run_id>` | Request cancellation |
+| `vibe runs cancel <run_id>` | Request cancellation; once the run's input reached the live Session turn, this stops that turn like Session Stop, including other runs sharing it |
 
 ## 6. Recommended Mental Model
 

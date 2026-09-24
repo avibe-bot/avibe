@@ -194,15 +194,10 @@ def _start_runtime_processes(
 ) -> StartedRuntime:
     """Start the service, and the UI when this job owns it."""
 
-    from vibe.memory_ui_access import generate_ui_read_secret, process_ui_read_secret
     from core.services import settings as settings_service
 
     paths.ensure_data_dirs()
     config = settings_service.load_config(default_factory=settings_service.default_config)
-    memory_ui_secret = process_ui_read_secret()
-    if memory_ui_secret is None and start_ui:
-        memory_ui_secret = generate_ui_read_secret()
-
     # Service-only restart: the UI process was never stopped, so carry its
     # existing pid through EVERY status write — including the early
     # starting/setup writes and any failure path — so a crash mid-start can't
@@ -217,7 +212,6 @@ def _start_runtime_processes(
     service_pid = runtime.start_service(
         wait_for_ready=False,
         initial_ready_timeout=0,
-        memory_ui_secret=memory_ui_secret,
     )
     if start_ui:
         bind_host = runtime.effective_ui_bind_host(config)
@@ -225,8 +219,7 @@ def _start_runtime_processes(
             bind_host,
             config.ui.setup_port,
             wait_for_ready=False,
-            memory_ui_secret=memory_ui_secret,
-        )
+            )
     else:
         ui_pid = preserved_ui_pid
 
@@ -494,7 +487,6 @@ def schedule_restart(
     trigger: str = "cli",
     scope: str = "all",
     prepare_show_runtime: bool = False,
-    memory_ui_secret: str | None = None,
     python_executable: str | None = None,
 ) -> dict:
     """Serialize restart seeding with staged install activation."""
@@ -508,8 +500,7 @@ def schedule_restart(
             trigger=trigger,
             scope=scope,
             prepare_show_runtime=prepare_show_runtime,
-            memory_ui_secret=memory_ui_secret,
-            python_executable=python_executable,
+                python_executable=python_executable,
         )
 
 
@@ -520,13 +511,9 @@ def _schedule_restart_locked(
     trigger: str,
     scope: str,
     prepare_show_runtime: bool,
-    memory_ui_secret: str | None,
     python_executable: str | None,
 ) -> dict:
     """Spawn the detached restart job while the caller owns activation."""
-    from vibe.memory_ui_access import process_ui_read_secret
-
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     job_id = uuid.uuid4().hex[:12]
     invocation = (
         [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
@@ -578,7 +565,7 @@ def _schedule_restart_locked(
             log.flush()
             process = subprocess.Popen(
                 command,
-                stdin=subprocess.PIPE if memory_ui_secret is not None else None,
+                stdin=None,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -586,10 +573,8 @@ def _schedule_restart_locked(
                 cwd=get_safe_cwd(),
                 env=runtime.independent_process_env(
                     env,
-                    memory_ui_secret=memory_ui_secret,
-                ),
+                            ),
             )
-            runtime._spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     except OSError as exc:
         # The seed status above is now "scheduled"; if the job can't be spawned
         # (bad cached vibe path, missing executable, permission/log-open error) no
@@ -611,9 +596,6 @@ def _schedule_restart_locked(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from vibe.memory_ui_access import initialize_process_ui_read_secret
-
-    initialize_process_ui_read_secret()
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--delay-seconds", type=float, default=0.0)

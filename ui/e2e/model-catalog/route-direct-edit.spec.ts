@@ -59,7 +59,6 @@ for (const backend of ['claude', 'codex', 'opencode']) {
           method: 'PUT',
           hops: [{ source_id: 'src_a', model_id: 'exact/model-中文' }, { source_id: 'src_b', model_id: 'gpt-test' }],
         }]);
-        await foot.getByRole('button', { name: copy('routeDialog.impact.done'), exact: true }).click();
         await expect(dialog).toHaveCount(0);
         expect(apiRequests).toEqual([]);
       });

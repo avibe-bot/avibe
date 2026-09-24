@@ -100,7 +100,6 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
   await page.route('**/api/version**', (route) => route.fulfill({
     json: { current: '2.4.0', latest: '2.4.0', has_update: false, build: { kind: 'package' } },
   }));
-  await page.route('**/api/memory/settings**', (route) => route.fulfill({ json: { status: 'ok', enabled: false } }));
   // The live stream: answered as an open, silent stream. Fulfilling it as JSON
   // would make EventSource reconnect in a loop and repaint mid-capture.
   await page.route('**/api/events**', (route) => route.fulfill({

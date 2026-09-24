@@ -329,6 +329,13 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 ),
                 "row_kind": "assistant",
                 "text": msg.get("text") if include_text else None,
+                # An intermediate assistant message is rendered through Activity,
+                # not ``MessageRow``, so its citation sidecar has to travel with
+                # the row or the badge the transcript would draw degrades to the
+                # plain domain link here (see ``core.citations``).
+                "citations": (
+                    (msg.get("content") or {}).get("citations") if include_text else None
+                ),
                 # The silent marker is a terminal that is INVISIBLE in the transcript,
                 # so a group closing on it must anchor to the (visible) turn trigger
                 # rather than the marker itself; ``terminal_status`` is resolved here so
@@ -472,6 +479,13 @@ def _make_group(
                 "created_at": item["created_at"],
                 # Migrated event ids are hashes; only storage has the original clock.
                 "order_micros": item["sort"],
+                # Omitted entirely when there is nothing to carry, so an ordinary
+                # row keeps the wire shape it always had.
+                **(
+                    {"citations": item["citations"]}
+                    if isinstance(item.get("citations"), list) and item["citations"]
+                    else {}
+                ),
             }
             for item in pending
         ]

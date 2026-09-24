@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
-import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { AccessTiles } from './onboarding/AccessTiles';
 import { RouteSurfaceActiveContext, useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
@@ -8,7 +8,7 @@ import { loadingRegion, readyRegion, beginRegionRead, failRegionRead } from './s
 import { modelsApi } from './settings/models/modelsApi';
 import { apiFetch } from '@/lib/apiFetch';
 import { INITIAL_SETUP_FLOW_STATE, setupBackTarget, setupCapability, setupNavigationReady, type SetupAction, type SetupCapability, type SetupScreenId, type SetupScreenHandle, type SetupScreenProps } from './onboarding/setupFlow';
-import { mediaQuery, playSetupHandoff, setupHandoffAllowed } from './onboarding/setupHandoff';
+import { captureSetupCards, mediaQuery, playSetupHandoff, setupHandoffAllowed, type SetupSnapshot } from './onboarding/setupHandoff';
 import { fetchSetupConfig, type SetupConfigRead, type SetupConfigSnapshot } from './onboarding/setupConfig';
 import { SETUP_REGISTERED_SCREENS } from './onboarding/setupScreenRegistry';
 import './onboarding/onboarding.css';
@@ -28,8 +28,6 @@ import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
-import { SetupPlatformRecovery, type SavedPlatformRecovery } from './onboarding/SetupPlatformRecovery';
-import { getEnabledPlatforms, getPlatformCatalog, platformHasRunnableConfig } from '../lib/platforms';
 import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
 import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
 import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
@@ -123,11 +121,30 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   const current = useRef(activation);
   const transition = useRef<(() => void) | null>(null);
   const transitioning = useRef(false);
+  /** A flight waiting for the screen it lands on to be on screen. */
+  const flight = useRef<{ snapshot: SetupSnapshot; to: SetupScreenId } | null>(null);
   const ready = setupNavigationReady(capability, gatewayEnabled);
   const policy = useRef({ ready, sequence, locked: navigationLocked, routeActive });
   useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence, locked: navigationLocked, routeActive }; });
   useLayoutEffect(() => {
+    if (handoff || !routeActive) return;
     roots.current[activation.id]?.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
+  }, [activation, handoff, routeActive]);
+  // The screens swap first and the identities fly afterwards, onto the screen that is
+  // now really there. Landing into a live diagram is what the reference does, and it
+  // is what keeps the wires, the summary and the action from appearing in one jump
+  // once the flight is already over.
+  useLayoutEffect(() => {
+    const pending = flight.current;
+    const incoming = roots.current[activation.id];
+    if (!pending || pending.to !== activation.id || !host.current || !incoming) return;
+    flight.current = null;
+    const finish = () => {
+      transition.current = null;
+      transitioning.current = false;
+      setHandoff(false);
+    };
+    transition.current = playSetupHandoff(host.current, pending.snapshot, incoming, pending.to, finish);
   }, [activation]);
   useEffect(() => () => transition.current?.(), []);
 
@@ -148,29 +165,28 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
     const backwards = policy.current.sequence.indexOf(target) < policy.current.sequence.indexOf(previous.id);
     if (!backwards && !policy.current.ready) return;
     const next = { id: target, epoch: previous.epoch + 1 };
-    const finish = () => {
-      transition.current = null;
-      transitioning.current = false;
-      current.current = next;
-      setAction(null);
-      setHandoff(false);
-      setActivation(next);
-    };
     if (mediaQuery('(max-width: 759px)')) {
       host.current?.closest('.onboarding-shell')?.scrollTo({ top: 0, behavior: 'instant' });
       window.scrollTo({ top: 0, behavior: 'instant' });
     }
-    if (backwards || !setupHandoffAllowed(paused) || !host.current || !roots.current[previous.id] || !roots.current[target]) {
-      finish(); return;
+    // Every arrival flies, as the reference's do: the identities that grew into
+    // assistants shrink back into the diagram's destinations on the way out, and that
+    // row grows back into the story cards it was folded from.
+    const animated = setupHandoffAllowed(paused)
+      && !!host.current && !!roots.current[previous.id] && !!roots.current[target];
+    if (animated) {
+      transitioning.current = true;
+      flight.current = { snapshot: captureSetupCards(roots.current[previous.id]!, previous.id), to: target };
     }
-    transitioning.current = true;
-    setHandoff(target === 'intro' ? false : target);
-    transition.current = playSetupHandoff(host.current, roots.current[previous.id]!, roots.current[target]!, previous.id, target, finish);
+    current.current = next;
+    setAction(null);
+    setHandoff(animated ? target : false);
+    setActivation(next);
   }, [paused]);
   // A callback belongs to this activation, even if an asynchronous consumer saves it.
   const feeds = useMemo(() => Object.fromEntries(sequence.map((id) => [id, {
     onActionChange: (next: SetupAction) => {
-      if (current.current.id === id && current.current.epoch === activation.epoch && !transitioning.current) setAction(next);
+      if (current.current.id === id && current.current.epoch === activation.epoch) setAction(next);
     },
     onNavigate: (target: SetupScreenId) => {
       if (current.current.id === id && current.current.epoch === activation.epoch) navigate(target);
@@ -182,32 +198,40 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   return <div className="onboarding-step" data-setup-sequence={sequence.join(' ')} data-setup-screen={activation.id} data-handoff={handoff || undefined}>
     <div className="onboarding-screens" ref={host}>
       {sequence.map((id) => {
-        const active = routeActive && id === activation.id;
+        const active = routeActive && id === activation.id && !handoff;
         return <div key={id} ref={(node) => { roots.current[id] = node; }} data-setup-screen-root={id}
           hidden={id !== activation.id} inert={!active || !!handoff}>
-          <RouteSurfaceActiveContext.Provider value={active && !handoff}>
+          <RouteSurfaceActiveContext.Provider value={active}>
             <SetupScreenContent id={id} screenProps={{ active, handoff, capability, gatewayEnabled, runtimeRead,
               onRetrySetup, flowState, setFlowState, ...feeds[id] }} renderScreen={renderScreen}
               ref={(handle) => { handles.current[id] = handle; }} />
           </RouteSurfaceActiveContext.Provider>
         </div>;
       })}
+      {/* Where a screen puts what is ancillary to the pair below: in the cell the screens
+          share, resting on its bottom edge and growing upward into the room the screen
+          leaves above the action. In the cell rather than in the column, because the
+          column is centred in the window — a caption in it would move the heading, the
+          cards and the action by half of its own height, which is what made the
+          assistants step sit 9px higher than the two before it. */}
+      <div className="onboarding-action-aside" data-setup-action-aside="" />
     </div>
     <div className="onboarding-setup-footer">
       <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action"
-        disabled={loading || !!handoff || navigationLocked || (!retry && (!action || action.disabled || action.busy || !ready))}
+        disabled={loading || !!handoff || (!retry && (!action || action.disabled || action.busy || !ready))}
         onClick={() => { if (transitioning.current || policy.current.locked) return; if (retry) onRetrySetup(); else if (ready && action && !action.disabled && !action.busy) handles.current[current.current.id]?.activate(); }}>
         {t(loading ? 'common.loading' : retry ? 'common.retry' : action?.labelKey ?? 'common.loading', action?.labelArgs)}
-        {(loading || action?.busy || action?.icon === 'spinner') ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
+        {(loading || action?.busy || action?.icon === 'spinner')
+          ? activation.id === 'providers'
+            ? <LoaderCircle size={16} className="motion-safe:animate-spin" />
+            : <RefreshCw size={16} className="motion-safe:animate-spin" />
+          : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
       </Button>
       <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" style={{ visibility: back ? 'visible' : 'hidden' }}
         disabled={!back || !!handoff || !!action?.busy || navigationLocked} onClick={() => { if (back) navigate(back); }}>
         <ArrowLeft size={14} />{t(back === 'providers' ? 'onboarding.flow.backToProviders' : 'onboarding.flow.backToIntro')}
       </Button>
     </div>
-    {/* Where a screen puts what is ancillary to the pair above: below it, in normal flow,
-        so a caption that grows can neither move the anchor nor cover it. */}
-    <div className="onboarding-action-aside" data-setup-action-aside="" />
     {(authoritativeBlock || (!!error && !loading)) && <div className="onboarding-flow-error" role="alert">
       <p>{authoritativeBlock ? t('onboarding.flow.gatewayRequired') : error?.message ?? t('onboarding.connection.readFailed')}</p>
       {/* Same shape the detection failure already uses one screen over: the sentence
@@ -244,7 +268,6 @@ const ProvidersEntry = forwardRef<SetupScreenHandle, ProvidersScreenProps & { on
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
-  const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
   const [loading, setLoading] = useState(true);
@@ -429,12 +452,6 @@ export function Wizard() {
       // Writes already issued cannot be recalled; the lease is what stops the next one.
       let lease = entry.lease;
       const holds = () => lease === configGeneration.current;
-      const enabledPlatforms = getEnabledPlatforms(entry.config.raw);
-      const missing = getPlatformCatalog(entry.config.raw).find((platform) => enabledPlatforms.includes(platform.id) && !platformHasRunnableConfig(entry.config.raw, platform.id));
-      if (missing) {
-        setPlatformRecovery({ config: entry.config.raw, descriptor: missing });
-        return;
-      }
       // C4. The gate is correlated over ONE assistant, so the reads that feed it are
       // taken together and judged together; what the browser must not do is assemble a
       // verdict out of three facts about three different machines.
@@ -528,14 +545,13 @@ export function Wizard() {
     <main className="onboarding-shell-content">
       <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}
         runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={retrySetup}
-        navigationLocked={Boolean(platformRecovery)} renderScreen={(id, props, ref) => id === 'intro'
+        renderScreen={(id, props, ref) => id === 'intro'
           ? <Welcome ref={ref} data={data ?? undefined} active={props.active} onActionChange={props.onActionChange}
               onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
           : id === 'providers'
           ? <ProvidersEntry ref={ref} {...props} agentReads={setupAgentReads} onEnter={enterProviders} />
           : <AgentDetection ref={ref} data={data ?? {}} active={props.active} onActionChange={props.onActionChange}
               flowState={props.flowState} setFlowState={props.setFlowState} onNavigate={props.onNavigate} agentReads={setupAgentReads}
-              completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : undefined}
               onNext={complete} />}
       />
     </main>

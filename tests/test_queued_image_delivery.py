@@ -122,7 +122,6 @@ def test_uploaded_image_survives_real_queue_admission_and_send_now(isolated_stat
     agent._session_mgr = _CodexSessionManager(session_id, "codex-thread", primary.working_path)
     agent._transports = {primary.working_path: native}
     controller = _build_controller_double()
-    controller.config.memory.enabled = False
     controller.agent_service = SimpleNamespace(
         agents={"codex": agent},
         _turn_gates={"runtime-key": SimpleNamespace(
@@ -159,7 +158,7 @@ def test_uploaded_image_survives_real_queue_admission_and_send_now(isolated_stat
     assert upload.status_code == 201
     attachment = upload.get_json()
     assert attachment["name"] == "队列图片.png"
-    assert (attachment["width"], attachment["height"]) == (1, 1)
+    assert attachment["mime"] == "image/png"
     with patch("vibe.internal_client.dispatch_async", side_effect=dispatch):
         response = client.post(
             f"/api/sessions/{session_id}/messages",

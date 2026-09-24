@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NOTICE = "pytest-asyncio is not installed"
 
 # One of the files the packaged-test and publish jobs select.
-SYNC_ONLY_CI_SELECTION = "tests/test_memory_distribution.py"
+SYNC_ONLY_CI_SELECTION = "tests/test_release_verification.py"
 # IsolatedAsyncioTestCase methods only -- unittest supplies the event loop.
 UNITTEST_ASYNC_FILE = "tests/test_feishu_post_messages.py"
 # Async tests behind the opt-in e2e_model_hub marker, skipped unless selected.

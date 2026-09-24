@@ -9,6 +9,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.handlers.session_handler import ClaudeSessionNotFoundError, SessionHandler
+from core.resource_governance import AgentResourceFailure
 from modules.im import MessageContext
 
 
@@ -561,6 +562,155 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     assert "Claude process terminated: SIGABRT (signal 6)" in diagnostic
     assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in diagnostic
+
+
+def test_claude_resource_failure_is_in_im_termination_notice(monkeypatch) -> None:
+    for failure, expected in (
+        (
+            AgentResourceFailure(kind="memory", message="shared memory event"),
+            "shared Agent cgroup recorded a memory limit event",
+        ),
+        (
+            AgentResourceFailure(
+                kind="pids",
+                message="shared PID event",
+                pids_current=0,
+                pids_max=4096,
+            ),
+            "thread/process limit event (0/4096)",
+        ),
+    ):
+        controller = _Controller(platform="slack")
+        controller.im_client = _FakeIM()
+        handler = SessionHandler(controller)
+        client = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        )
+        composite_key = "slack_C123:/tmp/workdir"
+        controller.claude_sessions[composite_key] = client
+        observations = []
+
+        def observe(_controller):
+            observations.append(True)
+            return failure
+
+        async def cleanup(_key, **_kwargs):
+            return None
+
+        monkeypatch.setattr(
+            "core.handlers.session_handler.observe_agent_resource_pressure", observe
+        )
+        handler.cleanup_session = cleanup
+        context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+        asyncio.run(
+            handler.handle_session_error(
+                composite_key,
+                context,
+                RuntimeError("Claude process exited"),
+                client=client,
+            )
+        )
+
+        assert observations == [True]
+        assert client._vibe_resource_failure is failure
+        assert expected in controller.im_client.sent_messages[0][1]
+
+
+def test_claude_resource_diagnostic_uses_failed_client_not_replacement(monkeypatch) -> None:
+    controller = _Controller(platform="slack")
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    failed_client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+    )
+    replacement = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+    )
+    controller.claude_sessions[composite_key] = replacement
+    failure = AgentResourceFailure(kind="memory", message="shared cgroup memory event")
+    monkeypatch.setattr(
+        "core.handlers.session_handler.observe_agent_resource_pressure",
+        lambda _controller: failure,
+    )
+
+    diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("old generation ended"),
+        client=failed_client,
+    )
+
+    assert "SIGKILL" in diagnostic
+    assert "shared cgroup memory event" in diagnostic
+    assert failed_client._vibe_resource_failure is failure
+    assert not hasattr(replacement, "_vibe_resource_failure")
+
+
+def test_intentional_claude_exit_does_not_consume_shared_resource_pressure(monkeypatch) -> None:
+    controller = _Controller(platform="slack")
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    intentional = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    failed = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+    )
+    failure = AgentResourceFailure(kind="memory", message="shared cgroup memory event")
+    observations = []
+
+    def observe(_controller):
+        observations.append(True)
+        return failure
+
+    monkeypatch.setattr(
+        "core.handlers.session_handler.observe_agent_resource_pressure",
+        observe,
+    )
+
+    intentional_diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("intentional exit"),
+        client=intentional,
+    )
+    assert "Resource diagnosis" not in intentional_diagnostic
+    assert observations == []
+
+    failed_diagnostic = handler.claude_error_diagnostic(
+        composite_key,
+        RuntimeError("unexpected exit"),
+        client=failed,
+    )
+    assert "shared cgroup memory event" in failed_diagnostic
+    assert observations == [True]
+
+
+def test_negative_claude_pressure_check_is_cached_for_exited_client(monkeypatch) -> None:
+    controller = _Controller(platform="slack")
+    handler = SessionHandler(controller)
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+    )
+    observations = []
+
+    def observe(_controller):
+        observations.append(True)
+        return None if len(observations) == 1 else AgentResourceFailure(
+            kind="pids", message="later shared event"
+        )
+
+    monkeypatch.setattr(
+        "core.handlers.session_handler.observe_agent_resource_pressure", observe
+    )
+    for _ in range(2):
+        diagnostic = handler.claude_error_diagnostic(
+            "slack_C123:/tmp/workdir",
+            RuntimeError("old generation ended"),
+            client=client,
+        )
+        assert "later shared event" not in diagnostic
+    assert observations == [True]
 
 
 def test_service_initiated_teardown_signal_is_not_reported_as_session_error() -> None:

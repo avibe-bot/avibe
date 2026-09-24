@@ -26,11 +26,8 @@ from core.caller_context import (
     AVIBE_SESSION_ID_ENV,
     caller_env_for_platform_payload,
     validated_caller_env_snapshot,
-    AVIBE_CALLER_SESSION_PROOF_ENV,
-    issue_caller_session_proof,
 )
-from core.message_output import stop_output_for, terminal_output_for
-from core.memory_cli_access import configure_memory_cli_access
+from core.message_output import stop_output_for
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
@@ -43,7 +40,12 @@ from core.native_dispatch_phase import (
     mark_backend_dispatch_attempted,
     prewrite_user_stop_requested,
 )
-from core.resource_governance import governor_from_controller
+from core.resource_governance import (
+    AgentResourceFailure,
+    observe_agent_resource_pressure,
+    governor_from_controller,
+    pids_failure_labels,
+)
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
@@ -976,7 +978,82 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             variant=reasoning_effort or default_label,
         )
 
-    def _server_start_error_display_text(self, error: BaseException) -> str:
+    def _resource_failure_for_server(
+        self,
+        server: OpenCodeServerManager | None,
+    ) -> AgentResourceFailure | None:
+        process = getattr(server, "_process", None)
+        if process is not None:
+            if getattr(process, "returncode", None) is None:
+                return None
+            pid = getattr(process, "pid", None)
+            generation = ("process", process)
+        else:
+            pid = getattr(server, "_last_start_failure_pid", None)
+            if pid is not None:
+                generation = (
+                    "startup",
+                    getattr(server, "_start_attempt_generation", 0),
+                    pid,
+                )
+            else:
+                observed_exit = getattr(server, "observed_runtime_exit_pid", None)
+                if callable(observed_exit):
+                    pid = observed_exit()
+                generation = (
+                    "adopted",
+                    getattr(server, "_runtime_generation_token", None),
+                    pid,
+                )
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+        cached_generation = getattr(server, "_vibe_resource_failure_generation", None)
+        same_generation = (
+            cached_generation is not None
+            and cached_generation[0] == generation[0]
+            and (
+                cached_generation[1] is process
+                if generation[0] == "process"
+                else cached_generation == generation
+            )
+        )
+        if same_generation:
+            return getattr(server, "_vibe_resource_failure", None)
+        failure = observe_agent_resource_pressure(self.controller)
+        if server is not None:
+            setattr(server, "_vibe_resource_failure_generation", generation)
+            setattr(server, "_vibe_resource_failure", failure)
+        if failure is not None:
+            logger.error(
+                "OpenCode server exited while the shared Agent cgroup reported resource pressure: %s",
+                failure.message,
+            )
+        return failure
+
+    def _resource_failure_suffix(
+        self,
+        failure: AgentResourceFailure | None,
+    ) -> str:
+        if failure is None:
+            return ""
+        language = str(
+            getattr(getattr(self.controller, "config", None), "language", "en")
+            or "en"
+        )
+        if failure.kind == "pids":
+            return (
+                f" {i18n_t('error.agentPidsLimit', language, **pids_failure_labels(failure, language))}"
+            )
+        if failure.kind == "memory":
+            return f" {i18n_t('error.agentMemoryLimit', language)}"
+        return ""
+
+    def _server_start_error_display_text(
+        self,
+        error: BaseException,
+        *,
+        resource_failure: AgentResourceFailure | None = None,
+    ) -> str:
         localized_key = None
         if isinstance(error, OpenCodeModelHubOverlayRequiredError):
             localized_key = "error.opencodeModelHubOverlayRequired"
@@ -989,8 +1066,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t(localized_key, language)}"
-        return f"Failed to start OpenCode server: {error}"
+            message = i18n_t(localized_key, language)
+        else:
+            message = f"Failed to start OpenCode server: {error}"
+        return f"❌ {message}{self._resource_failure_suffix(resource_failure)}"
 
     async def prepare_runtime_restart(self) -> None:
         """Adopt persisted server state before the shared drain snapshot."""
@@ -1218,6 +1297,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         caller_context_binding_renewal: asyncio.Task[None] | None = None
         active_poll_persisted = False
         active_poll_removal_pending = False
+        resource_failure: AgentResourceFailure | None = None
 
         def remove_active_poll() -> None:
             nonlocal active_poll_persisted, active_poll_removal_pending
@@ -1258,13 +1338,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation,
             )
             model_hub_overlay_reservation = None
+            resource_failure = self._resource_failure_for_server(server)
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
                 self.controller,
                 request.context,
                 self.name,
                 str(e),
-                display_text=self._server_start_error_display_text(e),
+                display_text=self._server_start_error_display_text(
+                    e,
+                    resource_failure=resource_failure,
+                ),
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1303,6 +1387,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation,
             )
             model_hub_overlay_reservation = None
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
             # fork a fresh session and lose context.
@@ -1311,7 +1396,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 str(e),
-                display_text=f"❌ {e}",
+                display_text=f"❌ {e}{self._resource_failure_suffix(resource_failure)}",
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1322,6 +1407,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation,
             )
             model_hub_overlay_reservation = None
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             # A transient/transport/auth failure while acquiring the session
             # (get_session now raises on non-404, Codex P2): surface it as a
             # terminal error result instead of letting it propagate unhandled or be
@@ -1334,7 +1420,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 str(e),
-                display_text=message,
+                display_text=f"{message}{self._resource_failure_suffix(resource_failure)}",
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1367,7 +1453,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.base_session_id,
                 _target_agent_session_id(request),
             )
-            self._session_manager.mark_initialized(session_id)
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
                 await self._finish_prestart_cancellation(
@@ -1490,7 +1575,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         request.working_path,
                         request.session_key,
                     )
-                    self._session_manager.mark_initialized(session_id)
                     baseline_messages = await server.list_messages(
                         session_id=session_id,
                         directory=request.working_path,
@@ -1508,10 +1592,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or self.controller.config.platform
             )
 
-            # Resolve admission once: it associates or clears this turn's Memory
-            # CLI session scope as a side effect, so a second call per turn would
-            # repeat that write.
-            configure_memory_cli_access(self.controller, request.context)
+            # Bind this turn's caller identity to the backend process.
             caller_context_env = caller_env_for_platform_payload(
                 request.context.platform_specific or {},
                 message=request.context,
@@ -1574,12 +1655,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
-                memory_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
-                ),
-                profile_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
-                ),
                 context=request.context,
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
@@ -1804,6 +1879,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             raise
         except OpenCodePromptRejectedError as e:
             error_text = f"{type(e).__name__}: {e}"
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             logger.error("OpenCode prompt was definitively rejected: %s", e)
 
             poll_can_be_removed = not (logical_turn_id and start_attempt_id)
@@ -1855,7 +1931,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 error_text,
-                display_text=f"OpenCode request failed: {error_text}",
+                display_text=(
+                    f"OpenCode request failed: {error_text}"
+                    f"{self._resource_failure_suffix(resource_failure)}"
+                ),
                 request=request,
             )
         except Exception as e:
@@ -1863,6 +1942,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             error_details = str(e).strip()
             error_text = f"{error_name}: {error_details}" if error_details else error_name
 
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             logger.error(f"OpenCode request failed: {error_text}", exc_info=True)
             await self.record_model_hub_native_failure(request.context, error_text)
             try:
@@ -1888,7 +1968,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 error_text,
-                display_text=message,
+                display_text=f"{message}{self._resource_failure_suffix(resource_failure)}",
                 request=request,
             )
         finally:
@@ -2626,16 +2706,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
             )
             restored_context = restored_context_from_poll_info(poll_info)
-            restored_session_id = str(
-                (steering_snapshot.get("target_session_id") if isinstance(steering_snapshot, dict) else None)
-                or poll_info.base_session_id or ""
-            )
-            if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
-                memory_context = self.controller.session_turns.restore_memory_context(restored_session_id, logical_turn_id)
-                admitted = memory_context is not None and configure_memory_cli_access(self.controller, memory_context)
-                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id) if admitted else None
-                if proof:
-                    restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
             if (
                 poll_platform == "avibe"
                 and str(restored_context.user_id or "").startswith("remote:")

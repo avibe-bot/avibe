@@ -6,12 +6,15 @@ import { useRef, useState } from 'react';
 // (which also blurs) doesn't double-fire.
 export const InlineNameInput: React.FC<{
   initial: string;
+  value?: string;
+  onChange?: (value: string) => void;
   placeholder?: string;
   onCommit: (value: string) => void;
   onCancel: () => void;
   className?: string;
-}> = ({ initial, placeholder, onCommit, onCancel, className }) => {
-  const [value, setValue] = useState(initial);
+}> = ({ initial, value: controlledValue, onChange, placeholder, onCommit, onCancel, className }) => {
+  const [uncontrolledValue, setUncontrolledValue] = useState(initial);
+  const value = controlledValue ?? uncontrolledValue;
   const committed = useRef(false);
   return (
     <input
@@ -19,7 +22,10 @@ export const InlineNameInput: React.FC<{
       value={value}
       placeholder={placeholder}
       onFocus={(e) => e.currentTarget.select()}
-      onChange={(e) => setValue(e.target.value)}
+      onChange={(e) => {
+        setUncontrolledValue(e.target.value);
+        onChange?.(e.target.value);
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') {
           e.preventDefault();

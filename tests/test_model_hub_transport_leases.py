@@ -22,12 +22,11 @@ LAST = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]
 class LeaseSupervisor:
     def __init__(self, origin):
         self.connection = EngineConnection(origin, "fixture-management", "fixture-token")
-        self.restart_started = threading.Event()
-        self.allow_restart = threading.Event()
-        self.allow_restart.set()
-        self.restart_count = 0
-        self.restore_count = 0
-        self.fail_restart = False
+        self.reload_started = threading.Event()
+        self.allow_reload = threading.Event()
+        self.allow_reload.set()
+        self.reload_count = 0
+        self.fail_reload = False
 
     def client(self):
         return EngineClient(self.connection)
@@ -36,15 +35,15 @@ class LeaseSupervisor:
         return self.client()
 
     def restart_if_running(self):
-        self.restart_count += 1
-        self.restart_started.set()
-        assert self.allow_restart.wait(3)
-        if self.fail_restart:
-            raise EngineUnavailableError("models.engine.health_failed")
+        raise AssertionError("a source save must hot-reload, never restart")
 
-    def ensure_running(self):
-        self.restore_count += 1
-        return self.connection
+    def reload_config_if_running(self, _previous=None):
+        self.reload_count += 1
+        self.reload_started.set()
+        assert self.allow_reload.wait(3)
+        if self.fail_reload:
+            self.fail_reload = False
+            raise EngineUnavailableError("models.engine.health_failed")
 
 
 @asynccontextmanager
@@ -97,20 +96,14 @@ async def _transport(tmp_path):
         yield adapter, supervisor, binding, received, finish, requests
     finally:
         finish.set()
-        supervisor.allow_restart.set()
+        supervisor.allow_reload.set()
         await runner.cleanup()
 
 
-async def _barrier_waiting(adapter, sync):
-    async with asyncio.timeout(2):
-        while not adapter._routing_lock.locked():
-            assert not sync.done()
-            await asyncio.sleep(0)
-    assert not sync.done()
-
-
 @pytest.mark.parametrize("stream", [False, True])
-def test_sync_waits_for_buffered_and_streaming_transport_not_service_settlement(tmp_path, stream):
+def test_sync_applies_during_buffered_and_streaming_transport_without_waiting(tmp_path, stream):
+    """A save must not wait for, restart under, or truncate an in-flight call."""
+
     async def run():
         async with _transport(tmp_path) as (adapter, supervisor, binding, received, finish, requests):
             invoke = asyncio.create_task(adapter.invoke(binding.source_id, "unknown", {}, stream, "opencode"))
@@ -119,24 +112,23 @@ def test_sync_waits_for_buffered_and_streaming_transport_not_service_settlement(
             if handle is not None:
                 assert await anext(handle.stream) == FIRST
             changed = replace(binding, route_model_ids=("unknown", "new"))
-            sync = asyncio.create_task(adapter.sync_sources([changed]))
-            await _barrier_waiting(adapter, sync)
+            await asyncio.wait_for(adapter.sync_sources([changed]), 2)
+            assert supervisor.reload_count == 1
+            assert adapter._active_transports == 1
+            # The fixture holds every upstream response until ``finish``; the
+            # new route is admitted while the first call is still open.
             later = asyncio.create_task(adapter.invoke(binding.source_id, "new", {}, False, "opencode"))
-            await asyncio.sleep(0)
-            assert not later.done()
-            assert supervisor.restart_count == 0
-            assert len(requests) == 1
-            # A service mutation lock can remain held during this drain. No
-            # outcome()/settlement call is needed to release the transport.
+            async with asyncio.timeout(2):
+                while len(requests) < 2:
+                    await asyncio.sleep(0.01)
             finish.set()
             if handle is not None:
                 assert b"".join([part async for part in handle.stream]) == LAST
             else:
                 handle = await asyncio.wait_for(invoke, 2)
-            await asyncio.wait_for(sync, 2)
-            assert supervisor.restart_count == 1
-            assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
             later_handle = await asyncio.wait_for(later, 2)
+            assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
+            assert (await later_handle.outcome()).kind is RawOutcomeKind.SUCCESS
             await handle.close_stream()
             await later_handle.close_stream()
             assert adapter._active_transports == 0
@@ -145,76 +137,49 @@ def test_sync_waits_for_buffered_and_streaming_transport_not_service_settlement(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("finish_kind", ["unstarted_close", "started_close", "stream_cancel", "invoke_cancel"])
-def test_close_and_cancellation_release_transport_without_waiting_for_outcome(tmp_path, finish_kind):
+def test_sync_keeps_an_admitted_request_routable_until_the_engine_has_read_it(tmp_path, monkeypatch):
+    """A removal saved after admission must not strand a request not yet sent."""
+
     async def run():
-        async with _transport(tmp_path) as (adapter, supervisor, binding, received, _finish, _requests):
-            streaming = finish_kind != "invoke_cancel"
-            invoke = asyncio.create_task(adapter.invoke(binding.source_id, "unknown", {}, streaming, "opencode"))
+        async with _transport(tmp_path) as (adapter, supervisor, binding, received, finish, requests):
+            connect = asyncio.Event()
+            original = EngineClient.invoke
+
+            async def delayed_invoke(self, *args, **kwargs):
+                await connect.wait()
+                return await original(self, *args, **kwargs)
+
+            monkeypatch.setattr(EngineClient, "invoke", delayed_invoke)
+            invoke = asyncio.create_task(adapter.invoke(binding.source_id, "unknown", {}, False, "opencode"))
+            async with asyncio.timeout(2):
+                while adapter._requests_sent.is_set():
+                    await asyncio.sleep(0.01)
+            sync = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=())]))
+            await asyncio.sleep(0.05)
+            assert supervisor.reload_count == 0
+            connect.set()
             await asyncio.wait_for(received.wait(), 2)
-            handle = await invoke if streaming else None
-            pending_read = None
-            if finish_kind in {"started_close", "stream_cancel"}:
-                assert await anext(handle.stream) == FIRST
-            if finish_kind == "stream_cancel":
-                pending_read = asyncio.create_task(anext(handle.stream))
-                await asyncio.sleep(0)
-            sync = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=("new",))]))
-            await _barrier_waiting(adapter, sync)
-            assert supervisor.restart_count == 0
-            if handle is None:
-                invoke.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await invoke
-            elif pending_read is not None:
-                pending_read.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await pending_read
-                await handle.close_stream()
-            else:
-                await handle.close_stream()
-                await handle.close_stream()
             await asyncio.wait_for(sync, 2)
-            assert supervisor.restart_count == 1
-            assert adapter._active_transports == 0
-            assert adapter._transports_idle.is_set()
-
-    asyncio.run(run())
-
-
-def test_cancelled_drain_does_not_cancel_active_request_or_leak_barrier(tmp_path):
-    async def run():
-        async with _transport(tmp_path) as (adapter, supervisor, binding, _received, finish, _requests):
-            handle = await adapter.invoke(binding.source_id, "unknown", {}, True, "opencode")
-            assert await anext(handle.stream) == FIRST
-            before = adapter.state_store.list_sources()
-            sync = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=("new",))]))
-            await _barrier_waiting(adapter, sync)
-            sync.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await sync
-            assert not adapter._routing_lock.locked()
-            assert adapter.state_store.list_sources() == before
-            assert adapter._active_transports == 1
-            assert supervisor.restart_count == 0
+            assert supervisor.reload_count == 1
+            assert requests[0]["model"].endswith("/unknown")
             finish.set()
-            assert b"".join([part async for part in handle.stream]) == LAST
+            handle = await asyncio.wait_for(invoke, 2)
             assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
-            await adapter.sync_sources([binding])
-            assert adapter._active_transports == 0
+            await handle.close_stream()
+            assert adapter._unsent_requests == 0 and adapter._active_transports == 0
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("fail_restart", [False, True])
-def test_cancelled_restart_retains_barrier_until_commit_or_rollback(tmp_path, fail_restart):
+@pytest.mark.parametrize("fail_reload", [False, True])
+def test_cancelled_reload_holds_admission_until_commit_or_rollback(tmp_path, fail_reload):
     async def run():
         async with _transport(tmp_path) as (adapter, supervisor, binding, _received, finish, requests):
             original = adapter.state_store.list_sources()
-            supervisor.allow_restart.clear()
-            supervisor.fail_restart = fail_restart
+            supervisor.allow_reload.clear()
+            supervisor.fail_reload = fail_reload
             sync = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=("changed",))]))
-            assert await asyncio.to_thread(supervisor.restart_started.wait, 2)
+            assert await asyncio.to_thread(supervisor.reload_started.wait, 2)
             sync.cancel()
             await asyncio.sleep(0)
             assert not sync.done()
@@ -222,16 +187,16 @@ def test_cancelled_restart_retains_barrier_until_commit_or_rollback(tmp_path, fa
             later = asyncio.create_task(adapter.invoke(binding.source_id, "listed", {}, False, "opencode"))
             await asyncio.sleep(0)
             assert requests == []
-            supervisor.allow_restart.set()
+            supervisor.allow_reload.set()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(sync, 2)
             finish.set()
             handle = await asyncio.wait_for(later, 2)
             assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
             await handle.close_stream()
-            if fail_restart:
+            if fail_reload:
                 assert adapter.state_store.list_sources() == original
-                assert supervisor.restore_count == 1
+                assert supervisor.reload_count == 2
             else:
                 assert adapter.state_store.list_sources()[0].route_model_ids == ("changed",)
             assert adapter._active_transports == 0
@@ -240,33 +205,33 @@ def test_cancelled_restart_retains_barrier_until_commit_or_rollback(tmp_path, fa
     asyncio.run(run())
 
 
-def test_two_concurrent_saves_are_serial_and_restart_failure_restores_projection(tmp_path):
+def test_two_concurrent_saves_are_serial_and_reload_failure_restores_projection(tmp_path):
     async def run():
         async with _transport(tmp_path) as (adapter, supervisor, binding, _received, _finish, _requests):
             original = adapter.state_store.list_sources()
-            supervisor.fail_restart = True
+            supervisor.fail_reload = True
             with pytest.raises(EngineUnavailableError):
                 await adapter.sync_sources([replace(binding, route_model_ids=("bad",))])
             assert adapter.state_store.list_sources() == original
-            assert supervisor.restore_count == 1
-            supervisor.fail_restart = False
-            supervisor.restart_started.clear()
-            supervisor.allow_restart.clear()
+            assert supervisor.reload_count == 2
+            supervisor.reload_started.clear()
+            supervisor.allow_reload.clear()
             first = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=("first",))]))
-            assert await asyncio.to_thread(supervisor.restart_started.wait, 2)
+            assert await asyncio.to_thread(supervisor.reload_started.wait, 2)
             second = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=("second",))]))
             await asyncio.sleep(0)
             assert adapter.state_store.list_sources()[0].route_model_ids == ("first",)
-            supervisor.allow_restart.set()
+            supervisor.allow_reload.set()
             await asyncio.wait_for(asyncio.gather(first, second), 2)
             assert adapter.state_store.list_sources()[0].route_model_ids == ("second",)
-            assert supervisor.restart_count == 3
+            assert supervisor.reload_count == 4
             assert not adapter._routing_lock.locked()
 
     asyncio.run(run())
 
 
-def test_service_save_drain_releases_before_settlement_can_acquire_mutation_lock(tmp_path):
+def test_service_save_completes_while_a_stream_is_active(tmp_path):
+    """The reported hang: a model-list save during an active turn must settle."""
     from tests.test_model_hub_resolution import _service, _source
     from tests.test_model_hub_routing_modes import MODEL, _sparse_config
 
@@ -280,27 +245,52 @@ def test_service_save_drain_releases_before_settlement_can_acquire_mutation_lock
             adapter.state_store.sync_sources(service._bindings(config))
             handle = await adapter.invoke(source.id, MODEL, {}, True, "opencode")
             assert await anext(handle.stream) == FIRST
-            save = asyncio.create_task(
-                service.set_agent_chain("claude", MODEL, {"hops": [{"source_id": source.id, "model_id": "new"}]})
+            result = await asyncio.wait_for(
+                service.set_agent_chain("claude", MODEL, {"hops": [{"source_id": source.id, "model_id": "new"}]}),
+                2,
             )
-            await _barrier_waiting(adapter, save)
-            assert service._mutation_lock.locked()
-
-            async def settle():
-                async with service._mutation_lock:
-                    return await handle.outcome()
-
-            settlement = asyncio.create_task(settle())
-            await asyncio.sleep(0)
-            assert not settlement.done()
-            assert supervisor.restart_count == 0
+            assert result["chain"]["current"] == {"source_id": source.id, "model_id": "new"}
+            assert store.config.agents["claude"].routes[MODEL].hops[0].model_id == "new"
+            assert supervisor.reload_count == 1
+            assert not service._mutation_lock.locked()
             finish.set()
             assert b"".join([part async for part in handle.stream]) == LAST
-            result, outcome = await asyncio.wait_for(asyncio.gather(save, settlement), 2)
-            assert result["chain"]["current"] == {"source_id": source.id, "model_id": "new"}
-            assert outcome.kind is RawOutcomeKind.SUCCESS
-            assert store.config.agents["claude"].routes[MODEL].hops[0].model_id == "new"
-            assert supervisor.restart_count == 1
+            async with service._mutation_lock:
+                assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
+            assert adapter._active_transports == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("finish_kind", ["unstarted_close", "started_close", "stream_cancel", "invoke_cancel"])
+def test_close_and_cancellation_release_transport_without_waiting_for_outcome(tmp_path, finish_kind):
+    # Leases still gate an engine binary upgrade restart.
+    async def run():
+        async with _transport(tmp_path) as (adapter, _supervisor, binding, received, _finish, _requests):
+            streaming = finish_kind != "invoke_cancel"
+            invoke = asyncio.create_task(adapter.invoke(binding.source_id, "unknown", {}, streaming, "opencode"))
+            await asyncio.wait_for(received.wait(), 2)
+            handle = await invoke if streaming else None
+            pending_read = None
+            if finish_kind in {"started_close", "stream_cancel"}:
+                assert await anext(handle.stream) == FIRST
+            if finish_kind == "stream_cancel":
+                pending_read = asyncio.create_task(anext(handle.stream))
+                await asyncio.sleep(0)
+            assert not adapter._transports_idle.is_set()
+            if handle is None:
+                invoke.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await invoke
+            elif pending_read is not None:
+                pending_read.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending_read
+                await handle.close_stream()
+            else:
+                await handle.close_stream()
+                await handle.close_stream()
+            await asyncio.wait_for(adapter._transports_idle.wait(), 2)
             assert adapter._active_transports == 0
 
     asyncio.run(run())

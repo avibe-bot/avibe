@@ -228,6 +228,7 @@ type SetupPhase = { kind: 'select' } | { kind: 'applying'; count: number } | { k
 export const MigrationDialog: React.FC<{
   open: boolean;
   onClose: () => void;
+  onDecline?: () => void;
   /** Fired after a successful apply so callers can refresh sources/agents. */
   onApplied?: (applied: number) => void;
   /** Scopes the entry point, then includes every native row and required
@@ -261,6 +262,7 @@ export const MigrationDialog: React.FC<{
 }> = ({
   open,
   onClose,
+  onDecline,
   onApplied,
   eligible,
   takeable,
@@ -404,9 +406,13 @@ export const MigrationDialog: React.FC<{
   };
 
   const reporting = scope === 'setup' && phase.kind !== 'select';
+  const decline = () => {
+    onDecline?.();
+    onClose();
+  };
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && !applying && onClose()}>
+    <Dialog open={open} onOpenChange={(v) => !v && !applying && (phase.kind === 'select' ? decline() : onClose())}>
       <DialogContent className="max-w-[640px] gap-5">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3 text-[18px] font-bold">
@@ -481,7 +487,7 @@ export const MigrationDialog: React.FC<{
 
         {!reporting && (
           <div className="flex items-center justify-end gap-2 border-t border-border pt-4">
-            <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={applying}>
+            <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={decline} disabled={applying}>
               {t(copy.cancel)}
             </Button>
             <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void apply()} disabled={!writable || selectedCount === 0 || applying}>

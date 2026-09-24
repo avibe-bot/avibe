@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from config import paths as config_paths
+from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ DEFAULT_GROUP_NAME = "avibe-agents"
 DEFAULT_RUNTIME_GROUP_NAME = "avibe-runtime"
 DEFAULT_AGENT_CPU_WEIGHT = 50
 DEFAULT_AGENT_IO_WEIGHT = 50
-DEFAULT_AGENT_PIDS_MAX = 512
+DEFAULT_AGENT_PIDS_MAX = 4096
 DEFAULT_AGENT_OOM_SCORE_ADJ = 500
 MIN_AGENT_MEMORY_MAX_BYTES = 512 * 1024 * 1024
 MIB = 1024 * 1024
@@ -37,6 +38,43 @@ class AgentResourceLimits:
     io_weight: int = DEFAULT_AGENT_IO_WEIGHT
     pids_max: int = DEFAULT_AGENT_PIDS_MAX
     oom_score_adj: int = DEFAULT_AGENT_OOM_SCORE_ADJ
+
+
+@dataclass(frozen=True)
+class AgentResourceSnapshot:
+    pids_current: int | None
+    pids_max: int | None
+    pids_events: dict[str, int]
+    memory_events: dict[str, int]
+
+
+@dataclass(frozen=True)
+class AgentResourceFailure:
+    kind: str
+    message: str
+    pids_current: int | None = None
+    pids_max: int | None = None
+    event_delta: int | None = None
+
+
+def pids_failure_labels(
+    failure: AgentResourceFailure,
+    language: str,
+) -> dict[str, str]:
+    """Preserve zero and distinguish unavailable cgroup counts in user copy."""
+
+    return {
+        "current": (
+            str(failure.pids_current)
+            if failure.pids_current is not None
+            else i18n_t("error.agentPidsCurrentUnavailable", language)
+        ),
+        "limit": (
+            str(failure.pids_max)
+            if failure.pids_max is not None
+            else i18n_t("error.agentPidsLimitUnavailable", language)
+        ),
+    }
 
 
 def _read_text(path: Path) -> str | None:
@@ -64,6 +102,44 @@ def _parse_pid(value: str | None) -> int | None:
     except ValueError:
         return None
     return pid if pid > 0 else None
+
+
+def _parse_non_negative_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _parse_counter_file(path: Path) -> dict[str, int]:
+    text = _read_text(path)
+    if not text:
+        return {}
+    counters: dict[str, int] = {}
+    for line in text.splitlines():
+        name, _, raw_value = line.partition(" ")
+        if not name or not raw_value:
+            continue
+        try:
+            value = int(raw_value.strip())
+        except ValueError:
+            continue
+        if value >= 0:
+            counters[name] = value
+    return counters
+
+
+def _parse_pids_max(value: str | None) -> int | None:
+    if not value or value == "max":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _round_down_mib(value: int) -> int:
@@ -129,9 +205,29 @@ def tenant_memory_limit_bytes(cgroup: Path | None = None, root: Path | None = No
     return None
 
 
+def tenant_pid_limit(cgroup: Path, root: Path) -> int | None:
+    """The tightest PID cap from the tenant through its cgroup ancestors."""
+
+    root = root.resolve()
+    cursor = cgroup.resolve()
+    if cursor != root and root not in cursor.parents:
+        return None
+    limits: list[int] = []
+    while True:
+        limit = _parse_pids_max(_read_text(cursor / "pids.max"))
+        if limit is not None:
+            limits.append(limit)
+        if cursor == root:
+            break
+        cursor = cursor.parent
+    return min(limits) if limits else None
+
+
 def derive_agent_limits(
     tenant_memory_bytes: int | None,
     config: dict[str, Any] | None = None,
+    *,
+    tenant_pids_max: int | None = None,
 ) -> AgentResourceLimits:
     config = config or {}
 
@@ -148,6 +244,11 @@ def derive_agent_limits(
     cpu_weight = max(1, min(10_000, _int_config("agent_cpu_weight", DEFAULT_AGENT_CPU_WEIGHT)))
     io_weight = max(1, min(10_000, _int_config("agent_io_weight", DEFAULT_AGENT_IO_WEIGHT)))
     pids_max = max(32, _int_config("agent_pids_max", DEFAULT_AGENT_PIDS_MAX))
+    if tenant_pids_max is not None:
+        # The agent group is a sibling of avibe-runtime under this cap. Keep
+        # explicit runtime headroom even when the configured agent cap is high.
+        runtime_reserve = max(64, tenant_pids_max // 4)
+        pids_max = min(pids_max, max(1, tenant_pids_max - runtime_reserve))
     oom_score_adj = max(-1000, min(1000, _int_config("agent_oom_score_adj", DEFAULT_AGENT_OOM_SCORE_ADJ)))
 
     explicit_max = _int_config("agent_memory_max_bytes", 0)
@@ -367,13 +468,14 @@ class AgentResourceGovernor:
         root: Path | None = None,
         base_cgroup: Path | None = None,
     ) -> None:
-        self.config = config or {}
+        self.config = dict(config or {})
         self.root = root
         self.base_cgroup = base_cgroup
         self._base: Path | None = None
         self._group: Path | None = None
         self._limits: AgentResourceLimits | None = None
         self._disabled_reason: str | None = None
+        self._event_baseline: AgentResourceSnapshot | None = None
 
     @property
     def mode(self) -> str:
@@ -389,11 +491,38 @@ class AgentResourceGovernor:
         return self._limits
 
     def update_config(self, config: dict[str, Any] | None) -> None:
-        self.config = config or {}
+        updated = dict(config or {})
+        if updated == self.config:
+            return
+        old_group_name = str(self.config.get("agent_group_name") or DEFAULT_GROUP_NAME).strip() or DEFAULT_GROUP_NAME
+        new_group_name = str(updated.get("agent_group_name") or DEFAULT_GROUP_NAME).strip() or DEFAULT_GROUP_NAME
+        same_group = self._group is not None and old_group_name == new_group_name
+        self.config = updated
+        if same_group:
+            # Settings do not change the identity of processes already in this
+            # cgroup. Keep their event baseline even when governance is disabled.
+            if self.mode != "disabled":
+                root = self.root or detect_cgroup_root()
+                if root is not None and self._base is not None:
+                    limits = derive_agent_limits(
+                        tenant_memory_limit_bytes(self._base, root),
+                        self.config,
+                        tenant_pids_max=tenant_pid_limit(self._base, root),
+                    )
+                    try:
+                        self._configure_group(self._group, limits)
+                    except OSError as exc:
+                        self._disabled_reason = str(exc)
+                        logger.warning("Agent resource governance reconfiguration failed: %s", exc)
+                    else:
+                        self._limits = limits
+                        self._disabled_reason = None
+            return
         self._base = None
         self._group = None
         self._limits = None
         self._disabled_reason = None
+        self._event_baseline = None
 
     def apply_to_pid(self, pid: int | None, *, label: str = "agent") -> bool:
         if not isinstance(pid, int) or pid <= 0:
@@ -403,10 +532,78 @@ class AgentResourceGovernor:
         group = self._ensure_group(known_agent_pids=known_agent_pids)
         if group is None:
             return False
+        if self._event_baseline is None:
+            self._event_baseline = self.snapshot()
         moved = self._move_pid(group, pid, label=label)
         for child_pid in descendant_pids:
             self._move_pid(group, child_pid, label=f"{label} child", warn=False)
         return moved
+
+    def snapshot(self) -> AgentResourceSnapshot | None:
+        """Read the current counters for the shared agent cgroup."""
+
+        group = self._group
+        if group is None:
+            return None
+        return self._snapshot_group(group)
+
+    @staticmethod
+    def _snapshot_group(group: Path) -> AgentResourceSnapshot:
+        return AgentResourceSnapshot(
+            pids_current=_parse_non_negative_int(_read_text(group / "pids.current")),
+            pids_max=_parse_pids_max(_read_text(group / "pids.max")),
+            pids_events=_parse_counter_file(group / "pids.events"),
+            memory_events=_parse_counter_file(group / "memory.events"),
+        )
+
+    def observe_resource_pressure(self) -> AgentResourceFailure | None:
+        """Observe a shared Agent cgroup limit event without process attribution."""
+
+        current = self.snapshot()
+        baseline = self._event_baseline
+        if current is None or baseline is None:
+            return None
+
+        pids_max_delta = current.pids_events.get("max", 0) - baseline.pids_events.get("max", 0)
+        if pids_max_delta > 0:
+            # Leave simultaneous memory events pending for the next observer.
+            self._event_baseline = replace(current, memory_events=baseline.memory_events)
+            current_label = (
+                str(current.pids_current)
+                if current.pids_current is not None
+                else "unknown"
+            )
+            limit_label = (
+                str(current.pids_max)
+                if current.pids_max is not None
+                else "max"
+            )
+            return AgentResourceFailure(
+                kind="pids",
+                message=(
+                    "shared Agent cgroup recorded a pids limit event "
+                    f"(current={current_label}, max={limit_label}, events.max_delta={pids_max_delta}); "
+                    "concurrent Agent processes may be affected"
+                ),
+                pids_current=current.pids_current,
+                pids_max=current.pids_max,
+                event_delta=pids_max_delta,
+            )
+
+        for event_name in ("oom_kill", "oom", "max"):
+            delta = current.memory_events.get(event_name, 0) - baseline.memory_events.get(event_name, 0)
+            if delta > 0:
+                self._event_baseline = replace(current, pids_events=baseline.pids_events)
+                return AgentResourceFailure(
+                    kind="memory",
+                    message=(
+                        "shared Agent cgroup recorded a memory limit event "
+                        f"(event={event_name}, events_delta={delta}); "
+                        "concurrent Agent processes may be affected"
+                    ),
+                    event_delta=delta,
+                )
+        return None
 
     def _move_pid(self, group: Path, pid: int, *, label: str, warn: bool = True) -> bool:
         try:
@@ -419,11 +616,11 @@ class AgentResourceGovernor:
             return False
 
     def _ensure_group(self, *, known_agent_pids: set[int] | None = None) -> Path | None:
-        if self._group is not None:
-            return self._group
         if self.mode == "disabled":
             self._disabled_reason = "disabled"
             return None
+        if self._group is not None:
+            return self._group
         root = self.root or detect_cgroup_root()
         if root is None:
             self._disabled_reason = "no-cgroup-v2"
@@ -444,10 +641,20 @@ class AgentResourceGovernor:
         group = base / group_name
         runtime_group = base / runtime_group_name
         try:
+            # An existing constrained group may receive known agent PIDs during
+            # base migration, before the newly discovered PID is adopted.
+            if self._event_baseline is None and group.exists():
+                self._event_baseline = self._snapshot_group(group)
             self._prepare_base_cgroup(base, runtime_group, group, root, known_agent_pids=known_agent_pids)
             self._enable_subtree_controllers(base)
             group.mkdir(exist_ok=True)
-            limits = derive_agent_limits(tenant_memory_limit_bytes(base, root), self.config)
+            if self._event_baseline is None:
+                self._event_baseline = self._snapshot_group(group)
+            limits = derive_agent_limits(
+                tenant_memory_limit_bytes(base, root),
+                self.config,
+                tenant_pids_max=tenant_pid_limit(base, root),
+            )
             self._configure_group(group, limits)
         except OSError as exc:
             self._disabled_reason = str(exc)
@@ -546,6 +753,8 @@ class AgentResourceGovernor:
                         if not (agent_group / "cgroup.procs").exists():
                             raise OSError(f"agent cgroup.procs is unavailable in {agent_group}")
                         agent_group_ready = True
+                    if self._event_baseline is None:
+                        self._event_baseline = self._snapshot_group(agent_group)
                     target_group = agent_group
                     target_label = "known agent"
                 try:
@@ -648,3 +857,9 @@ def governor_from_controller(controller: Any) -> AgentResourceGovernor:
     mark_controller_resource_governor(governor)
     setattr(controller, "_agent_resource_governor", governor)
     return governor
+
+
+def observe_agent_resource_pressure(controller: Any) -> AgentResourceFailure | None:
+    """Return a shared Agent cgroup resource observation."""
+
+    return governor_from_controller(controller).observe_resource_pressure()

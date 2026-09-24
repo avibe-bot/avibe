@@ -6,7 +6,6 @@
 vibe              # vibe start 的别名
 vibe start        # 按需启动 Avibe（打开 Web UI）
 vibe status       # 查看服务状态
-vibe memory status # 通过运行中的控制器查看本地记忆状态
 vibe remote       # 引导式配置 Avibe Cloud 远程访问
 vibe screenshot   # 截取本机桌面截图
 vibe stop         # 停止所有服务
@@ -61,14 +60,6 @@ vibe start
 - 如果主服务与 Web UI 已在运行，则复用现有进程
 - 打开设置向导 `http://127.0.0.1:5123`
 - **保留已运行的进程** — 需要明确重启时请使用 `vibe restart`
-
-**已知限制 —— 部分重启后的记忆设置页。** Web UI 与主服务之间通过一个每次启动
-现生成的凭据来校验本地记忆读取。该凭据只经 stdin 传给子进程，不会落盘，因此
-`vibe start` 只能让它自己拉起的进程保持一致。当主服务已在运行、只有 Web UI 是
-新启动的时候，两侧没有共享凭据，记忆设置页会显示记忆不可用，直到两个进程一起
-重启为止；CLI 会打印恢复步骤 —— 先执行 `vibe stop`，再执行 `vibe`。反过来的情况
-无需处理：主服务如果是新启动的，会顺带重启仍在运行的 Web UI，使新的一对共享同一
-凭据。`vibe memory ...` 走的是另一套会话级授权，不受影响。
 
 ### `vibe stop`
 
@@ -191,27 +182,6 @@ vibe data skill-usage --clear --yes --json
 清除与保留清理都是逻辑删除，不代表安全擦除或保证释放磁盘空间；旧数据可能
 仍存在于 SQLite WAL、空闲页或备份中。恢复数据库备份也会恢复其中的历史统计
 及清除水位，必要时应在恢复后再次清除。此功能不会扫描或回填历史对话。
-
-### `vibe memory`
-
-通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或提交内容进行尽力而为的进程内捕获——既包括用户明确要求记住的内容，也包括 Agent 从对话以及在本机工作中主动提炼的结论（含在文件或工具输出中遇到的持久环境、账户事实）。接受请求不保证提供方投递或持久化。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
-
-`status` 可在普通终端中使用。`profile`、`list`、`search` 和 `remember` 必须在
-Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回
-`memory_access_denied`。
-
-```bash
-vibe memory status [--json]
-vibe memory profile [--json]
-vibe memory list [--project <slug>] [--page N] [--limit 1..100] [--json]
-vibe memory search <查询> [--project <slug>] [--limit 1..100] [--json]
-vibe memory remember <文本> [--project <slug>] [--json]
-```
-
-`list` 按时间倒序返回有效且已处理的事件。页码严格采用 EverOS 从 1 开始的语义，每页
-默认 20 条；JSON 会包含每条事件的不透明 entry id。Agent CLI 只接受 `default` 或目录中
-已有的具名项目，`--project all` 仅供设置页使用。该命令用于显式检查，不会加入注入的
-个人记忆 prompt。
 
 ### `vibe doctor`
 
@@ -397,6 +367,7 @@ vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correc
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
 `--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
@@ -421,6 +392,10 @@ P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队�
 
 `vibe hook send` 仅作为 deprecated 兼容入口保留。新的自动化入口应使用
 `vibe agent run`。
+
+对于新建或 fork 的 Session，如果希望 Run 结束后释放 Agent runtime，同时保留
+Session、transcript 和 Run 记录，可以使用 `--close-after`。它不能和
+`--session-id` 一起使用，因为现有 Session 自己管理 runtime 生命周期。
 
 ### `vibe watch`
 
@@ -621,5 +596,3 @@ Web UI (`http://127.0.0.1:5123`) 提供相同的控制功能：
 - [Slack 配置指南](SLACK_SETUP_ZH.md)
 - [Telegram 配置指南](TELEGRAM_SETUP_ZH.md)
 - [Codex 配置指南](CODEX_SETUP.md)
-
-Memory 画像开关关闭后会保留既有画像和普通搜索，但暂停画像读取及自动画像处理；重新开启即可恢复。

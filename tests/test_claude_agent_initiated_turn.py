@@ -986,7 +986,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             "slack::channel::C-ORIGIN",
         )
 
-    async def test_completed_task_notification_at_eof_delivers_summary(self):
+    async def test_completed_task_notification_at_eof_settles_without_sdk_summary(self):
         agent, service = _build_agent()
         composite_key = "session-eof:/tmp/work"
         context = SimpleNamespace(
@@ -1000,7 +1000,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-eof",
             },
         )
-        agent.emit_result_message = _dispatcher_owned_emit(service)
+        agent.emit_result_message = AsyncMock()
+        agent.controller.emit_agent_message = _dispatcher_owned_emit(service)
 
         await agent._receive_messages(
             _completed_task_notification_client(),
@@ -1010,12 +1011,16 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             composite_key=composite_key,
         )
 
-        agent.emit_result_message.assert_awaited_once()
-        self.assertEqual(
-            agent.emit_result_message.await_args.args[1],
-            "Background verification finished",
-        )
-        output = agent.emit_result_message.await_args.kwargs["output"]
+        # The SDK summary is a CLI receipt, not assistant output: it stays
+        # invisible and the Activity settles through the silent result path.
+        agent.emit_result_message.assert_not_awaited()
+        silent_calls = [
+            call
+            for call in agent.controller.emit_agent_message.await_args_list
+            if call.args[1:3] == ("result", "")
+        ]
+        self.assertEqual(len(silent_calls), 1)
+        output = silent_calls[0].kwargs["output"]
         self.assertTrue(output.detached)
         self.assertFalse(output.completes_turn)
         self.assertTrue(output.completes_run)
@@ -1037,12 +1042,15 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         emitted = asyncio.Event()
+        dispatcher_emit = _dispatcher_owned_emit(service)
 
-        async def _emit(*_args, **_kwargs):
-            emitted.set()
-            return "message-id"
+        async def _emit(*args, **kwargs):
+            if args[1:3] == ("result", ""):
+                emitted.set()
+            return await dispatcher_emit(*args, **kwargs)
 
-        agent.emit_result_message = AsyncMock(side_effect=_emit)
+        agent.emit_result_message = AsyncMock()
+        agent.controller.emit_agent_message = AsyncMock(side_effect=_emit)
         release = asyncio.Event()
         receiver = asyncio.create_task(
             agent._receive_messages(
@@ -1056,7 +1064,12 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.wait_for(emitted.wait(), timeout=1)
             self.assertFalse(receiver.done())
-            output = agent.emit_result_message.await_args.kwargs["output"]
+            agent.emit_result_message.assert_not_awaited()
+            output = next(
+                call.kwargs["output"]
+                for call in agent.controller.emit_agent_message.await_args_list
+                if call.args[1:3] == ("result", "")
+            )
             self.assertTrue(output.detached)
             self.assertFalse(output.completes_turn)
             self.assertTrue(output.completes_run)
@@ -3091,10 +3104,15 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             composite_key=composite_key,
         )
 
-        self.assertEqual(agent.emit_result_message.await_count, 2)
-        human_call, detached_call = agent.emit_result_message.await_args_list
+        # The current master contract deliberately treats the SDK Task summary
+        # as a non-visible receipt.  With no Assistant text, the detached
+        # Activity settles through the controller's silent result path rather
+        # than ``emit_result_message``.
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        human_call = agent.emit_result_message.await_args
         self.assertIs(human_call.kwargs["request"], pending_request)
         self.assertNotIn("output", human_call.kwargs)
+        detached_call = agent.controller.emit_agent_message.await_args
         detached_output = detached_call.kwargs["output"]
         self.assertTrue(detached_output.detached)
         self.assertFalse(detached_output.completes_turn)

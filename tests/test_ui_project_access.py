@@ -479,7 +479,7 @@ def test_editor_config_write_always_answers_with_a_renderable_code(monkeypatch, 
             json=payload,
         )
 
-    forbidden = _post({"runtime": {"default_cwd": "/tmp/editor-should-not-write"}})
+    forbidden = _post({"runtime": {"default_cwd": "/tmp/editor-should-not-write"}, "memory": {"enabled": True}})
     assert forbidden.status_code == 400
     assert forbidden.get_json()["error"] == {
         "code": "editor_config_write_forbidden",
@@ -493,9 +493,10 @@ def test_editor_config_write_always_answers_with_a_renderable_code(monkeypatch, 
         "message": "editor_config_write_invalid",
     }
 
-    accepted = _post({"ack_mode": "reaction"})
+    accepted = _post({"ack_mode": "reaction", "memory": {"enabled": {"malformed": True}}})
     assert accepted.status_code == 200
     assert V2Config.load().ack_mode == "reaction"
+    assert not hasattr(V2Config.load(), "memory")
     assert V2Config.load().runtime.default_cwd == "."
 
 

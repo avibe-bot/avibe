@@ -93,7 +93,6 @@ def management_http(tmp_path, monkeypatch):
 # This inventory describes retained effects independently of the policy rules.
 # A newly registered Owner-only management route must be consciously classified.
 _RETAINED_OWNER_ROUTES = {
-    ("POST", "/api/model-service/refresh"),  # Internal signed CLI notification, not a settings API.
     ("PUT", "/api/permissions/authorized-users"),
     ("PUT", "/api/permissions/projects/{project_id}/access"),
     ("PUT", "/api/permissions/resources/{resource_kind}/{resource_id}/access"),
@@ -119,7 +118,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 292
+    assert len(endpoints) == 276
     # Additive read-only backend projection inherits native backend-management
     # authorization; it does not grant lower-tier credential-management access.
     assert ("GET", "/api/backend/{name}/connection") in endpoints

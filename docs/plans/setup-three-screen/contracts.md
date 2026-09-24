@@ -2,6 +2,8 @@
 
 Status: **PR0 interface proposal; D10 owner-ratified**, audited against head
 `08b82658bbbf3e3e952fa1007c13f93fbca51410`. The handoff remains unchanged user source.
+The later owner-approved setup implementation edits one Model Hub route per assistant,
+using the existing `RouteChainDialog`; it has no shared route draft or cross-backend writer.
 The approved `model-hub-native-takeover.md` supplies runtime/custody precedent; the
 orchestrator adopts its automatic runtime preparation and the routine decisions in plan §10.
 The owner reaffirmed on 2026-09-21 12:56 +08 that setup uses Model Hub; disabling it
@@ -10,13 +12,13 @@ At 13:19 +08 the owner ratified D10: setup delegates migration takeover to the e
 migration feature. C1/C6 supersede the handoff's copy-only, unchanged-connection and atomic-
 rollback promises for this flow; they do not alter the source handoff.
 
-C1–C6 now specify the selected custody behavior and concrete technical mappings. D4/D9 is
-orchestrator-ratified as a bounded technical interpretation. D11 is also orchestrator-ratified
-for its config transport boundary. C6 now distinguishes controller-owned startup recovery
-from browser observation and conditional retry, with separate composed owner evidence. Product
-ratification does not authorize feature dispatch or extend #2065 merge authority to #2082;
-requested feature authorization and contracts-on-master remain gates. Current work is PR0
-only. A lane reports gaps instead of inventing a parallel contract.
+C1–C6 specify the selected custody behavior and concrete technical mappings. D4/D9 was
+orchestrator-ratified as a bounded technical interpretation; the later owner-approved
+per-assistant route design supersedes its shared-route mapping below. D11 is also
+orchestrator-ratified for its config transport boundary. C6 distinguishes controller-owned
+startup recovery from browser observation and conditional retry. The original PR0 did not
+authorize feature dispatch or extend #2065 merge authority to #2082; this document now
+records the subsequently approved implementation boundary.
 
 | Contract | Where it lives | Owner |
 | --- | --- | --- |
@@ -68,9 +70,8 @@ and the shell-owned `SetupFlowState`.
   Consumers use `setFlowState(previous => ({ ...previous, changedField }))`, including
   asynchronous completions. Replacing captured state loses other screens' intervening work.
   `providerSelection` holds the complete ephemeral `MigrationScan` and selected backend
-  consent groups shared with the existing migration owner, not an apply/recovery journal;
-  `routeOrder` holds `(source_id, model_id)` rows, never source IDs alone.
-  Neither is a second source of truth for persisted readiness.
+  consent groups shared with the existing migration owner, not an apply/recovery journal.
+  The shell does not own model-route drafts; persisted routes are read from Model Hub.
 - The shell renders the single primary and Back actions. Each `onActionChange` and
   `onNavigate` callback is bound to the emitting screen and activation; the shell rejects
   inactive/stale publications and clicks only the current `SetupScreenHandle.activate()`.
@@ -95,8 +96,8 @@ and the shell-owned `SetupFlowState`.
 - Server facts (CLI presence, backend enablement, sources and routes) are re-read on active
   entry and after mutations. C4/C6 require the existing Agent collection authority to deep-refresh
   cached CLI presence after install/path/config changes and before completion; ordinary list
-  reads alone cannot establish that freshness. Preserve unconfirmed drafts across those reads; C6 defines scan
-  reconciliation, route targets and preservation of dirty target baselines. `setupFlow.test.ts` consumes the actual
+  reads alone cannot establish that freshness. Preserve unconfirmed provider drafts across those reads;
+  C6 defines scan reconciliation and the per-card route read boundary. `setupFlow.test.ts` consumes the actual
   props with React state and checks navigation plus a late update, not just initial values.
 
 `setupCapability(boolean | null)` maps the shell's validated config capability boolean to
@@ -196,17 +197,19 @@ anchor without a layout shift.
 
 **Shared reservation.** `.onboarding-stage` remains the box both the story and the screens
 below it occupy, so the anchor's vertical position does not depend on what a screen draws.
-The import capsule lives in a reserved slot inside screen 2's stage: dismissing it leaves
-the slot, so the primary action cannot move (handoff §4, and the assertion #2065 already
-writes for the two-step flow).
+Screen 2's migration offer uses the shell's primary action and a controlled review dialog;
+dismissing an offer changes neither the stage nor the action anchor.
 
 **Snapshot hooks.** The handoff reads live DOM across screens, so these class names are a
 contract, not styling. L1's `setupHandoff.ts` queries them; L2 and L3 must render them.
-An inactive `hidden` root has no measurable box. L1 must temporarily lay out the incoming
-root invisibly and inertly for measurement, without activating its effects or action feed,
-then switch activity at handoff completion. Restore `hidden` after cancellation; the settled
-state still has exactly one active screen. L1's geometry test must exercise this real path,
-not measurements taken with every screen already visible.
+An inactive `hidden` root has no measurable box. At handoff start, the incoming screen
+becomes the displayed root: its heading and diagram or summary appear immediately, as in
+Show session `ses36vg559de2`'s `begin` and `chooseAssistants`. Only the incoming destination
+cards stay visually hidden while the cloned outgoing cards fly into place (about 900 ms).
+The incoming root remains inert and its effects and action feed inactive until landing.
+After cancellation, restore the inactive root's `hidden` state; the settled state still
+has exactly one active screen. L1's geometry test must exercise this real path, not
+measurements taken with every screen already visible.
 
 | Transition | Reads from | Lands on |
 | --- | --- | --- |
@@ -260,7 +263,7 @@ and Agent name** to backend connection/CLI reads and `AgentSupply.named_agents`.
 
 Do not read backend-level `selected_model_id` to reject a different candidate: it describes
 only `selected_by_agent`. The runnable-hop owner is the server resolver; neither an unrelated
-healthy source nor a client `routeOrder` proves readiness. Revalidate on the completion click.
+healthy source nor a card's displayed route proves readiness. Revalidate on the completion click.
 
 **CLI freshness owner.** `Controller` caches CLI presence; an ordinary `listAgents()` cannot
 refresh it after installation. Use one shared `createAgentCollectionReadAuthority(modelsApi)`
@@ -286,20 +289,23 @@ ensure/start. Startup
 has no assistant/source readiness prerequisite. Do not restart after an enable/config write.
 
 Preserve `default_agent_name` if it remains in the available set, including a usable custom
-Agent outside the route editor's setup targets. Otherwise prefer a runnable setup target in
-C6's stable order, then an available named Agent in stable backend/name order; call
+Agent outside the cards' designated builtin Agents. Otherwise prefer a runnable designated
+builtin Agent in card order, then an available named Agent in stable backend/name order; call
 `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
 `api.mutateConfig` with an explicit field mutation, then validate a fresh uncached
 `apiFetch('/api/config', {cache:'no-store'})` readback before navigating. Use that same
 read/parse path after an unknown/failed write; cached pre-write data cannot settle it.
-Unknown writes are reconciled by reads, not treated as success or blindly retried. Keep `SetupPlatformRecovery` for
-existing invalid IM configuration. `SetupModelRecovery` is the shipped **Direct OpenCode**
-recovery; it does not repair Hub models. C6 specifies Hub catalog/chain repair.
+Unknown writes are reconciled by reads, not treated as success or blindly retried. Existing
+invalid IM configuration remains saved for later repair in Settings and does not gate Model
+Hub setup completion. `SetupModelRecovery` is the shipped **Direct OpenCode**
+recovery; it does not repair Hub models. A missing Hub Agent model is repaired in existing
+Agent/Model Hub settings, not chosen or written by Setup.
 
 The new Hub route predicate replaces credential readiness / `entry_eligible` as the *route*
 criterion, not the confirmed application-state or backend permission guard. Today's `Wizard.complete()` only
 filters OpenCode routes; the all-backend named-Agent join is new L3 orchestration, not a
-helper that already exists. Unrouted enabled assistants retain a configuration action (C6).
+helper that already exists. Cards with a confirmed Hub model can edit its route even when
+the chain is empty; cards without a model show a hint instead of creating a route target.
 
 **Known by design — setup requires Model Hub.** Owner decision, 2026-09-21 12:56 +08:
 “setup的契约是默认使用模型网关”; users who later need to disable it do so in Settings.
@@ -319,7 +325,8 @@ Hub flow remain defects. Current-head review, unresolved-thread and CI gates sti
 
 ## C5 — stable dialog frame
 
-Applies to all three screen-2 dialogs and to screen 3's route dialog.
+Applies to the three screen-2 dialogs. Screen 3 reuses Model Hub's existing
+`RouteChainDialog` and its own focus, layout, guard and save behavior.
 
 - One frame per dialog across every tab and state: 568 wide, 24 padding, 16 radius, 20
   gaps, and a common height taken from that dialog's longer ordinary form (not from an
@@ -343,20 +350,20 @@ Field names are exact. Every row names its producer and its consumer, because a 
 contract passes both sides' unit tests while the behavior silently disagrees.
 
 Each row distinguishes a shipped owner from required setup orchestration. Reuse an owner
-where its actual inputs and outputs fit; controlled state, support preflight and shared model
-mapping cannot be attributed to helpers that lack them. A lane reports contradictions instead
+where its actual inputs and outputs fit; controlled state, support preflight and per-assistant
+route reads cannot be attributed to helpers that lack them. A lane reports contradictions instead
 of silently changing either the handoff or another owner.
 
 ### Screen 2 — providers
 
 | Element | Producer → consumer and rule |
 | --- | --- |
-| scan and discovery | existing migration feature `modelsApi.scanMigration().items` → full `providerSelection.scan`; `isImportableKey` identifies entry-point keys only. Keep every row; reuse its group closure/blockers before the actionable capsule count; a blocked detected key remains visible with its reason but is not advertised as importable |
+| scan and discovery | existing migration feature `modelsApi.scanMigration().items` → full `providerSelection.scan`; `isImportableKey` identifies entry-point keys only. Keep every row; reuse its group closure/blockers before the primary-action count; a blocked detected key remains visible with its reason but is not advertised as importable |
 | candidate identity | `MigrationItem.id` is selection identity, never vendor alone. Use `providerLabel` / `providerVendorId` as `MigrationDialog.ItemRow` does. Optional vendor/name/mask may be absent: generic mark plus `masked_detail`, never infer vendor from backend or fabricate a mask. Show every `source_paths` locator; only when absent use `migration.source.<backend>`. `notes_key` is an explanation, not origin |
 | cards | slots 1–2 show detected/provider identities then existing sources, with OpenAI/Anthropic placeholders if needed; slot 3 is Add more. Vendor grouping is presentation only: multiple keys from one vendor retain separate IDs and may require whole backend selection |
 | selected and connected | selected means complete consent group selected; a blocked group is disabled with its reason. Added/connected treatment follows confirmed source IDs from `listSources` and status `active` / `standby`; `verification_pending` is disclosed as unverified, not rejected as unusable (the shipped resolver accepts standby). One vendor's healthy source does not prove every key/card connected or a runnable assistant |
-| counts | CTA count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. Capsule count = distinct key IDs in complete, unblocked, key-only groups, independent of selection. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
-| capsule | retain dismissal signature owner `modelHubMigrationDismiss` and the reserved slot. Existing `ImportKeysNotice` scans/owns a dialog internally: L2 must adapt it to the shared scan/selection owner before claiming consistency; it is not a drop-in consumer of C2 |
+| counts | Primary-action count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. There is no independent capsule count. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
+| migration offer | The primary action opens the controlled `MigrationDialog` for selected complete backend groups. `modelHubMigrationDismiss` persists declined `MigrationItem` identities; a newly discovered key remains visible for review, but its group is never automatically selected if another required item was declined. Only explicit consent to the complete group clears those identities. No `ImportKeysNotice` or reserved slot is mounted |
 | import / Detected tab | use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 delegates confirmation/apply/recovery to the existing migration feature; setup never applies from selection or normal navigation |
 | add — API key | shared `AddApiKeyDialog` form: one create carrying `save_unverified: true` (`apiKeySourceDraft.ts`), no observe or probe first — the credential is saved on the person's word and verified afterwards, so a provider that is slow or briefly down does not cost them the key they pasted. Preserve its existing unknown-write recovery exactly: only a server-named non-409 4xx settles the write (`apiKeyWriteSettled`), anything else reconciles against `client_nonce` through `reconcileUnknownWrite` rather than repeating the create. Read `SourceCreated.source` and placement tails (`added_to`, `adopted_by`); refresh sources and affected supplies before reporting ready, and a source that comes back `verification_pending` is shown as saved-but-unverified per the `selected and connected` row — never as a completed verification |
 | add — subscription | reuse `subscriptionOptions.ts` / `OAuthConnectDialog` / `OAuthFlowParts` for the offered product vendors, custody choice and flow ownership. Setup limits the shipped vendor list to OpenAI/Anthropic per handoff; there is no callable vendor-capability-list API in `ModelsApi`, and no such producer should be invented. `getOAuthStatus` / `submitOAuth` return `OAuthResult`; terminal create carries `created.source` and placement tails. Do not create the source a second time or equate terminal OAuth with assistant readiness |
@@ -382,11 +389,9 @@ setup's API-key-only requirement, an otherwise importable OAuth member also bloc
 for this entry point; show it and explain that the full migration is available in Settings.
 Never silently import OAuth or drop it from a batch.
 
-L2 makes the smallest controlled-state/copy adaptation of the existing dialog/grouping
-owner so discovery cards, capsule and Detected tab consume that same feature. Current
-`MigrationDialog` has only `open/onClose/onApplied/eligible` props and local `items` selection;
-the shared state/copy inputs and setup key-only whole-group constraint are future adaptation
-work, not already shipped props. Keep one grouping/confirmation/apply/recovery owner: no
+The controlled `MigrationDialog`, discovery cards and Detected tab consume the same scan
+and complete-group selection. Setup supplies the key-only eligibility and write admission;
+Settings keeps its broader migration scope. Keep one grouping/confirmation/apply/recovery owner: no
 independent item-ID selection engine, setup-specific migration coordinator or retry engine.
 Rescans invalidate old item IDs: preserve selection only for unchanged complete groups;
 changed membership/custody requires renewed review, and failed rescans disable apply rather
@@ -418,7 +423,7 @@ key cleanup, preservation of unrelated MCP/name settings, and retained custody f
 after exposure. Setup must not duplicate cleanup, custody writes, mode transition, rollback
 or retry machinery, and must not send a second mode PATCH after successful apply.
 
-Cards, capsule and Detected actions delegate to this feature's complete-group review. Keep
+Cards, the primary action and Detected actions delegate to this feature's complete-group review. Keep
 every required backend/file visible and show the exact consequence
 `迁移后，CLI的认证信息将完全交由模型网关管理`, with **Not now / Start migration**. Only the latter
 explicit confirmation invokes apply. New/incomplete takeover invokes server dependency ensure
@@ -484,7 +489,7 @@ retry can reseed an actually absent config without overwriting user fields.
 A direct `apiFetch` POST **does not clear ApiContext's 30-second config cache or emit
 `onConfigChanged`/configuration convergence**. L1 explicitly installs the validated fresh
 GET into the shell's existing server-config state (`data` in today's Wizard), scoped to the
-current request/activation. Feed capability, platform recovery and bootstrap decisions from
+current request/activation. Feed capability and bootstrap decisions from
 that snapshot. Future authoritative setup reads use the same direct uncached read/parse
 path, including unknown-write reconciliation; do not replace it with cached `api.getConfig()`
 or assume a global notification occurred. C2's draft state/setter remains unchanged.
@@ -517,9 +522,10 @@ an explicit/active recovery attempt using fresh config and runtime evidence. A `
 can be the service's projection of failed demand, not proof of installed bytes. StatusProvider's
 `refreshStatus()` only refreshes service status and may return null; neither it nor a cached
 status alone proves config persistence or backend readiness. Missing CLI, sources, routes
-and incomplete setup do not forbid controller startup. Bad existing platform configuration
-uses `SetupPlatformRecovery`; do not disable configured transports or restart after an
-already-reconciled config write.
+and incomplete setup do not forbid controller startup. Saved incomplete platform
+configuration remains intact for repair in Settings; it does not block Model Hub setup
+completion. Do not disable configured transports or restart after an already-reconciled
+config write.
 
 Evidence is separated deliberately. The temporary frontend consumer imports the **actual
 ApiProvider, serializer and apiFetch** with mocked HTTP: empty mutations reject before POST;
@@ -579,7 +585,7 @@ is not universally side-effect-free. These are separate transport/server/compose
 | Mode change without native rows | `set_agent_mode` guards/drains native writers, rescans under lock and uses `_commit_synced`. No ensure; native rows are rejected, never silently taken over. Fresh health/config and mode readback remain required |
 | Migration scan / apply | Full scan is discovery, not consent. New/incomplete `apply_native_migration._resume_takeover` explicitly ensures before native withdrawal and before sync/start; retain installing-path admission and journal recovery. A completed receipt replay returns before ensure. Healthy health alone cannot bypass this dependency; do not change migration semantics to remove it |
 | Source/mode writes that change engine bindings | `_commit_synced` persists and calls adapter `sync_sources`; it waits for active transports and restarts a running engine via the existing verified disk binary, without installer ensure. Restart can fail if that binary/permissions/health is unavailable; owner restoration may also fail. Surface errors and re-read persisted config/runtime/receipts before retry, never claim atomic rollback |
-| Exact route reads/preview/reorder | Pure chain reorder has unchanged bindings, so `_commit_synced` saves without restart or install. Keep exact-hop/menu-model eligibility, per-target guards and readback |
+| Exact route reads/preview/reorder | Pure chain reorder has unchanged bindings, so `_commit_synced` saves without restart or install. `RouteChainDialog` owns exact-hop/menu-model eligibility, guards and readback for the selected route |
 
 Thus a usable running Hub is not disabled merely by `manifest.resolution === 'unsupported'`.
 New takeover can still be blocked by its real ensure dependency; manual sources, existing
@@ -595,128 +601,46 @@ the default journey. Read failures authorize neither lifecycle writes nor comple
 | install | explicit `api.installAgent(name)` then detect the returned/configured path and await the collection authority refresh/current result. Path/agent-config changes have the same refresh requirement. Pending/stale/failed refresh holds completion and exposes Retry; retain install output and one loading indicator |
 | enabled | existing Switch config write, followed by `getBackendConnection` and Agent reads. Saved config reconciles live backends; no second restart |
 | upgrade | `BackendLifecycleChip.onVisual` still owns probe/write, activity-gated; update coexists with enabled state |
-| route control | **every installed/enabled assistant has an action**, including Direct, empty route, missing model and read failure. Enabled-capability setup opens Hub configuration/recovery: show its own `named_agents` model when routed, otherwise `onboarding.setup.configureRoute`. Opening requires no resolved route; mutations use C6 operation-specific admission/consent. Unsupported without running Hub offers recheck/guide, not native auth as a setup bypass. A disabled configuration retains C2 configuration recovery, never a Direct setup dialog. Busy operations may temporarily disable action |
-| candidate identity | use the setup target policy below; identify backend + Agent name and exact menu model, independently of the global default. C4 may preserve a runnable custom default outside these edit targets |
-| add model source | `onNavigate('providers')` preserves the dirty route draft and closes the route dialog; reopening restores it. Done returns focus to the invoking chip/configure action |
+| route control | Confirmed Hub cards with a designated builtin Agent model show that model's first chain hop and backup count. Enabled cards open `RouteChainDialog` for only `(backend, menu model)`; disabled cards preview the same route but cannot edit it. A current successful route read is required to open the editor; pending or failed reads do not infer an empty model or authorize editing. Route-read failure has its own Retry. A Hub card with no model shows a hint to repair it later in Agent/Model Hub settings; Setup does not choose or write an Agent model. Direct cards retain native connection actions, but Direct cannot satisfy setup completion. Unknown or conflicting Hub/Direct ownership disables configuration until a fresh read. A disabled Hub configuration retains C2 recovery, never a Direct setup-completion bypass |
+| candidate identity | for each backend, read its current designated builtin Agent, including disabled Agents, and use its saved menu model; custom Agents or the global default do not substitute as that card's route target. C4 may preserve a runnable custom default independently |
+| route close | close/commit refreshes the card's server-backed route and connection; `RouteChainDialog` owns the edit draft and save lifecycle, not `SetupFlowState` |
 | all uninstalled | three install actions, workspace entry disabled, Back still available |
 
-### Model-ranked route mapping — D4/D9 orchestrator-ratified technical interpretation
+### Per-assistant Model Hub route mapping
 
-C2 keeps `RouteHop[]`: ordered `(source_id, upstream model_id)` pairs. A source with two
-models yields two distinct rows. `putAgentSources` changes backend source membership and
-priority; it is never the model-ranked Save operation. Existing `getAgentChain`,
-`previewAgentChain`, `putAgentChain`, `putAgentModels` and `RouteChainDialog` supply the
-primitives. The shared projection and multi-target coordinator are new L3 orchestration.
+Each card reads its designated builtin Agent's saved menu model, including when that Agent
+is disabled, and the matching chain from `GET /api/models/agents/{backend}/chains`. Read
+the backend supply and sources once per refresh, not once per card. The card displays that
+chain's actual first upstream model (display name when available, otherwise ID) and the
+remaining hop count. The three cards may legitimately show different routes. A route on
+another menu model, another backend, or an unrelated custom Agent is not substituted.
 
-**Targets and scope.** Each installed/enabled backend card represents its designated builtin
-default Agent. Use `listVibeAgents({cache:false})` for enabled/non-archived candidates and
-`getVibeAgent(name,{cache:false})` for metadata: the brief list omits it. Match the store's
-builtin selection (metadata `builtin_default` or `lock_delete`; prefer name equal to backend,
-then `default`, then name order). A custom Agent merely named `claude` is not a builtin.
-If none exists, keep configure reachable and require an explicit existing named-Agent target
-selection; do not create or mutate an arbitrary Agent. Preserve each target Agent's exact
-saved `model`; join to `AgentSupply.named_agents` by backend/name, then the exact
-`catalog_models` menu id. No backend-native default or prefix-stripping inference.
+Only a current, successful read for the active screen may supply an editor selection. A
+pending or failed read may retain old values for non-operational display, but it cannot
+claim an empty model, enable the route action or open an old selection. Retry refreshes the
+route inventory. A confirmed Hub card with a saved menu model opens the existing Model Hub
+`RouteChainDialog` for exactly that `(backend, menu model)`, including when its chain is
+empty. The dialog owns its own draft, preview, save guards, unknown-write reconciliation
+and readback; Setup refreshes the card after commit or close. It does not write other
+backends' chains. If the Agent has no model, Setup shows a hint and leaves model selection
+and catalog repair to existing Agent/Model Hub settings.
 
-The shared reorder includes the displayed setup targets, deduplicated by `(backend, menu
-model)`, with their names/model identities visible before Save. It does not edit Agent model
-fields, other menu-model chains, source order, disabled backends or the global default.
-All Agents on the same backend/menu model necessarily share that chain: disclose their names
-as affected; do not promise custom Agents with that same key are unaffected. A custom Agent
-on a different menu model and a runnable global custom default are preserved. Explicit target
-selection is required before adding such a custom route to the edit set.
-
-**Fresh or unrouted target.** First ensure controller/runtime and mode as above; opening the
-control itself has no route prerequisite. The server materializes recommendations for new
-and legacy blank Agent models (`VibeAgentStore` creation/prefill); the UI never chooses the
-first catalog row as an Agent model. Read back the actual selected model. If an anomalous
-blank remains, require explicit Agent-model repair using existing Agent settings before
-claiming a route target. The shipped Direct OpenCode recovery cannot perform this Hub repair.
-
-Read the target's catalog and effective `getAgentChain`. Existing nonempty automatic or
-manual chains hydrate immediately. If the exact saved menu id is absent (fresh OpenCode is
-one real case), offer the existing catalog-add/manual form for **that exact id**, keeping the
-current catalog as `baseline` and adding only the reviewed row through `putAgentModels`.
-Use `getAgentModelCandidates` metadata for an exact matching candidate, or the existing
-manual form's validated metadata/native protocol; never guess from the Agent name. If the
-picker displays supplier chips, forward its `expected_suppliers` on catalog addition; a
-manual row without a supplier promise omits that field. Preserve unrelated baseline rows
-and read the catalog back before chain mutation. This adds a model entry, not an Agent-model
-change; cancellation keeps the target unconfigured. Server admission errors remain visible.
-For an empty chain, reuse the `routeCandidates`/`RouteChainDialog` exact-hop picker to select
-an upstream model from an eligible source, preview it for this target, then save explicitly.
-No arbitrary default hop, vendor-based cross-backend assumption or transplant from another
-Agent. API-key passthrough can be an explicit manual target via the existing editor.
-
-Example proved against the actual server: OpenCode's server-selected menu id
-`openai/gpt-5.6-sol` can be admitted unchanged, then explicitly mapped to
-`(source_id, 'gpt-5.6-sol')`. They are different identities. A source added on screen 2 can
-supply an automatic route; it does not automatically extend a frozen manual chain. When an
-existing manual route needs a new fallback, the same target-specific hop picker admits it
-explicitly, then refreshes that target's membership. The shared reorder only reorders the
-reviewed members; it never adds all global rows to every target.
-
-**Initialization and reconciliation.** On the first clean open, snapshot for each target
-`{ backend, modelId, agentNames, chain, manual_override }` from actual reads. Hydrate the
-shared list by stable union of exact pairs: current global default's target first **only if
-in the edit set**, then Claude/Codex/OpenCode and Agent name order. Preserve every target's
-original membership and order as a baseline. Display the projected preferred/backup rank
-for each affected target, not a claim that every row works on every backend. Divergent
-existing orders remain unchanged on open/Done without an edit; show their actual orders and
-the proposed outcome before an explicit shared Save. Disjoint native subscriptions retain
-their disjoint subsets. A global interleaving change that alters no target is a no-op.
-
-`routeOrder` and `routeOrderDirty` live in shell state. The single shared mounted route owner
-retains target baselines, pending submissions and per-target results while hidden (local
-state, not extra C2 fields or a new global store). Add source/Back closes the dialog without
-unmounting this owner. Dirty re-entry retains both draft and baselines; read new server facts
-separately, showing added candidates without overwriting edits. Changed Agent model, mode,
-source membership or target set invalidates dependent previews and requires reconciliation.
-If the owner is deliberately reset, clear the draft and baselines together, never retain an
-orphaned dirty list. Refresh restores persisted truth, not an unpersisted browser draft.
-
-**Projection, write and retry.** For each target, filter the shared order by that target's
-reviewed exact-pair membership. Preserve temporarily unhealthy/stale persisted hops; the
-server annotates health and admission. No empty write silently resets a chain: empty means
-configuration/recovery required, because `{hops:[]}` removes the override and inherits defaults.
-For changed targets preview with **`{manual_override:{hops}}`**. Server validation supplies
-backend eligibility/model admission; inspect runnable/current and affected route evidence.
-Do not synthesize vendor/protocol compatibility, auto-force interruption guards or hide a
-failed target. A pure reorder keeps membership; actual backend eligibility changes may still
-block it and require a fresh review.
-
-Save only changed targets, in the displayed stable order, using `putAgentChain(backend,
-menuModel,{hops})`. Reordering an automatic chain freezes that target as a manual override:
-show the existing follows/frozen route explanation; future source additions will not silently
-join it. Just opening or confirming an unchanged list never freezes an automatic chain.
-Before each write re-read its Agent/model, mode and chain against the baseline. After each
-write, read the exact target again and verify **manual_override and pair order**, not merely
-the current healthy source. Reuse `routeChainMatchesAttempt` for identity/override matching.
-A second-target failure leaves earlier confirmed writes intact and the shared draft dirty.
-On retry read every attempted target: confirmed desired override/order is skipped; unchanged
-baseline may be retried; any third state needs reconciliation/review. Unknown response means
-read first. No cross-target rollback or atomicity claim. The API has no chain baseline/CAS;
-a race after the last pre-read is an existing last-writer limitation, so the UI must detect
-readback differences and must not promise exclusion of concurrent Settings writers.
-Clear dirty only when every changed intended target is confirmed (or a verified no-op),
-then refresh candidate supply/default readiness. A locally sorted list is never C4 evidence.
-
-Temporary composed fixture evidence (real service persistence/preview/resolver with fake
-engine, outside PR files): same source/two models remain distinct; native Claude/Codex subsets
-remain separate; one builtin target edit preserves a custom Agent's different model/chain;
-fresh Agent model materialization and OpenCode exact catalog/hop admission work; divergent
-orders cause no opening write; second-target failure preserves the first write and retries
-only the outstanding one. Existing primitive tests separately cover unknown-response
-reconciliation, route guards and model prefill. Neither is a shipped setup integration test;
-L3 must port these cases to its real consuming coordinator.
+Installing or enabling an assistant never adopts another assistant's route or changes its
+Agent model. An install offers automatic enablement only when the click-time action promised
+it for a confirmed Hub backend, and a newer explicit disable or changed backend ownership
+prevents that later enable write. Direct cards retain native connection actions; they cannot
+complete the Hub setup journey. There is no shared `routeOrder`, target projection,
+multi-target partial receipt or cross-assistant rollback policy in Setup.
 
 ## Audit evidence and required consuming checks
 
 | Repeated root class | Whole boundary audited / remaining evidence |
 | --- | --- |
-| route identity / eligibility / readiness | refreshed current CLI presence (existing generation owner) → action availability → named Agent+backend → mode → menu model → exact chain → default readback. C4/C6 define reachable configuration, explicit targets, exact-pair projection, partial-write/readback and default preservation; composed fixtures exercise the mapping |
+| route identity / eligibility / readiness | refreshed current CLI presence (existing generation owner) → action availability → named Agent+backend → mode → menu model → exact chain → default readback. C4/C6 keep completion on fresh server evidence; each card reads only its designated Agent's current route. `RouteChainDialog` owns single-route guards and readback; Setup does not coordinate cross-backend writes |
 | lifecycle / capability / readiness | enabled setup prerequisite → active-provider persistence → controller recovery/server admission → browser observation → operation-specific recovery/consent → readback. Default Hub requirement and independent healthy-Hub use are preserved; no unsupported-to-Direct conversion. `gatewayAdoption.test.ts` proves helper scope only; it is not a screen-2 preflight test. Future L2 tests must cover unsupported with zero runtime artifact installation/start, healthy-engine source writes and restart failure, already-Hub missing/stopped, real controller recovery (external composed fixture available), start failure and native blockers |
 | producer / consumer / state | C2 React consuming test covers cross-screen state plus a late functional update. Full scan → transitive backend groups → complete apply IDs follows `MigrationDialog` and its grouping tests; L2 still needs a consuming integration test for discovery → owner confirmation → receipt/readback, including no implicit apply and unchanged Settings behavior |
 | duplicated instructions / copy | plan §§4/9/10, C1 metadata and C2/C4/C6 reviewed together. Automatic runtime setup reuses approved precedent; owner D10 selects existing migration takeover and supersedes the handoff promises; setup owns only discovery/context/result presentation. Task-specific design source overrides the general default; existing theme shadow token replaces the literal prescription. Source-ranking substitution and false approval/rollback claims are removed; handoff remains unchanged user source |
 
-PR0 tests do not claim a shipped screen or an end-to-end migration/route implementation.
+The original PR0 tests established interface shapes only. Current consuming tests cover
+per-card route reads, current-read editor admission and model-less presentation; they do
+not replace the server's route-save and migration-owner checks.

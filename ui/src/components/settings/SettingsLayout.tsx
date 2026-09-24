@@ -3,7 +3,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
-  Brain,
   ChevronDown,
   ChevronLeft,
   Cpu,
@@ -27,7 +26,6 @@ import clsx from 'clsx';
 
 import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { SETTINGS_LANDING_PATH } from '@/lib/adminNavigation';
 import { settingsResumePath, writeLastSettingsSection } from '@/lib/settingsSectionMemory';
 import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
@@ -47,7 +45,7 @@ type SettingsItem = {
   labelKey: TranslationKey;
   icon: React.ComponentType<{ className?: string }>;
   ownerOnly?: boolean;
-  feature?: 'models' | 'memory' | 'channels';
+  feature?: 'models' | 'channels';
   children?: SettingsItem[];
   defaultOpen?: boolean;
   exact?: boolean;
@@ -70,7 +68,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     items: [
       { path: '/settings/backends', labelKey: 'settings.sections.backends', icon: Server, ownerOnly: true },
       { path: '/settings/models', labelKey: 'settings.sections.models', icon: Cpu, ownerOnly: true, feature: 'models' },
-      { path: '/settings/memory', labelKey: 'settings.sections.memory', icon: Brain, ownerOnly: true, feature: 'memory' },
       { path: '/settings/replies', labelKey: 'settings.sections.replies', icon: MessageSquare },
     ],
   },
@@ -246,7 +243,6 @@ export const SettingsLayout: React.FC = () => {
   const setupOrigin = setupOriginPath !== undefined && isChromelessShellPath(setupOriginPath);
   const standaloneMenu = useStandaloneSettingsMenu();
   const [modelHubVisible, setModelHubVisible] = useState(false);
-  const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
@@ -258,7 +254,6 @@ export const SettingsLayout: React.FC = () => {
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
     let cancelled = false;
-    let memoryRequest = 0;
     let configVersion = 0;
     const applyConfigVisibility = (config: unknown) => {
       setModelHubVisible(modelHubEnabledFromConfig(config));
@@ -271,18 +266,6 @@ export const SettingsLayout: React.FC = () => {
       configVersion += 1;
       applyConfigVisibility(config);
     });
-    const refreshMemoryVisibility = () => {
-      const request = ++memoryRequest;
-      void api.getMemorySettings()
-        .then((memory) => {
-          if (!cancelled && request === memoryRequest) {
-            setMemoryVisible(memoryNavShouldBeVisible(memory));
-          }
-        })
-        .catch(() => {
-          if (!cancelled && request === memoryRequest) setMemoryVisible(false);
-        });
-    };
     const requestedConfigVersion = configVersion;
     void api.getConfig()
       .then((config) => {
@@ -294,12 +277,9 @@ export const SettingsLayout: React.FC = () => {
           setChannelSettingsVisible(false);
         }
       });
-    refreshMemoryVisibility();
-    window.addEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     return () => {
       cancelled = true;
       stopConfigChanges();
-      window.removeEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     };
   }, [api, capabilities.can_manage_instance]);
 
@@ -309,7 +289,6 @@ export const SettingsLayout: React.FC = () => {
       items: group.items.flatMap((item) => {
         if (item.ownerOnly && !capabilities.can_manage_instance) return [];
         if (item.feature === 'models' && !modelHubVisible) return [];
-        if (item.feature === 'memory' && !memoryVisible) return [];
         return [{
           ...item,
           children: item.children?.filter((child) =>
@@ -317,10 +296,10 @@ export const SettingsLayout: React.FC = () => {
         }];
       }),
     })).filter((group) => group.items.length > 0),
-    [capabilities.can_manage_instance, channelSettingsVisible, memoryVisible, modelHubVisible],
+    [capabilities.can_manage_instance, channelSettingsVisible, modelHubVisible],
   );
 
-  const activeTrail = useMemo(() => {
+  const activeTrail = (() => {
     // Route hierarchy must stay stable while capability/config projections load;
     // otherwise a mobile deep link can briefly point its Back action at the
     // wrong parent before its rail item becomes visible.
@@ -332,7 +311,7 @@ export const SettingsLayout: React.FC = () => {
       }
     }
     return [];
-  }, [location.pathname]);
+  })();
 
   const mobileBackTarget = useMemo(() => {
     if (atRoot || setupOrigin) return '/';
@@ -361,11 +340,8 @@ export const SettingsLayout: React.FC = () => {
   // it, which is the row the rail can show as current.
   //
   // Where the person actually is, is the whole input. A feature-gated row
-  // (Models, Memory, Channels) can leave the rail while its page stays routed,
-  // and that does not make the page the wrong place to be: Memory with memory
-  // off is the setup surface, and a Model Hub that is off redirects itself —
-  // which arrives here as the section it redirected to and corrects the memory
-  // on its own. Nothing here consults the feature projections the rail draws
+  // (Models, Channels) can leave the rail while its page stays routed.
+  // Nothing here consults the feature projections the rail draws
   // rows from, so a pending or failed read can neither erase a preference nor
   // record the wrong one.
   useEffect(() => {

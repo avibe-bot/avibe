@@ -505,7 +505,6 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
-| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或提交内容进行尽力而为的进程内捕获；接受请求不保证投递或持久化 |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
@@ -863,6 +862,7 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--scope-id`
 - `--model`
 - `--reasoning-effort`
+- `--close-after`
 - `--sync`
 - `--message`
 - `--message-file`
@@ -873,6 +873,10 @@ no-delivery session，更适合 sub-agent 调用。
 Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `session_id` 的
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
+
+`--close-after` 适用于新建或 fork 的 Session。Run 结束后它会释放该 Agent
+runtime，同时保留 Session、transcript 和 Run 记录；不能和现有的
+`--session-id` 一起使用。
 
 对于现有 `--session-id`，默认投递是 P1：新消息会 steering 进活动 native Turn，
 Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。`--queue` 会
@@ -897,7 +901,7 @@ fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`
 | --- | --- |
 | `vibe runs list` | 列出最近 run |
 | `vibe runs show <run_id>` | 查看单个 run |
-| `vibe runs cancel <run_id>` | 请求取消 run |
+| `vibe runs cancel <run_id>` | 请求取消 run；若该 run 的输入已进入正在运行的 Session turn，会像 Session Stop 一样停止整个 turn，同一 turn 中的其他 run 也会一起停止 |
 
 ## 6. 推荐心智模型
 

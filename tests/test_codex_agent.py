@@ -15,6 +15,7 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.resource_governance import AgentResourceFailure
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.base import BaseAgent as RealBaseAgent
@@ -186,6 +187,61 @@ for name, module in _saved_modules.items():
         sys.modules.pop(name, None)
     else:
         sys.modules[name] = module
+
+
+class CodexExitPressureCacheTests(unittest.TestCase):
+    def _agent_with_transport(self, transport):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(language="en"))
+        agent._session_mgr = SimpleNamespace(get_cwd=lambda _base: "/work")
+        agent._transports = {"/work": transport}
+        return agent
+
+    def test_concurrent_sessions_share_positive_exit_observation(self):
+        transport = SimpleNamespace(_process=SimpleNamespace(returncode=137))
+        agent = self._agent_with_transport(transport)
+        failure = AgentResourceFailure(
+            kind="pids", message="shared PID event", pids_current=10, pids_max=32
+        )
+        first = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "one"})
+        )
+        second = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "two"})
+        )
+
+        with patch.object(
+            _MODULE, "observe_agent_resource_pressure", return_value=failure
+        ) as observe:
+            assert first() == second()
+        observe.assert_called_once()
+
+    def test_negative_exit_observation_is_cached_only_for_that_transport(self):
+        old_transport = SimpleNamespace(_process=SimpleNamespace(returncode=137))
+        agent = self._agent_with_transport(old_transport)
+        first = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "one"})
+        )
+        second = agent.capture_backend_exit_failure(
+            SimpleNamespace(platform_specific={"turn_base_session_id": "two"})
+        )
+        newer_failure = AgentResourceFailure(kind="memory", message="new event")
+
+        with patch.object(
+            _MODULE,
+            "observe_agent_resource_pressure",
+            side_effect=[None, newer_failure],
+        ) as observe:
+            assert first() is None
+            assert second() is None
+            agent._transports["/work"] = SimpleNamespace(
+                _process=SimpleNamespace(returncode=137)
+            )
+            third = agent.capture_backend_exit_failure(
+                SimpleNamespace(platform_specific={"turn_base_session_id": "three"})
+            )
+            assert "new event" in third()[0]
+        assert observe.call_count == 2
 
 
 class _StubSessionManager:
@@ -1601,7 +1657,11 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
 
-        bad_transport = SimpleNamespace(stop=AsyncMock(), is_alive=False)
+        bad_transport = SimpleNamespace(
+            stop=AsyncMock(),
+            is_alive=False,
+            _process=SimpleNamespace(returncode=137),
+        )
         fresh_transport = SimpleNamespace()
         invalidated = []
         session_mgr = SimpleNamespace(
@@ -1642,7 +1702,9 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent._start_thread = AsyncMock(return_value="thread-new")
         agent._start_turn = AsyncMock(return_value="thread-new")
 
-        await agent.handle_message(request)
+        with patch.object(_MODULE, "observe_agent_resource_pressure") as observe_pressure:
+            await agent.handle_message(request)
+        observe_pressure.assert_not_called()
 
         bad_transport.stop.assert_awaited_once()
         self.assertEqual(agent._transports, {})
@@ -3687,37 +3749,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         transport.send_request.assert_not_awaited()
 
-    def test_thread_developer_instructions_follow_live_memory_enabled_state(self):
-        agent = object.__new__(CodexAgent)
-        agent.controller = SimpleNamespace(
-            config=SimpleNamespace(
-                platform="avibe",
-                reply_enhancements=True,
-                memory=SimpleNamespace(enabled=False),
-            )
-        )
-        agent.codex_config = SimpleNamespace(default_model=None)
-        request = SimpleNamespace(
-            context=SimpleNamespace(
-                platform="avibe",
-                platform_specific={"agent_session_id": "sesk8m4q2p7x", "memory_cli_admitted": True},
-                user_id="U1",
-                channel_id="C1",
-            ),
-            subagent_name=None,
-        )
-
-        disabled_instructions = asyncio.run(
-            agent._build_thread_developer_instructions(request)
-        )
-        agent.controller.config.memory.enabled = True
-        enabled_instructions = asyncio.run(
-            agent._build_thread_developer_instructions(request)
-        )
-
-        self.assertNotIn("## Personal Memory", disabled_instructions)
-        self.assertIn("## Personal Memory", enabled_instructions)
-        self.assertIn('vibe memory search "<query>" --json', enabled_instructions)
 
     def test_build_input_does_not_add_codex_generated_image_prompt_to_each_turn(self):
         agent = object.__new__(CodexAgent)
@@ -6156,7 +6187,6 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             "'failed to load configuration: No such file or directory (os error 2)'}"
         )
         self.assertTrue(agent._is_recoverable_transport_error(err))
-
 
 
 class CodexPromptSnapshotRecoveryTests(unittest.IsolatedAsyncioTestCase):

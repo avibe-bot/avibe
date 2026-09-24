@@ -12,7 +12,6 @@ from core.message_context import (
     requires_typed_user_session_key,
     resolve_context_thread_id,
 )
-from core.memory_adapter import SessionReset
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
 from modules.agents.base import AgentRequest
@@ -155,18 +154,6 @@ class CommandHandlers(BaseHandler):
                 deadline_seconds=0.0,
             )
         return await operation()
-
-    def _offer_session_reset(self, session_anchor: str | None) -> None:
-        if not session_anchor:
-            return
-        adapter = getattr(self.controller, "memory_adapter", None)
-        offer = getattr(adapter, "offer", None)
-        if not callable(offer):
-            return
-        try:
-            offer(SessionReset(session_anchor))
-        except Exception:
-            logger.debug("Session reset observation failed", exc_info=True)
 
     def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
         keys = [session_key]
@@ -565,10 +552,10 @@ class CommandHandlers(BaseHandler):
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
             # Resolve the old session before Telegram can create a replacement
             # topic. The new topic context is not a valid identity for this flush.
-            session_anchor, memory_session_anchor = self._session_anchors_for_new(context)
+            session_anchor, _ = self._session_anchors_for_new(context)
             # ``/new`` deletes the session rows that scheduled tasks and watches may
             # be pinned to. Wait briefly for in-flight capture, then always reset
-            # (a stalled or failed Memory flush must not fail the command).
+            # (a stalled or failed session reset must not fail the command).
             async def _reset_session() -> tuple[bool, list[dict[str, Any]]]:
                 if platform == "telegram" and hasattr(im_client, "start_new_topic_session"):
                     topic_context = await im_client.start_new_topic_session(context)
@@ -603,14 +590,9 @@ class CommandHandlers(BaseHandler):
                                 )
                 return False, reclaimed
 
-            async def _reset_and_offer() -> _NewSessionResult:
-                result = await _reset_session()
-                self._offer_session_reset(memory_session_anchor)
-                return result
-
             topic_started, reclaimed = await self._run_session_lifecycle_for_new(
-                memory_session_anchor,
-                _reset_and_offer,
+                session_anchor,
+                _reset_session,
             )
             if topic_started:
                 return

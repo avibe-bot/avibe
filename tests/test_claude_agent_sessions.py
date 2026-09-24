@@ -3240,7 +3240,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
-            reason="transport_auth_failure",
+            reason="result_auth_failure",
         )
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
@@ -3862,7 +3862,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
-            reason="transport_auth_failure",
+            reason="assistant_auth_failure",
         )
         self.assertEqual(agent._remove_ack_reaction.await_count, 2)
         self.assertEqual(agent._remove_ack_reaction.await_args_list[0].args, (pending_request_1,))
@@ -4538,6 +4538,22 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
         pending = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "T2"}))
         ClaudeAgent._adopt_pending_turn_token(ctx, pending)
         self.assertEqual(ctx.platform_specific["turn_token"], "T2")
+
+    def test_close_after_follows_the_matched_turn(self):
+        ctx = SimpleNamespace(platform_specific={"turn_token": "T1", "close_after": True})
+        ordinary = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={"turn_token": "T2"})
+        )
+        ClaudeAgent._adopt_pending_turn_token(ctx, ordinary)
+        self.assertNotIn("close_after", ctx.platform_specific)
+
+        disposable = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"turn_token": "T3", "close_after": True}
+            )
+        )
+        ClaudeAgent._adopt_pending_turn_token(ctx, disposable)
+        self.assertTrue(ctx.platform_specific["close_after"])
 
     def test_noop_without_pending_request(self):
         ctx = SimpleNamespace(platform_specific={"turn_token": "T1"})

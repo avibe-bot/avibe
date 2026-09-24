@@ -998,6 +998,9 @@ def test_retiring_a_model_keeps_persisted_selections_admissible():
             is None
         ), model
 
+    assert backend_model_admission_error("claude", "grok-4.7") is None
+    assert backend_model_admission_error("claude", "default") == "backend_model_id_invalid"
+
 
 def test_visible_backend_model_entries_drops_only_hidden_rows():
     catalog = {

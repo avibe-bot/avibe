@@ -112,9 +112,6 @@ from storage.background import (
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
-    SWEEP_REASON_ORPHANED,
-    SWEEP_REASON_QUEUE_HOLD_EXPIRED,
-    SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
@@ -152,6 +149,7 @@ AGENT_RUN_DELIVERY_INTENTS = frozenset(
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
+AGENT_RUN_CLOSE_AFTER_METADATA_KEY = "close_after"
 FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE = "session_turn_gate_unavailable"
 SESSION_TURN_GATE_UNAVAILABLE_I18N_KEY = "harness.run.sessionTurnGateUnavailable"
 
@@ -1619,11 +1617,7 @@ class ScheduledTaskStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-        metadata = metadata_with_delegated_memory_owner(
-            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
-        )
+        metadata = metadata_with_resource_user_context(metadata, user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1779,11 +1773,6 @@ class ScheduledTaskStore:
         task.metadata = metadata_with_resource_user_context(
             metadata if metadata is not None else task.metadata,
             user_context,
-        )
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-        task.metadata = metadata_with_delegated_memory_owner(
-            task.metadata, session_id=session_id
         )
         task.updated_at = _utc_now_iso()
         if not self._write_task(
@@ -10880,7 +10869,7 @@ class ScheduledTaskService:
                 "is_dm": target.is_dm,
                 "message_metadata": {
                     key: value for key, value in (metadata or {}).items()
-                    if key in {"delegated_memory_owner", "resource_user_context"}
+                    if key == "resource_user_context"
                 },
                 "turn_source": "scheduled",
                 "agent_session_id": session_id,
@@ -10914,6 +10903,14 @@ class ScheduledTaskService:
                 ),
                 "vibe_agent_name": agent_name,
                 "vibe_agent_id": agent_id,
+                "agent_backend": (
+                    target_info.agent_backend
+                    if target_info is not None
+                    else None
+                ),
+                "close_after": bool(
+                    (metadata or {}).get(AGENT_RUN_CLOSE_AFTER_METADATA_KEY)
+                ),
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
                 "source_session_id": (metadata or {}).get("source_session_id"),

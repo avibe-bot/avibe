@@ -10,11 +10,12 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
@@ -23,6 +24,7 @@ from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
 from core.delivery_target import routed_delivery_context
+from core.citations import CitationBundle, materialize_citations
 from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
@@ -38,7 +40,14 @@ from core.message_output import (
     neutralize_mentions,
     output_for_message,
 )
-from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
+from core.reply_enhancer import (
+    FileLink,
+    QuickReplyButton,
+    inline_links,
+    process_reply,
+    strip_file_links,
+    strip_silent_blocks,
+)
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
@@ -48,7 +57,11 @@ from core.run_settlement import (
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    SQLiteBackgroundTaskStore,
+    TERMINAL_RUN_STATUSES,
+    normalize_run_status,
+)
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -87,6 +100,44 @@ _HARNESS_PROMPT_ECHO_I18N_KEYS = {
     "hook": "harness.promptEcho.hook",
     "agent_run": "harness.promptEcho.agentRun",
 }
+
+
+def _written_buttons(
+    buttons: Sequence[QuickReplyButton],
+    citations: Optional[CitationBundle],
+) -> Sequence[QuickReplyButton]:
+    """Quick-reply buttons with their citations written as bare attribution.
+
+    A label is lifted out of the body into a structured field no surface parses
+    as Markdown, so a link written here would show the reader its syntax. The
+    domain on its own still says who is being cited - and an internal token must
+    never survive into a field nothing else will rewrite.
+    """
+    if not citations or not buttons:
+        return buttons
+    return [
+        replace(
+            button,
+            text=materialize_citations(button.text, citations, as_markdown=False) or "",
+        )
+        for button in buttons
+    ]
+
+
+def _written_files(
+    files: Sequence[FileLink],
+    citations: Optional[CitationBundle],
+) -> Sequence[FileLink]:
+    """The same for an extracted file link's label, which is uploaded as text."""
+    if not citations or not files:
+        return files
+    return [
+        replace(
+            link,
+            label=materialize_citations(link.label, citations, as_markdown=False) or "",
+        )
+        for link in files
+    ]
 
 
 class ActivityOutputDeliveryError(RuntimeError):
@@ -228,6 +279,25 @@ _WECHAT_CONSOLIDATED_SPLIT_THRESHOLD = 1700
 # normal fast step stays a clean label. This is the always-moving "still running"
 # signal that the heartbeat keeps ticking even when no new emit arrives.
 _ACTION_TIME_HINT_S = 10.0
+# Name the result attachment gets when a platform has no native Markdown upload
+# and the full text has to ride its ordinary file path instead.
+_RESULT_DOCUMENT_NAME = "result.md"
+
+
+@dataclass(frozen=True)
+class _ResultSplit:
+    """A proposed split, and whether every link in it survived.
+
+    ``links_whole`` is False when a link unit is longer than one message can
+    carry, so no boundary keeps it intact. The chunks are still the best split
+    available, but a caller that can deliver the whole text another way should
+    take that route BEFORE sending any of them: a half link sends fine, which
+    would make the delivery look successful while the reader is shown broken
+    Markdown and no way to reach the source.
+    """
+
+    chunks: list[str]
+    links_whole: bool
 
 
 class ConsolidatedMessageDispatcher:
@@ -258,6 +328,8 @@ class ConsolidatedMessageDispatcher:
         # progress signal. Heartbeat re-renders do NOT go through the emit path,
         # so they never inflate it. Dropped per turn in ``_drop_status_keys``.
         self._status_step_count: dict[str, int] = {}
+        self._close_after_runtime_tasks: set[asyncio.Task] = set()
+        self._close_after_session_ids: set[str] = set()
         # Current context-window occupancy (keyed by SESSION key, not turn-key) so
         # the footer can show "{n} tok" of context the session is using. Backends
         # report the latest snapshot via ``note_session_tokens(total=…)`` (Claude:
@@ -375,11 +447,47 @@ class ConsolidatedMessageDispatcher:
             else SETTLED_BY_TURN_ONLY_RESULT
         )
 
-    def _release_runtime_turn(self, context: MessageContext) -> None:
+    def _release_runtime_turn(
+        self, context: MessageContext, output_semantics: MessageOutput
+    ) -> None:
         service = getattr(self.controller, "agent_service", None)
         release = getattr(service, "release_runtime_turn", None)
-        if callable(release):
-            release(context)
+        payload = getattr(context, "platform_specific", None) or {}
+        settlement = self._turn_release_settlement(output_semantics)
+        # Turn-only Activity delivery failure leaves its Run with the retry
+        # owner. A stopped/refresh result is resultless but has a separate
+        # Run-settlement writer, so it still qualifies for close-after.
+        # Terminal results arm close-after only after their Run write succeeds.
+        # Resultless settlements have a separate writer before this release.
+        run_terminal = settlement in SETTLEMENTS_WITHOUT_RESULT
+        wait_for_run_ids = tuple(payload.pop("_close_after_wait_for_run_ids", ()))
+        if run_terminal and payload.get("close_after"):
+            # The Turn writer can fail after the resultless output is delivered.
+            # Do not reserve or dispose the runtime until its Runs are terminal.
+            wait_for_run_ids = tuple(
+                dict.fromkeys(
+                    (*wait_for_run_ids, *self._terminal_agent_run_ids(context, output_semantics))
+                )
+            )
+        should_close = bool(payload.pop("_close_after_runtime_pending", False)) or bool(
+            payload.get("close_after") and run_terminal
+        )
+        lease = None
+        try:
+            reserve = getattr(service, "reserve_close_after_teardown", None)
+            if should_close and not wait_for_run_ids and callable(reserve):
+                lease = reserve(context)
+            elif callable(release):
+                release(context)
+        finally:
+            if should_close and lease is not False:
+                self._schedule_close_after_runtime(
+                    context, lease=lease, wait_for_run_ids=wait_for_run_ids
+                )
+            elif wait_for_run_ids:
+                self._schedule_close_after_runtime(
+                    context, wait_for_run_ids=wait_for_run_ids
+                )
 
     async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "processing_indicator", None)
@@ -1175,7 +1283,7 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None,
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
-    ) -> None:
+    ) -> list[str]:
         normalized_run_ids = list(
             dict.fromkeys(
                 run_id
@@ -1213,7 +1321,7 @@ class ConsolidatedMessageDispatcher:
                 error=terminal_error,
                 deferred_run_ids=deferred_run_ids,
             )
-            return
+            return deferred_run_ids
         get_run = getattr(store, "get_run", None)
         eligible_run_ids = (
             [
@@ -1238,11 +1346,13 @@ class ConsolidatedMessageDispatcher:
             ):
                 notification["fallback_run_id"] = min(eligible_run_ids)
             terminal_provenance["turn_failure_notification"] = notification
+        deferred_run_ids: list[str] = []
         for run_id in normalized_run_ids:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
             if run_terminal_status and self._run_has_blocking_activity(run_id):
+                deferred_run_ids.append(run_id)
                 defer_terminal = getattr(store, "defer_run_terminal", None)
                 if callable(defer_terminal):
                     defer_kwargs = {
@@ -1290,6 +1400,7 @@ class ConsolidatedMessageDispatcher:
                     run_id,
                     **record_kwargs,
                 )
+        return deferred_run_ids
 
     def _terminal_agent_run_ids(
         self,
@@ -1561,7 +1672,7 @@ class ConsolidatedMessageDispatcher:
         store = None
         try:
             store = SQLiteBackgroundTaskStore()
-            self._record_agent_run_terminal_for_ids(
+            deferred_run_ids = self._record_agent_run_terminal_for_ids(
                 store=store,
                 run_ids=run_ids,
                 text=text,
@@ -1575,9 +1686,253 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
             if require_confirmation:
                 raise
+            return
         finally:
             if store is not None:
                 store.close()
+        if semantics.settles_run:
+            payload = getattr(context, "platform_specific", None) or {}
+            defer_close_after = bool(
+                payload.get("close_after")
+                and semantics.completes_turn
+                and not semantics.detached
+                and self._is_current_runtime_turn(context)
+            )
+            if deferred_run_ids:
+                if defer_close_after:
+                    payload["_close_after_wait_for_run_ids"] = tuple(deferred_run_ids)
+                else:
+                    self._schedule_close_after_runtime(
+                        context, wait_for_run_ids=tuple(deferred_run_ids)
+                    )
+            elif defer_close_after:
+                payload["_close_after_runtime_pending"] = True
+            else:
+                self._schedule_close_after_runtime(context)
+
+    async def _wait_for_close_after_runs(self, run_ids: tuple[str, ...]) -> bool:
+        """Wait for the Run writer, not a Turn output, to finish disposal ownership."""
+
+        from core.inbox_events import RUNS_UPDATED_EVENT, bus
+
+        request_store = getattr(
+            getattr(self.controller, "scheduled_task_service", None),
+            "request_store",
+            None,
+        )
+        own_store = request_store is None
+        if own_store:
+            request_store = SQLiteBackgroundTaskStore()
+        get_run = getattr(request_store, "get_run", None)
+        if not callable(get_run):
+            if own_store:
+                request_store.close()
+            return False
+        subscription_id, queue = bus.subscribe()
+        try:
+            while True:
+                runs = [get_run(run_id) for run_id in run_ids]
+                if any(not isinstance(run, dict) for run in runs):
+                    logger.warning(
+                        "Skipping close-after: a Run is missing for %s",
+                        ",".join(run_ids),
+                    )
+                    return False
+                if all(
+                    normalize_run_status(run["status"]) in TERMINAL_RUN_STATUSES
+                    for run in runs
+                ) and not any(self._run_has_blocking_activity(run_id) for run_id in run_ids):
+                    return True
+                if getattr(self, "_close_after_settlement_closed", False):
+                    logger.warning(
+                        "Skipping close-after teardown: Run settlement did not finish for %s",
+                        ",".join(run_ids),
+                    )
+                    return False
+                try:
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=5)
+                except TimeoutError:
+                    continue
+                if (
+                    event_type != RUNS_UPDATED_EVENT
+                    or not isinstance(payload, dict)
+                    or str(payload.get("run_id") or "") not in run_ids
+                ):
+                    continue
+        finally:
+            bus.unsubscribe(subscription_id)
+            if own_store:
+                request_store.close()
+
+    def defer_close_after_until_run_terminal(self, context: MessageContext) -> None:
+        """Pre-native Stop has no terminal emit; its Run writer owns close-after."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        if not payload.get("close_after"):
+            return
+        run_id = str(payload.get("task_execution_id") or "").strip()
+        if run_id:
+            self._schedule_close_after_runtime(
+                context, wait_for_run_ids=(run_id,)
+            )
+
+    def _schedule_close_after_runtime(
+        self,
+        context: MessageContext,
+        *,
+        lease: tuple[str, str, asyncio.Task | None] | None = None,
+        wait_for_run_ids: tuple[str, ...] = (),
+    ) -> None:
+        """Release a runtime explicitly marked disposable after its Run settles."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        if not bool(payload.get("close_after")):
+            return
+        session_id = str(payload.get("agent_session_id") or "").strip()
+        target = payload.get("agent_session_target")
+        target = target if isinstance(target, dict) else {}
+        backend = str(
+            payload.get("agent_backend")
+            or target.get("agent_backend")
+            or ""
+        ).strip()
+        base_session_id = str(
+            target.get("session_anchor")
+            or payload.get("backend_base_session_id")
+            or ""
+        ).strip()
+        if (
+            not session_id
+            or not base_session_id
+            or backend not in {"claude", "codex", "opencode"}
+        ):
+            if lease is not None:
+                release_lease = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "release_runtime_turn_key",
+                    None,
+                )
+                if callable(release_lease):
+                    release_lease(lease[0], lease[1])
+            logger.warning(
+                "close-after requested without a disposable runtime target: session_id=%s base_session_id=%s backend=%s",
+                session_id,
+                base_session_id,
+                backend,
+            )
+            return
+        if session_id in self._close_after_session_ids:
+            if lease is not None:
+                release_lease = getattr(
+                    getattr(self.controller, "agent_service", None),
+                    "release_runtime_turn_key",
+                    None,
+                )
+                if callable(release_lease):
+                    release_lease(lease[0], lease[1])
+            return
+        self._close_after_session_ids.add(session_id)
+        backend_cleanup = payload.get("_close_after_backend_cleanup")
+
+        async def _close() -> None:
+            # A backend may finish its own post-result cleanup after the shared
+            # terminal boundary. Keep its gate reserved until that task exits.
+            current_lease = lease
+            try:
+                if wait_for_run_ids and not await self._wait_for_close_after_runs(
+                    wait_for_run_ids
+                ):
+                    return
+                if isinstance(backend_cleanup, asyncio.Event):
+                    await backend_cleanup.wait()
+                await asyncio.sleep(0)
+                if current_lease is not None and current_lease[2] is not None:
+                    await asyncio.wait({current_lease[2]})
+                runtime_key = str(
+                    payload.get("agent_runtime_turn_key") or ""
+                ).strip()
+                service = getattr(self.controller, "agent_service", None)
+                if current_lease is None:
+                    reserve_idle = getattr(service, "reserve_idle_close_after_teardown", None)
+                    current_lease = (
+                        await reserve_idle(runtime_key)
+                        if runtime_key and callable(reserve_idle)
+                        else False
+                    )
+                    if current_lease is False:
+                        logger.info(
+                            "Skipping close-after teardown for Agent Session %s: "
+                            "runtime %s is busy or its gate identity is unavailable",
+                            session_id,
+                            runtime_key,
+                        )
+                        return
+                manager = getattr(self.controller, "session_turns", None)
+                has_successor = getattr(manager, "has_close_after_successor", None)
+                if callable(has_successor):
+                    try:
+                        if has_successor(
+                            session_id,
+                            str(payload.get("turn_token") or "").strip(),
+                        ):
+                            logger.info(
+                                "Skipping close-after teardown for Agent Session %s: "
+                                "a durable successor owns the runtime",
+                                session_id,
+                            )
+                            return
+                    except Exception:
+                        logger.exception(
+                            "Skipping close-after teardown for Agent Session %s: "
+                            "durable successor check failed",
+                            session_id,
+                        )
+                        return
+                from core.services.running_agents import end_running_agent
+
+                result = await end_running_agent(
+                    self.controller,
+                    backend=backend,
+                    session_id=session_id,
+                    base_session_id=base_session_id or None,
+                )
+                if not result.get("ok") and result.get("error") != "session_not_live":
+                    logger.warning(
+                        "close-after failed for Agent Session %s: %s",
+                        session_id,
+                        result,
+                    )
+            except Exception:
+                logger.warning(
+                    "close-after runtime teardown failed for Agent Session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            finally:
+                if current_lease is not None and current_lease is not False:
+                    release_lease = getattr(
+                        getattr(self.controller, "agent_service", None),
+                        "release_runtime_turn_key",
+                        None,
+                    )
+                    if callable(release_lease):
+                        release_lease(current_lease[0], current_lease[1])
+                self._close_after_session_ids.discard(session_id)
+
+        task = asyncio.create_task(
+            _close(),
+            name=f"agent-runtime-close-after-{session_id}",
+        )
+        self._close_after_runtime_tasks.add(task)
+        task.add_done_callback(self._close_after_runtime_tasks.discard)
+
+    async def drain_close_after_runtime(self) -> None:
+        """Join teardowns after the Run settlement owner has stopped."""
+
+        self._close_after_settlement_closed = True
+        while self._close_after_runtime_tasks:
+            tasks = tuple(self._close_after_runtime_tasks)
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks))
 
     def _schedule_agent_run_activity(
         self,
@@ -1772,8 +2127,14 @@ class ConsolidatedMessageDispatcher:
         return f"{prefix}{text[:keep]}{suffix}"
 
     @staticmethod
-    def _find_result_split_index(text: str, max_chars: int) -> int:
-        minimum_boundary = max_chars // 2
+    def _find_result_split_index(text: str, max_chars: int, floor: int = 0) -> int:
+        """The preferred boundary at or before ``max_chars``, above ``floor``.
+
+        ``floor`` is a position the chunk has already committed to keeping -
+        the end of a link that fits - so whitespace behind it is no longer a
+        candidate. With the default it is the boundary search this always did.
+        """
+        minimum_boundary = max(max_chars // 2, floor)
         for separator in ("\n\n", "\n", " "):
             index = text.rfind(separator, 0, max_chars + 1)
             if index >= minimum_boundary:
@@ -1781,56 +2142,181 @@ class ConsolidatedMessageDispatcher:
                 return candidate if candidate <= max_chars else index
         return max_chars
 
-    def _split_result_text(self, text: str, max_chars: int) -> list[str]:
-        if len(text) <= max_chars:
-            return [text]
+    @staticmethod
+    def _link_units(text: str) -> Optional[list[tuple[int, int]]]:
+        """Where each Markdown link unit starts and ends in ``text``.
 
+        A link is one unit - a label a reader taps and an address the tap goes
+        to - and a boundary drawn through it delivers neither: both halves send
+        successfully, so nothing falls back, and the reader is shown raw
+        Markdown where the source should have been. The enumeration is the
+        shared one every platform pass already holds a link with, so splitting
+        and spelling agree on where a link is.
+
+        Returns ``None`` when the scan could not run. That is not the same
+        answer as "there are no links": nothing here knows where a link is
+        without it, so the plan may still split on text boundaries but may not
+        certify that those boundaries kept anything whole.
+        """
+        try:
+            return [(link.start, link.end) for link in inline_links(text)]
+        except Exception:
+            logger.warning(
+                "Link scan failed while planning a split; the plan cannot certify a whole link",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _straddling_link(
+        split_at: int, links: Sequence[tuple[int, int]], consumed: int
+    ) -> Optional[tuple[int, int]]:
+        """The chunk-relative link a boundary at ``split_at`` would cut, if any.
+
+        ``links`` are offsets into the whole text and ``consumed`` is how much
+        of it earlier chunks already took.
+        """
+        for start, end in links:
+            start -= consumed
+            end -= consumed
+            if end <= split_at:
+                continue
+            if start >= split_at:
+                return None
+            return max(start, 0), end
+        return None
+
+    def _boundary_keeping_links_whole(
+        self,
+        links: Sequence[tuple[int, int]],
+        consumed: int,
+        capacity: int,
+        preferred: Callable[[int], int],
+    ) -> tuple[int, bool]:
+        """Choose a boundary in ``(0, capacity]`` that no link straddles.
+
+        ``capacity`` is what one message actually holds, measured in the same
+        characters ``preferred`` proposes a cut in; ``preferred(floor)`` is the
+        platform's own boundary search above a position already committed to.
+
+        The decision is the link's size against that capacity, never against
+        the preferred cut. A link the cut lands inside can be kept three ways:
+        cut before it, so it rides the next message whole; or, when it starts
+        the chunk, cut after it if it fits, because a chunk that is nothing but
+        the link is still a legal message. Only a link that outruns a whole
+        message on its own has no boundary left, and that is the one case this
+        reports as unwhole. Reading "the preferred whitespace is inside the
+        link" as that case rejected links half the size of the message.
+
+        Returns ``(split_at, links_whole)``.
+        """
+        floor = 0
+        while True:
+            split_at = preferred(floor)
+            if split_at <= floor:
+                # The preferred cut is behind what this chunk already keeps;
+                # the whole capacity is the boundary to try instead.
+                split_at = capacity
+            straddling = self._straddling_link(split_at, links, consumed)
+            if straddling is None:
+                return split_at, True
+            start, end = straddling
+            if start > 0:
+                return start, True
+            if end <= capacity:
+                # The link begins the chunk and fits in one message: keep it
+                # and look for the boundary again beyond its end. ``floor``
+                # strictly increases, so this settles.
+                floor = end
+                continue
+            return capacity, False
+
+    def _plan_result_split(self, text: str, max_chars: int) -> _ResultSplit:
+        if len(text) <= max_chars:
+            return _ResultSplit(chunks=[text], links_whole=True)
+
+        scanned = self._link_units(text)
+        links = scanned or []
+        # A scan that could not run has not found zero links; it has found
+        # nothing at all, and a plan that cannot see a link cannot promise one
+        # survived. Splitting still proceeds on text boundaries - the message
+        # is too long either way - but the promise is withheld.
+        links_whole = scanned is not None
         chunks: list[str] = []
         remaining = text
+        consumed = 0
 
         while len(remaining) > max_chars:
-            split_at = self._find_result_split_index(remaining, max_chars)
-            if split_at <= 0:
-                split_at = max_chars
+            chunk = remaining
+            split_at, whole = self._boundary_keeping_links_whole(
+                links,
+                consumed,
+                max_chars,
+                lambda floor: self._find_result_split_index(chunk, max_chars, floor),
+            )
+            links_whole = links_whole and whole
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
+            consumed += split_at
 
         if remaining:
             chunks.append(remaining)
 
-        return chunks
+        return _ResultSplit(chunks=chunks, links_whole=links_whole)
 
-    def _split_result_text_by_bytes(self, text: str, max_bytes: int) -> list[str]:
+    def _split_result_text(self, text: str, max_chars: int) -> list[str]:
+        return self._plan_result_split(text, max_chars).chunks
+
+    def _plan_result_split_by_bytes(self, text: str, max_bytes: int) -> _ResultSplit:
         if self._get_text_byte_length(text) <= max_bytes:
-            return [text]
+            return _ResultSplit(chunks=[text], links_whole=True)
 
+        scanned = self._link_units(text)
+        links = scanned or []
+        links_whole = scanned is not None
         chunks: list[str] = []
         remaining = text
+        consumed = 0
 
         while self._get_text_byte_length(remaining) > max_bytes:
+            # The longest prefix this budget holds, decoded: its length is the
+            # capacity in the same characters the boundary search counts, so a
+            # link that ends at or before it is a link the message can carry.
             prefix = remaining.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-            minimum_boundary = max(1, len(prefix) // 2)
-            split_at = len(prefix)
-            for separator in ("\n\n", "\n", " "):
-                index = prefix.rfind(separator)
-                if index >= minimum_boundary:
-                    candidate = index + len(separator)
-                    if self._get_text_byte_length(remaining[:candidate]) <= max_bytes:
-                        split_at = candidate
-                        break
+            capacity = len(prefix)
+
+            def preferred(floor: int, prefix: str = prefix, capacity: int = capacity) -> int:
+                minimum_boundary = max(1, capacity // 2, floor)
+                for separator in ("\n\n", "\n", " "):
+                    index = prefix.rfind(separator)
+                    if index >= minimum_boundary:
+                        return index + len(separator)
+                return capacity
+
+            split_at, whole = self._boundary_keeping_links_whole(
+                links, consumed, capacity, preferred
+            )
+            links_whole = links_whole and whole
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
+            consumed += split_at
 
         if remaining:
             chunks.append(remaining)
 
-        return chunks
+        return _ResultSplit(chunks=chunks, links_whole=links_whole)
 
-    def _split_result_text_for_context(self, context: MessageContext, text: str) -> list[str]:
+    def _split_result_text_by_bytes(self, text: str, max_bytes: int) -> list[str]:
+        return self._plan_result_split_by_bytes(text, max_bytes).chunks
+
+    def _plan_result_split_for_context(self, context: MessageContext, text: str) -> _ResultSplit:
         max_bytes = self._get_result_max_bytes(context)
         if max_bytes is not None:
-            return self._split_result_text_by_bytes(text, max_bytes)
-        return self._split_result_text(text, self._get_result_max_chars(context))
+            return self._plan_result_split_by_bytes(text, max_bytes)
+        return self._plan_result_split(text, self._get_result_max_chars(context))
+
+    def _split_result_text_for_context(self, context: MessageContext, text: str) -> list[str]:
+        return self._plan_result_split_for_context(context, text).chunks
 
     def _truncate_consolidated(self, text: str, max_bytes: int) -> str:
         if self._get_text_byte_length(text) <= max_bytes:
@@ -1847,12 +2333,32 @@ class ConsolidatedMessageDispatcher:
         context: MessageContext,
         text: str,
     ) -> Optional[str]:
+        """Send an intermediate message on a platform that cannot edit one.
+
+        This is the second consumer of the shared split plan. It stays an
+        intermediate message throughout - it settles no turn, signals no
+        result lifecycle, and writes no transcript row of its own - so the
+        only thing it takes from the result path is the narrow whole-document
+        upload, and only for a body no boundary can keep whole.
+        """
         target_context = self._get_target_context(context)
         max_bytes = self._get_consolidated_max_bytes(context)
-        chunks = self._split_result_text_by_bytes(text, max_bytes)
+        plan = self._plan_result_split_by_bytes(text, max_bytes)
+        if not plan.links_whole:
+            # The same answer the result path acts on, honoured by the plan's
+            # other consumer. A boundary drawn through a link delivers neither
+            # half and both halves send successfully, so nothing after this
+            # would notice - the whole body goes out as one document instead,
+            # BEFORE any fragment, and an upload that did not happen is
+            # reported as no delivery rather than as a partial one.
+            logger.warning(
+                "Log message split would break a link unit; delivering the whole body as a document"
+            )
+            return await self._upload_result_document(im_client, target_context, text)
+
         first_message_id: Optional[str] = None
 
-        for chunk in chunks:
+        for chunk in plan.chunks:
             try:
                 message_id = await im_client.send_message(target_context, chunk, parse_mode="markdown")
             except Exception as err:
@@ -2062,6 +2568,7 @@ class ConsolidatedMessageDispatcher:
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
+        citations: Optional[CitationBundle] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2102,6 +2609,16 @@ class ConsolidatedMessageDispatcher:
         compatibility default remains one terminal result. Explicit nonterminal
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
+
+        ``citations`` is the registered source bundle for a message whose text
+        still carries an opaque token where each cited marker was (see
+        ``core.citations``). Every copy this method produces writes those tokens
+        out for itself, because the copies are not the same text: file links are
+        stripped for IM, media links are rewritten for the workbench, footers are
+        folded, long results are truncated or split. The persisted row is the one
+        that also gets the sidecar, bound to the body it was measured in, so the
+        Web transcript can render compact badges while every other surface keeps
+        the plain Markdown links.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
@@ -2194,6 +2711,12 @@ class ConsolidatedMessageDispatcher:
         # without guessing from transcript order or requiring a live sink.
         if mutates_turn_lifecycle:
             terminal_body = enhanced.text if enhanced and enhanced.text.strip() else text
+            # A Turn snapshot is text and nothing else - no sidecar rides with it -
+            # so the citations are written into it here. It does not reach
+            # ``persist_agent_message``, which is where every other copy is
+            # finalized, and an internal token must never be what a later steer
+            # reads back as the turn's result.
+            terminal_body = materialize_citations(terminal_body, citations)
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(
@@ -2261,7 +2784,7 @@ class ConsolidatedMessageDispatcher:
                     # settle its origin Run without touching the current Turn.
                     self._record_agent_run_terminal_result(
                         context,
-                        text,
+                        materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2294,7 +2817,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted
@@ -2392,7 +2915,7 @@ class ConsolidatedMessageDispatcher:
                     )
                     duplicate_result_text = self._accepted_message_result_text(
                         accepted_message,
-                        persist_text,
+                        materialize_citations(persist_text, citations),
                         result_footer if mutates_turn_lifecycle else None,
                     )
                     self._record_agent_run_terminal_result(
@@ -2432,7 +2955,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, accepted_output_semantics)
 
         if activity_batch_incomplete:
             raise ActivityOutputDeliveryError(
@@ -2483,10 +3006,17 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             communication_type,
                             background_enhanced.text or persist_text,
-                            quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            quick_replies=[
+                                b.text
+                                for b in _written_buttons(
+                                    background_enhanced.buttons, citations
+                                )
+                            ]
+                            or None,
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -2496,6 +3026,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -2504,6 +3035,7 @@ class ConsolidatedMessageDispatcher:
                         recorded_text,
                         metadata=output_metadata,
                         native_message_id=native_output_id,
+                        citations=citations,
                     )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
@@ -2516,10 +3048,14 @@ class ConsolidatedMessageDispatcher:
                 # message recorder, except an intermediate message on a Harness run,
                 # which belongs to no output ledger entry and is recorded by neither.
                 suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
+                # A run record carries text alone, so its copy is written here.
+                # The persisted row above keeps its tokens: it is finalized with
+                # a sidecar bound to the body the reader is actually shown.
+                written_recorded_text = materialize_citations(recorded_text, citations)
                 if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
-                        recorded_text,
+                        written_recorded_text,
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2528,7 +3064,7 @@ class ConsolidatedMessageDispatcher:
                 elif canonical_type == "result" or suppressed_trigger_kind not in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_run_message(
                         context,
-                        recorded_text,
+                        written_recorded_text,
                         None,
                         terminal_status=terminal_status,
                     )
@@ -2556,7 +3092,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type == "notify":
             # Three steps, three error scopes — deliberately NOT one blanket ``try``.
@@ -2568,8 +3104,14 @@ class ConsolidatedMessageDispatcher:
             # ``_stream_chunk`` failure did the same thing. Whoever owes a durable
             # notice for this message has to be able to tell those apart from a send
             # that genuinely failed, so each stage reports itself.
+            # The outbound copy and the live stream carry text alone; the row
+            # below keeps its tokens so ``persist_agent_message`` can bind the
+            # sidecar to the body it finalizes.
+            notify_text = materialize_citations(text, citations)
             try:
-                message_id = await im_client.send_message(target_context, text, parse_mode=parse_mode)
+                message_id = await im_client.send_message(
+                    target_context, notify_text, parse_mode=parse_mode
+                )
             except Exception as err:
                 logger.error("Failed to send notify message: %s", err, exc_info=True)
                 if delivery is not None:
@@ -2590,6 +3132,7 @@ class ConsolidatedMessageDispatcher:
                     metadata=output_metadata,
                     native_message_id=native_output_id,
                     error_sink=persist_errors,
+                    citations=citations,
                 )
                 if delivery is not None:
                     delivery.persisted_row = persisted_notify
@@ -2600,7 +3143,9 @@ class ConsolidatedMessageDispatcher:
             # this point the message is delivered; a failure here is recorded for
             # diagnosis and must not be read as a delivery failure.
             try:
-                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
+                await _stream_chunk(
+                    self.controller, context, text=notify_text, message_id=message_id, kind="notify"
+                )
             except Exception as err:
                 logger.error("notify stream failed after delivery: %s", err, exc_info=True)
                 if delivery is not None:
@@ -2631,6 +3176,15 @@ class ConsolidatedMessageDispatcher:
                 # ``enhanced`` (extracted file links + quick-reply buttons) was
                 # computed above for persistence; reuse it for delivery.
                 display_text = enhanced.text if enhanced.text.strip() else text
+                # Everything downstream of here is a text-only copy - the IM
+                # sends, the split parts, the summary, the .md attachment, the
+                # status footer and the live stream - so the citations are
+                # written in once, before any of them can truncate or reflow the
+                # body. ``persist_text`` below still holds its tokens.
+                display_text = materialize_citations(display_text, citations)
+                delivery_buttons = _written_buttons(
+                    enhanced.buttons if enhanced else [], citations
+                )
 
                 # The concise done-footer (``✅ done · 248k tok``) is attached to the
                 # fresh result message as platform subtext so the turn's final
@@ -2681,7 +3235,7 @@ class ConsolidatedMessageDispatcher:
                             im_client,
                             target_context,
                             display_text,
-                            enhanced.buttons if enhanced else [],
+                            delivery_buttons,
                             parse_mode,
                             subtext=done_footer,
                         )
@@ -2704,7 +3258,7 @@ class ConsolidatedMessageDispatcher:
                             im_client,
                             target_context,
                             display_text,
-                            enhanced.buttons if enhanced else [],
+                            delivery_buttons,
                             parse_mode,
                             subtext=done_footer,
                         )
@@ -2753,22 +3307,17 @@ class ConsolidatedMessageDispatcher:
                     logger.warning("All direct result sends failed; attempting fallback delivery")
                     file_uploaded = False
 
-                    # Fallback 1: upload full content as .md file.
-                    if hasattr(im_client, "upload_markdown"):
-                        try:
-                            primary_message_id = await im_client.upload_markdown(
-                                target_context,
-                                title="result.md",
-                                content=display_text,
-                                filetype="markdown",
-                            )
-                            file_uploaded = True
-                            delivered_as_attachment = True
-                            if self._attachment_id_can_anchor_delivery(context):
-                                scheduled_anchor_message_id = primary_message_id
-                            logger.info("Result delivered as .md file attachment (fallback)")
-                        except Exception as upload_err:
-                            logger.warning("upload_markdown fallback failed: %s", upload_err)
+                    # Fallback 1: upload the full content as a .md file, by the
+                    # native markdown upload or by the plain file upload of a
+                    # platform that has only that one.
+                    attachment_id = await self._upload_result_document(im_client, target_context, display_text)
+                    if attachment_id:
+                        primary_message_id = attachment_id
+                        file_uploaded = True
+                        delivered_as_attachment = True
+                        if self._attachment_id_can_anchor_delivery(context):
+                            scheduled_anchor_message_id = primary_message_id
+                        logger.info("Result delivered as .md file attachment (fallback)")
 
                     # Fallback 2: split into multiple messages.
                     if not file_uploaded:
@@ -2777,7 +3326,7 @@ class ConsolidatedMessageDispatcher:
                                 im_client,
                                 target_context,
                                 display_text,
-                                enhanced.buttons if enhanced else [],
+                                delivery_buttons,
                                 parse_mode,
                                 subtext=done_footer,
                             )
@@ -2801,7 +3350,9 @@ class ConsolidatedMessageDispatcher:
 
                 # Upload extracted file attachments
                 if enhanced and enhanced.files:
-                    await self._upload_file_links(im_client, target_context, enhanced.files)
+                    await self._upload_file_links(
+                        im_client, target_context, _written_files(enhanced.files, citations)
+                    )
 
                 if scheduled_anchor_message_id and mutates_turn_lifecycle:
                     try:
@@ -2838,6 +3389,11 @@ class ConsolidatedMessageDispatcher:
                 # platform. The Web message row separately persists a clean body
                 # plus structured footer below.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
+                # The agent-run records take text alone, so they take the written
+                # copy; ``persisted_result_text`` itself still carries its tokens
+                # into ``persist_agent_message``, which finalizes the row it
+                # writes and binds the sidecar to it.
+                written_result_text = materialize_citations(persisted_result_text, citations)
                 run_provenance = output_semantics.provenance(context)
                 workbench_run_waits_for_persistence = (
                     target_context.platform == "avibe"
@@ -2857,12 +3413,12 @@ class ConsolidatedMessageDispatcher:
                 durable_output_exists = False
                 activity_was_delivered = False
                 settlement_output_semantics = output_semantics
-                settlement_result_text = persisted_result_text
+                settlement_result_text = written_result_text
 
                 if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
                         context,
-                        persisted_result_text,
+                        written_result_text,
                         primary_message_id,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2898,10 +3454,15 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             communication_type,
                             avibe_enhanced.text or persist_text,
-                            quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            quick_replies=[
+                                b.text
+                                for b in _written_buttons(avibe_enhanced.buttons, citations)
+                            ]
+                            or None,
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -2911,6 +3472,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
 
                 if settlement_waits_for_persistence:
@@ -2929,7 +3491,7 @@ class ConsolidatedMessageDispatcher:
                         )
                         settlement_result_text = self._accepted_message_result_text(
                             accepted_message,
-                            persisted_result_text,
+                            written_result_text,
                             None,
                         )
                     activity_was_delivered = bool(
@@ -3027,7 +3589,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context)
+                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"
@@ -3043,7 +3605,13 @@ class ConsolidatedMessageDispatcher:
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
-        persist_agent_message(target_context, canonical_type, persist_text)
+        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+
+        # The row above is the only copy of an intermediate message that carries a
+        # sidecar. Everything left below is what the channel is shown - the concise
+        # status line, the consolidated log, the hidden-type log preview - so write
+        # the citations into ``text`` once here rather than at each of them.
+        text = materialize_citations(text, citations)
 
         # Target platform toolcall-delivery gate stays in FRONT of the concise
         # shortcut: when a turn is routed via ``delivery_override`` to a target
@@ -3296,7 +3864,17 @@ class ConsolidatedMessageDispatcher:
         chunk (a mid-stream footer would read wrong); every chunk is a new send so
         the result notifies. Returns the first chunk's id (the delivery anchor).
         """
-        chunks = self._split_result_text_for_context(context, text)
+        plan = self._plan_result_split_for_context(context, text)
+        if not plan.links_whole:
+            # Checked BEFORE the first send: a link that no boundary keeps whole
+            # would go out as two halves that both send successfully, so nothing
+            # downstream would ever fall back, and the reader would be left with
+            # a broken address. Hand the whole result to the caller's fallback
+            # instead of reporting a delivery that lost the source.
+            logger.warning("Split would break a link unit; abandoning the split before sending")
+            return None
+
+        chunks = plan.chunks
         first_message_id: Optional[str] = None
 
         for index, chunk in enumerate(chunks):
@@ -3336,6 +3914,70 @@ class ConsolidatedMessageDispatcher:
                 first_message_id = message_id
 
         return first_message_id
+
+    async def _upload_result_document(
+        self,
+        im_client,
+        context: MessageContext,
+        text: str,
+    ) -> Optional[str]:
+        """Deliver the whole result as a file, by whichever route the client has.
+
+        ``upload_markdown`` is the native route. A platform can inherit it from
+        ``BaseIMClient`` without implementing it and still have an ordinary file
+        upload - WeChat is exactly that shape - so the same content is written
+        to a temporary ``result.md`` and handed to ``upload_file_from_path``,
+        the path its own file links already take.
+
+        Returns the delivered id, or ``None`` when nothing was delivered: an
+        adapter that reports failure by returning an empty id has uploaded
+        nothing, and treating that as an attachment would end the turn claiming
+        a result the user never received.
+        """
+        upload_markdown = getattr(im_client, "upload_markdown", None)
+        if callable(upload_markdown):
+            try:
+                message_id = await upload_markdown(
+                    context,
+                    title=_RESULT_DOCUMENT_NAME,
+                    content=text,
+                    filetype="markdown",
+                )
+                if message_id:
+                    return message_id
+                logger.warning("upload_markdown returned no id; nothing was attached")
+                return None
+            except NotImplementedError:
+                logger.debug("IM client inherits upload_markdown unimplemented; trying its file upload")
+            except Exception as err:
+                logger.warning("upload_markdown fallback failed: %s", err)
+                return None
+
+        upload_file_from_path = getattr(im_client, "upload_file_from_path", None)
+        if not callable(upload_file_from_path):
+            logger.debug("IM client supports no file upload; cannot attach the full result")
+            return None
+
+        with tempfile.TemporaryDirectory(prefix="avibe-result-") as staging_dir:
+            document = Path(staging_dir) / _RESULT_DOCUMENT_NAME
+            try:
+                document.write_text(text, encoding="utf-8")
+                file_id = await upload_file_from_path(
+                    context,
+                    file_path=str(document),
+                    title=_RESULT_DOCUMENT_NAME,
+                )
+            except NotImplementedError:
+                logger.debug("IM client does not implement file uploads; cannot attach the full result")
+                return None
+            except Exception as err:
+                logger.warning("Result file upload fallback failed: %s", err)
+                return None
+
+        if not file_id:
+            logger.warning("Result file upload returned no id; nothing was attached")
+            return None
+        return file_id
 
     async def _upload_file_links(
         self,

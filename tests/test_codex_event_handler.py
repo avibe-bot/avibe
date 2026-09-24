@@ -24,6 +24,7 @@ class _TurnState:
         self.turn_id = turn_id
         self.request = request
         self.pending_assistant = None
+        self.pending_narration = []
         self.terminal_error = None
         self.terminal_error_notified = False
         self.visible_to_user = True
@@ -67,6 +68,7 @@ class _StubTurnRegistry:
             return None
         state.visible_to_user = False
         state.pending_assistant = None
+        state.pending_narration = []
         state.terminal_error = None
         state.terminal_error_notified = False
         if self._active_turns.get(state.request.base_session_id) == turn_id:

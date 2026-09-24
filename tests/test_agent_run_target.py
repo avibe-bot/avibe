@@ -9,7 +9,6 @@ from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
 from core.services import sessions as sessions_service
-from avibe_memory.store import derive_project_id
 from core.services.agent_run_target import (
     resolve_agent_run_target,
     resolve_default_agent_workdir,
@@ -767,12 +766,7 @@ def test_new_im_session_without_scope_settings_snapshots_default_cwd(tmp_path):
         settings_key="memory-ui",
         session_key="memory-ui",
     )
-    scope_key = bytes.fromhex("11" * 32)
     assert ui_workdir == target.workdir
-    assert derive_project_id(scope_key, ui_workdir) == derive_project_id(
-        scope_key,
-        target.workdir,
-    )
 
 
 def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):

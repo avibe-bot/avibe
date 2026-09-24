@@ -28,9 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iter
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import backend_failure_notification_output
@@ -116,7 +114,7 @@ class SessionLifecycleSnapshot:
 
 @dataclass
 class TurnLifecycleAdmission:
-    """One idempotent lease bridging turn admission into Memory capture."""
+    """One idempotent lease bridging turn admission into capture."""
 
     _state: _SessionLifecycleState
     _released: bool = field(default=False, init=False)
@@ -487,6 +485,11 @@ def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     return not (sink_token is not None and ctx_token != sink_token)
 
 
+# A Run cancel joining another Stop waits this long for that Stop's receipt.
+# Together with one retried Stop it must fit the CLI's 30s cancel timeout.
+_RUN_CANCEL_JOIN_WAIT_SECONDS = 10.0
+_RUN_CANCEL_JOIN_POLL_SECONDS = 0.05
+
 @dataclass
 class Turn:
     """The one active turn for an avibe session — the EXECUTION half of the FSM
@@ -541,9 +544,10 @@ class DeliveryRequest:
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
     expected_turn_id: str | None = None
-    # Run-level cancellation may interrupt a backend only when this exact Run is
-    # still the Turn's sole initial input.  Checked under the P0 writer lock.
-    expected_exclusive_agent_run_id: str | None = None
+    # Run-level cancellation stops the live Turn whenever this Run's input may
+    # have reached it; an input still outside the Turn is canceled alone.
+    # Checked under the P0 writer lock.
+    cancel_agent_run_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -705,7 +709,7 @@ class SessionTurnManager:
         raw_session_id: str,
         snapshot: object,
     ) -> bool:
-        """Revalidate a retained generation before Memory attribution."""
+        """Revalidate a retained session lifecycle generation."""
 
         if not isinstance(raw_session_id, str) or not raw_session_id:
             raise ValueError("session lifecycle requires a session id")
@@ -749,11 +753,6 @@ class SessionTurnManager:
         if self._session_lifecycle_states.get(raw_session_id) is not state:
             raise RuntimeError("session lifecycle ownership changed")
         state.epoch += 1
-        if abandon_captures:
-            adapter = getattr(self.controller, "memory_adapter", None)
-            abandon = getattr(adapter, "abandon_memory_captures_for_session", None)
-            if callable(abandon):
-                abandon(raw_session_id)
 
     async def run_session_lifecycle(
         self,
@@ -762,7 +761,7 @@ class SessionTurnManager:
         *,
         deadline_seconds: float = 5.0,
     ) -> Any:
-        """Run a destructive transition without waiting for Memory capture."""
+        """Run a destructive transition without waiting for capture."""
 
         state = self._session_lifecycle_state(raw_session_id)
         await state.operation_lock.acquire()
@@ -770,7 +769,7 @@ class SessionTurnManager:
         try:
             pre_epoch = state.epoch
             # Lifecycle operations are intentionally non-blocking with respect
-            # to Memory delivery. If a capture already owns the admission lock,
+            # to delivery. If a capture already owns the admission lock,
             # advance the generation immediately; the capture will revalidate
             # its snapshot and drop without provider I/O. An uncontended lock
             # acquisition completes synchronously on this event loop.
@@ -2342,24 +2341,6 @@ class SessionTurnManager:
                 continue
             return None
 
-    def restore_memory_context(self, session_id: str, turn_id: str) -> Optional["MessageContext"]:
-        """Reconstruct only this still-live execution, never a later Session turn."""
-        with self._sqlite_engine().connect() as conn:
-            turn = delivery_store.get_turn(conn, turn_id)
-            if not turn or turn["session_id"] != session_id or turn["state"] not in delivery_store.TURN_OWNER_STATES:
-                return None
-            delivery = delivery_store.delivery_for_turn(conn, turn_id)
-        if delivery is None:
-            return None
-        context = self._delivery_context(session_id)
-        self._hydrate_delivery_context(context, delivery)
-        self._restore_scheduled_dispatch_context(context, delivery)
-        context.platform_specific["turn_token"] = turn_id
-        context.platform_specific["turn_source"] = (
-            SOURCE_SCHEDULED if context.platform_specific.get("delivery_source") == "harness" else SOURCE_HUMAN
-        )
-        return context
-
     def _hydrate_delivery_context(
         self,
         context: "MessageContext",
@@ -2392,33 +2373,12 @@ class SessionTurnManager:
             not isinstance(snapshot, dict) or "message_kind" not in snapshot
         )
         author_id = payload.get("author_id")
-        if legacy_workbench:
+        if legacy_workbench and not author_id:
             author_id = delivery_store.legacy_admitted_user_id(metadata)
         if author_id:
             context.user_id = str(author_id)
         context.message_kind = normalize_message_kind(payload.get("message_kind"))
         context.is_original_human_text = context.message_kind == "original"
-        memory_enabled = bool(
-            getattr(
-                getattr(getattr(self.controller, "config", None), "memory", None),
-                "enabled",
-                False,
-            )
-        )
-        memory_cli_admitted = bool(
-            context.platform == "avibe"
-            and payload.get("source") == "user"
-            and memory_enabled
-            and author_id
-            and (
-                not legacy_workbench
-                or delivery_store.legacy_is_cli_admitted(metadata)
-            )
-        )
-        if memory_cli_admitted:
-            context.platform_specific["memory_cli_admitted"] = True
-        else:
-            context.platform_specific.pop("memory_cli_admitted", None)
         context.platform_specific.update(
             {
                 "delivery_id": str(delivery["id"]),
@@ -3489,8 +3449,8 @@ class SessionTurnManager:
                 )
             ).scalar_one_or_none()
             current = delivery_store.active_turn(conn, request.session_id)
-            expected_exclusive_run_id = str(
-                request.expected_exclusive_agent_run_id or ""
+            cancel_run_id = str(
+                request.cancel_agent_run_id or ""
             ).strip()
             if request.content is not None and session_status != "active":
                 existing = (
@@ -3510,10 +3470,10 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
-                    if expected_exclusive_run_id:
+                    if cancel_run_id:
                         cancellation = apply_live_agent_run_cancellation_in_connection(
                             conn,
-                            expected_exclusive_run_id,
+                            cancel_run_id,
                             session_id=request.session_id,
                             detach=True,
                         )
@@ -3555,7 +3515,7 @@ class SessionTurnManager:
                     request.content is None
                     and expected_turn_id
                     and current_id != expected_turn_id
-                    and not expected_exclusive_run_id
+                    and not cancel_run_id
                 ):
                     return DeliveryResult(
                         None,
@@ -3564,33 +3524,48 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
-                if request.content is None and expected_exclusive_run_id:
-                    exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
+                if request.content is None and cancel_run_id:
+                    stops_turn, reason = delivery_store.agent_run_input_reached_turn(
                         conn,
-                        run_id=expected_exclusive_run_id,
+                        run_id=cancel_run_id,
                         turn_id=str(current_id or ""),
                     )
                     replacement_terminalized = False
-                    if not exclusive:
+                    if stops_turn and current.get("control_state") in {
+                        "pending",
+                        "interrupting",
+                        "reconciling",
+                    }:
+                        # A Stop without a receipt may still be refused. Record
+                        # nothing so a refused Stop cannot leave this Run
+                        # marked canceled while its backend keeps running.
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "reconciling",
+                            current_id,
+                            "joined_unconfirmed_interrupt",
+                        )
+                    if not stops_turn:
                         replacement_terminalized = (
                             self._terminalize_detached_run_replacement(
                                 conn,
-                                run_id=expected_exclusive_run_id,
+                                run_id=cancel_run_id,
                                 session_id=request.session_id,
                                 current=current,
                             )
                         )
                     cancellation = apply_live_agent_run_cancellation_in_connection(
                         conn,
-                        expected_exclusive_run_id,
+                        cancel_run_id,
                         session_id=request.session_id,
-                        detach=not exclusive,
+                        detach=not stops_turn,
                     )
                     if replacement_terminalized and cancellation != "run_detached":
                         raise RuntimeError(
                             "replacement Run terminalized without cancellation ownership"
                         )
-                    if not exclusive:
+                    if not stops_turn:
                         return DeliveryResult(
                             None,
                             None,
@@ -5660,6 +5635,36 @@ class SessionTurnManager:
                 name=f"durable-terminal-resume:{session_id}",
             )
         return None
+
+    def has_close_after_successor(self, session_id: str, completed_turn_id: str) -> bool:
+        """Read durable successor ownership before disposing a completed runtime.
+
+        Unlike the UI projection in ``turn_state``, a failed read must propagate:
+        uncertainty is not permission to stop a possibly active successor.
+        """
+        if not self._durable_schema_available():
+            return False
+        with self._sqlite_engine().connect() as conn:
+            queued = conn.execute(
+                select(delivery_rows.c.id)
+                .where(delivery_rows.c.session_id == session_id)
+                .where(delivery_rows.c.state == "queued")
+                .limit(1)
+            ).first()
+            if queued is not None:
+                return True
+            successor = conn.execute(
+                select(session_turn_rows.c.id)
+                .where(session_turn_rows.c.session_id == session_id)
+                .where(session_turn_rows.c.id != completed_turn_id)
+                .where(
+                    session_turn_rows.c.state.in_(
+                        ("waiting",) + delivery_store.TURN_OWNER_STATES
+                    )
+                )
+                .limit(1)
+            ).first()
+            return successor is not None
 
     def scan_runtime_delivery_recovery(
         self,
@@ -8146,7 +8151,11 @@ class SessionTurnManager:
         *,
         agent_run_id: str | None = None,
     ) -> dict:
-        """Cancel a Session Turn or detach one exact Run from a shared Turn."""
+        """Cancel a Session Turn, or one exact Run.
+
+        A Run whose input may have reached the live Turn stops that whole Turn,
+        exactly like Session Stop; a Run still outside it is canceled alone.
+        """
         normalized_agent_run_id = (
             str(agent_run_id).strip() if agent_run_id is not None else None
         )
@@ -8250,18 +8259,25 @@ class SessionTurnManager:
                         "status": "stale_released",
                         "reason": "runtime_gone",
                     }
-        result = await self.deliver(
-            DeliveryRequest(
-                session_id=session_id,
-                priority="p0",
-                content=None,
-                expected_turn_id=(str(owner["id"]) if owner is not None else None),
-                expected_exclusive_agent_run_id=(
-                    normalized_agent_run_id
-                ),
-            ),
-            context=turn.context if turn is not None else None,
+        request = DeliveryRequest(
+            session_id=session_id,
+            priority="p0",
+            content=None,
+            expected_turn_id=(str(owner["id"]) if owner is not None else None),
+            cancel_agent_run_id=normalized_agent_run_id,
         )
+        context = turn.context if turn is not None else None
+        result = await self.deliver(request, context=context)
+        # A Run cancel that meets another Stop awaiting its receipt waits for
+        # that receipt: accepted confirms this cancel, refused lets it retry.
+        deadline = asyncio.get_running_loop().time() + _RUN_CANCEL_JOIN_WAIT_SECONDS
+        while (
+            normalized_agent_run_id
+            and result.reason == "joined_unconfirmed_interrupt"
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(_RUN_CANCEL_JOIN_POLL_SECONDS)
+            result = await self.deliver(request, context=context)
         if result.state == "run_detached":
             return {
                 "ok": True,
@@ -8271,7 +8287,15 @@ class SessionTurnManager:
             }
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
-        if result.state == "settled":
+        # ``claimed``: a pre-write stop settled the Turn and started its successor.
+        if result.state in {"settled", "claimed"}:
+            if normalized_agent_run_id and result.reason == "prewrite_canceled":
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "cancel_requested",
+                    "reason": result.reason,
+                }
             if normalized_agent_run_id:
                 return {
                     "ok": True,

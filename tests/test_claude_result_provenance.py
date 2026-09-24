@@ -235,6 +235,54 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
         self.assertFalse(service.activities.has_completed_output("claude", key))
 
+    async def test_buffered_foreground_tool_is_owned_before_task_started(self):
+        key = "session-buffered-foreground-tool:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-buffered-foreground-tool",
+            activity_id="background-task",
+            kind="local_agent",
+            turn_id="background-turn",
+        )
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(
+                        _block(
+                            ToolUseBlock,
+                            id="foreground-tool",
+                            name="Bash",
+                            input={"command": "pwd"},
+                        )
+                    ),
+                    TaskStartedMessage(
+                        "foreground-task",
+                        tool_use_id="foreground-tool",
+                    ),
+                    TaskNotificationMessage(
+                        "foreground-task",
+                        "foreground finished",
+                    ),
+                    ResultMessage("human reply", origin={"kind": "human"}),
+                ]
+            ),
+            "sess-buffered-foreground-tool",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertFalse(service.activities.has_completed_output("claude", key))
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+
     async def test_activity_flush_defers_until_buffered_phase_has_terminal_owner(self):
         key = "session-provenance-flush-race:/tmp/work"
         agent, service = _build_agent()
@@ -656,6 +704,14 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
         )
         agent.session_handler.handle_session_error = AsyncMock(return_value=False)
+        cleanup_lock_states = []
+
+        async def cleanup_session(*_args, **_kwargs):
+            cleanup_lock_states.append(agent._steering_lock(key).locked())
+
+        agent.session_handler.cleanup_session = AsyncMock(
+            side_effect=cleanup_session,
+        )
         service.activities.start(
             backend="claude",
             runtime_key=key,
@@ -703,6 +759,108 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             .detached
         )
         self.assertFalse(service.activities.has_completed_output("claude", key))
+        agent.session_handler.handle_session_error.assert_not_awaited()
+        agent.session_handler.cleanup_session.assert_awaited_once()
+        self.assertEqual(cleanup_lock_states, [False])
+
+    async def test_receiver_error_contains_buffered_failure_replay_exception(self):
+        key = "session-buffered-failure-replay-error:/tmp/work"
+        agent, _service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.controller.agent_auth_service = SimpleNamespace(
+            maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
+        )
+        agent.session_handler.handle_session_error = AsyncMock(return_value=True)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent._emit_no_result_settlement = AsyncMock()
+        agent._release_service_runtime_turn = Mock()
+        agent._process_assistant_terminal_frame = AsyncMock(
+            side_effect=RuntimeError("replay emit failed"),
+        )
+
+        class _FailingClient:
+            def receive_messages(self):
+                async def _iterate():
+                    yield TaskStartedMessage("task-replay-error")
+                    yield _failure_assistant("backend exploded")
+                    raise RuntimeError("receiver disconnected")
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _FailingClient(),
+            "sess-buffered-failure-replay-error",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        agent.session_handler.handle_session_error.assert_awaited_once()
+        agent._emit_no_result_settlement.assert_awaited_once()
+        agent._release_service_runtime_turn.assert_called_once_with(context)
+
+    async def test_eof_closes_write_admission_before_buffered_failure_replay(self):
+        key = "session-eof-write-fence:/tmp/work"
+        agent, _service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        replay_started = asyncio.Event()
+        release_replay = asyncio.Event()
+        eof_entered = asyncio.Event()
+        release_eof = asyncio.Event()
+        client = SimpleNamespace(query=AsyncMock())
+        agent.claude_sessions[key] = client
+
+        async def hold_eof(*_args, **_kwargs):
+            eof_entered.set()
+            await release_eof.wait()
+
+        agent._handle_receiver_eof = AsyncMock(side_effect=hold_eof)
+
+        async def replay_failure(*_args, **_kwargs):
+            replay_started.set()
+            await release_replay.wait()
+            return "failure"
+
+        agent._process_assistant_terminal_frame = replay_failure
+
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _client(
+                    [
+                        TaskStartedMessage("task-eof-write-fence"),
+                        _failure_assistant("backend exploded"),
+                    ]
+                ),
+                "sess-eof-write-fence",
+                "/tmp/work",
+                context,
+                composite_key=key,
+            )
+        )
+        await asyncio.wait_for(replay_started.wait(), timeout=1)
+        self.assertIn(key, agent._steering_closing_keys())
+
+        async def fenced_write():
+            async with agent._steering_lock(key):
+                await agent._write_human_query(
+                    client,
+                    key,
+                    "new input",
+                    context,
+                )
+
+        write = asyncio.create_task(fenced_write())
+        release_replay.set()
+        await asyncio.wait_for(eof_entered.wait(), timeout=1)
+        with self.assertRaises(ClaudeInputNotSentError):
+            await asyncio.wait_for(write, timeout=1)
+
+        release_eof.set()
+        await receiver
 
     async def test_primary_write_and_stop_share_the_native_write_fence(self):
         key = "session-primary-stop-fence:/tmp/work"
@@ -804,7 +962,8 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         agent.session_handler._claude_runtime_generation_lock = (
             lambda _key: generation_lock
         )
-        agent.session_handler._cleanup_session_locked = AsyncMock()
+        cleanup_session = AsyncMock()
+        agent.session_handler._cleanup_session_locked = cleanup_session
 
         async def _primary_write():
             async with agent._steering_lock(key):
@@ -826,10 +985,12 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.sleep(0)
         self.assertFalse(eviction.done())
+        cleanup_session.assert_not_awaited()
 
         release_query.set()
         await writer
         await asyncio.wait_for(eviction, timeout=1)
+        cleanup_session.assert_awaited_once()
         self.assertTrue(generation_lock.locked())
         generation_lock.release()
 
