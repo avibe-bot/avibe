@@ -603,6 +603,11 @@ test.describe('shared screen anchors', () => {
       await page.clock.runFor(950);
       await expect(page.locator('.setup-provider-summary')).toContainText('已选');
       const providers = await center('.setup-provider-summary');
+      // On the same line even where the welcome is the tallest screen and this diagram
+      // is shorter than its stage (the 1920 tier): the summary rests on the stage floor.
+      const summary = await box(page, '.setup-provider-summary');
+      const providersStage = await box(page, '[data-setup-screen-root]:not([hidden]) .onboarding-stage');
+      expect(summary.y + summary.height).toBeCloseTo(providersStage.y + providersStage.height, 0);
       expect(welcomeSize).toBe(await fontSize('.setup-provider-summary'));
       await page.locator('.onboarding-setup-hint button').click();
       await page.clock.runFor(950);
