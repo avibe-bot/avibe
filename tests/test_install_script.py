@@ -1181,6 +1181,19 @@ def test_install_script_activation_fallback_refuses_an_unowned_destination(tmp_p
     assert not (home_dir / ".avibe" / "runtime" / "install-generations").exists()
 
 
+def test_powershell_publishes_complete_installer_marker_before_source_snapshot():
+    source = INSTALL_POWERSHELL.read_text(encoding="utf-8")
+    # PowerShell execution/convergence remains a native Windows CI gate.
+    staging = source.split('$installerMarker = Join-Path $generationRoot ".avibe-installing"', 1)[1]
+    staging = staging.split("$previousSourcePath = $launcherState.SourcePath", 1)[0]
+    assert "Set-Content -LiteralPath $installerMarker " not in staging
+    assert "Set-Content -LiteralPath $installerMarkerTemporary " in staging
+    publication = "[System.IO.File]::Move($installerMarkerTemporary, $installerMarker)"
+    assert publication in staging
+    assert staging.index(publication) < staging.index("Get-LauncherState")
+    assert "Remove-Item -LiteralPath $generationRoot -Recurse -Force" in staging
+
+
 def test_install_script_skips_relative_path_entries_for_tool_bin(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

@@ -55,6 +55,9 @@ environments while preserving:
 The optional PATH lookup only adds positively identified managed targets to the
 keep set. An unrelated command earlier on PATH does not block retirement by a
 validated managed launcher; it is outside the deletion scope.
+If either selected command is positively mapped into this root but that
+generation is unrecognized, collection defers: it can be a wrapper depending
+on another generation. This is not the unrelated outside-PATH veto.
 
 Only official recorded PIDs need process inspection. Unreadable or ambiguous
 official runtime references defer collection; unrelated user processes do not.
@@ -172,11 +175,72 @@ consumer run (retirement, upgrade flow, shell installer, restart supervisor, CLI
 and every runtime suite) passes 869 tests and four subtests, with one existing
 Windows-only skip (126.97s; 28 existing SQLAlchemy reflection warnings).
 Changed-file Ruff, shell syntax and whitespace checks pass. A terminal
-independent review of this complete diff is still required before publication.
+independent review cleared fingerprint
+`789b764530143110f89b94563fc2724b095a5e4bc5a65ef238bcbffe889658df`
+with the same consuming results. Published commit
+`091d11d0aff9c337f3bcae1754a1854a95e55d25` matches that diff exactly.
 
 Independent pre-push review is required for the complete revised diff and its
 failing-before/passing-after matrix. The original Watch remains armed. No manual
 Codex review trigger or retry-until-green CI strategy is permitted.
+
+### First recovery-contract review: bounded correction decision
+
+Full REST reviews/comments and GraphQL thread/comment pagination at `091d11d`
+show 12 threads: nine resolved and three new unresolved P2 findings in Codex
+review 5309129819. There are seven distinct findings-bearing Codex heads
+overall, exactly one after the recovery rewrite; reply reviews do not count.
+The repeated selector and official-reference classes triggered diagnosis
+before further implementation. Independent peer run `ca4ed3c2c51b` re-fetched
+the threads, verified the immutable diff, reran the isolated failure probes,
+and consumed all four real-uv installation cases. Its first request timed out;
+that transport failure was not treated as approval.
+
+The direct delivery owner authorizes one reversible, contract-preserving
+correction after that diagnosis. No new receipt/schema, global scan, dependency,
+workflow, deletion-root expansion, or README change is involved:
+
+| Boundary | Failing-before evidence at `091d11d` | Scope decision |
+| --- | --- | --- |
+| Installer-marker publication (4097576298) | Empty marker in an incomplete generation makes three activations retain all five directories. Direct shell write failure also leaves a torn marker. | Both shell and PowerShell write a private staging file and rename before reading the source snapshot or starting uv. Failed publication aborts before handoff and cleans up its own failed staging. Keep malformed published markers conservative; do not treat unreadable GUID markers as dead or introduce age-based recovery. |
+| Selected-command authority (4097576304) | Missing-receipt symlink/hardlink/copy selections delete all recognized history. An in-root wrapper breaks the selected command from exit 0 to 126; independent peer also reproduced the PATH-selected form. | If either lookup positively maps into an unrecognized generation, defer. A foreign outside-root command still adds no pin and no veto. Preserve normal convergence and identified inside-root aliases. |
+| Official Windows reference completeness (4097576313) | Live base-Python UI child loses its generation when the redirector parent is absent or exits during inspection; present-parent control retains it (simulated Windows APIs). | Require the parent only when the child's own absolute paths do not identify a generation. On parent loss, distinguish a child that has exited from a still-live child; only the latter defers. No environment-variable or arbitrary-process scanning. |
+| Released uv Windows receipt identity | Portable fixtures for both layouts are rejected with logical entrypoint `vibe` and physical export `vibe.exe`; ordinary POSIX controls are recognized. Exact CI reports zero managed environments. | Accept uv's bounded Windows suffix pair while retaining package, export-directory and exclusive-layout checks. Upstream uv 0.12.18 `ToolEntrypoint::new` removes the executable suffix from the logical name. Native Windows convergence remains an exact-head CI gate. |
+| Deferred-activation consuming fixture | PERMISSIONS-026's existing fixture raises because its candidate is outside the authoritative managed root; its minimal fake process then lacks `terminate`. | Put the test candidate inside its isolated installation root and verify the helper PID marker. Preserve caller-context stripping assertions; do not weaken the production ownership guard. |
+
+The marker consumer fallback suggested by the peer is deliberately not adopted:
+an unreadable or malformed GUID marker cannot prove its owner has exited.
+Atomic publication fixes the demonstrated producer failure without guessing at
+historical state. A corrupt marker created outside that protocol still defers;
+this PR's marker format has not shipped and needs no adoption/migration heuristic.
+
+Exact-head lint 36046733488 attempt 1 is terminal failure: 14 of 18 jobs passed.
+Linux packaged installer and its aggregate passed. Windows smoke and unit shard
+2/6 failed as above; the unit aggregate also failed. UI failed separately on
+mobile-WebKit search-focus typing timing out after all 6103 Vitest assertions
+passed, not the earlier ToastProvider timer error. Session `ses6dzapvbkwm` owns
+read-only investigation of that distinct CI boundary. No UI edits or blind
+reruns are part of the retention correction.
+
+Before changing production code, 16 distinct regression cases failed against
+`091d11d`: two Windows receipt-layout cases, five selected-command cases, five
+Windows parent/own-reference cases, three real-shell publication failures,
+and the PowerShell publication-order contract. The first 45-case run had
+15 failures and 30 passes; strengthening the shell rename-failure admission
+trace then exposed its additional failure. PERMISSIONS-026 independently
+failed before its fixture correction.
+
+After the correction, the full retirement, shell-installer and permissions
+entrypoint suites passed 196 tests (131.09s; five existing SQLAlchemy warnings).
+Two additional controls explicitly retain corrupt published GUID markers;
+they do not pretend that absent provenance proves a dead owner. Changed-file
+Ruff, shell syntax and whitespace checks pass. Broader consumers and independent
+frozen-diff review are recorded in PR evidence before publication.
+
+A terminal independent review of the complete frozen correction is required
+before another push. The three new threads remain unresolved until published
+proof; the original Watch stays armed. Prior passing test counts do not override
+this inventory.
 
 ## Review accounting
 

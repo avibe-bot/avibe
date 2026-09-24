@@ -37,7 +37,10 @@ def installation(tmp_path, monkeypatch):
     return root, launcher
 
 
-def candidate(root, name, *, layout="uv/tools", package="avibe-os"):
+def candidate(
+    root, name, *, layout="uv/tools", package="avibe-os",
+    export_name="vibe", entry_name="vibe",
+):
     generation = root / name
     environment = generation / layout / package
     target = environment / "bin" / "vibe"
@@ -45,12 +48,12 @@ def candidate(root, name, *, layout="uv/tools", package="avibe-os"):
     target.write_text(f"#!/bin/sh\n# {generation}\nexit 0\n", encoding="utf-8")
     target.chmod(0o755)
     (environment / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
-    exported = generation / "bin" / "vibe"
+    exported = generation / "bin" / export_name
     exported.parent.mkdir()
     exported.symlink_to(target)
     (environment / "uv-receipt.toml").write_text(
         f'[tool]\nrequirements = [{{ name = "{package}" }}]\n'
-        f'entrypoints = [{{ name = "vibe", install-path = {json.dumps(str(exported))} }}]\n',
+        f'entrypoints = [{{ name = {json.dumps(entry_name)}, install-path = {json.dumps(str(exported))} }}]\n',
         encoding="utf-8",
     )
     return exported
@@ -87,6 +90,46 @@ def test_repeated_installations_leave_only_selected_generation(
         assert upgrade._launcher_generation(launcher, root) == current.parent.parent
 
 
+@pytest.mark.parametrize("layout", ["tools", "uv/tools"])
+@pytest.mark.parametrize("entry_name,export_name", [
+    ("vibe", "vibe"), ("vibe", "vibe.exe"), ("vibe.exe", "vibe.exe"),
+])
+def test_uv_logical_entrypoint_and_platform_export_converge(
+    installation, layout, entry_name, export_name,
+):
+    """uv strips EXE_SUFFIX from receipt names, not from Windows export paths.
+
+    These are portable artifact/activation cases, not native Windows execution.
+    """
+    root, launcher = installation
+    for index in range(3):
+        exported = candidate(
+            root, f"generation-{index}", layout=layout,
+            entry_name=entry_name, export_name=export_name,
+        )
+        generation = exported.parent.parent
+        assert retention._uv_installation(generation) is not None
+        upgrade.activate_installer_candidate(upgrade.AtomicActivation(
+            launcher, exported, upgrade._launcher_generation(launcher, root),
+        ))
+        assert {path.name for path in root.iterdir()} == {generation.name}
+        assert launcher.resolve() == exported.resolve()
+
+
+@pytest.mark.parametrize("entry_name,export_name", [
+    ("other", "vibe.exe"), ("vibe", "other.exe"),
+    ("vibe", "vibe.exe.exe"), ("vibe.exe", "vibe"),
+])
+def test_receipt_export_normalization_is_not_general_suffix_matching(
+    installation, entry_name, export_name,
+):
+    root, launcher = installation
+    unknown = candidate(root, "unknown", entry_name=entry_name, export_name=export_name)
+    assert retention._uv_installation(unknown.parent.parent) is None
+    activate(root, launcher, "selected")
+    assert unknown.exists()
+
+
 @pytest.mark.parametrize("foreign_kind", ["symlink", "script"])
 def test_foreign_path_command_does_not_block_managed_retirement(
     installation, monkeypatch, tmp_path, foreign_kind,
@@ -113,6 +156,60 @@ def test_foreign_path_command_does_not_block_managed_retirement(
     assert launcher.resolve() == current.resolve()
     assert foreign.read_text() == foreign_contents
     assert subprocess.run([str(launcher)], check=False).returncode == 0
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink", "copy"])
+def test_unrecognized_in_root_selected_generation_cannot_authorize_retirement(
+    installation, link,
+):
+    root, launcher = installation
+    old = candidate(root, "old")
+    selected = candidate(root, "selected")
+    (root / "selected" / "uv" / "tools" / "avibe-os" / "uv-receipt.toml").unlink()
+    if link == "symlink":
+        launcher.symlink_to(selected)
+    elif link == "hardlink":
+        os.link(selected.resolve(), launcher)
+    else:
+        shutil.copy2(selected, launcher)
+        upgrade._update_launcher_generation_marker(launcher, selected, root)
+    assert collect(launcher) == []
+    assert old.exists()
+    assert subprocess.run([str(launcher)], check=False).returncode == 0
+    # A later recognized activation restores ordinary retirement.
+    current = activate(root, launcher, "recovered")
+    assert not old.exists()
+    assert selected.exists()  # Unknown installations never become garbage by name.
+    assert current.exists()
+
+
+@pytest.mark.parametrize("selector", ["primary", "path"])
+def test_in_root_wrapper_preserves_the_selected_command_dependency(
+    installation, tmp_path, monkeypatch, selector,
+):
+    root, launcher = installation
+    old = candidate(root, "old")
+    wrapper = root / "unknown" / "bin" / "vibe"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(f'#!/bin/sh\nexec "{old}" "$@"\n')
+    wrapper.chmod(0o755)
+    if selector == "primary":
+        selected_command = launcher
+    else:
+        selected_command = tmp_path / "path-first" / "vibe"
+        selected_command.parent.mkdir()
+        monkeypatch.setenv("PATH", os.pathsep.join([
+            str(selected_command.parent), os.environ["PATH"],
+        ]))
+    selected_command.symlink_to(wrapper)
+    assert subprocess.run([str(selected_command)], check=False).returncode == 0
+    if selector == "primary":
+        collect(launcher)
+    else:
+        current = activate(root, launcher, "current")
+        assert current.exists()
+    assert old.exists()
+    assert subprocess.run([str(selected_command)], check=False).returncode == 0
 
 
 def test_reclaims_fifteen_historical_generations_without_activation_receipts(installation):
@@ -390,6 +487,134 @@ def test_windows_official_base_python_child_keeps_redirector_generation(installa
     current = activate(root, launcher, "selected")
     assert old.exists()
     assert current.exists()
+
+
+@pytest.mark.parametrize("parent_state", ["missing", "exited", "denied"])
+@pytest.mark.parametrize("child_state", ["live", "exited", "in-root", "zombie"])
+def test_windows_redirector_loss_is_not_the_official_child_exiting(
+    installation, monkeypatch, parent_state, child_state,
+):
+    root, launcher = installation
+    old = candidate(root, "official-ui")
+    monkeypatch.setattr(retention, "_runtime_paths", OFFICIAL_PATHS)
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(retention, "sys", SimpleNamespace(platform="win32"))
+    paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
+    paths.get_runtime_ui_pid_path().write_text("123")
+    inspections = []
+
+    def parent():
+        inspections.append("parent")
+        if parent_state == "missing":
+            return None
+
+        def executable():
+            if parent_state == "denied":
+                raise psutil.AccessDenied(122)
+            raise psutil.NoSuchProcess(122)
+
+        return SimpleNamespace(exe=executable)
+
+    child = SimpleNamespace(
+        status=lambda: psutil.STATUS_ZOMBIE if child_state == "zombie" else psutil.STATUS_RUNNING,
+        cmdline=lambda: [
+            str(old.with_name("python.exe")) if child_state == "in-root" else sys.executable,
+            "-c", "from vibe.ui_server import run; run()",
+        ],
+        exe=lambda: sys.executable,
+        parent=parent,
+        is_running=lambda: child_state != "exited",
+    )
+    monkeypatch.setattr(retention.psutil, "Process", lambda _: child)
+    current = activate(root, launcher, "selected")
+    must_keep = child_state in {"live", "in-root"} or (
+        child_state == "exited" and parent_state == "denied"
+    )
+    assert old.exists() is must_keep
+    assert current.exists()
+    if child_state in {"in-root", "zombie"}:
+        assert not inspections
+
+
+@pytest.mark.parametrize("interruption", ["write-failure", "interrupted-write", "rename-failure"])
+def test_shell_marker_publication_failure_cannot_poison_future_collection(
+    installation, monkeypatch, interruption,
+):
+    root, launcher = installation
+    old = candidate(root, "old")
+    launcher.symlink_to(old)
+    source = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+    source = source.rsplit('\nmain "$@"', 1)[0]
+    hooks = {
+        "write-failure": r"""
+printf() {
+    if [ "$1" = '%s\n' ] && [ "${2:-}" = "$$" ]; then return 1; fi
+    builtin printf "$@"
+}
+""",
+        "interrupted-write": r"""
+printf() {
+    if [ "$1" = '%s\n' ] && [ "${2:-}" = "$$" ]; then exit 91; fi
+    builtin printf "$@"
+}
+""",
+        "rename-failure": r"""
+mv() {
+    case "${*: -1}" in */.avibe-installing) return 1 ;; esac
+    command mv "$@"
+}
+""",
+    }
+    # A publication failure must precede source snapshot and package installation.
+    script = source + hooks[interruption] + r"""
+VIBE_TOOL_BIN_DIR="$VIBE_TEST_STABLE_BIN"
+launcher_destination_is_available() { return 0; }
+resolve_binary_path() { echo snapshot >> "$VIBE_TEST_ADMISSION_TRACE"; exit 92; }
+uv() { echo uv >> "$VIBE_TEST_ADMISSION_TRACE"; return 93; }
+if uv_tool_install avibe-os; then exit 94; else exit 95; fi
+"""
+    trace = root.parent / "admission-trace"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ, "HOME": str(root.parent.parent),
+            "AVIBE_HOME": str(root.parent.parent),
+            "VIBE_TEST_STABLE_BIN": str(launcher.parent),
+            "VIBE_TEST_ADMISSION_TRACE": str(trace),
+        },
+        cwd=root.parent.parent, text=True, capture_output=True, timeout=15,
+    )
+    assert result.returncode in {91, 95}
+    assert not trace.exists()
+    staged = [generation for generation in root.iterdir() if generation.name != "old"]
+    assert all(not (generation / retention.INSTALLER_PID).exists() for generation in staged)
+    if interruption != "interrupted-write":
+        assert not staged
+    monkeypatch.setattr(retention, "_installer_is_live", INSTALLER_IS_LIVE)
+    for index in range(3):
+        current = activate(root, launcher, f"selected-{index}")
+    assert not old.exists()
+    assert current.exists()
+    assert {generation.name for generation in root.iterdir()} == {
+        "selected-2", *(generation.name for generation in staged),
+    }
+
+
+@pytest.mark.parametrize("contents", ["", "not-a-pid"])
+def test_corrupt_published_guid_marker_is_not_guessed_dead(
+    installation, monkeypatch, contents,
+):
+    root, launcher = installation
+    old = candidate(root, "old")
+    stage = root / "0123456789abcdef0123456789abcdef"
+    stage.mkdir()
+    (stage / retention.INSTALLER_PID).write_text(contents)
+    monkeypatch.setattr(retention, "_installer_is_live", INSTALLER_IS_LIVE)
+    current = activate(root, launcher, "selected")
+    assert old.exists()
+    assert current.exists()
+    assert launcher.resolve() == current.resolve()
+    assert (stage / retention.INSTALLER_PID).read_text() == contents
 
 
 @pytest.mark.parametrize("legacy", [False, True])

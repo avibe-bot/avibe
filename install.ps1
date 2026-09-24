@@ -422,15 +422,21 @@ function Invoke-UvToolInstallAttempt {
     # Protect the source snapshot throughout staging outside the Python lock.
     # The collector ignores this marker only for its own candidate.
     $installerMarker = Join-Path $generationRoot ".avibe-installing"
-    Set-Content -LiteralPath $installerMarker -Value $PID -Encoding UTF8
-    # The candidate's shared Python activation owner resolves this snapshot to
-    # a generation. PowerShell must not duplicate junction/symlink identity.
-    $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
-    $previousSourcePath = $launcherState.SourcePath
-
+    $installerMarkerTemporary = "$installerMarker.new"
     $previousToolDir = $env:UV_TOOL_DIR
     $previousToolBinDir = $env:UV_TOOL_BIN_DIR
     try {
+        try {
+            Set-Content -LiteralPath $installerMarkerTemporary -Value $PID -Encoding UTF8
+            [System.IO.File]::Move($installerMarkerTemporary, $installerMarker)
+        } catch {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+        }
+        # The candidate's shared Python activation owner resolves this snapshot to
+        # a generation. PowerShell must not duplicate junction/symlink identity.
+        $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
+        $previousSourcePath = $launcherState.SourcePath
         $env:UV_TOOL_DIR = $generationTools
         $env:UV_TOOL_BIN_DIR = $generationBin
         $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)

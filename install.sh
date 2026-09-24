@@ -461,8 +461,12 @@ uv_tool_install() {
     # Publish before the source snapshot. Collection in another activation
     # retains this installer's entire handoff while the shell is still alive.
     # The marker protects staging even after uv has finished its tool receipt.
-    if ! printf '%s\n' "$$" > "$generation_root/.avibe-installing"; then
+    local installer_marker="$generation_root/.avibe-installing"
+    local installer_marker_temporary="$installer_marker.new"
+    if ! printf '%s\n' "$$" > "$installer_marker_temporary" ||
+        ! mv -f -- "$installer_marker_temporary" "$installer_marker"; then
         warn "Could not protect the installer handoff"
+        rm -rf -- "$generation_root"
         return 1
     fi
     if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then

@@ -82,7 +82,10 @@ def _uv_installation(generation: Path) -> tuple[Path, set[Path]] | None:
             exported = Path(entry["install-path"])
             if (
                 exported.is_absolute()
-                and exported.name.lower() == entry["name"].lower()
+                # uv records the logical name without Windows' EXE_SUFFIX.
+                and (entry["name"].lower(), exported.name.lower()) in {
+                    ("vibe", "vibe"), ("vibe", "vibe.exe"), ("vibe.exe", "vibe.exe"),
+                }
                 and exported.parent.resolve() == generation / "bin"
             ):
                 exports.add(exported)
@@ -192,8 +195,9 @@ def _invocation_paths() -> set[Path]:
 
 def _runtime_paths() -> set[Path]:
     """Inspect only official service/UI records, never the user's process table."""
-    from vibe import runtime
+    from vibe import runtime, upgrade
 
+    root = upgrade.atomic_uv_install_root().expanduser().resolve()
     result: set[Path] = set()
     pids: set[int] = set()
     for pid_path in (paths.get_runtime_pid_path(), paths.get_runtime_ui_pid_path()):
@@ -230,17 +234,27 @@ def _runtime_paths() -> set[Path]:
             executable = process.exe()
             if not argv or not Path(argv[0]).is_absolute() or not Path(executable).is_absolute():
                 raise ValueError("official runtime interpreter could not be identified")
-            result.add(Path(executable))
-            result.update(Path(value) for value in argv if value and Path(value).is_absolute())
-            if sys.platform == "win32":
+            process_paths = {Path(executable)}
+            process_paths.update(Path(value) for value in argv if value and Path(value).is_absolute())
+            if sys.platform == "win32" and not any(
+                upgrade._generation_for_path(path, root) is not None for path in process_paths
+            ):
                 # Windows venv redirectors spawn a base-Python child. The UI's
-                # -c command may have no generation path; its parent still does.
-                parent = process.parent()
-                if parent is not None:
-                    parent_executable = parent.exe()
-                    if not Path(parent_executable).is_absolute():
-                        raise ValueError("official runtime redirector could not be identified")
-                    result.add(Path(parent_executable))
+                # -c command may need its parent to identify the environment.
+                # Losing that parent is not proof the official child has exited.
+                try:
+                    parent = process.parent()
+                    parent_executable = parent.exe() if parent is not None else ""
+                except psutil.NoSuchProcess:
+                    parent_executable = ""
+                if not parent_executable:
+                    if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                        continue
+                    raise ValueError("live official runtime lost its redirector")
+                if not Path(parent_executable).is_absolute():
+                    raise ValueError("official runtime redirector could not be identified")
+                process_paths.add(Path(parent_executable))
+            result.update(process_paths)
         except psutil.NoSuchProcess:
             continue
         # Access denial or an unknown official launch shape defers this pass.
@@ -274,6 +288,10 @@ def _launcher_targets(
 
     generation = upgrade._launcher_generation(launcher, root)
     if generation is not None:
+        if generation not in managed:
+            # An in-root wrapper can depend on another generation. Neither the
+            # primary command nor PATH may authorize deleting that dependency.
+            raise ValueError("selected in-root installation could not be recognized")
         return {generation}
     if launcher.is_symlink():
         # An outside alias proves nothing about which managed generation the
