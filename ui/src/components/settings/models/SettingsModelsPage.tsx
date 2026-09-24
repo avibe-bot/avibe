@@ -399,6 +399,9 @@ export const SettingsModelsPage: React.FC = () => {
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [catalogFocus, setCatalogFocus] = React.useState<CatalogFocus | null>(null);
+  // The route the catalog was opened from. Its action unmounted with the route
+  // dialog, so closing the catalog returns focus to that model row instead.
+  const catalogOriginRef = React.useRef<RouteTarget | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<RouteTarget | null>(null);
   const pendingRouteOpenersRef = React.useRef(new Map<RouteReport, HTMLElement | null>());
@@ -1507,7 +1510,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
+                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1583,7 +1586,13 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} focus={catalogFocus} onClose={() => { setMenuBackend(null); setCatalogFocus(null); }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} focus={catalogFocus} onClose={() => {
+        setMenuBackend(null);
+        setCatalogFocus(null);
+        const origin = catalogOriginRef.current;
+        catalogOriginRef.current = null;
+        if (origin) focusRouteDestination(origin);
+      }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         covered={orderBackend !== null}
@@ -1598,6 +1607,7 @@ export const SettingsModelsPage: React.FC = () => {
           // The catalog dialog is the one writer of the model list; the route
           // dialog closes and hands it the model it was showing.
           if (!routeTarget) return;
+          catalogOriginRef.current = routeTarget;
           setRouteTarget(null);
           setCatalogFocus({ modelId: routeTarget.modelId, action });
           setMenuBackend(routeTarget.agent.backend);

@@ -764,11 +764,25 @@ def _opencode_protocol(
     return None
 
 
-_CODEX_PROVIDER_TEXT = (
-    "name", "base_url", "env_key", "env_key_instructions", "experimental_bearer_token",
-)
-_CODEX_PROVIDER_MAPS = ("http_headers", "env_http_headers", "query_params")
-_CODEX_PROVIDER_COUNTS = ("request_max_retries", "stream_max_retries", "stream_idle_timeout_ms")
+# Every field of Codex's `ModelProviderInfo` (codex-rs/core/config.schema.json),
+# by declared type. Codex ignores unknown keys but rejects a known one of the
+# wrong type, so the whole table is checked rather than fields one at a time.
+_CODEX_PROVIDER_FIELDS: dict[str, str] = {
+    **dict.fromkeys((
+        "name", "base_url", "env_key", "env_key_instructions",
+        "experimental_bearer_token", "model_catalog_url",
+    ), "text"),
+    **dict.fromkeys(("http_headers", "env_http_headers", "query_params"), "text_map"),
+    **dict.fromkeys((
+        "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms",
+        "websocket_connect_timeout_ms",
+    ), "count"),
+    **dict.fromkeys((
+        "requires_openai_auth", "supports_websockets", "supports_standalone_web_search",
+    ), "flag"),
+    **dict.fromkeys(("auth", "aws", "gateway_oauth"), "table"),
+    "wire_api": "wire_api",
+}
 
 
 def _text_map(value: object) -> bool:
@@ -777,29 +791,32 @@ def _text_map(value: object) -> bool:
     )
 
 
+def _codex_field_well_typed(kind: str, value: object) -> bool:
+    if kind == "text":
+        return isinstance(value, str)
+    if kind == "text_map":
+        return _text_map(value)
+    if kind == "count":
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if kind == "flag":
+        return isinstance(value, bool)
+    if kind == "table":
+        return isinstance(value, dict)
+    # An unknown variant fails deserialization. `chat` stays accepted: older
+    # CLIs still run it, and migration carries it as openai_chat.
+    return value in ("chat", "responses")
+
+
 def _codex_provider_well_typed(provider: object) -> bool:
     """Whether Codex can deserialize this ``model_providers`` entry.
 
     A field of the wrong type fails the whole config before any Hub override
     applies, so only an absent field or one of its declared type is safe.
     """
-    if not isinstance(provider, dict):
-        return False
-    if any(key in provider and not isinstance(provider[key], str) for key in _CODEX_PROVIDER_TEXT):
-        return False
-    if any(key in provider and not _text_map(provider[key]) for key in _CODEX_PROVIDER_MAPS):
-        return False
-    if any(
-        key in provider and (isinstance(provider[key], bool) or not isinstance(provider[key], int)
-                             or provider[key] < 0)
-        for key in _CODEX_PROVIDER_COUNTS
-    ):
-        return False
-    if "wire_api" in provider and provider["wire_api"] not in ("chat", "responses"):
-        # An unknown variant fails deserialization. `chat` stays accepted:
-        # older CLIs still run it, and migration carries it as openai_chat.
-        return False
-    return "requires_openai_auth" not in provider or isinstance(provider["requires_openai_auth"], bool)
+    return isinstance(provider, dict) and all(
+        _codex_field_well_typed(kind, provider[field])
+        for field, kind in _CODEX_PROVIDER_FIELDS.items() if field in provider
+    )
 
 
 def _opencode_provider_well_typed(provider: object) -> bool:

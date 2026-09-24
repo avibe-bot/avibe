@@ -68,6 +68,31 @@ describe('SupplyGraph', () => {
     await waitFor(() => expect(path.getAttribute('d')).toContain('M 30 35'));
   });
 
+  it('ignores scrolling elsewhere and measures once per frame', async () => {
+    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function measure(this: HTMLElement) {
+      if (this.dataset.testid === 'graph-root') return rect(0, 0, 120, 100);
+      if (this.dataset.sourceId === 'src_a') return rect(10, 10, 20, 10);
+      if (this.dataset.agentBackend === 'claude') return rect(90, 40, 20, 20);
+      return rect(0, 0, 0, 0);
+    });
+    const elsewhere = document.body.appendChild(document.createElement('div'));
+    const view = render(<Fixture />);
+    await waitFor(() => expect(view.container.querySelector('.model-hub-wire')).not.toBeNull());
+    const settle = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await settle();
+
+    bounds.mockClear();
+    fireEvent.scroll(elsewhere);
+    await settle();
+    expect(bounds).not.toHaveBeenCalled();
+
+    const card = view.container.querySelector('[data-source-id="src_a"]') as Element;
+    for (let index = 0; index < 5; index += 1) fireEvent.scroll(card);
+    await settle();
+    expect(bounds.mock.contexts.filter((element) => (element as HTMLElement).dataset.testid === 'graph-root')).toHaveLength(1);
+    elsewhere.remove();
+  });
+
   it('lands every relation for an agent on the agent card midpoint', async () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
       if (this.dataset.testid === 'graph-root') return rect(0, 0, 120, 100);

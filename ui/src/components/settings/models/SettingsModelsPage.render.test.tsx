@@ -1926,6 +1926,34 @@ describe('SettingsModelsPage surface branches', () => {
     }
   });
 
+  it('MH-ROUTING-007 returns focus to the model row after a route-to-catalog handoff', async () => {
+    const catalogModel: BackendModel = {
+      id: 'gpt-5.6-sol', display_name: null, origin: 'manual', models_dev_id: null, context_window: null,
+      max_output_tokens: null, input_modalities: ['text'], output_modalities: ['text'], supports_tools: true,
+      supports_reasoning: false, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    const agent = { ...takeoverAgent, catalog_models: [catalogModel] };
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    renderPage([
+      { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+      { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+    ], [agent]);
+    const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
+    await userEvent.click(opener);
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$|^编辑模型$/i }));
+    await waitFor(() => expect(document.querySelector('.model-hub-route-head')).toBeNull());
+    // Edit opens the model editor over the catalog; leave both by keyboard.
+    for (let open = 0; open < 3 && screen.queryAllByRole('dialog').length; open += 1) {
+      await userEvent.keyboard('{Escape}');
+      await flushRouteFocus();
+    }
+    await waitFor(() => expect(screen.queryAllByRole('dialog')).toHaveLength(0));
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(opener);
+  });
+
   it('MH-ROUTING-007 keeps the previous retry fallback when another route opens', async () => {
     const { opener } = await saveRouteForFocusTest();
     const agentsRead = deferred<AgentSupply[]>();

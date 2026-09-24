@@ -337,6 +337,9 @@ def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home
     '{ base_url = 1 }',
     '{ stream_max_retries = "3" }',
     '{ wire_api = "bogus" }',
+    '{ supports_websockets = "bad" }',
+    '{ websocket_connect_timeout_ms = -1 }',
+    '{ auth = "bad" }',
 ])
 def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
     _write(home / ".codex/config.toml", f"model_providers = {{ relay = {entry} }}\n")
@@ -354,7 +357,8 @@ def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry
 
 
 def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
-    _write(home / ".codex/config.toml", 'model_providers = { relay = { http_headers = { X = "y" } } }\n')
+    _write(home / ".codex/config.toml", 'model_providers = { relay = { http_headers = { X = "y" }, '
+           'supports_websockets = true, wire_api = "responses", future_field = 1 } }\n')
     _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"options": {"headers": {"X": "y"}}}}}')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert not any(item.config_blocker for item in _items(service, ()))
