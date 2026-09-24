@@ -330,13 +330,30 @@ def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home
     assert json.loads(config.read_text())["provider"]["openrouter"]["options"] == layer
 
 
-def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path):
-    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+@pytest.mark.parametrize("entry", [
+    '"bad"',
+    '{ http_headers = "bad" }',
+    '{ env_http_headers = ["X_KEY"] }',
+    '{ base_url = 1 }',
+    '{ stream_max_retries = "3" }',
+])
+def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
+    _write(home / ".codex/config.toml", f"model_providers = {{ relay = {entry} }}\n")
     service, _, _ = _service(tmp_path, migration_home=home)
     assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
 
 
-def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path):
-    _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": "bad"}}')
+@pytest.mark.parametrize("entry", [
+    '"bad"', '{"options": "bad"}', '{"options": {"baseURL": 1}}', '{"models": {"m": "bad"}}',
+])
+def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
+    _write(home / ".config/opencode/opencode.json", f'{{"provider": {{"relay": {entry}}}}}')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert any(item.backend == "opencode" and item.config_blocker for item in _items(service, ()))
+
+
+def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
+    _write(home / ".codex/config.toml", 'model_providers = { relay = { http_headers = { X = "y" } } }\n')
+    _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"options": {"headers": {"X": "y"}}}}}')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert not any(item.config_blocker for item in _items(service, ()))

@@ -659,7 +659,7 @@ def _codex_items(
             ))
             continue
         for provider_id, provider in providers.items():
-            if not isinstance(provider, dict):
+            if not _codex_provider_well_typed(provider):
                 # Codex deserializes the whole provider map before any Hub
                 # override applies, so one malformed entry fails every launch.
                 items.append(_blocked_item(
@@ -762,6 +762,59 @@ def _opencode_protocol(
     if npm in {"@ai-sdk/openai-compatible", "@openrouter/ai-sdk-provider"}:
         return "openai_chat"
     return None
+
+
+_CODEX_PROVIDER_TEXT = (
+    "name", "base_url", "env_key", "env_key_instructions", "experimental_bearer_token",
+)
+_CODEX_PROVIDER_MAPS = ("http_headers", "env_http_headers", "query_params")
+_CODEX_PROVIDER_COUNTS = ("request_max_retries", "stream_max_retries", "stream_idle_timeout_ms")
+
+
+def _text_map(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    )
+
+
+def _codex_provider_well_typed(provider: object) -> bool:
+    """Whether Codex can deserialize this ``model_providers`` entry.
+
+    A field of the wrong type fails the whole config before any Hub override
+    applies, so only an absent field or one of its declared type is safe.
+    """
+    if not isinstance(provider, dict):
+        return False
+    if any(key in provider and not isinstance(provider[key], str) for key in _CODEX_PROVIDER_TEXT):
+        return False
+    if any(key in provider and not _text_map(provider[key]) for key in _CODEX_PROVIDER_MAPS):
+        return False
+    if any(
+        key in provider and (isinstance(provider[key], bool) or not isinstance(provider[key], int)
+                             or provider[key] < 0)
+        for key in _CODEX_PROVIDER_COUNTS
+    ):
+        return False
+    if "wire_api" in provider and not isinstance(provider["wire_api"], str):
+        return False
+    return "requires_openai_auth" not in provider or isinstance(provider["requires_openai_auth"], bool)
+
+
+def _opencode_provider_well_typed(provider: object) -> bool:
+    """Whether OpenCode's config schema accepts this ``provider`` entry.
+
+    OpenCode validates the whole file on start, so a malformed typed field
+    fails every launch, Hub-owned or not.
+    """
+    if not isinstance(provider, dict):
+        return False
+    options = provider.get("options", {})
+    if not isinstance(options, dict):
+        return False
+    if any(key in options and not isinstance(options[key], str) for key in ("apiKey", "baseURL")):
+        return False
+    models = provider.get("models", {})
+    return isinstance(models, dict) and all(isinstance(model, dict) for model in models.values())
 
 
 def _opencode_manual_models(
@@ -874,7 +927,7 @@ def _opencode_candidates(
             items.append(blocked(f"{locator}:invalid-provider"))
             continue
         provider_config = provider_configs.get(provider_id, {})
-        if not isinstance(provider_config, dict):
+        if not _opencode_provider_well_typed(provider_config):
             # OpenCode validates the whole provider map before any Hub
             # override applies, so one malformed entry fails every launch.
             items.append(blocked(f"{locator}:{provider_id}", config_blocker=True))
