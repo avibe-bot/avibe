@@ -88,6 +88,11 @@ an SSH daemon or host ownership metadata.
    cp .env.regression.example .env.regression
    ```
 
+   When the runner is invoked from a task worktree, it looks for
+   `.env.regression` in that current worktree first, then falls back to the
+   primary checkout. Keep the worktree copy intentional because it shadows the
+   primary checkout's configuration.
+
 4. Fill in `.env.regression` with:
 
 - shared LLM credentials: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`

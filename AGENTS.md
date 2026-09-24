@@ -199,10 +199,13 @@ Source-of-truth rule:
   contract, require an exact-head Codex review, zero unresolved review threads,
   and passing CI before close-out, apply the review-loop circuit breaker, and
   never merge without explicit owner instruction
-- use `background-watch-hook` for managed review and CI waits
+- use the `background-watch-hook` skill for managed review and CI waits
+- keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
 - the change contract names intended behavior, affected boundaries, and
   validation evidence; use the Skill's circuit breaker when findings repeat
-- ordinary documentation, product, and test PRs retain the Skill's normal gates
+- only an explicit owner decision may make Codex findings advisory for an
+  architecture/spec-only PR; ordinary documentation and every product or test
+  code PR retain the Skill's normal gates
 
 ### Pre-Push Requirements
 
