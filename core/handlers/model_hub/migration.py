@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -873,21 +874,84 @@ def _codex_provider_well_typed(provider: object) -> bool:
     )
 
 
+_OPENCODE_COST = ({
+    "input": "finite", "output": "finite", "cache_read": "finite", "cache_write": "finite",
+}, frozenset({"input", "output"}))
+_OPENCODE_MODALITIES = ("modality", "text", "audio", "image", "video", "pdf")
+_OPENCODE_MODEL = ({
+    "id": "text", "name": "text", "family": "text", "release_date": "text",
+    "attachment": "flag", "reasoning": "flag", "temperature": "flag", "tool_call": "flag",
+    "experimental": "flag",
+    "interleaved": ("any", "flag", "text", ({"field": "text"}, frozenset({"field"}))),
+    "cost": ({**_OPENCODE_COST[0], "context_over_200k": _OPENCODE_COST}, _OPENCODE_COST[1]),
+    "limit": ({"context": "finite", "input": "finite", "output": "finite"}, frozenset({"context", "output"})),
+    "modalities": ({"input": _OPENCODE_MODALITIES, "output": _OPENCODE_MODALITIES}, frozenset()),
+    "status": ("choice", "alpha", "beta", "deprecated", "active"),
+    "provider": ({"npm": "text", "api": "text"}, frozenset()),
+    "options": "record",
+    "headers": "text_map",
+    "variants": ("values", ({"disabled": "flag"}, frozenset())),
+}, frozenset())
+_OPENCODE_TIMEOUT = ("any", "positive_count", ("choice", False))
+_OPENCODE_PROVIDER = ({
+    "api": "text", "name": "text", "id": "text", "npm": "text",
+    "env": "texts", "whitelist": "texts", "blacklist": "texts",
+    "options": ({
+        "apiKey": "text", "baseURL": "text", "enterpriseUrl": "text", "setCacheKey": "flag",
+        "timeout": _OPENCODE_TIMEOUT, "headerTimeout": _OPENCODE_TIMEOUT,
+        "chunkTimeout": _OPENCODE_TIMEOUT,
+    }, frozenset()),
+    "models": ("values", _OPENCODE_MODEL),
+}, frozenset())
+
+
+def _opencode_value_well_typed(spec: object, value: object) -> bool:
+    """Check ``value`` against OpenCode's ``ProviderConfig`` schema.
+
+    Effect structs drop unknown keys, so only declared fields are checked.
+    """
+    if spec == "text":
+        return isinstance(value, str)
+    if spec == "flag":
+        return isinstance(value, bool)
+    if spec == "texts":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if spec == "text_map":
+        return _text_map(value)
+    if spec == "record":
+        return isinstance(value, dict)
+    if spec == "finite":
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if spec == "positive_count":
+        # JSON has one number type; `1.0` is the integer 1 to OpenCode.
+        return (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value == int(value) and value > 0
+        )
+    kind = spec[0] if isinstance(spec, tuple) else None
+    if kind == "any":
+        return any(_opencode_value_well_typed(variant, value) for variant in spec[1:])
+    if kind == "choice":
+        return any(value is choice or (type(value) is type(choice) and value == choice) for choice in spec[1:])
+    if kind == "modality":
+        return isinstance(value, list) and all(item in spec[1:] for item in value)
+    if kind == "values":
+        return isinstance(value, dict) and all(_opencode_value_well_typed(spec[1], item) for item in value.values())
+    fields, required = cast(tuple[dict[str, object], frozenset[str]], spec)
+    return (
+        isinstance(value, dict)
+        and required <= value.keys()
+        and all(_opencode_value_well_typed(fields[key], item) for key, item in value.items() if key in fields)
+    )
+
+
 def _opencode_provider_well_typed(provider: object) -> bool:
     """Whether OpenCode's config schema accepts this ``provider`` entry.
 
     OpenCode validates the whole file on start, so a malformed typed field
     fails every launch, Hub-owned or not.
     """
-    if not isinstance(provider, dict):
-        return False
-    options = provider.get("options", {})
-    if not isinstance(options, dict):
-        return False
-    if any(key in options and not isinstance(options[key], str) for key in ("apiKey", "baseURL")):
-        return False
-    models = provider.get("models", {})
-    return isinstance(models, dict) and all(isinstance(model, dict) for model in models.values())
+    return _opencode_value_well_typed(_OPENCODE_PROVIDER, provider)
 
 
 def _opencode_manual_models(

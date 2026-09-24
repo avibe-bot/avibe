@@ -353,6 +353,9 @@ def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
 
 @pytest.mark.parametrize("entry", [
     '"bad"', '{"options": "bad"}', '{"options": {"baseURL": 1}}', '{"models": {"m": "bad"}}',
+    '{"npm": 1}', '{"env": "KEY"}', '{"options": {"timeout": 0}}', '{"options": {"setCacheKey": "yes"}}',
+    '{"models": {"m": {"limit": {"context": 1}}}}', '{"models": {"m": {"status": "gone"}}}',
+    '{"models": {"m": {"modalities": {"input": ["smell"]}}}}', '{"models": {"m": {"headers": {"X": 1}}}}',
 ])
 def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
     _write(home / ".config/opencode/opencode.json", f'{{"provider": {{"relay": {entry}}}}}')
@@ -367,7 +370,10 @@ def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
            'aws = { profile = "p", credential_export = { command = "fixture" } }, '
            'gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", '
            'delivery = { kind = "header", name = "X" } } } }\n')
-    _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"options": {"headers": {"X": "y"}}}}}')
+    _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"npm": "@ai-sdk/openai-compatible", '
+           '"future": 1, "options": {"headers": {"X": "y"}, "timeout": false, "chunkTimeout": 1000}, '
+           '"models": {"m": {"limit": {"context": 1, "output": 2}, "interleaved": {"field": "reasoning"}, '
+           '"cost": {"input": 0.5, "output": 1}, "variants": {"high": {"disabled": false, "x": 1}}}}}}}')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert not any(item.config_blocker for item in _items(service, ()))
 
