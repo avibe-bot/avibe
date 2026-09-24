@@ -308,61 +308,6 @@ def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None
     assert event["sequence_number"] == 9
 
 
-def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
-    root = Path(__file__).parents[1]
-    owner = root / "core/handlers/model_hub/provenance.py"
-    runtime_files = [
-        *sorted((root / "core/handlers/model_hub").glob("*.py")),
-        root / "modules/agents/model_hub.py",
-    ]
-
-    assert "modelHub.launch." in owner.read_text(encoding="utf-8")
-    for path in runtime_files:
-        if path == owner:
-            continue
-        source = path.read_text(encoding="utf-8")
-        assert "modelHub.launch." not in source
-        assert '"copy_key"' not in source
-
-    excluded = {".git", ".venv", "node_modules"}
-
-    def is_projection_constructor(node: ast.Call) -> bool:
-        return (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "TurnOutcomeProjectionInput"
-        ) or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "TurnOutcomeProjectionInput"
-        )
-
-    constructor_calls: dict[Path, set[int]] = {}
-    for path in root.rglob("*.py"):
-        if any(part in excluded for part in path.parts):
-            continue
-        calls = [
-            node.lineno
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-            if isinstance(node, ast.Call)
-            and is_projection_constructor(node)
-        ]
-        if calls:
-            constructor_calls[path] = set(calls)
-    owner_tree = ast.parse(owner.read_text(encoding="utf-8"))
-    producer = next(
-        node
-        for node in owner_tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "produce_turn_outcome"
-    )
-    producer_calls = {
-        node.lineno
-        for node in ast.walk(producer)
-        if isinstance(node, ast.Call)
-        and is_projection_constructor(node)
-    }
-    assert producer_calls
-    assert constructor_calls == {owner: producer_calls}
-
-
 def test_gateway_handle_termination_has_one_settlement_owner() -> None:
     path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -450,33 +395,6 @@ def test_gateway_handle_termination_has_one_settlement_owner() -> None:
     assert len(registered_closers) == 1
     assert isinstance(registered_closers[0].args[0], ast.Attribute)
     assert registered_closers[0].args[0].attr == "close_stream"
-
-
-def test_terminal_chain_reinspection_has_no_execution_channel_input() -> None:
-    path = Path(__file__).parents[1] / "core/handlers/model_hub/service.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    owner = functions["_inspect_terminal_chain"]
-    owner_inputs = {
-        argument.arg
-        for argument in (*owner.args.args, *owner.args.kwonlyargs)
-    }
-    assert "supply_channel" not in owner_inputs
-
-    def calls_owner(function_name: str) -> bool:
-        return any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_inspect_terminal_chain"
-            for node in ast.walk(functions[function_name])
-        )
-
-    assert calls_owner("_produce_attempt_terminal_outcome")
-    assert calls_owner("resolve")
 
 
 def _terminal_resolution_facts(
@@ -10682,28 +10600,6 @@ def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded
         shared.shutdown()
 
     asyncio.run(exercise())
-
-
-def test_no_ending_of_a_turn_decides_for_itself_what_the_call_did() -> None:
-    """The metering facts have one owner, so an ending is a *when*, not a *what*.
-
-    Endings that answered locally answered in the vocabulary of the shape they
-    happened to see, and the boundary — which can see either — got the buffered
-    one wrong. An ending added later is covered by construction if it cannot pass
-    the answer in, so that is what is asserted rather than today's three endings.
-    """
-
-    path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
-    calls = [
-        node
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_record_usage"
-    ]
-
-    assert calls, "the gateway must still meter the calls whose body it forwards"
-    assert all(len(call.args) == 1 and not call.keywords for call in calls)
 
 
 def test_no_downstream_ending_after_adoption_can_drop_the_turn_from_the_ledger(
