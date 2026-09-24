@@ -2393,3 +2393,13 @@ def test_new_subscription_without_a_catalog_joins_its_vendor_agent(tmp_path):
     config.sources.append(chatgpt)
     service._apply_source_placement(config, chatgpt)
     assert [backend for backend in ("claude", "codex", "opencode") if chatgpt.id in config.agents[backend].sources.order] == ["codex", "opencode"]
+
+
+def test_new_subscription_ahead_of_its_agents_menu_still_joins_its_vendor_agent(tmp_path):
+    config = _config([])
+    service, _, _ = _service(tmp_path, config)
+    chatgpt = _source("src_placeahead", ("gpt-9-preview",), kind="subscription", vendor="openai")
+    config.sources.append(chatgpt)
+    service._apply_source_placement(config, chatgpt)
+    assert config.agents["codex"].models
+    assert [backend for backend in ("claude", "codex", "opencode") if chatgpt.id in config.agents[backend].sources.order] == ["codex", "opencode"]

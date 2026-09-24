@@ -585,6 +585,29 @@ describe('MigrationDialog — shared persisted files', () => {
     expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('blocks a backend whose native config the CLI cannot parse', async () => {
+    // Hub mode over an unparseable native config fails every launch, so the
+    // server refuses the batch; the dialog must not offer it.
+    serve([
+      CODEX_KEY,
+      {
+        ...CODEX_KEY,
+        id: 'blocked_config',
+        proposed_action: 'reauth',
+        selected: false,
+        notes_key: 'settings.models.migration.blocked.config',
+        config_blocker: true,
+      },
+    ]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+    const [checkbox] = within(dialog).getAllByRole('checkbox');
+    expect((checkbox as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('keeps a transitive three-backend closure visible and selected from one entry point', async () => {
     const items: MigrationItem[] = [SUBSCRIPTION, CODEX_KEY, LEGACY].map((item) => ({
       ...item,

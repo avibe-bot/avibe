@@ -411,3 +411,24 @@ def test_equal_secret_selected_for_another_backend_leaves_claude_oauth_token(hom
     for edit in plan_native_cleanup([*codex, claude], home=home):
         edit.apply()
     assert json.loads(settings.read_text())["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == KEY
+
+
+def test_claude_retained_credential_in_one_layer_keeps_another_layers_base_url(home, tmp_path):
+    user = home / ".claude/settings.json"
+    project = home / "project/.claude/settings.json"
+    _write(user, json.dumps({"env": {"ANTHROPIC_API_KEY": KEY, "ANTHROPIC_BASE_URL": "https://relay.example"}}))
+    _write(project, json.dumps({"apiKeyHelper": "fixture-helper"}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, roots) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert json.loads(user.read_text())["env"] == {"ANTHROPIC_BASE_URL": "https://relay.example"}
+
+
+def test_scan_payload_exposes_configuration_blockers(home, tmp_path):
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    rows = service.migration_scan()["items"]
+    assert any(row["backend"] == "codex" and row["config_blocker"] for row in rows)

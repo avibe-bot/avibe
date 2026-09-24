@@ -120,6 +120,23 @@ describe('failed-turn upstream details', () => {
     expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
   });
 
+  it('reads again once a live notice\'s Turn has been settled', async () => {
+    vi.useFakeTimers();
+    try {
+      const read = vi.spyOn(modelsApi, 'getTurnProvenance')
+        .mockRejectedValueOnce(new ApiCallError('turn_not_found', 'not found'))
+        .mockResolvedValue(record);
+      mount();
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('button', { name: '查看详情' })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('names Avibe-side terminal failures and localizes every blocker reason', async () => {
     vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
       ...record,

@@ -17,6 +17,7 @@ import type { WorkbenchMessage } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import type { TurnProvenance } from '../settings/models/types';
+import { ApiCallError } from '../settings/models/modelsApi';
 import { CopyButton } from '../ui/copy-button';
 import { readNames, readRecord } from './failureDetailsReads';
 
@@ -28,6 +29,9 @@ type Row = {
   code: string | null;
   reason: string;
 };
+
+const RECORD_RETRIES = 3;
+const RECORD_RETRY_MS = 1_000;
 
 type Detail = { record: TurnProvenance; names: Record<string, string> };
 
@@ -48,19 +52,28 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   React.useEffect(() => {
     if (!eligible || !turnId) return;
     let active = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
     setDetail(null);
-    void (async () => {
+    const load = async (attempt: number) => {
       try {
         const record = await readRecord(turnId);
         // Names are a courtesy: a role that cannot read Sources, or a source
         // deleted since, still gets the stable id.
         const names = await readNames();
         if (active) setDetail({ record, names });
-      } catch {
-        // Nothing to show is shown as nothing.
+      } catch (error) {
+        // A live notice can arrive before its Turn is settled; the record
+        // appears moments later. Anything else to show is shown as nothing.
+        if (active && error instanceof ApiCallError && error.code === 'turn_not_found' && attempt < RECORD_RETRIES) {
+          retry = setTimeout(() => { void load(attempt + 1); }, RECORD_RETRY_MS * 2 ** attempt);
+        }
       }
-    })();
-    return () => { active = false; };
+    };
+    void load(0);
+    return () => {
+      active = false;
+      clearTimeout(retry);
+    };
   }, [eligible, turnId]);
 
   if (!eligible || !turnId || !detail) return null;

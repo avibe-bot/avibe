@@ -271,26 +271,42 @@ def plan_native_cleanup(
         return isinstance(value, str) and value.strip() in selected_by_backend.get(backend, set())
 
     if "claude" in backends:
+        claude_keys = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+        def claude_retained(key: str, value: object) -> bool:
+            selected = (
+                selected_api_key(value, "claude")
+                if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+                else isinstance(value, str) and value in selected_by_backend.get("claude", set())
+            )
+            return bool(value) and not selected
+
+        # Claude merges its settings layers, so a credential kept native in any
+        # one of them still sends to the Base URL another layer names.
+        claude_auth_retained = False
+        for path in claude_settings_paths(home, project_roots):
+            staged = edits.get(path.absolute())
+            raw = staged.before if staged else _read_regular(path.absolute())
+            if raw is None:
+                continue
+            layer = _object(raw)
+            env = layer.get("env")
+            if layer.get("apiKeyHelper") or (
+                isinstance(env, dict) and any(claude_retained(key, env.get(key)) for key in claude_keys)
+            ):
+                claude_auth_retained = True
+
         def clear_settings(payload: dict) -> None:
             env = payload.get("env")
             if env is not None and not isinstance(env, dict):
                 raise TakeoverStateError("native configuration cannot be parsed")
             # A credential the Hub cannot carry stays native, with the Base
             # URL it may depend on. Hub launches pin their own connection.
-            retained = bool(payload.get("apiKeyHelper"))
             if isinstance(env, dict):
-                for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
-                    value = env.get(key)
-                    selected = (
-                        selected_api_key(value, "claude")
-                        if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-                        else isinstance(value, str) and value in selected_by_backend.get("claude", set())
-                    )
-                    if value and not selected:
-                        retained = True
-                    else:
+                for key in claude_keys:
+                    if not claude_retained(key, env.get(key)):
                         env.pop(key, None)
-                if not retained:
+                if not claude_auth_retained:
                     env.pop("ANTHROPIC_BASE_URL", None)
 
         for path in claude_settings_paths(home, project_roots):

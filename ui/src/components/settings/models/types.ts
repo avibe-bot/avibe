@@ -468,6 +468,9 @@ export type MigrationItem = {
   /** Server-computed transitive closure of backends sharing persisted shell
    *  assignments. They must migrate together. Missing/empty means this backend. */
   required_backends?: AgentBackend[];
+  /** The backend's native config cannot be parsed, so Hub mode would fail every
+   *  launch: the row blocks its whole consent group. Optional for older servers. */
+  config_blocker?: boolean;
 };
 
 export type MigrationScan = { items: MigrationItem[] };

@@ -262,6 +262,9 @@ class NativeMigrationItem:
             "masked_credential": self.masked_credential,
             "source_paths": list(self.source_paths),
             "required_backends": list(self.required_backends),
+            # The backend's native config cannot be parsed, so Hub mode would
+            # fail every launch: the whole group is blocked, not just this row.
+            "config_blocker": self.config_blocker,
         }
 
 

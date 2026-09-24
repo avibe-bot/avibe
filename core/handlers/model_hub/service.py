@@ -2215,11 +2215,13 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         backend: BackendName,
     ) -> bool:
-        if backend == "opencode":
+        if backend == "opencode" or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend:
+            # The vendor's own Agent serves its subscription even when the
+            # catalog is ahead of the backend's menu.
             return True
         if not agent.models or not any(not model.retired for model in source.models):
-            # Nothing to compare: fall back to the vendor's own Agent.
-            return _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend
+            return False
+        # Another backend serves it only where the catalogs overlap.
         return any(
             _matching_v1_model_id(
                 backend=backend,

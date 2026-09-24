@@ -5,7 +5,8 @@
 // and which rows a selection actually submits — without owning a second answer.
 // A group is the unit of consent, not a row: shared persisted assignments link
 // backends into one custody boundary. Rows the Hub cannot carry are not shown at
-// all — they stay native and never block their group.
+// all — they stay native and never block their group, unless the row says the
+// backend's native config cannot be parsed at all.
 import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, MigrationItem, MigrationScan } from './types';
 
@@ -110,10 +111,13 @@ export function groupMigrationCandidates(
     // server still requires it: the shared credential it reads would be moved
     // out from under it. Its native rows explain why the group cannot move.
     const stranded = [...required].filter((linked) => !carried.some((item) => item.backend === linked));
-    const blockedRows = [
+    // A backend whose native config cannot be parsed would fail every Hub
+    // launch, so its blocker row blocks the group the other native rows don't.
+    const blockedRows = [...new Set([
       ...linkedRows.filter((item) => !importableHere(item)),
       ...items.filter((item) => stranded.includes(item.backend) && !isImportable(item)),
-    ];
+      ...items.filter((item) => required.has(item.backend) && item.config_blocker),
+    ])];
     return {
       backend,
       rows,
