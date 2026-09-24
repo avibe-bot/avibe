@@ -931,6 +931,55 @@ def test_malformed_nested_hours_are_unavailable_without_inventing_usage(
     assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 1
 
 
+def test_recent_usage_without_its_hour_cannot_claim_complete_hourly_history(
+    tmp_path: Path,
+) -> None:
+    """A complete flag is insufficient when the latest metered hour is absent."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 24, 12, 15, tzinfo=timezone.utc)
+    counts = {
+        "requests": 1,
+        "token_reports": 1,
+        "input_tokens": 4,
+        "cached_input_tokens": 1,
+        "output_tokens": 2,
+    }
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps(
+                [
+                    {
+                        "day": "2026-09-24",
+                        "source_id": "src_missing_hour",
+                        "model_id": "model-missing-hour",
+                        **counts,
+                        "last_metered_at": (now - timedelta(minutes=30)).isoformat(),
+                        "hourly_history_complete": True,
+                        "hours": [],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        report = ledger.report(window="24h", now=now)
+
+        assert report["totals"]["requests"] == 0
+        assert any(not bucket["history_complete"] for bucket in report["buckets"])
+        assert ledger.summary(days=1, now=now)["totals"] == counts
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
 def test_daily_midnight_uses_the_date_specific_local_offset() -> None:
     from core.handlers.model_hub.usage import _local_midnight
 

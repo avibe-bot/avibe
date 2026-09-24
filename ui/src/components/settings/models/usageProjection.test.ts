@@ -96,6 +96,21 @@ describe('usageProjection', () => {
     }, 'zh-CN')).toBe('Supplier · 未知模型');
   });
 
+  it('disambiguates localized unknown-model collisions', () => {
+    const value = reportWith([bucket('00', [
+      row({ model_id: 'removed-model' }),
+      row({ model_id: 'model-a' }),
+    ])]);
+    value.sources[0]!.models = [
+      { model_id: 'model-a', label: '未知模型', ...counters() },
+    ];
+
+    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', 'zh-CN').map((item) => item.label)).toEqual([
+      'Supplier · 未知模型 · source-a · removed-model',
+      'Supplier · 未知模型 · source-a · model-a',
+    ]);
+  });
+
   it('renders incomplete empty buckets as unavailable gaps, not zero', () => {
     const value = reportWith([bucket('00', [], false), bucket('01', [], false)]);
     const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'total', 'tokens');

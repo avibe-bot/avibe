@@ -677,6 +677,20 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
             # slices merely because their daily owner also carried an older one.
             continue
         retained[key] = {**item, "key": key}
+    latest_metered = _instant(row.get("last_metered_at"))
+    if (
+        not incomplete
+        and row.get("requests", 0) > 0
+        and latest_metered is not None
+        and oldest_start <= latest_metered <= measured
+        and _hour_key(latest_metered) not in retained
+    ):
+        logger.warning(
+            "Model Hub usage ledger row %s has complete hourly history without "
+            "its latest metered hour; publishing it as incomplete",
+            _row_key(row),
+        )
+        incomplete = True
     if len(retained) > USAGE_HOURLY_RETENTION_HOURS:
         retained = dict(
             sorted(

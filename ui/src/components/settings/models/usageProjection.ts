@@ -178,6 +178,7 @@ export function identityLabel(identity: UsageIdentity, locale = 'en'): string {
 export function usageLabelContext(
   report: UsageReport,
   rows: readonly UsageBucketRow[] = report.buckets.flatMap((bucket) => bucket.rows),
+  locale = 'en',
 ): UsageLabelContext {
   const sourceLabelCounts = new Map<string, number>();
   for (const source of report.sources) {
@@ -188,12 +189,12 @@ export function usageLabelContext(
   const identityLabelCounts = new Map<string, number>();
   const identities = usageIdentities(report, rows);
   for (const identity of identities) {
-    const label = identityLabel(identity);
+    const label = identityLabel(identity, locale);
     identityLabelCounts.set(label, (identityLabelCounts.get(label) ?? 0) + 1);
   }
   const sourceQualifiedIdentityCounts = new Map<string, number>();
   for (const identity of identities) {
-    const label = identityLabel(identity);
+    const label = identityLabel(identity, locale);
     if (identityLabelCounts.get(label) === 1) continue;
     const qualifiedLabel = `${label} · ${identity.sourceId}`;
     sourceQualifiedIdentityCounts.set(qualifiedLabel, (sourceQualifiedIdentityCounts.get(qualifiedLabel) ?? 0) + 1);
@@ -214,7 +215,7 @@ export function usageLabelContext(
     identityModelCollisionKeys: new Set(
       identities
         .filter((identity) => {
-          const label = identityLabel(identity);
+          const label = identityLabel(identity, locale);
           return identityCollisionLabels.has(label)
             && (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1;
         })
@@ -238,7 +239,7 @@ export function identityDisplayLabel(
   context?: UsageLabelContext,
 ): string {
   const label = identityLabel(identity, locale);
-  if (!context?.identityCollisionLabels.has(identityLabel(identity))) return label;
+  if (!context?.identityCollisionLabels.has(label)) return label;
   const modelSuffix = context.identityModelCollisionKeys.has(identity.key) ? ` · ${identity.modelId}` : '';
   return `${label} · ${identity.sourceId}${modelSuffix}`;
 }
@@ -337,7 +338,7 @@ export function seriesFor(
   }
 
   if (group === 'source') {
-    const labelContext = usageLabelContext(report);
+    const labelContext = usageLabelContext(report, rows, locale);
     const sourceIds = [...new Set(rows.map((row) => row.source_id))];
     return sourceIds.map((sourceId, index) => ({
       key: sourceId,
@@ -351,7 +352,7 @@ export function seriesFor(
   }
 
   const identities = usageIdentities(report, rows);
-  const labelContext = usageLabelContext(report);
+  const labelContext = usageLabelContext(report, rows, locale);
   return identities.map((identity, index) => ({
     key: identity.key,
     label: identityDisplayLabel(identity, locale, labelContext),

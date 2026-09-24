@@ -165,6 +165,7 @@ describe('UsageTab', () => {
 
     expect(container.textContent).toContain('Some requests have no token report; token values are unavailable');
     expect(container.textContent).toContain('—');
+    expect(container.querySelector('tfoot')?.textContent).not.toContain('100%');
   });
 
   it('MH-USAGE-023: states every bucket in accessible text, not only in a pointer tooltip', () => {
@@ -308,6 +309,33 @@ describe('UsageTab', () => {
     expect(screen.getByRole('dialog', { name: 'Usage bucket details' }).getAttribute('data-pinned')).toBe('false');
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+  });
+
+  it('clears a pinned bucket that disappears from a same-window refresh', async () => {
+    const value = report();
+    const rendered = draw(value);
+    fireEvent.pointerEnter(screen.getAllByRole('button', { name: /Usage bucket/ })[1]!);
+    await userEvent.click(screen.getByRole('button', { name: 'Pin this bucket' }));
+    expect(screen.getByRole('dialog', { name: 'Usage bucket details' }).getAttribute('data-pinned')).toBe('true');
+
+    rendered.rerender(
+      <I18nextProvider i18n={i18n}>
+        <UsageTab usage={readyRegion(report({ buckets: [bucket('00')] }))} windowKey="24h" onWindowChange={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+    expect(rendered.container.querySelector('.model-hub-usage-details-header p')?.textContent).toContain('same filters');
+  });
+
+  it('shows both offsets in the report heading across a DST change', () => {
+    const { container } = draw(report({
+      from_at: '2026-11-01T01:00:00-04:00',
+      to_at: '2026-11-01T01:00:00-05:00',
+    }));
+
+    expect(container.textContent).toContain('UTC-04:00');
+    expect(container.textContent).toContain('UTC-05:00');
   });
 
   it('includes both bucket offsets in DST-adjacent detail text', () => {

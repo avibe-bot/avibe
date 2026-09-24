@@ -29,7 +29,6 @@ import {
   formatBucketAxisLabel,
   formatBucketLabel,
   formatBucketRange,
-  formatOffset,
   identityDisplayLabel,
   modelLabel,
   pairKey,
@@ -275,9 +274,14 @@ function UsageChart({
   const pendingHoverTimer = React.useRef<number | null>(null);
   const [escapeDismissed, setEscapeDismissed] = React.useState(false);
   const pinnedIndex = pinnedKey === null ? -1 : report.buckets.findIndex((bucket) => bucket.key === pinnedKey);
-  const activeIndex = dismissed || escapeDismissed
+  const requestedIndex = dismissed || escapeDismissed
     ? null
     : pinnedIndex >= 0 ? pinnedIndex : inspected ?? hovered;
+  const activeIndex = requestedIndex !== null
+    && requestedIndex >= 0
+    && requestedIndex < report.buckets.length
+    ? requestedIndex
+    : null;
   const bars = report.window_key === '30d' || report.window_key === '60d';
   const series = React.useMemo(() => seriesFor(report, filter, group, metric, i18n.language), [filter, group, metric, i18n.language, report]);
   const labels = React.useMemo(() => new Map(series.map((item) => [
@@ -357,7 +361,7 @@ function UsageChart({
     setDismissed(false);
     setEscapeDismissed(false);
     setHidden([]);
-  }, [scopeKey, group, metric]);
+  }, [report, scopeKey, group, metric]);
 
   React.useEffect(() => {
     if (!hostRef.current || typeof ResizeObserver === 'undefined') return undefined;
@@ -674,7 +678,7 @@ function tableRows(
   const buckets = pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey);
   const rows = buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
   const grouped = new Map<string, TableRow>();
-  const labelContext = usageLabelContext(report);
+  const labelContext = usageLabelContext(report, filteredRows(report, filter), locale);
   for (const row of rows) {
     const key = group === 'source' ? row.source_id : pairKey(row.source_id, row.model_id);
     const identity = group === 'source'
@@ -740,6 +744,12 @@ export const UsageTab: React.FC<{
     setPinnedKey(null);
   }, [scopeKey]);
 
+  React.useEffect(() => {
+    if (report !== null && pinnedKey !== null && !report.buckets.some((bucket) => bucket.key === pinnedKey)) {
+      setPinnedKey(null);
+    }
+  }, [report, pinnedKey]);
+
   if (report === null) {
     return (
       <div className="model-hub-usage-analytics">
@@ -757,7 +767,7 @@ export const UsageTab: React.FC<{
   }
 
   const allRows = filteredRows(report, { sourceIds: [], modelKeys: [] });
-  const labelContext = usageLabelContext(report, allRows);
+  const labelContext = usageLabelContext(report, allRows, i18n.language);
   const sourceOptions: FilterOption[] = report.sources.map((source) => ({
     key: source.source_id,
     label: sourceIdentityLabel(report, source.source_id, labelContext),
@@ -786,11 +796,15 @@ export const UsageTab: React.FC<{
   const reportEmpty = usageIsEmpty(report);
   const filteredEmpty = !reportEmpty && scopedRows.length === 0 && !partialHistory;
   const historyOnlyUnknown = partialHistory && scopedRows.length === 0;
-  const rows = tableRows(report, filter, tableGroup, pinnedKey, i18n.language);
+  const pinnedBucket = pinnedKey === null
+    ? null
+    : report.buckets.find((bucket) => bucket.key === pinnedKey) ?? null;
+  const activePinnedKey = pinnedBucket?.key ?? null;
+  const rows = tableRows(report, filter, tableGroup, activePinnedKey, i18n.language);
   const sortValue = (row: TableRow): number => usageMetricValue(row.counters, metric) ?? -1;
   const sortedRows = [...rows].sort((left, right) => (sortValue(right) - sortValue(left)) * (sortAscending ? -1 : 1));
   const tableTotal = aggregateCounters(
-    (pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey))
+    (activePinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === activePinnedKey))
       .flatMap((bucket) => filterBucketRows(bucket, filter)),
   );
   const metricText = (counters: UsageCounters, selectedMetric = metric) =>
@@ -800,7 +814,7 @@ export const UsageTab: React.FC<{
   const allReportedNote = String(t('settings.models.usage.stats.allReported'));
 
   const exportCsv = () => {
-    const csv = buildUsageCsv(report, filter, pinnedKey, {
+    const csv = buildUsageCsv(report, filter, activePinnedKey, {
       bucketKey: t('settings.models.usage.csv.bucketKey') as string,
       startAt: t('settings.models.usage.csv.startAt') as string,
       endAt: t('settings.models.usage.csv.endAt') as string,
@@ -844,18 +858,21 @@ export const UsageTab: React.FC<{
           selected={modelKeys}
           onChange={setModelKeys}
         />
-        <label className="model-hub-usage-select">
+        <div className="model-hub-usage-select">
           <Zap aria-hidden className="size-3.5" />
-          <span className="sr-only">{t('settings.models.usage.metric.label')}</span>
-          <select value={metric} onChange={(event) => {
-            const next = event.target.value as UsageMetric;
-            setMetric(next);
-            if (next === 'requests' && group === 'type') setGroup('total');
-          }}>
+          <select
+            aria-label={t('settings.models.usage.metric.label') as string}
+            value={metric}
+            onChange={(event) => {
+              const next = event.target.value as UsageMetric;
+              setMetric(next);
+              if (next === 'requests' && group === 'type') setGroup('total');
+            }}
+          >
             {metricKeys.map((key) => <option value={key} key={key}>{metricLabel(key, t)}</option>)}
           </select>
           <ChevronDown aria-hidden className="size-3" />
-        </label>
+        </div>
         {(sourceIds.length > 0 || modelKeys.length > 0 || metric !== 'tokens') && (
           <Button
             type="button"
@@ -943,7 +960,7 @@ export const UsageTab: React.FC<{
               filter={filter}
               metric={metric}
               group={group}
-              pinnedKey={pinnedKey}
+              pinnedKey={activePinnedKey}
               scopeKey={scopeKey}
               onPin={setPinnedKey}
             />
@@ -952,10 +969,12 @@ export const UsageTab: React.FC<{
             <div className="model-hub-usage-card-header model-hub-usage-details-header">
               <div>
                 <h3 id="model-hub-usage-details-title">{t('settings.models.usage.table.title')} <span>{sortedRows.length}</span></h3>
-                <p>{pinnedKey === null ? t('settings.models.usage.table.range') : t('settings.models.usage.table.bucket', { bucket: formatBucketLabel(report.buckets.find((item) => item.key === pinnedKey)!, i18n.language) })}</p>
+                <p>{activePinnedKey === null
+                  ? t('settings.models.usage.table.range')
+                  : t('settings.models.usage.table.bucket', { bucket: formatBucketLabel(pinnedBucket!, i18n.language) })}</p>
               </div>
               <div className="model-hub-usage-details-actions">
-                {pinnedKey !== null && <Button type="button" variant="ghost" size="sm" onClick={() => setPinnedKey(null)}><X aria-hidden className="size-3" />{t('settings.models.usage.table.allBuckets')}</Button>}
+                {activePinnedKey !== null && <Button type="button" variant="ghost" size="sm" onClick={() => setPinnedKey(null)}><X aria-hidden className="size-3" />{t('settings.models.usage.table.allBuckets')}</Button>}
                 <div className="model-hub-usage-table-group" role="group" aria-label={t('settings.models.usage.table.group') as string}>
                   <button type="button" className={tableGroup === 'model' ? 'is-selected' : ''} aria-pressed={tableGroup === 'model'} onClick={() => setTableGroup('model')}>{t('settings.models.usage.table.byModel')}</button>
                   <button type="button" className={tableGroup === 'source' ? 'is-selected' : ''} aria-pressed={tableGroup === 'source'} onClick={() => setTableGroup('source')}>{t('settings.models.usage.table.bySource')}</button>
@@ -1014,7 +1033,7 @@ export const UsageTab: React.FC<{
                       <td>{tokenText(tableTotal, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                       <td>{tokenText(tableTotal, 'output', count, t('settings.models.usage.blank') as string)}</td>
                       <td>{metricText(tableTotal)}</td>
-                      <td>100%</td>
+                      <td>{usageMetricValue(tableTotal, metric) === null ? t('settings.models.usage.blank') : '100%'}</td>
                     </tr>
                   </tfoot>
                 )}
@@ -1047,7 +1066,7 @@ function UsageHeading({
         <h2>{t('settings.models.usage.title')}</h2>
         <p>
           {report
-            ? `${formatBucketRange({ start_at: report.from_at, end_at: report.to_at, key: report.from_at, history_complete: true, rows: [] }, i18n.language)} · ${formatOffset(report.to_at)}`
+            ? formatBucketRange({ start_at: report.from_at, end_at: report.to_at, key: report.from_at, history_complete: true, rows: [] }, i18n.language, true)
             : t('settings.models.usage.detail')}
         </p>
       </div>
