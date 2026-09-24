@@ -896,6 +896,7 @@
         },
         "tab": {
           "hub": "Sources & gateway",
+          "quota": "Subscription quota",
           "usage": "Usage",
           "logs": "Logs"
         }
@@ -1328,6 +1329,84 @@
         "cooldown": "Cooling down (auto-recovers)",
         "needs_action": "Needs attention",
         "error": "Needs attention"
+      },
+      "quota": {
+        "title": "Subscription quota",
+        "header_one": "{{count}} signed-in subscription account",
+        "header_other": "{{count}} signed-in subscription accounts",
+        "autoRefresh": "Refreshes every 5 minutes",
+        "refresh": "Refresh now",
+        "refreshing": "Refreshing…",
+        "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Sources & gateway to see its quota here.",
+        "left": "left",
+        "window": {
+          "session": "5-hour limit",
+          "weekly": "Weekly limit",
+          "model": "{{model}} weekly limit"
+        },
+        "hint": {
+          "shared": "Shared by all models",
+          "model": "Counts {{model}} only"
+        },
+        "scoped": {
+          "title": "Per-model limits",
+          "note": "These models also count toward the weekly limit; whichever runs out first pauses use"
+        },
+        "pace": {
+          "ok": "Lasts until reset",
+          "slightlyFast": "A little fast, still lasts until reset",
+          "fast": "Running fast, expected to run out {{time}}",
+          "exhausted": "Used up, back in {{duration}}",
+          "exhaustedUnknown": "Used up",
+          "paused": "Updates paused",
+          "reset": "Reset"
+        },
+        "reset": {
+          "in": "Resets in {{duration}}",
+          "done": "Reset, waiting for refresh"
+        },
+        "meter": "{{label}}: {{pct}}% used",
+        "status": {
+          "ok": "Available",
+          "exhausted": "{{label}} used up",
+          "reauth": "Sign in again",
+          "paused": "Updates paused"
+        },
+        "stale": {
+          "authExpired": "Sign-in expired; showing data from {{ago}}",
+          "retained": "Can't read the latest quota; showing data from {{ago}}",
+          "reauth": "Sign in again"
+        },
+        "unread": {
+          "auth_expired": "Sign-in expired; quota unavailable",
+          "unsupported": "This subscription doesn't report quota",
+          "error": "Quota unavailable right now; retrying automatically"
+        },
+        "ago": {
+          "minutes_one": "{{count}} minute ago",
+          "minutes_other": "{{count}} minutes ago",
+          "long": "{{duration}} ago"
+        },
+        "duration": {
+          "days": "{{days}}d {{hours}}h",
+          "hours": "{{hours}}h {{minutes}}m",
+          "minutes": "{{minutes}}m"
+        },
+        "clock": {
+          "today": "today {{time}}",
+          "tomorrow": "tomorrow {{time}}"
+        },
+        "stat": {
+          "tightest": "Lowest remaining limit",
+          "tightestNone": "No limit has been used yet",
+          "exhausted": "Used up",
+          "exhaustedUnit": "limits",
+          "exhaustedNone": "Every account is usable",
+          "exhaustedNote": "{{name}} · back {{time}}",
+          "resetsIn": "resets in {{duration}}"
+        },
+        "upcoming": "Resetting soon",
+        "footnote": "The bar is the part used; the thin mark is how much of this period has passed. A bar past the mark is spending faster than time."
       },
       "usage": {
         "title": "Usage",
@@ -2120,6 +2199,15 @@
       },
       "error": {
         "unclassified": "Unknown error — temporarily unavailable"
+      }
+    },
+    "quota": {
+      "error": {
+        "auth_expired": "Sign-in expired",
+        "rate_limited": "The provider is limiting quota reads",
+        "unsupported": "This subscription doesn't report quota",
+        "unavailable": "Quota unavailable right now",
+        "malformed": "The provider returned an unreadable quota report"
       }
     }
   },

@@ -41,6 +41,7 @@ import type {
   SourceRepaired,
   SupplyChannel,
   SupplyGap,
+  QuotaSummary,
   UsageSummary,
 } from './types';
 import { USAGE_DEFAULT_WINDOW_DAYS } from './types';
@@ -162,6 +163,10 @@ export type ModelsApi = {
    *  the server clamps it to retention and echoes what it served in
    *  `window_days`, which is the only number a view may display. */
   getUsageSummary(days?: number): Promise<UsageSummary>;
+  /** Subscription rate-limit windows, served from the service's 5-minute cache. */
+  getQuota(): Promise<QuotaSummary>;
+  /** The same report, re-read now (the service bounds how often). */
+  refreshQuota(): Promise<QuotaSummary>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
@@ -642,6 +647,8 @@ export const modelsApi: ModelsApi = {
     ).then((r) => r.events),
   getUsageSummary: (days = USAGE_DEFAULT_WINDOW_DAYS) =>
     call<{ usage: UsageSummary }>(`/api/models/usage?days=${days}`).then((r) => r.usage),
+  getQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota').then((r) => r.quota),
+  refreshQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota/refresh', jsonInit('POST')).then((r) => r.quota),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
