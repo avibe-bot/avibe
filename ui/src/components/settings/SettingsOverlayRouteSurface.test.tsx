@@ -191,6 +191,27 @@ const PortaledShellControl = () => createPortal(
   document.body,
 );
 
+const AgentationEscapeProbe = () => {
+  const [active, setActive] = useState(true);
+  return createPortal(
+    <div data-agentation-root="">
+      <div data-agentation-toolbar>
+        <div tabIndex={active ? -1 : 0}>
+          <button
+            type="button"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setActive(false);
+            }}
+          >
+            feedback-toolbar
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+};
+
 const SettingsFrame = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -702,7 +723,26 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(surface.classList.contains('md:border-l')).toBe(dividedFromSidebar);
   });
 
-  it('never dismisses inline on an outside interaction, and still lets the user leave', async () => {
+  it.each(['shell-resizer', 'sidebar-idle', 'sidebar-portaled', 'shell-elsewhere'] as const)(
+    'dismisses inline when %s is clicked',
+    async (outsideControl) => {
+      const user = userEvent.setup();
+      window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+      render(
+        <MemoryRouter initialEntries={['/chat/ses_1']}>
+          <RoutedHarness />
+        </MemoryRouter>,
+      );
+
+      await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+      expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+      await user.click(screen.getByRole('button', { name: outsideControl }));
+      await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+      expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+    },
+  );
+
+  it('keeps inline navigation on the clicked sidebar destination', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
     render(
@@ -711,60 +751,13 @@ describe('SettingsOverlayRouteSurface', () => {
       </MemoryRouter>,
     );
 
-    const open = async () => {
-      await user.click(screen.getByRole('link', { name: 'shell-settings' }));
-      expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
-      // Inline's whole premise is that the shell behind stays reachable, so
-      // this dialog must never go modal: Radix's modal path inerts the page
-      // behind it. Whether a layer *covers* the sidebar is a hit test, which
-      // only a browser can run — `geometry.spec.ts` settles that half.
-      expect(document.body.style.pointerEvents).not.toBe('none');
-    };
-    const stillOpen = () => expect(
-      document.querySelector('[data-settings-overlay="true"]'),
-    ).toBeTruthy();
-
-    await open();
-
-    // Grabbing the divider moves this surface's OWN left edge. Dismissing on it
-    // would close the thing the drag is laying out.
-    await user.click(screen.getByRole('button', { name: 'shell-resizer' }));
-    stillOpen();
-
-    // Nor is the sidebar's own quiet space a dismissal: inline puts these two
-    // surfaces side by side, so the sidebar is a neighbour, not "outside".
-    await user.click(screen.getByRole('button', { name: 'sidebar-idle' }));
-    stillOpen();
-
-    // The launcher and Dock belong to that column but portal above this layer,
-    // so they are not descendants of it. Anything deciding this by DOM ancestry
-    // passes the two cases above and fails here — which is the whole point of
-    // not deciding it that way.
-    await user.click(screen.getByRole('button', { name: 'sidebar-portaled' }));
-    stillOpen();
-
-    // Not even the rest of the shell: inline covers everything right of the
-    // sidebar, so there is no neutral background left to click at.
-    await user.click(screen.getByRole('button', { name: 'shell-elsewhere' }));
-    stillOpen();
-
-    // Leaving is never in doubt, though. Escape still closes to the retained
-    // origin...
-    await user.keyboard('{Escape}');
-    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
-    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
-
-    // ...and a sidebar link takes the user out by its own navigation, which is
-    // exactly ONE navigation. Were dismissal to fire too, `closeSettingsOverlay`
-    // would traverse history asynchronously and race this synchronous push back
-    // to the retained origin.
-    await open();
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     await user.click(screen.getByRole('link', { name: 'sidebar-chat-link' }));
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
   });
 
-  it('keeps the shipped outside dismissal for the standalone surface', async () => {
+  it('keeps standalone Settings open when an outside control is clicked', async () => {
     const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={['/chat/ses_1']}>
@@ -772,13 +765,30 @@ describe('SettingsOverlayRouteSurface', () => {
       </MemoryRouter>,
     );
 
-    // Standalone really does own the viewport — anything that floats above it is
-    // outside in the ordinary sense, and closes it back to the retained origin.
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'sidebar-portaled' }));
-    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
+  });
+
+  it('lets an active feedback interaction consume Escape before Settings closes', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+        <AgentationEscapeProbe />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    await user.click(screen.getByRole('button', { name: 'feedback-toolbar' }));
+    await user.keyboard('{Escape}');
+
+    expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
   });
 
   // Some shells draw no app sidebar at all — the setup wizard, a single-app tab.

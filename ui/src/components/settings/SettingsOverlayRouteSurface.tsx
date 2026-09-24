@@ -41,6 +41,15 @@ const isForegroundFocusOwner = (element: Element | null): element is HTMLElement
   return false;
 };
 
+const isAgentationActive = (): boolean => (
+  // Agentation does not expose its active state through a callback. Its toolbar
+  // keeps the collapsed trigger at tabIndex=0 and switches its root container
+  // to tabIndex=-1 while feedback mode (and its annotation popup) is active.
+  document.querySelector(
+    '[data-agentation-root] [data-agentation-toolbar] > div[tabindex="-1"]',
+  ) !== null
+);
+
 export const SettingsOverlayRouteSurface = ({
   children,
   fallbackElement,
@@ -160,35 +169,23 @@ export const SettingsOverlayRouteSurface = ({
                 : 'left-0 border-l-0 md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
-                // Inline has no outside in the sense this handler assumes. It is
-                // a pane beside a live shell, not a popup over an inert one, and
-                // everything still reachable belongs to that shell: the sidebar
-                // column left of this surface, plus the launcher, Dock, menus and
-                // floating details it portals to `document.body` above this
-                // layer. Each of those already owns what it does. The resize edge
-                // moves this surface's own left edge, so grabbing it must not
-                // close what the drag is laying out; a sidebar link navigates,
-                // and that navigation IS the way out — were dismissal to fire
-                // too, `closeSettingsOverlay`'s asynchronous history traversal
-                // would race the link's synchronous push and could land on the
-                // retained origin instead of the route that was clicked.
-                //
-                // Naming those surfaces is what a portal defeats: they are not
-                // DOM descendants of the column they belong to, so any ancestry
-                // test can only cover the ones someone remembered. Inline is left
-                // by Escape, by the Settings toggle, or by navigating — never by
-                // clicking its neighbour — so it simply does not dismiss.
-                if (!standaloneMenu) {
-                  event.preventDefault();
-                  return;
-                }
-                // Standalone does own the whole viewport, and keeps the dismissal
-                // that shipped with it. Only the toggle is exempt there, because
-                // it closes this surface itself and must not do it twice.
+                // Standalone Settings stays open while the user interacts with
+                // another portalled tool, such as the built-in feedback toolbar.
+                // Inline Settings is a panel beside the shell, so an interaction
+                // outside its panel dismisses it.
                 const target = event.target;
                 if (target instanceof Element && target.closest('[data-settings-toggle="true"]')) {
                   event.preventDefault();
+                  return;
                 }
+                if (standaloneMenu) event.preventDefault();
+              }}
+              onEscapeKeyDown={(event) => {
+                // Radix listens in the document capture phase, while Agentation
+                // clears its current annotation in a later document listener.
+                // Give an active annotation interaction first claim on Escape;
+                // the next Escape, after Agentation is inactive, closes Settings.
+                if (isAgentationActive()) event.preventDefault();
               }}
               onOpenAutoFocus={() => {
                 if (focusFrameRef.current !== null) {
