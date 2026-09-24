@@ -474,8 +474,8 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
         {signedIn && <p className="connection-confirmed">{t('onboarding.connection.savedSubscription')}</p>}
         <div><Button variant="brand" onClick={() => void oauth.startFlow()} disabled={oauth.starting}><ExternalLink size={15} />{startLabel}</Button></div>
       </div> : <div className="connection-auth-steps">
-        {oauth.deviceCode && <><Label>{t('onboarding.connection.copyDevice')}</Label><OAuthDeviceCodeRow code={oauth.deviceCode} onCopy={(event) => void oauth.copyDeviceCode(event)} copyLabel={t('common.copy')} /></>}
-        {oauth.url && <><Label>{t(oauth.deviceCode ? 'onboarding.connection.openDevice' : 'onboarding.connection.authorizeBrowser')}</Label><OAuthLinkRow url={oauth.url} onCopy={(event) => void oauth.copyUrl(event)} copyLabel={t('common.copy')} /></>}
+        {oauth.deviceCode && <><Label>{t('onboarding.connection.copyDevice')}</Label><OAuthDeviceCodeRow code={oauth.deviceCode} /></>}
+        {oauth.url && <><Label>{t(oauth.deviceCode ? 'onboarding.connection.openDevice' : 'onboarding.connection.authorizeBrowser')}</Label><OAuthLinkRow url={oauth.url} /></>}
         {oauth.deviceCode && oauth.url && <div><Button variant="brand" asChild><a href={oauth.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={15} />{t(backend === 'codex' ? 'onboarding.connection.openChatGPT' : 'onboarding.connection.openProvider')}</a></Button></div>}
         {needsCode && <div className="connection-field"><Label htmlFor="connection-code">{t(backend === 'claude' ? 'settings.backends.claudeCallbackCodeLabel' : oauth.callbackKind === 'code' ? 'onboarding.connection.manualCode' : 'settings.backends.opencodeCallbackUrlLabel')}</Label>
           <Input id="connection-code" value={oauth.code} onChange={(event) => oauth.setCode(event.target.value)} disabled={oauth.submitting} placeholder={backend === 'claude' ? 'code#state' : oauth.callbackKind === 'code' ? t('onboarding.connection.manualCodePlaceholder') : 'http://127.0.0.1:…/callback?code=…'} autoComplete="off" />

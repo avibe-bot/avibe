@@ -179,9 +179,15 @@ def test_empty_codex_container_never_authorizes_deleting_dormant_file_grant(
     store.config.agents["codex"].mode = "direct"
     ids = [row["id"] for row in service.migration_scan()["items"]]
     if with_api_key:
-        with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply(ids))
-        assert store.config.agents["codex"].mode == "direct"
+        # The key migrates; the dormant file grant is never deleted.
+        asyncio.run(service.migration_apply(ids))
+        assert json.loads(dormant.read_bytes()) == {"tokens": payload["tokens"]}
+        assert store.config.agents["codex"].mode == "hub"
+        assert len(adapter.provisioned) == len(store.config.sources) == 1
+        assert not adapter.oauth_provisioned
+        assert not keychain.delete_calls and not keychain.write_calls
+        assert service.migration_journal.load() is None
+        return
     else:
         assert asyncio.run(service.migration_apply(ids))["applied"] == 1
         assert store.config.agents["codex"].mode == "hub"
@@ -270,10 +276,12 @@ def test_unsupported_provider_blocks_only_its_cli_before_any_cleanup(monkeypatch
     service, _, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert {row["proposed_action"] for row in rows} == {"import", "reauth"}
-    with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"] for row in rows if row["proposed_action"] == "import"]))
-    assert path.read_bytes() == before
-    assert adapter.provisioned == []
+    asyncio.run(service.migration_apply([row["id"] for row in rows if row["proposed_action"] == "import"]))
+    # The OAuth provider the Hub cannot carry stays exactly as it was.
+    assert json.loads(path.read_bytes()) == {
+        "github-copilot": json.loads(before)["github-copilot"],
+    }
+    assert len(adapter.provisioned) == 1
 
 
 def test_project_key_changed_after_consent_refuses_without_import(monkeypatch, tmp_path):

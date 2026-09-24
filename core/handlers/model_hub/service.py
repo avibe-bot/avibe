@@ -57,6 +57,7 @@ from .adapter import (
     InvokeCancelledError,
     InvokeHandle,
     OAuthFlowState,
+    OAuthSubmissionRejectedError,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
@@ -1066,6 +1067,8 @@ class ModelHubService:
                 status=409,
                 detail="modelHub.errors.native_login_in_progress",
             ) from None
+        except OAuthSubmissionRejectedError:
+            raise ModelHubError("submission_rejected", status=422) from None
         except ModelHubError:
             raise
         except Exception:
@@ -2191,12 +2194,55 @@ class ModelHubService:
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
     ) -> None:
-        """Add a new Source to eligible backend defaults without editing overrides."""
+        """Add a new Source to eligible backend defaults without editing overrides.
+
+        A subscription serves a fixed catalog, so it joins only the backends whose
+        menu that catalog serves (OpenCode reaches every vendor), ahead of the API
+        keys there. API keys stay open to every eligible backend, appended.
+        """
 
         for backend in MODEL_HUB_BACKENDS:
             agent = config.agents[backend]
-            if self._eligible_for_agent(source, backend) and source.id not in agent.sources.order:
+            if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
+                continue
+            if source.kind != "subscription":
                 agent.sources.order.append(source.id)
+                continue
+            if not self._subscription_serves_backend(agent, source, backend):
+                continue
+            by_id = {item.id: item for item in config.sources}
+            position = next(
+                (
+                    index
+                    for index, source_id in enumerate(agent.sources.order)
+                    if (existing := by_id.get(source_id)) is not None and existing.kind != "subscription"
+                ),
+                len(agent.sources.order),
+            )
+            agent.sources.order.insert(position, source.id)
+
+    @staticmethod
+    def _subscription_serves_backend(
+        agent: ModelHubAgentSupplyConfig,
+        source: ModelHubSourceConfig,
+        backend: BackendName,
+    ) -> bool:
+        if backend == "opencode" or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend:
+            # The vendor's own Agent serves its subscription even when the
+            # catalog is ahead of the backend's menu.
+            return True
+        if not agent.models or not any(not model.retired for model in source.models):
+            return False
+        # Another backend serves it only where the catalogs overlap.
+        return any(
+            _matching_v1_model_id(
+                backend=backend,
+                requested_model=model.id,
+                source=source,
+                include_manual=True,
+            ) is not None
+            for model in agent.models
+        )
 
     def _matching_menu_model_hops(
         self,
@@ -4621,7 +4667,15 @@ class ModelHubService:
                                     self.migration_journal.completed() or {}
                                 ).get("clean_native_stores"),
                             )
-                            if any(item.backend == backend for item in available):
+                            # Retained auth stays native beside the Hub, but a
+                            # config the CLI cannot parse fails every launch.
+                            if any(
+                                item.backend == backend and (
+                                    item.proposed_action == "import"
+                                    or item.config_blocker
+                                )
+                                for item in available
+                            ):
                                 raise ModelHubError("mode_switch_blocked", status=409)
                             config = self._clone_config(previous)
                             self._agent(config, backend).mode = "hub"
@@ -5007,17 +5061,26 @@ class ModelHubService:
                 )
                 if admission_error == "backend_model_id_invalid":
                     raise ModelHubError(admission_error)
+            # Two different refusals, and they are separate codes because they
+            # name different next steps. Forging `builtin` is a claim about a
+            # model this backend publishes, and the way out is to drop the row.
+            # Rewriting a saved row's origin is a claim about a row that already
+            # exists, and the way out is to EDIT that row instead of removing it
+            # and adding it again — advice the built-in wording cannot carry, and
+            # which the merged code left unsayable on a backend like OpenCode
+            # whose built-in snapshot is empty by construction.
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
-                if (
-                    (
-                        trusted is None
-                        and desired.origin == "builtin"
-                        and model_id not in builtin_ids
+                if trusted is None:
+                    if desired.origin == "builtin" and model_id not in builtin_ids:
+                        raise ModelHubError("backend_model_locked", status=409)
+                elif desired.origin != trusted.origin:
+                    # `origin` records how a row was FIRST created, so a saved
+                    # row keeps its own answer however often it is re-filled.
+                    raise ModelHubError(
+                        "backend_model_origin_immutable",
+                        status=409,
                     )
-                    or (trusted is not None and desired.origin != trusted.origin)
-                ):
-                    raise ModelHubError("backend_model_locked", status=409)
             for model_id in desired_by_id.keys() - current_by_id.keys():
                 admission_error = self._backend_model_admission_error(
                     agent_backend,

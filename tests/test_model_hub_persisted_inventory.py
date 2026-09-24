@@ -277,7 +277,8 @@ def test_claude_key_and_bearer_are_both_retained(home):
     }}))
     rows = scan(home)
     assert {(row.secret, row.auth_scheme) for row in rows} == {
-        ("fixture-api-key", None), ("fixture-bearer", "bearer"),
+        # A custom-origin API key travels as the Bearer the engine sends.
+        ("fixture-api-key", "bearer"), ("fixture-bearer", "bearer"),
     }
     assert len({row.id for row in rows}) == 2
 

@@ -38,6 +38,10 @@
             "items": { "enum": ["claude", "codex", "opencode"] },
             "uniqueItems": true,
             "description": "Backend-group consent closure for a shared persisted assignment. Empty/absent means this row's backend alone. The server independently requires the entire closure."
+          },
+          "config_blocker": {
+            "type": "boolean",
+            "description": "The backend's native config cannot be parsed, so Hub mode would fail every launch. Blocks the row's whole consent group; apply refuses it."
           }
         }
       }

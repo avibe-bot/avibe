@@ -90,6 +90,31 @@ export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney)
       : 'settings.models.oauth.error.finalize'
     : 'settings.models.oauth.error.generic';
 
+/**
+ * The provider refused a pasted value without touching the flow (api.md
+ * `submission_rejected`). Not a failure of the flow: it is still waiting, so the
+ * dialog keeps the input and says what to paste instead.
+ */
+export const SUBMISSION_REJECTED_FAILURE = 'submission_rejected';
+export const PASTE_REJECTED_KEY: TranslationKey = 'settings.models.oauth.callback.rejected';
+
+/**
+ * Whether a pasted callback address carries the provider's answer. The engine
+ * reads `code` (or `error`) off the address and refuses anything without one, so
+ * a page address copied from the provider's own site — the usual mistake — is
+ * caught here before it costs a round trip. A bare value is sent as a code.
+ */
+export const callbackValueCarriesResult = (value: string): boolean => {
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed.length > 0;
+  try {
+    const params = new URL(trimmed).searchParams;
+    return Boolean(params.get('code')?.trim() || params.get('error')?.trim() || params.get('error_description')?.trim());
+  } catch {
+    return false;
+  }
+};
+
 /** Start-route failures have not reached provider authorization yet. */
 export const NATIVE_SUBSCRIPTION_EXISTS_FAILURE = 'modelHub.errors.native_subscription_exists';
 export const NATIVE_LOGIN_IN_PROGRESS_FAILURE = 'modelHub.errors.native_login_in_progress';
@@ -122,6 +147,8 @@ const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, TranslationKey>> = {
   'modelHub.errors.backend_model_id_invalid': 'settings.models.gateway.catalog.saveIdInvalid',
   'modelHub.errors.backend_model_duplicate': 'settings.models.gateway.catalog.saveDuplicate',
   'modelHub.errors.backend_model_locked': 'settings.models.gateway.catalog.saveLocked',
+  'modelHub.errors.backend_model_origin_immutable':
+    'settings.models.gateway.catalog.saveOriginImmutable',
   'modelHub.errors.backend_model_catalog_invalid': 'settings.models.gateway.catalog.saveInvalid',
 };
 

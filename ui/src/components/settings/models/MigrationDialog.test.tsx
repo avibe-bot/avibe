@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
 // The settings migration and setup's key-import entry share the same takeover
-// dialog. A backend is one custody boundary: unsupported rows stay visible and
-// block that CLI, while a complete backend can still migrate independently.
+// dialog. Rows the Hub cannot carry are hidden and stay native; every carried
+// row of a backend still migrates together.
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
@@ -123,19 +123,19 @@ afterEach(() => {
 });
 
 describe('MigrationDialog — the settings default', () => {
-  it('shows blocked native rows and keeps a complete backend actionable', async () => {
+  it('hides rows the Hub cannot carry and keeps every backend actionable', async () => {
     serve();
     renderDialog();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
-    expect((within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect(within(dialog).getByText('This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually.')).toBeTruthy();
+    expect(within(dialog).queryByRole('checkbox', { name: /sk-ant-…4b7e/ })).toBeNull();
+    expect(within(dialog).queryByRole('status')).toBeNull();
     expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('applies only complete backend groups with one migration action', async () => {
+  it('applies every carried row with one migration action, leaving the rest native', async () => {
     serve();
     renderDialog();
     const user = userEvent.setup();
@@ -145,8 +145,7 @@ describe('MigrationDialog — the settings default', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
-    expect(applied[0]).toEqual(['mig_codex_key', 'mig_opencode_legacy']);
-    expect(applied[0]).not.toContain('mig_claude_oauth');
+    expect(applied[0]).toEqual(['mig_claude_oauth', 'mig_codex_key', 'mig_opencode_legacy']);
   });
 
   it('selects and submits every import candidate for a backend as one group', async () => {
@@ -167,21 +166,21 @@ describe('MigrationDialog — the settings default', () => {
     expect(applied[0]).not.toContain('mig_claude_oauth_2');
   });
 
-  it('shows but never submits a reauth row, even when it is pre-selected', async () => {
+  it('never shows or submits a reauth row, even when it is pre-selected', async () => {
     serve();
     renderDialog();
     const user = userEvent.setup();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    expect((within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).queryByText(/sk-ant-…4b7e/)).toBeNull();
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).not.toContain('mig_claude_reauth');
   });
 
-  it('uses eligible as a backend scope without hiding blocked rows in that backend', async () => {
+  it('uses eligible as a backend scope and still hides rows it cannot carry', async () => {
     const claudeKey: MigrationItem = {
       ...CODEX_KEY,
       id: 'mig_claude_key',
@@ -197,7 +196,7 @@ describe('MigrationDialog — the settings default', () => {
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getAllByText('Anthropic').length).toBeGreaterThan(0));
     expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
-    expect((within(dialog).getByRole('checkbox', { name: /sk-ant-…4b7e/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).queryByText(/sk-ant-…4b7e/)).toBeNull();
     expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
 
@@ -351,26 +350,21 @@ describe('MigrationDialog — the settings default', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['settings.models.migration.blocked.config', "Check this CLI's saved configuration, then scan again."],
-    ['settings.models.migration.blocked.environment', 'This environment-based authentication cannot be imported. Save the key in a supported configuration file, then scan again.'],
-    ['settings.models.migration.blocked.credential', 'This credential could not be read or is not supported. Check credential access and the saved authentication format, then scan again.'],
-    ['settings.models.migration.blocked.unknown', 'This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually.'],
-  ] as const)('maps blocked note %s to actionable copy', async (notes_key, message) => {
-    const blocked = { ...REAUTH, notes_key };
-    serve([CODEX_KEY, blocked]);
+  it('says nothing about a row it cannot carry', async () => {
+    serve([CODEX_KEY, { ...REAUTH, notes_key: 'settings.models.migration.blocked.config' }]);
     renderDialog();
 
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
-    expect((within(dialog).getByRole('status') as HTMLElement).textContent).toContain(message);
+    expect(within(dialog).queryByRole('status')).toBeNull();
+    expect(within(dialog).getAllByRole('checkbox')).toHaveLength(1);
   });
 });
 
 describe('MigrationDialog — persisted authentication', () => {
   it.each([
-    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. After migration, Model Hub will manage the selected authentication.'],
-    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证，不读取运行中的环境变量。迁移后，所选认证由模型网关管理。'],
+    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, Model Hub will manage the selected authentication.'],
+    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，所选认证由模型网关管理。'],
   ] as const)('explains the saved source boundary and consequence in %s', async (language, sentence) => {
     await i18n.changeLanguage(language);
     serve([CODEX_KEY]);
@@ -380,136 +374,24 @@ describe('MigrationDialog — persisted authentication', () => {
     expect(within(dialog).getByText(sentence)).toBeTruthy();
   });
 
-  const blockedReasons = [
-    {
-      reason: 'dynamic_shell',
-      path: '/home/用户/.zshrc',
-      en: /expressions or commands.*literal values.*never executes shell code/,
-      zh: /表达式或命令.*固定值.*不会执行 Shell 代码/,
-    },
-    {
-      reason: 'ambiguous_shell',
-      path: '/home/用户/.profile',
-      en: /Conflicting saved assignments.*listed files.*unambiguous literal value/,
-      zh: /列出的文件.*互相冲突.*固定值.*统一相关配置/,
-    },
-    {
-      reason: 'unreadable',
-      path: '/home/用户/.bashrc',
-      en: /source file could not be read.*Avibe has read access/,
-      zh: /无法读取此配置文件.*Avibe 是否有读取权限/,
-    },
-    {
-      reason: 'reference',
-      path: '/home/用户/.claude/settings.json',
-      en: /referenced variable.*no unambiguous saved literal value.*save.*key.*listed configuration or shell startup file/,
-      zh: /引用的变量.*固定值.*列出的配置文件或 Shell 启动文件.*保存对应的密钥/,
-    },
-    {
-      reason: 'helper',
-      path: '/home/用户/.claude/settings.local.json',
-      en: /supplied by a command.*supported static configuration.*add the source manually/,
-      zh: /由命令提供.*静态配置.*手动添加供应商/,
-    },
-    {
-      reason: 'token',
-      path: '/home/用户/.zshenv',
-      en: /login token or authentication format cannot be imported.*Add a source.*sign in again/,
-      zh: /登录令牌或认证格式暂不支持导入.*添加供应商.*重新登录/,
-    },
-    {
-      reason: 'headers',
-      path: '/home/用户/.zprofile',
-      en: /Custom credential headers cannot be imported.*supported authentication method/,
-      zh: /自定义认证请求头.*受支持的认证方式/,
-    },
-    {
-      reason: 'transport',
-      path: '/home/用户/.bashrc',
-      en: /can't use this authentication method yet.*file is unchanged.*standard API key/,
-      zh: /暂不支持这里的认证方式.*原文件未改动.*标准 API Key 重新添加/,
-    },
-  ] as const;
+  it.each(['dynamic_shell', 'ambiguous_shell', 'unreadable', 'reference', 'helper', 'token', 'headers', 'transport'])(
+    'hides a %s row and still migrates the backend beside it',
+    async (reason) => {
+      serve([
+        { ...REAUTH, notes_key: `settings.models.migration.blocked.${reason}`, source_paths: ['/home/用户/.zshrc'] },
+        { ...CODEX_KEY, source_paths: ['/home/用户/.codex/auth.json'] },
+      ]);
+      renderDialog();
+      const user = userEvent.setup();
 
-  it.each(['en', 'zh'] as const)('shows every blocked file and its specific %s remedy while preserving backend selection', async (language) => {
-    await i18n.changeLanguage(language);
-    serve([
-      ...blockedReasons.map(({ reason, path }) => ({
-        ...REAUTH,
-        id: `blocked_${reason}`,
-        notes_key: `settings.models.migration.blocked.${reason}`,
-        source_paths: [path],
-      })),
-      SUBSCRIPTION,
-      { ...CODEX_KEY, source_paths: ['/home/用户/.codex/auth.json'] },
-    ]);
-    renderDialog();
-    const user = userEvent.setup();
-
-    const dialog = await screen.findByRole('dialog');
-    const status = await within(dialog).findByRole('status');
-    const warnings = within(status).getAllByRole('listitem');
-    expect(warnings).toHaveLength(blockedReasons.length);
-    for (const { path, ...reason } of blockedReasons) {
-      const warning = warnings.find((element) => (
-        within(element).queryByText(path) && within(element).queryByText(reason[language])
-      ));
-      expect(warning).toBeTruthy();
-      expect(within(warning!).getByText(reason[language])).toBeTruthy();
-    }
-    expect(status.textContent).not.toMatch(/Allow credential access|请允许访问凭据|Remove this CLI|清除.*环境变量/);
-    for (const row of within(dialog).getAllByRole('checkbox', { name: /sk-ant-…4b7e|Claude 账号登录/ })) {
-      expect((row as HTMLButtonElement).disabled).toBe(true);
-      expect(row.getAttribute('aria-checked')).toBe('false');
-    }
-    const supportedRow = within(dialog).getByRole('checkbox', { name: /OpenAI.*\/home\/用户\/\.codex\/auth\.json/ });
-    expect((supportedRow as HTMLButtonElement).disabled).toBe(false);
-    expect(supportedRow.getAttribute('aria-checked')).toBe('true');
-    await user.click(within(dialog).getByRole('button', { name: language === 'en' ? 'Start migration' : '开始迁移' }));
-    await waitFor(() => expect(applied).toEqual([[CODEX_KEY.id]]));
-  });
-
-  it('deduplicates only matching source/reason pairs, keeping different files and reasons', async () => {
-    const dynamic: MigrationItem = {
-      ...REAUTH,
-      notes_key: 'settings.models.migration.blocked.dynamic_shell',
-      source_paths: ['/home/用户/.zshrc', '/home/用户/.profile', '/home/用户/.zshrc'],
-    };
-    serve([
-      dynamic,
-      { ...dynamic, id: 'duplicate', source_paths: ['/home/用户/.zshrc'] },
-      { ...dynamic, id: 'different_reason', notes_key: 'settings.models.migration.blocked.reference', source_paths: ['/home/用户/.zshrc'] },
-    ]);
-    renderDialog();
-
-    const dialog = await screen.findByRole('dialog');
-    const status = await within(dialog).findByRole('status');
-    const warnings = within(status).getAllByRole('listitem');
-    expect(warnings).toHaveLength(3);
-    expect(within(status).getAllByText('/home/用户/.zshrc')).toHaveLength(2);
-    expect(within(status).getAllByText('/home/用户/.profile')).toHaveLength(1);
-    expect(within(status).getAllByText(/expressions or commands/)).toHaveLength(2);
-    expect(within(status).getAllByText(/referenced variable/)).toHaveLength(1);
-    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it('keeps distinct blocked legacy rows visible without inventing file locators', async () => {
-    serve([
-      { ...REAUTH, notes_key: 'settings.models.migration.blocked.credential' },
-      { ...REAUTH, id: 'legacy_second', masked_detail: 'sk-ant-…5678', notes_key: 'settings.models.migration.blocked.environment' },
-    ]);
-    renderDialog();
-
-    const dialog = await screen.findByRole('dialog');
-    const status = await within(dialog).findByRole('status');
-    const warnings = within(status).getAllByRole('listitem');
-    expect(warnings).toHaveLength(2);
-    expect(within(warnings[0]).getByText('Claude Code configuration')).toBeTruthy();
-    expect(within(warnings[0]).getByText(/could not be read or is not supported/)).toBeTruthy();
-    expect(within(warnings[1]).getByText('Claude Code configuration')).toBeTruthy();
-    expect(within(warnings[1]).getByText(/Save the key in a supported configuration file/)).toBeTruthy();
-    expect(status.textContent).not.toMatch(/\.json|\.zshrc|\.profile/);
-  });
+      const dialog = await screen.findByRole('dialog');
+      await within(dialog).findByText('OpenAI');
+      expect(within(dialog).queryByRole('status')).toBeNull();
+      expect(within(dialog).queryByText('/home/用户/.zshrc')).toBeNull();
+      await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+      await waitFor(() => expect(applied).toEqual([[CODEX_KEY.id]]));
+    },
+  );
 
   it.each([
     ['en', 'No configuration found to migrate.', 'Start migration'],
@@ -654,7 +536,7 @@ describe('MigrationDialog — shared persisted files', () => {
     await waitFor(() => expect(applied).toEqual([linked.map((item) => item.id)]));
   });
 
-  it('shows a linked backend blocker in each affected group, even outside the entry-point scope', async () => {
+  it('does not let a linked row it cannot carry hold back the group', async () => {
     serve([
       ...linked,
       {
@@ -668,23 +550,81 @@ describe('MigrationDialog — shared persisted files', () => {
       SUBSCRIPTION,
     ]);
     renderDialog({ eligible: (item) => item.id === CODEX_KEY.id });
+    const user = userEvent.setup();
 
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
-    const warnings = within(dialog).getAllByRole('status');
-    expect(warnings).toHaveLength(2);
-    for (const warning of warnings) {
-      expect(within(warning).getByText('/home/用户/.config/opencode/opencode.json')).toBeTruthy();
-      expect(within(warning).getByText(/Credentials supplied by a command cannot be imported/)).toBeTruthy();
-    }
+    expect(within(dialog).queryByRole('status')).toBeNull();
     const checkboxes = within(dialog).getAllByRole('checkbox');
-    expect(checkboxes).toHaveLength(4);
-    for (const checkbox of checkboxes) {
-      expect((checkbox as HTMLButtonElement).disabled).toBe(true);
-      expect(checkbox.getAttribute('aria-checked')).toBe('false');
-    }
+    expect(checkboxes).toHaveLength(3);
+    for (const checkbox of checkboxes) expect((checkbox as HTMLButtonElement).disabled).toBe(false);
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await waitFor(() => expect(applied).toEqual([linked.map((item) => item.id)]));
+  });
+
+  it('blocks a linked group whose other backend has nothing the Hub can carry', async () => {
+    // The server requires every linked backend in the batch; one with no
+    // carried row can never be selected, so offering the rest always fails.
+    serve([
+      { ...CODEX_KEY, source_paths: ['/home/用户/.profile'], required_backends: ['codex', 'opencode'] },
+      {
+        ...LEGACY,
+        id: 'blocked_headers',
+        proposed_action: 'keep_native',
+        notes_key: 'settings.models.migration.blocked.headers',
+        source_paths: ['/home/用户/.profile'],
+        required_backends: ['codex', 'opencode'],
+      },
+    ]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+    const [checkbox] = within(dialog).getAllByRole('checkbox');
+    expect((checkbox as HTMLButtonElement).disabled).toBe(true);
     expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+  });
+
+  it('blocks a backend whose native config the CLI cannot parse', async () => {
+    // Hub mode over an unparseable native config fails every launch, so the
+    // server refuses the batch; the dialog must not offer it.
+    serve([
+      CODEX_KEY,
+      {
+        ...CODEX_KEY,
+        id: 'blocked_config',
+        proposed_action: 'reauth',
+        selected: false,
+        notes_key: 'settings.models.migration.blocked.config',
+        config_blocker: true,
+      },
+    ]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findAllByText('OpenAI');
+    const [checkbox] = within(dialog).getAllByRole('checkbox');
+    expect((checkbox as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('names a standalone config blocker the user has to repair', async () => {
+    serve([{
+      ...CODEX_KEY,
+      id: 'blocked_config',
+      masked_detail: '',
+      proposed_action: 'reauth',
+      selected: false,
+      notes_key: 'settings.models.migration.blocked.config',
+      source_paths: ['/home/用户/.codex/config.toml'],
+      config_blocker: true,
+    }]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    expect((await within(dialog).findAllByText('/home/用户/.codex/config.toml')).length).toBeGreaterThan(0);
+    expect(within(dialog).getByRole('status')).toBeTruthy();
+    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('keeps a transitive three-backend closure visible and selected from one entry point', async () => {
@@ -766,14 +706,10 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
 
     expect(visibleText(dialog)).toEqual([
       'Migrate to the Model Hub',
-      'Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. After migration, Model Hub will manage the selected authentication.',
+      'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, Model Hub will manage the selected authentication.',
       'Claude Code',
-      'Claude Code configuration',
-      'This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually.',
       'Anthropic',
       'Claude 账号登录（OAuth） · Claude Code configuration',
-      'Anthropic',
-      'sk-ant-…4b7e · Claude Code configuration',
       'Codex',
       'OpenAI',
       'sk-…9f21 · Codex configuration',
@@ -782,8 +718,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
       'Close',
     ]);
     expect(controls(dialog)).toEqual([
-      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: true },
-      { role: 'checkbox', name: 'Anthropic · sk-ant-…4b7e · Claude Code configuration', disabled: true },
+      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
       { role: 'checkbox', name: 'OpenAI · sk-…9f21 · Codex configuration', disabled: false },
       { role: null, name: 'Later', disabled: false },
       { role: null, name: 'Start migration', disabled: false },

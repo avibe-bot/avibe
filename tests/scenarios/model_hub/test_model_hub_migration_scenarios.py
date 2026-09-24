@@ -714,12 +714,18 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     reloaded = _assert_canonical_round_trip(store.config)
     by_id = {source.id: source for source in store.config.sources}
     imported_ids = set(by_id)
+    # A subscription joins only the Agents its fixed catalog serves (OpenCode
+    # reaches every vendor), ahead of the keys; keys join every eligible Agent.
+    serves = {"claude": {"anthropic"}, "codex": {"openai"}, "opencode": {"anthropic", "openai"}}
     for backend in ("claude", "codex", "opencode"):
-        assert store.config.agents[backend].sources.order == [
-            source.id
-            for source in store.config.sources
+        eligible = [
+            source for source in store.config.sources
             if ModelHubConfig.source_eligible_for_backend(source, backend)
         ]
+        assert store.config.agents[backend].sources.order == [
+            source.id for source in eligible
+            if source.kind == "subscription" and source.vendor in serves[backend]
+        ] + [source.id for source in eligible if source.kind != "subscription"]
     codex_payload = next(
         agent for agent in service.list_agents() if agent["backend"] == "codex"
     )

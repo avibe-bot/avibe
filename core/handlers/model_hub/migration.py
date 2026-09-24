@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -239,6 +240,12 @@ class NativeMigrationItem:
     file_snapshots: tuple[NativeFileEdit, ...] = field(default=(), repr=False)
     auth_scheme: str | None = field(default=None, repr=False)
     receipt_identity: str | None = field(default=None, repr=False)
+    # The native config file itself cannot be parsed, so the CLI fails before
+    # any Hub override applies; this row blocks Hub mode, not just import.
+    config_blocker: bool = field(default=False, repr=False)
+    # The settings ``env`` field a Claude credential came from; cleanup
+    # consent is bound to it, not to equal bytes held in another field.
+    native_field: str | None = field(default=None, repr=False)
 
     def to_payload(self) -> dict[str, object]:
         # Presentation metadata is additive: `vendor` and `display_name` let a
@@ -259,6 +266,9 @@ class NativeMigrationItem:
             "masked_credential": self.masked_credential,
             "source_paths": list(self.source_paths),
             "required_backends": list(self.required_backends),
+            # The backend's native config cannot be parsed, so Hub mode would
+            # fail every launch: the whole group is blocked, not just this row.
+            "config_blocker": self.config_blocker,
         }
 
 
@@ -490,6 +500,12 @@ def _native_store_items(
             native_store_revision=snapshot.revision,
             native_store_placeholder=placeholder,
             source_paths=source_paths,
+            # Codex reads its own auth.json before any Hub routing applies,
+            # so one it cannot read or parse fails every launch.
+            config_blocker=(
+                backend == "codex" and payload.get("store") == "file"
+                and payload.get("status") in {"invalid", "permission_needed"}
+            ),
         ))
     if secret:
         base_url = _oauth_text(state, "base_url")
@@ -524,6 +540,7 @@ def _blocked_item(
     source_paths: tuple[str, ...] = (),
     shell_variables: tuple[str, ...] = (),
     shell_auth_variables: tuple[str, ...] = (),
+    config_blocker: bool = False,
 ) -> NativeMigrationItem:
     item_id, source_id = _ids(backend, "api_key", identity, "reauth")
     return NativeMigrationItem(
@@ -534,7 +551,7 @@ def _blocked_item(
         protocol="anthropic" if backend == "claude" else "openai_responses",
         display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
         source_paths=source_paths, shell_variables=shell_variables,
-        shell_auth_variables=shell_auth_variables,
+        shell_auth_variables=shell_auth_variables, config_blocker=config_blocker,
     )
 
 
@@ -559,6 +576,7 @@ def _claude_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "claude", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -566,7 +584,9 @@ def _claude_items(
             continue
         env = config.get("env", {})
         if not isinstance(env, dict):
-            items.append(_blocked_item("claude", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "claude", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         base_url = _oauth_text(env, "ANTHROPIC_BASE_URL")
         api_key = _oauth_text(env, "ANTHROPIC_API_KEY")
@@ -582,7 +602,7 @@ def _claude_items(
                 notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
                 vendor="anthropic", protocol="anthropic", display_name="Anthropic",
                 base_url=base_url, secret=api_key, masked_credential=detail,
-                source_paths=(str(path),),
+                source_paths=(str(path),), native_field="ANTHROPIC_API_KEY",
             ))
         if config.get("apiKeyHelper"):
             items.append(_blocked_item(
@@ -608,6 +628,7 @@ def _claude_items(
                     notes_key=_CUSTOM_ENDPOINT_NOTE, vendor="anthropic", protocol="anthropic",
                     display_name="Anthropic", base_url=base_url, secret=token,
                     masked_credential=masked, source_paths=(str(path),), auth_scheme=scheme,
+                    native_field="ANTHROPIC_AUTH_TOKEN",
                 ))
         if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
             items.append(_blocked_item(
@@ -639,17 +660,29 @@ def _codex_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "codex", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
         if config is None:
             continue
         providers = config.get("model_providers", {})
+        # Only the provider map migration reads and rewrites is checked here.
+        # The rest of the file belongs to the installed CLI, whose accepted
+        # shapes differ by version, and fails in direct mode alike.
         if not isinstance(providers, dict):
-            items.append(_blocked_item("codex", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "codex", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         for provider_id, provider in providers.items():
-            if not isinstance(provider, dict):
+            if not _codex_provider_well_typed(provider):
+                # Codex deserializes the whole provider map before any Hub
+                # override applies, so one malformed entry fails every launch.
+                items.append(_blocked_item(
+                    "codex", f"{path}:{provider_id}", source_paths=(str(path),),
+                    config_blocker=True,
+                ))
                 continue
             key = _oauth_text(provider, "experimental_bearer_token")
             env_key = _oauth_text(provider, "env_key")
@@ -748,6 +781,192 @@ def _opencode_protocol(
     return None
 
 
+# Every field of Codex's `ModelProviderInfo` (codex-rs/core/config.schema.json),
+# by declared type. Codex ignores unknown keys but rejects a known one of the
+# wrong type, so the whole table is checked rather than fields one at a time.
+_CODEX_PROVIDER_FIELDS: dict[str, str] = {
+    **dict.fromkeys((
+        "name", "base_url", "env_key", "env_key_instructions",
+        "experimental_bearer_token", "model_catalog_url",
+    ), "text"),
+    **dict.fromkeys(("http_headers", "env_http_headers", "query_params"), "text_map"),
+    **{field: field for field in ("auth", "aws", "gateway_oauth")},
+    **dict.fromkeys((
+        "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms",
+        "websocket_connect_timeout_ms",
+    ), "count"),
+    **dict.fromkeys((
+        "requires_openai_auth", "supports_websockets", "supports_standalone_web_search",
+    ), "flag"),
+    "wire_api": "wire_api",
+}
+
+
+# The nested tables Codex deserializes (required keys present, known ones of
+# their declared type), from the same schema. Unknown keys are ignored: only
+# `--strict-config`, which launches never pass, rejects them. A value is a kind name, a
+# nested spec, or a tuple of alternative specs (a tagged enum).
+_CodexSpec = dict[str, object]
+_COMMAND_SPEC: _CodexSpec = {"command": "text", "args": "texts", "timeout_ms": "positive_count"}
+_CODEX_NESTED_SPECS: dict[str, tuple[_CodexSpec, frozenset[str]]] = {
+    "auth": ({
+        "command": "text", "args": "texts", "cwd": "text",
+        "refresh_interval_ms": "count", "timeout_ms": "positive_count",
+    }, frozenset({"command"})),
+    "aws": ({
+        "profile": "text", "region": "text",
+        "auth_refresh": (_COMMAND_SPEC, frozenset({"command"})),
+        "credential_export": (_COMMAND_SPEC, frozenset({"command"})),
+    }, frozenset()),
+    "gateway_oauth": ({
+        "authorization_url": "text", "client_id": "text", "token_url": "text",
+        "resource": "text", "scopes": "texts", "redirect_port": "port",
+        "delivery": (
+            ({"kind": ("header",), "name": "text", "scheme": "text"}, frozenset({"kind", "name"})),
+            ({"kind": ("cookie",), "name": "text"}, frozenset({"kind", "name"})),
+        ),
+    }, frozenset({"authorization_url", "client_id", "delivery", "token_url"})),
+}
+
+
+def _text_map(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    )
+
+
+def _codex_field_well_typed(kind: str, value: object) -> bool:
+    if kind == "text":
+        return isinstance(value, str)
+    if kind == "text_map":
+        return _text_map(value)
+    if kind == "count":
+        # TOML integers are signed 64-bit; Codex rejects anything wider.
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**63
+    if kind == "flag":
+        return isinstance(value, bool)
+    if kind in _CODEX_NESTED_SPECS:
+        return _codex_table_well_typed(_CODEX_NESTED_SPECS[kind], value)
+    # An unknown variant fails deserialization. `chat` stays accepted: older
+    # CLIs still run it, and migration carries it as openai_chat.
+    return value in ("chat", "responses")
+
+
+def _codex_table_well_typed(spec: object, value: object) -> bool:
+    if isinstance(spec, str):
+        if spec == "texts":
+            return isinstance(value, list) and all(isinstance(item, str) for item in value)
+        if spec in ("positive_count", "port"):
+            limit = 2**16 if spec == "port" else 2**63
+            minimum = 1 if spec == "positive_count" else 0
+            return isinstance(value, int) and not isinstance(value, bool) and minimum <= value < limit
+        return _codex_field_well_typed(spec, value)
+    if isinstance(spec, tuple) and spec and isinstance(spec[0], tuple):
+        # A tagged enum: exactly one variant has to accept the table.
+        return any(_codex_table_well_typed(variant, value) for variant in spec)
+    if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[0], dict):
+        fields, required = spec
+        return (
+            isinstance(value, dict)
+            and required <= value.keys()
+            and all(_codex_table_well_typed(fields[key], item) for key, item in value.items() if key in fields)
+        )
+    # A literal-choice tuple, such as a variant tag.
+    return value in spec
+
+
+def _codex_provider_well_typed(provider: object) -> bool:
+    """Whether Codex can deserialize this ``model_providers`` entry.
+
+    A field of the wrong type fails the whole config before any Hub override
+    applies, so only an absent field or one of its declared type is safe.
+    """
+    return isinstance(provider, dict) and all(
+        _codex_field_well_typed(kind, provider[field])
+        for field, kind in _CODEX_PROVIDER_FIELDS.items() if field in provider
+    )
+
+
+_OPENCODE_COST = ({
+    "input": "finite", "output": "finite", "cache_read": "finite", "cache_write": "finite",
+}, frozenset({"input", "output"}))
+_OPENCODE_MODALITIES = ("modality", "text", "audio", "image", "video", "pdf")
+_OPENCODE_MODEL = ({
+    "id": "text", "name": "text", "family": "text", "release_date": "text",
+    "attachment": "flag", "reasoning": "flag", "temperature": "flag", "tool_call": "flag",
+    "experimental": "flag",
+    "interleaved": ("any", "flag", "text", ({"field": "text"}, frozenset({"field"}))),
+    "cost": ({**_OPENCODE_COST[0], "context_over_200k": _OPENCODE_COST}, _OPENCODE_COST[1]),
+    "limit": ({"context": "finite", "input": "finite", "output": "finite"}, frozenset({"context", "output"})),
+    "modalities": ({"input": _OPENCODE_MODALITIES, "output": _OPENCODE_MODALITIES}, frozenset()),
+    "status": ("choice", "alpha", "beta", "deprecated", "active"),
+    "provider": ({"npm": "text", "api": "text"}, frozenset()),
+    "options": "record",
+    "headers": "text_map",
+    "variants": ("values", ({"disabled": "flag"}, frozenset())),
+}, frozenset())
+_OPENCODE_TIMEOUT = ("any", "positive_count", ("choice", False))
+_OPENCODE_PROVIDER = ({
+    "api": "text", "name": "text", "id": "text", "npm": "text",
+    "env": "texts", "whitelist": "texts", "blacklist": "texts",
+    "options": ({
+        "apiKey": "text", "baseURL": "text", "enterpriseUrl": "text", "setCacheKey": "flag",
+        "timeout": _OPENCODE_TIMEOUT, "headerTimeout": _OPENCODE_TIMEOUT,
+        "chunkTimeout": _OPENCODE_TIMEOUT,
+    }, frozenset()),
+    "models": ("values", _OPENCODE_MODEL),
+}, frozenset())
+
+
+def _opencode_value_well_typed(spec: object, value: object) -> bool:
+    """Check ``value`` against OpenCode's ``ProviderConfig`` schema.
+
+    Effect structs drop unknown keys, so only declared fields are checked.
+    """
+    if spec == "text":
+        return isinstance(value, str)
+    if spec == "flag":
+        return isinstance(value, bool)
+    if spec == "texts":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if spec == "text_map":
+        return _text_map(value)
+    if spec == "record":
+        return isinstance(value, dict)
+    if spec == "finite":
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if spec == "positive_count":
+        # JSON has one number type; `1.0` is the integer 1 to OpenCode.
+        return (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value == int(value) and value > 0
+        )
+    kind = spec[0] if isinstance(spec, tuple) else None
+    if kind == "any":
+        return any(_opencode_value_well_typed(variant, value) for variant in spec[1:])
+    if kind == "choice":
+        return any(value is choice or (type(value) is type(choice) and value == choice) for choice in spec[1:])
+    if kind == "modality":
+        return isinstance(value, list) and all(item in spec[1:] for item in value)
+    if kind == "values":
+        return isinstance(value, dict) and all(_opencode_value_well_typed(spec[1], item) for item in value.values())
+    fields, required = cast(tuple[dict[str, object], frozenset[str]], spec)
+    return (
+        isinstance(value, dict)
+        and required <= value.keys()
+        and all(_opencode_value_well_typed(fields[key], item) for key, item in value.items() if key in fields)
+    )
+
+
+def _opencode_provider_well_typed(provider: object) -> bool:
+    """Whether OpenCode's config schema accepts this ``provider`` entry.
+
+    OpenCode validates the whole file on start, so a malformed typed field
+    fails every launch, Hub-owned or not.
+    """
+    return _opencode_value_well_typed(_OPENCODE_PROVIDER, provider)
+
+
 def _opencode_manual_models(
     provider_config: dict[str, Any],
 ) -> tuple[NativeManualModel, ...]:
@@ -792,16 +1011,20 @@ def _opencode_items(
     try:
         auth_entries = read_native_config(opencode_auth_path(home)) or {}
     except (TakeoverStateError, OSError):
-        return [_blocked_item(
+        # Hub mode cannot prove what an unreadable auth map would shadow, so
+        # it blocks; config layers still surface their own rows beside it.
+        auth_entries = {}
+        items.append(_blocked_item(
             "opencode", "auth-file", "unreadable",
-            source_paths=(str(opencode_auth_path(home)),),
-        )]
+            source_paths=(str(opencode_auth_path(home)),), config_blocker=True,
+        ))
     provider_catalog = _load_opencode_provider_catalog(persisted)
     seen_providers: set[str] = set()
     for path in opencode_config_paths(home, project_roots):
         if path in persisted.problems:
             items.append(_blocked_item(
                 "opencode", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -809,7 +1032,9 @@ def _opencode_items(
             continue
         provider_configs = config.get("provider", {})
         if not isinstance(provider_configs, dict):
-            items.append(_blocked_item("opencode", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "opencode", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         seen_providers.update(provider_configs)
         relevant_auth = {key: value for key, value in auth_entries.items() if key in provider_configs}
@@ -837,10 +1062,12 @@ def _opencode_candidates(
         names: tuple[str, ...] = ()
         auth_names: tuple[str, ...] = ()
 
-        def blocked(identity: str, reason: str = "config") -> NativeMigrationItem:
+        def blocked(
+            identity: str, reason: str = "config", *, config_blocker: bool = False,
+        ) -> NativeMigrationItem:
             return _blocked_item(
                 "opencode", identity, reason, source_paths=paths, shell_variables=names,
-                shell_auth_variables=auth_names,
+                shell_auth_variables=auth_names, config_blocker=config_blocker,
             )
 
         if (
@@ -853,8 +1080,10 @@ def _opencode_candidates(
             items.append(blocked(f"{locator}:invalid-provider"))
             continue
         provider_config = provider_configs.get(provider_id, {})
-        if not isinstance(provider_config, dict):
-            items.append(blocked(f"{locator}:{provider_id}"))
+        if not _opencode_provider_well_typed(provider_config):
+            # OpenCode validates the whole provider map before any Hub
+            # override applies, so one malformed entry fails every launch.
+            items.append(blocked(f"{locator}:{provider_id}", config_blocker=True))
             continue
         options = provider_config.get("options")
         if not isinstance(options, dict):
@@ -1224,6 +1453,23 @@ def _require_native_api_key_transport(
         raise MigrationConflictError from None
 
 
+def _bearer_transport(item: NativeMigrationItem) -> NativeMigrationItem | None:
+    """Carry a custom-endpoint Anthropic key over as the Bearer the engine sends.
+
+    The pinned engine sends ``x-api-key`` only to the official origin. Custom
+    endpoints get Bearer, so migration proves and provisions exactly that header;
+    an endpoint that refuses it fails proof and the native files stay untouched.
+    """
+    if item.kind == "oauth_native" or item.protocol != "anthropic" or item.auth_scheme is not None:
+        return None
+    candidate = replace(item, auth_scheme="bearer")
+    try:
+        _require_native_api_key_transport(candidate)
+    except MigrationConflictError:
+        return None
+    return candidate
+
+
 def scan_native_configs(
     config: ModelHubConfig,
     *,
@@ -1301,7 +1547,7 @@ def scan_native_configs(
             try:
                 _require_native_api_key_transport(item)
             except MigrationConflictError:
-                item = replace(
+                item = _bearer_transport(item) or replace(
                     item, proposed_action="reauth", selected=False,
                     notes_key="settings.models.migration.blocked.transport",
                 )
@@ -1505,6 +1751,8 @@ async def _prepare_takeover(
                         "vendor": item.vendor,
                         "base_url": validate_base_url(item.base_url),
                         "key": item.secret,
+                        # Bearer exists only on the Anthropic interface.
+                        **({"protocol": "anthropic"} if item.auth_scheme == "bearer" else {}),
                     }, on_reserved=lambda ref: host.revocations.add("observation", ref), **auth_options)
                     protocol = cast(Any, observation.protocol)
                     _require_native_api_key_transport(item, observed_protocol=protocol)
@@ -1875,7 +2123,11 @@ async def apply_native_migration(
                                 project_roots=host.migration_project_roots(),
                                 clean_native_stores=record.get("clean_native_stores"),
                             )
-                            if not any(item.backend in record["backends"] for item in residual):
+                            if not any(
+                                item.backend in record["backends"]
+                                and (item.proposed_action == "import" or item.config_blocker)
+                                for item in residual
+                            ):
                                 return result
                             completed_record = record
                 else:
@@ -1896,9 +2148,16 @@ async def apply_native_migration(
         backends = tuple(sorted({item.backend for item in selected}))
         if any(set(item.required_backends) - set(backends) for item in selected):
             raise MigrationConflictError
-        # A CLI takeover cannot leave an unselected credential maintaining its
-        # original authentication. Selection is therefore grouped by backend.
-        if any(item.backend in backends and item.id not in item_ids for item in available):
+        # A takeover moves every credential the Hub can carry, so selection is
+        # grouped by backend. Rows it cannot carry stay native: a Hub launch
+        # pins its own connection above them, so they are shadowed, not used.
+        if any(
+            item.backend in backends and item.proposed_action == "import" and item.id not in item_ids
+            for item in available
+        ):
+            raise MigrationConflictError
+        # Hub mode over a native config the CLI cannot parse fails every launch.
+        if any(item.backend in backends and item.config_blocker for item in available):
             raise MigrationConflictError
         retained_inventory_ids = (
             set(record.get("inventory_ids", [item["id"] for item in record["items"]]))
@@ -1996,7 +2255,13 @@ async def apply_native_migration(
                     selected.extend(item for item in resolved if item not in selected)
                     if (original.receipt_identity or original.id) in retained_inventory_ids:
                         retained_item_ids.update(item.id for item in resolved)
-                if any(item.backend in backends and item not in selected for item in rescanned):
+                if any(
+                    item.backend in backends and (
+                        (item.proposed_action == "import" and item not in selected)
+                        or item.config_blocker
+                    )
+                    for item in rescanned
+                ):
                     raise MigrationConflictError
                 record = await _prepare_takeover(
                     host, previous, selected, mask_credential=mask_credential,

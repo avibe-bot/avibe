@@ -2,7 +2,6 @@ import * as React from 'react';
 import { Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { cn } from '@/lib/utils';
 import { GuardGapList } from './GuardGapList';
 import type { RouteHopRef, SupplyGap } from './types';
 
@@ -79,10 +78,9 @@ export const GuardImpact: React.FC<GuardPicture & {
         </>
       )}
       {/* Both of these are statements ABOUT the gaps — the list names them, and
-          the hint below says whether there are any — so an unstated gap list
-          renders neither. Silence is the only honest reading: 「safe」 would be
-          this client vouching for supply it cannot see, and 「interrupt」 would
-          invent a consequence. The hops above are unaffected; they are what the
+          the hint below warns when there are any — so an unstated gap list
+          renders neither: 「interrupt」 would invent a consequence. No gaps
+          reads as nothing to warn about, so it says nothing either. The hops above are unaffected; they are what the
           caller does know. */}
       {gaps !== null && (
         <>
@@ -90,10 +88,12 @@ export const GuardImpact: React.FC<GuardPicture & {
             gaps={gaps}
             labelKey={committed ? 'settings.models.guard.result.gapLabel' : undefined}
           />
-          <p className={cn('model-hub-guard-hint', gaps.length > 0 && 'text-destructive-ink')}>
-            <Info aria-hidden />
-            {t(`settings.models.guard.${committed ? 'result.' : ''}hint.${gaps.length > 0 ? 'interrupt' : 'safe'}`)}
-          </p>
+          {gaps.length > 0 && (
+            <p className="model-hub-guard-hint text-destructive-ink">
+              <Info aria-hidden />
+              {t(`settings.models.guard.${committed ? 'result.' : ''}hint.interrupt`)}
+            </p>
+          )}
         </>
       )}
     </>

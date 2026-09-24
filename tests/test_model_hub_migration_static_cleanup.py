@@ -159,13 +159,14 @@ def test_static_canonical_value_reuses_existing_ref(home, tmp_path, shape):
 
 
 @pytest.mark.parametrize("shape", CONFIG_SHAPES)
-def test_other_canonical_credential_does_not_authorize_cleanup(home, tmp_path, shape):
+def test_other_canonical_credential_is_left_in_place(home, tmp_path, shape):
     path, roots = _seed(home, shape)
     before = path.read_bytes()
     service, _, adapter = _service(tmp_path, migration_home=home)
     [item] = _items(service, roots)
-    with pytest.raises(TakeoverStateError, match="another native credential"):
-        plan_native_cleanup([replace(item, secret="fixture-other")], home=home, project_roots=roots)
+    edits = plan_native_cleanup([replace(item, secret="fixture-other")], home=home, project_roots=roots)
+    # An unselected credential stays native; the Hub launch shadows it.
+    assert next(edit for edit in edits if edit.path == path).after == before
     assert path.read_bytes() == before and not adapter.provisioned
 
 
@@ -207,8 +208,8 @@ def test_padding_only_change_never_bypasses_exact_consent(home, tmp_path, shape,
 
 @pytest.mark.parametrize("value", [" \t ", "fixture-other", ["fixture"], {"key": KEY}, 123])
 @pytest.mark.parametrize("field", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
-def test_unselected_settings_value_still_refuses_cleanup(home, tmp_path, value, field):
-    _seed(home, "claude-user-api", KEY)
+def test_unselected_settings_value_stays_while_selected_key_is_cleaned(home, tmp_path, value, field):
+    path, _ = _seed(home, "claude-user-api", KEY)
     # A real second native layer, not a new supported filename.
     project = home / "project"
     other = project / ".claude/settings.local.json"
@@ -216,9 +217,9 @@ def test_unselected_settings_value_still_refuses_cleanup(home, tmp_path, value, 
     before = other.read_bytes()
     service, _, adapter = _service(tmp_path, migration_home=home)
     selected = next(item for item in _items(service, (project,)) if item.secret == KEY)
-    with pytest.raises(TakeoverStateError, match="another native credential"):
-        plan_native_cleanup([selected], home=home, project_roots=(project,))
-    assert other.read_bytes() == before
+    edits = {edit.path: edit for edit in plan_native_cleanup([selected], home=home, project_roots=(project,))}
+    assert KEY.encode() not in edits[path].after
+    assert edits[other.absolute()].after == before
     assert not adapter.provisioned
 
 
@@ -244,3 +245,372 @@ def test_padded_settings_bearer_uses_proven_header_after_custody(home, tmp_path)
             assert json.loads(path.read_bytes()) == {"env": {"KEEP_FIXTURE": "preserved"}}
 
     asyncio.run(scenario())
+
+
+def test_codex_retained_bearer_provider_keeps_its_selectors(home, tmp_path):
+    path = home / ".codex/config.toml"
+    _write(path, 'model_provider = "relay"\n'
+           '[profiles.work]\nmodel_provider = "relay"\n'
+           '[model_providers.relay]\nbase_url = "https://relay.example/v1"\n'
+           'experimental_bearer_token = "fixture-unselected-bearer"\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    [item] = _items(service, ())
+    # Another credential (e.g. OAuth) is imported while `relay` is active.
+    other = replace(item, kind="oauth_native", secret=None, native_provider_id="relay")
+    edits = plan_native_cleanup([other], home=home)
+    for edit in edits:
+        edit.apply()
+    content = path.read_text()
+    assert content.count('model_provider = "relay"') == 2
+    assert "fixture-unselected-bearer" in content and "relay.example" in content
+
+
+def test_opencode_shell_key_leaves_a_same_vendor_oauth_entry_native(home, tmp_path):
+    auth = home / ".local/share/opencode/auth.json"
+    oauth = {"type": "oauth", "access": "fixture-access", "refresh": "fixture-refresh", "expires": 1}
+    _write(auth, json.dumps({"openrouter": oauth}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\n")
+    service, _, adapter = _service(tmp_path, migration_home=home)
+    rows = [row for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    assert len(rows) == 1
+    assert asyncio.run(service.migration_apply([rows[0]["id"]]))["applied"] == 1
+    assert adapter.provisioned
+    assert json.loads(auth.read_text())["openrouter"] == oauth
+
+
+@pytest.mark.parametrize("entry", ["legacy-or-malformed-value", 7, ["fixture"], None])
+def test_opencode_shell_key_leaves_a_non_object_auth_entry_native(home, tmp_path, entry):
+    auth = home / ".local/share/opencode/auth.json"
+    _write(auth, json.dumps({"openrouter": entry}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, ()) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    # Not carried, so not removed: direct mode finds what it left.
+    assert json.loads(auth.read_text()) == {"openrouter": entry}
+
+
+@pytest.mark.parametrize("field", ["http_headers", "env_http_headers"])
+def test_codex_retained_header_provider_keeps_its_configuration(home, tmp_path, field):
+    path = home / ".codex/config.toml"
+    header = '{ Authorization = "Bearer fixture-header" }' if field == "http_headers" else '{ Authorization = "RELAY_TOKEN" }'
+    _write(path, 'model_provider = "relay"\n'
+           '[model_providers.relay]\nbase_url = "https://relay.example/v1"\n'
+           f'{field} = {header}\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    [item] = _items(service, ())
+    assert item.proposed_action != "import"
+    other = replace(item, kind="oauth_native", proposed_action="import", native_provider_id="relay")
+    for edit in plan_native_cleanup([other], home=home):
+        edit.apply()
+    content = path.read_text()
+    assert 'model_provider = "relay"' in content
+    assert "relay.example" in content and "Authorization" in content
+
+
+def test_opencode_shell_key_keeps_the_endpoint_a_retained_oauth_entry_uses(home, tmp_path):
+    config = home / ".config/opencode/opencode.json"
+    auth = home / ".local/share/opencode/auth.json"
+    # The OAuth entry's endpoint; the shell key is the only importable row.
+    _write(config, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1"}}}}))
+    oauth = {"type": "oauth", "access": "fixture-access", "refresh": "fixture-refresh", "expires": 1}
+    _write(auth, json.dumps({"openrouter": oauth}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    items = _items(service, ())
+    importable = [item for item in items if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    assert json.loads(auth.read_text())["openrouter"] == oauth
+    options = json.loads(config.read_text())["provider"]["openrouter"]["options"]
+    assert options.get("baseURL") == "https://relay.example/api/v1"
+
+
+def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home, tmp_path):
+    config = home / ".config/opencode/opencode.json"
+    # Header auth is left native; the shell key is the importable row.
+    layer = {"baseURL": "https://relay.example/api/v1", "headers": {"Authorization": "Bearer fixture"}}
+    _write(config, json.dumps({"provider": {"openrouter": {"options": layer}}}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, ()) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    assert json.loads(config.read_text())["provider"]["openrouter"]["options"] == layer
+
+
+@pytest.mark.parametrize("entry", [
+    '"bad"',
+    '{ http_headers = "bad" }',
+    '{ env_http_headers = ["X_KEY"] }',
+    '{ base_url = 1 }',
+    '{ stream_max_retries = "3" }',
+    '{ wire_api = "bogus" }',
+    '{ supports_websockets = "bad" }',
+    '{ websocket_connect_timeout_ms = -1 }',
+    '{ auth = "bad" }',
+    '{ aws = { profile = 1 }, http_headers = { X = "y" } }',
+    '{ aws = { credential_export = { args = ["x"] } } }',
+    '{ auth = { command = "fixture", timeout_ms = 0 } }',
+    '{ gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", delivery = { kind = "query", name = "x" } } }',
+])
+def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
+    _write(home / ".codex/config.toml", f"model_providers = {{ relay = {entry} }}\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+@pytest.mark.parametrize("entry", [
+    '"bad"', '{"options": "bad"}', '{"options": {"baseURL": 1}}', '{"models": {"m": "bad"}}',
+    '{"npm": 1}', '{"env": "KEY"}', '{"options": {"timeout": 0}}', '{"options": {"setCacheKey": "yes"}}',
+    '{"models": {"m": {"limit": {"context": 1}}}}', '{"models": {"m": {"status": "gone"}}}',
+    '{"models": {"m": {"modalities": {"input": ["smell"]}}}}', '{"models": {"m": {"headers": {"X": 1}}}}',
+])
+def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
+    _write(home / ".config/opencode/opencode.json", f'{{"provider": {{"relay": {entry}}}}}')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "opencode" and item.config_blocker for item in _items(service, ()))
+
+
+def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
+    _write(home / ".codex/config.toml", 'model_providers = { relay = { http_headers = { X = "y" }, '
+           'supports_websockets = true, wire_api = "responses", future_field = 1, '
+           'auth = { command = "fixture", args = ["x"], refresh_interval_ms = 0, extension = "y" }, '
+           'aws = { profile = "p", credential_export = { command = "fixture" } }, '
+           'gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", '
+           'delivery = { kind = "header", name = "X" } } } }\n')
+    _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"npm": "@ai-sdk/openai-compatible", '
+           '"future": 1, "options": {"headers": {"X": "y"}, "timeout": false, "chunkTimeout": 1000}, '
+           '"models": {"m": {"limit": {"context": 1, "output": 2}, "interleaved": {"field": "reasoning"}, '
+           '"cost": {"input": 0.5, "output": 1}, "variants": {"high": {"disabled": false, "x": 1}}}}}}}')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert not any(item.config_blocker for item in _items(service, ()))
+
+
+@pytest.mark.parametrize("field", [
+    "model = 1", "model_post_turn_compact_threshold_percent = 12.5", '[features]\nunified_exec = "bad"',
+])
+def test_codex_fields_outside_the_provider_map_stay_with_the_cli(home, tmp_path, field):
+    # Accepted shapes differ by CLI version and fail direct launches alike;
+    # migration neither reads nor rewrites them.
+    _write(home / ".codex/config.toml", f'{field}\n[model_providers.relay]\nhttp_headers = {{ X = "y" }}\n'
+           if not field.startswith("[") else f'[model_providers.relay]\nhttp_headers = {{ X = "y" }}\n{field}\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert not any(item.config_blocker for item in _items(service, ()))
+
+
+def test_codex_count_beyond_signed_64_bits_blocks_hub_mode(home, tmp_path):
+    _write(home / ".codex/config.toml", "model_providers = { relay = { stream_max_retries = 9223372036854775808 } }\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+def test_apply_rejects_a_backend_whose_native_config_blocks_hub_mode(home, tmp_path):
+    _seed(home, "codex-auth")
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    importable = [row for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    assert len(importable) == 1
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.migration_apply([importable[0]["id"]]))
+    assert caught.value.status == 409
+    assert not store.config.sources and not adapter.provisioned
+    assert KEY.encode() in (home / ".codex/auth.json").read_bytes()
+
+
+def test_completed_replay_rejects_a_config_blocker_written_after_cleanup(home, tmp_path):
+    _seed(home, "codex-auth")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    [item_id] = [row["id"] for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    assert asyncio.run(service.migration_apply([item_id]))["applied"] == 1
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.migration_apply([item_id]))
+    assert caught.value.status == 409
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_invalid_codex_auth_file_blocks_hub_mode(home, tmp_path, unreadable):
+    _write(home / ".codex/auth.json", json.dumps({"OPENAI_API_KEY": KEY}) if unreadable else "{1: 2}")
+    if unreadable:
+        (home / ".codex/auth.json").chmod(0)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+@pytest.mark.parametrize("config", [
+    {"provider": {"openrouter": {"options": {"apiKey": KEY}}}},
+    {"provider": {"openrouter": "bad"}},
+])
+def test_unreadable_opencode_auth_file_blocks_hub_mode_and_scans_config_layers(home, tmp_path, config):
+    _write(home / ".local/share/opencode/auth.json", "{1: 2}")
+    user = home / ".config/opencode/opencode.json"
+    _write(user, json.dumps(config))
+    service, _, _ = _service(tmp_path, migration_home=home)
+    items = [item for item in _items(service, ()) if item.backend == "opencode"]
+    assert any(item.config_blocker and item.notes_key.endswith(".unreadable") for item in items)
+    assert any(str(user) in item.source_paths for item in items)
+
+
+def test_apply_rejects_a_config_blocker_found_by_the_guarded_rescan(home, tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    import core.handlers.model_hub.migration as migration
+
+    _seed(home, "codex-auth")
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    [item_id] = [row["id"] for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    draining = False
+    scan = migration.scan_native_configs
+
+    def rescan(*args, **kwargs):
+        # A real file edit also rebinds the selected row's revision, so inject
+        # the blocker beside an unchanged selection to reach the final check.
+        items = scan(*args, **kwargs)
+        if draining:
+            items.append(migration._blocked_item("codex", "drained", config_blocker=True))
+        return items
+
+    @asynccontextmanager
+    async def guard(backends):
+        nonlocal draining
+        draining = True
+
+        async def verify_idle():
+            return None
+
+        yield verify_idle
+
+    monkeypatch.setattr(migration, "scan_native_configs", rescan)
+    service.migration_guard = guard
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.migration_apply([item_id]))
+    assert caught.value.status == 409
+    assert not store.config.sources and not adapter.provisioned
+    assert KEY.encode() in (home / ".codex/auth.json").read_bytes()
+
+
+def test_opencode_header_auth_in_one_layer_keeps_another_layers_endpoint(home, tmp_path):
+    user = home / ".config/opencode/opencode.json"
+    project = home / "project/opencode.json"
+    _write(user, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1", "apiKey": KEY}}}}))
+    _write(project, json.dumps({"provider": {"openrouter": {"options": {
+        "headers": {"Authorization": "Bearer fixture"}}}}}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, roots) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    options = json.loads(user.read_text())["provider"]["openrouter"]["options"]
+    assert options == {"baseURL": "https://relay.example/api/v1"}
+
+
+def test_equal_secret_selected_for_another_backend_leaves_claude_oauth_token(home, tmp_path):
+    settings = home / ".claude/settings.json"
+    _write(settings, json.dumps({"env": {"CLAUDE_CODE_OAUTH_TOKEN": KEY}}))
+    _seed(home, "codex-auth", raw=KEY)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    codex = [item for item in _items(service, ()) if item.backend == "codex" and item.proposed_action == "import"]
+    assert codex
+    claude = replace(codex[0], backend="claude", secret=None, kind="oauth_native", proposed_action="import")
+    for edit in plan_native_cleanup([*codex, claude], home=home):
+        edit.apply()
+    assert json.loads(settings.read_text())["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == KEY
+
+
+def test_equal_claude_api_key_leaves_a_blocked_oauth_token_in_another_field(home, tmp_path):
+    settings = home / ".claude/settings.json"
+    _write(settings, json.dumps({"env": {"ANTHROPIC_API_KEY": KEY, "CLAUDE_CODE_OAUTH_TOKEN": KEY}}))
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, ()) if item.proposed_action == "import"]
+    assert [item.backend for item in importable] == ["claude"]
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    assert json.loads(settings.read_text())["env"] == {"CLAUDE_CODE_OAUTH_TOKEN": KEY}
+
+
+def test_claude_retained_credential_in_one_layer_keeps_another_layers_base_url(home, tmp_path):
+    user = home / ".claude/settings.json"
+    project = home / "project/.claude/settings.json"
+    _write(user, json.dumps({"env": {"ANTHROPIC_API_KEY": KEY, "ANTHROPIC_BASE_URL": "https://relay.example"}}))
+    _write(project, json.dumps({"apiKeyHelper": "fixture-helper"}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, roots) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert json.loads(user.read_text())["env"] == {"ANTHROPIC_BASE_URL": "https://relay.example"}
+
+
+def test_scan_payload_exposes_configuration_blockers(home, tmp_path):
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    rows = service.migration_scan()["items"]
+    assert any(row["backend"] == "codex" and row["config_blocker"] for row in rows)
+
+
+def test_opencode_unselected_key_in_one_layer_keeps_another_layers_endpoint(home, tmp_path):
+    user = home / ".config/opencode/opencode.json"
+    project = home / "project/opencode.json"
+    _write(user, json.dumps({"provider": {"openrouter": {"options": {"apiKey": "fixture-kept-native"}}}}))
+    _write(project, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1", "apiKey": KEY}}}}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [
+        item for item in _items(service, roots)
+        if item.proposed_action == "import" and item.secret == KEY
+    ]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert json.loads(user.read_text())["provider"]["openrouter"]["options"] == {"apiKey": "fixture-kept-native"}
+    assert json.loads(project.read_text())["provider"]["openrouter"]["options"] == {
+        "baseURL": "https://relay.example/api/v1"}
+
+
+def test_codex_unresolved_env_key_in_one_layer_keeps_the_provider_native(home, tmp_path):
+    user = home / ".codex/config.toml"
+    project = home / "project/.codex/config.toml"
+    _write(user, 'model_provider = "relay"\n[model_providers.relay]\nenv_key = "FIXTURE_UNSET_KEY"\n')
+    _write(project, '[model_providers.relay]\nbase_url = "https://relay.example/v1"\n'
+           f"experimental_bearer_token = {json.dumps(KEY)}\n")
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    items = _items(service, roots)
+    importable = [item for item in items if item.proposed_action == "import"]
+    assert importable and any(item.proposed_action != "import" for item in items if item.backend == "codex")
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert 'env_key = "FIXTURE_UNSET_KEY"' in user.read_text()
+    assert 'model_provider = "relay"' in user.read_text()
+    assert "relay.example" in project.read_text()
+    # The carried bearer still leaves the layer that supplied it, so a replay
+    # cannot rediscover it as importable.
+    assert KEY not in project.read_text()
+    assert "experimental_bearer_token" not in project.read_text()
+
+
+def test_unresolved_opencode_reference_in_another_layer_stays_with_its_endpoint(home, tmp_path):
+    user = home / ".config/opencode/opencode.json"
+    project = home / "project/opencode.json"
+    _write(user, json.dumps({"provider": {"openrouter": {"options": {"apiKey": "{env:FIXTURE_MISSING_KEY}"}}}}))
+    _write(project, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1", "apiKey": KEY}}}}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, roots) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert json.loads(user.read_text())["provider"]["openrouter"]["options"] == {"apiKey": "{env:FIXTURE_MISSING_KEY}"}
+    assert json.loads(project.read_text())["provider"]["openrouter"]["options"] == {
+        "baseURL": "https://relay.example/api/v1"}

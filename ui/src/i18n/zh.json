@@ -924,13 +924,13 @@
           "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
-          "title": "切换到模型网关，你会多出三件事",
+          "title": "切换到模型网关，有三大益处",
           "1": "额度用尽不断线",
           "1.detail": "Claude 订阅用满时，自动切换到下一个供应商，对话继续。",
           "2": "一个 Key 用于多个后端",
           "2.detail": "同一个 API Key 可以同时给 Claude Code、Codex、OpenCode 用。",
-          "3": "按后端、按模型自己定",
-          "3.detail": "哪个后端的哪个模型使用哪个供应商，都可以逐条指定。"
+          "3": "模型搭配随心所欲",
+          "3.detail": "哪个后端使用哪个供应商的哪个模型，都可以任意搭配。"
         },
         "note": {
           "perBackend": "逐个后端切换，互不影响——其余后端保持直连。切换后随时可以切换回直连。"
@@ -976,8 +976,8 @@
           "summary_one": "{{count}} 个 Agent 需关注",
           "summary_other": "{{count}} 个 Agent 需关注",
           "modelMissing": "未选择模型",
-          "routeMissing": "此模型未配置路由",
-          "degraded": "模型供应已降级",
+          "routeMissing": "{{model}} 模型名不存在，请修改此 agent 的模型名或添加 {{model}} 模型的路由",
+          "degraded": "部分供应商不可用，请求已自动切换到其他供应商",
           "waiting": "等待供应商恢复",
           "interrupted": "此模型没有可用供应商"
         },
@@ -1021,6 +1021,7 @@
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
           "removeConfirm": "移除",
+          "removeTitle": "移除 {{model}}？",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
@@ -1036,7 +1037,8 @@
           "saveConflict": "编辑期间该列表在别处发生了变更。你的改动已重放到新列表上，请确认后重新保存。",
           "saveIdInvalid": "列表中有模型 ID 不适用于这个后端。请移除该模型后重新添加。",
           "saveDuplicate": "列表中有两个模型使用了相同的 ID，请移除其中一个后重新保存。",
-          "saveLocked": "该列表与服务端自有的模型不一致。已重新读取服务器上的列表，请确认后重新保存。",
+          "saveLocked": "列表中有模型被标记为该后端内置，但这个后端并不提供它。已重新读取服务器上的列表，请移除该模型后重新添加。",
+          "saveOriginImmutable": "这个模型已经在列表里了，不能作为新模型重新添加。已重新读取服务器上的列表，请直接编辑已有的那一项。",
           "saveInvalid": "列表中某个模型的字段值不被这个后端接受，请检查后重新保存。",
           "grabbed_one": "已抓起 {{model}}，第 {{position}} / {{count}} 位。",
           "grabbed_other": "已抓起 {{model}}，第 {{position}} / {{count}} 位。",
@@ -1245,6 +1247,7 @@
           "passthrough": "透传",
           "unconfigured": "未配置"
         },
+        "originNow": "当前",
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
@@ -1461,6 +1464,8 @@
           "confirm": "替换",
           "replaced": "已替换第 {{position}} 个路由项。"
         },
+        "editModel": "编辑模型",
+        "removeModel": "删除模型",
         "sourceMissing": "供应商不存在",
         "invalidAfterRefresh": "这个路由项在刷新后的供应商中不可用。替换或移除后再保存。",
         "reorder": {
@@ -1591,8 +1596,7 @@
           "native": {
             "label": "由 Agent 管理",
             "desc": {
-              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。",
-              "chatgpt": "Codex 直接用这个 ChatGPT 账号登录。"
+              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。"
             }
           },
           "hub": {
@@ -1605,15 +1609,13 @@
         },
         "badge": {
           "recommended": "推荐",
-          "secondary": "次选",
-          "supportedNotRecommended": "支持，不推荐"
+          "secondary": "次选"
         },
         "tos": {
           "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
         },
         "hint": {
-          "claude": "两条都要也可以，分两次添加。",
-          "chatgpt": "额度用完不会自动切换，也看不到用量。"
+          "claude": "两条都要也可以，分两次添加。"
         },
         "signIn": "去登录",
         "cancel": "取消",
@@ -1646,7 +1648,8 @@
           "hint": "登录同意后，把页面给的授权码粘贴回来"
         },
         "callback": {
-          "hint": "登录后，把浏览器最终停留的回调地址粘贴回来"
+          "hint": "登录后，把浏览器最终停留的回调地址粘贴回来",
+          "rejected": "这不是授权完成后的回调地址。请粘贴登录同意后浏览器地址栏里的完整网址（包含 code=），改好后重新提交。"
         },
         "deviceCode": {
           "hint": "在那个页面输入设备码，这里会自动继续"
@@ -1707,24 +1710,24 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证，不读取运行中的环境变量。迁移后，所选认证由模型网关管理。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，所选认证由模型网关管理。",
         "empty": "没有检测到可迁移的配置。",
         "sharedFiles": "这些后端共用文件中保存的认证，需要一起迁移：{{backends}}。勾选或取消其中一个，会同时更新全部关联后端。",
         "scanFailed": "扫描 Agent 配置失败，请重试",
         "applyFailed": "迁移失败，请重试",
         "blocked": {
-          "config": "请检查此 CLI 已保存的配置，再重新扫描。",
-          "environment": "暂时无法导入此环境变量认证。请将密钥保存到受支持的配置文件，再重新扫描。",
-          "credential": "无法读取此凭据，或其认证形式暂不受支持。请检查凭据访问权限和已保存的认证格式，再重新扫描。",
-          "dynamic_shell": "此文件通过表达式或命令设置认证，无法安全读取。请将需要迁移的认证以固定值保存到受支持的配置文件，再重新扫描。迁移不会执行 Shell 代码。",
-          "ambiguous_shell": "列出的文件中存在互相冲突的赋值。请确认应使用的固定值，统一相关配置后重新扫描。",
-          "unreadable": "无法读取此配置文件。请检查文件是否存在，以及 Avibe 是否有读取权限，再重新扫描。",
-          "reference": "引用的变量没有明确的已保存固定值。请在列出的配置文件或 Shell 启动文件中配置并保存对应的密钥，再重新扫描。",
-          "helper": "无法导入由命令提供的凭据。请将凭据保存为受支持的静态配置，或在模型网关中手动添加供应商。",
-          "token": "此登录令牌或认证格式暂不支持导入。请在模型网关中添加供应商，或为该供应商重新登录。",
-          "headers": "暂不支持导入自定义认证请求头。请使用受支持的认证方式，或在模型网关中手动添加供应商。",
-          "transport": "模型网关暂不支持这里的认证方式，已跳过，原文件未改动。可以改用供应商的标准 API Key 重新添加。",
-          "fallback": "暂时无法导入此认证，请使用模型网关现有的添加流程手动添加供应商。"
+          "config": "配置文件格式有误。",
+          "environment": "环境变量里的密钥暂不支持迁移。",
+          "credential": "不支持这种认证方式。",
+          "dynamic_shell": "密钥由命令生成，无法读取。",
+          "ambiguous_shell": "多个文件里的密钥不一致。",
+          "unreadable": "没有读取这个文件的权限。",
+          "reference": "引用的变量找不到值。",
+          "helper": "密钥由脚本生成，无法读取。",
+          "token": "不支持这种登录令牌。",
+          "headers": "不支持自定义请求头。",
+          "transport": "网关无法按这种方式发送密钥。",
+          "fallback": "暂不支持迁移，请手动添加。"
         },
         "applying": "迁移中…",
         "errors": {
@@ -1900,7 +1903,6 @@
           "position": "顺序 #{{n}}"
         },
         "hint": {
-          "safe": "这些模型还有其他供应商可用。",
           "interrupt": "有模型会因此没有可用供应商。"
         },
         "gap": {
@@ -1912,7 +1914,6 @@
           "label": "已移除的路由项",
           "gapLabel": "已经没有可用供应商的模型",
           "hint": {
-            "safe": "这些模型仍有其他供应商可用。",
             "interrupt": "有模型现在没有可用供应商。"
           }
         },
@@ -2092,6 +2093,7 @@
       "submission_failed": "粘贴的内容没能提交，请重试",
       "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
       "binding_failed": "该账号已被另一个供应商使用",
+      "account_already_added": "这个账号已经添加过了，不能重复添加。要添加另一个订阅，请登录其他账号。",
       "expired": "授权超时，请重新连接"
     },
     "probe": {
@@ -4376,6 +4378,44 @@
         "more": "+{{count}}",
         "showMore": "显示其余 {{count}} 个附件",
         "collapse": "收起附件"
+      }
+    },
+    "failureDetails": {
+      "show": "查看详情",
+      "hide": "收起详情",
+      "outcome": {
+        "served": "{{model}} 最终已成功响应。",
+        "exhausted": "{{model}} 的所有供应商在上游都失败了。",
+        "failed_terminal": "上游 API 拒绝了 {{model}} 的请求。",
+        "failed_local": "{{model}} 的请求失败了，原因见下方。",
+        "no_candidate": "请求时没有可以提供 {{model}} 的供应商。",
+        "canceled": "{{model}} 的请求已取消。"
+      },
+      "httpStatus": "HTTP 状态码",
+      "errorCode": "错误码",
+      "reasonLabel": "原因",
+      "blockers": "当时不可用的供应商",
+      "upstreamNote": "以上状态码与错误码均由上游供应商的 API 返回。Avibe 会保留状态码和错误码，但不会保存供应商返回的原始报文，因为其中可能包含凭据。",
+      "copyRecord": "复制记录",
+      "reason": {
+        "quota_exhausted": "额度用尽",
+        "cooldown": "冷却中",
+        "rate_limited": "触发限流",
+        "server_error": "上游服务器错误",
+        "network": "网络错误",
+        "recovery": "恢复中",
+        "manual": "手动切换",
+        "credential_expired": "凭据已过期",
+        "credential_revoked": "凭据已吊销",
+        "balance_exhausted": "余额不足",
+        "account_banned": "账号被封禁",
+        "permission_denied": "无权限",
+        "unclassified_error": "未分类的上游错误",
+        "no_enabled_source": "没有已启用的供应商",
+        "no_eligible_source": "没有能提供该模型的供应商",
+        "route_unconfigured": "尚未配置路由",
+        "source_missing": "供应商已不存在",
+        "model_unsupported": "该供应商不提供此模型"
       }
     }
   },
