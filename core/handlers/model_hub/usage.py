@@ -478,6 +478,10 @@ def _normalize_row(row: object) -> Optional[dict]:
         "model_id": model_id,
         **counters,
     }
+    if row.get("history_degraded") is True:
+        # Internal witness that an earlier read lost evidence. It never crosses
+        # the public usage-summary boundary.
+        normalized["history_degraded"] = True
     for subset, superset in _COUNTER_SUBSETS:
         normalized[subset] = min(normalized[subset], normalized[superset])
     normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
@@ -744,6 +748,7 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
         )
         incomplete = True
     row_day = _calendar_day(row.get("day", ""))
+    row_day_overlaps = False
     if not incomplete and row_day is not None:
         try:
             day_start = _local_midnight(row_day).astimezone(timezone.utc)
@@ -751,27 +756,30 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
         except (OverflowError, OSError, ValueError):
             day_start = None
             day_end = None
-        if (
+        row_day_overlaps = (
             day_start is not None
             and day_end is not None
             and day_start <= measured
             and day_end > oldest_start
+        )
+    if not incomplete and (row_day_overlaps or retained or expired_known):
+        # Compare durable UTC slices even when a host timezone change makes the
+        # persisted local owner day fall outside the current display grid.
+        nested_totals = _empty_totals()
+        for item in retained.values():
+            _accumulate(nested_totals, item)
+        if expired_known:
+            _accumulate(nested_totals, expired)
+        if not expired_known or any(
+            nested_totals[key] != row[key] for key in _COUNTER_KEYS
         ):
-            nested_totals = _empty_totals()
-            for item in retained.values():
-                _accumulate(nested_totals, item)
-            if expired_known:
-                _accumulate(nested_totals, expired)
-            if not expired_known or any(
-                nested_totals[key] != row[key] for key in _COUNTER_KEYS
-            ):
-                logger.warning(
-                    "Model Hub usage ledger row %s cannot reconcile its complete "
-                    "in-horizon day with retained and expired hourly counters; "
-                    "publishing it as incomplete",
-                    _row_key(row),
-                )
-                incomplete = True
+            logger.warning(
+                "Model Hub usage ledger row %s cannot reconcile its complete "
+                "in-horizon day with retained and expired hourly counters; "
+                "publishing it as incomplete",
+                _row_key(row),
+            )
+            incomplete = True
     if len(retained) > USAGE_HOURLY_RETENTION_HOURS:
         retained = dict(
             sorted(
@@ -883,7 +891,9 @@ class BoundedUsageLedger:
         # wrote. Same answer as every other door, for the same reason: a row whose
         # magnitude no published document could carry is dropped, not saturated.
         held = []
-        degraded = dropped > 0
+        degraded = dropped > 0 or any(
+            row.get("history_degraded") is True for row in rows.values()
+        )
         for row in rows.values():
             if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
                 held.append(row)
@@ -980,7 +990,14 @@ class BoundedUsageLedger:
             return
         with self._lock:
             persisted_at = _aware(self._now())
-            rows = {_row_key(row): row for row in self._read().rows}
+            read = self._read()
+            rows = {_row_key(row): row for row in read.rows}
+            if read.degraded:
+                # A successful write must not turn damaged history into a
+                # complete report. Carry the uncertainty forward in the
+                # surviving/new rows until the ledger is explicitly repaired.
+                for row in rows.values():
+                    row["history_degraded"] = True
             folded = False
             for call in calls:
                 metered_at = min(_aware(call.at), persisted_at)
@@ -1030,6 +1047,8 @@ class BoundedUsageLedger:
                         extra={"source_id_usable": source_key is not None},
                     )
                     continue
+                if read.degraded:
+                    increment["history_degraded"] = True
                 existing = rows.get(_row_key(increment))
                 if existing is None:
                     rows[_row_key(increment)] = increment

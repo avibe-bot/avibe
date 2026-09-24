@@ -1447,6 +1447,7 @@
           "pin": "Pin this bucket",
           "unpin": "Unpin this bucket",
           "pinned": "Pinned",
+          "currentPartial": "Current partial hour",
           "complete": "History complete",
           "partial": "Partial history",
           "points_one": "{{count}} {{granularity}} point",

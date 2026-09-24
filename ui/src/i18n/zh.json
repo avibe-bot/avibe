@@ -1447,6 +1447,7 @@
           "pin": "固定这个时间桶",
           "unpin": "取消固定时间桶",
           "pinned": "已固定",
+          "currentPartial": "当前小时未结束",
           "complete": "历史完整",
           "partial": "历史不完整",
           "points_one": "{{count}} 个{{granularity}}数据点",

@@ -393,6 +393,23 @@ describe('UsageTab', () => {
     expect(screen.getByRole('dialog').textContent).toContain('UTC-05:00');
   });
 
+  it('labels the current 24-hour bucket when it is only partially elapsed', () => {
+    const value = report({
+      to_at: '2026-09-24T02:15:00+08:00',
+      buckets: [
+        bucket('00'),
+        bucket('01'),
+        bucket('02', [row()], { end_at: '2026-09-24T02:15:00+08:00' }),
+      ],
+    });
+    draw(value);
+
+    fireEvent.pointerEnter(screen.getAllByRole('button', { name: /Usage bucket/ })[2]!);
+
+    expect(screen.getByRole('dialog').textContent).toContain('Current partial hour');
+    expect(screen.getByRole('dialog').textContent).toContain('History complete');
+  });
+
   it('neutralizes formula-like supplier/model labels without quoting numeric counters', () => {
     expect(csvCell('=supplier')).toBe("'=supplier");
     expect(csvCell('@model')).toBe("'@model");

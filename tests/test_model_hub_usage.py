@@ -1310,6 +1310,67 @@ def test_hourly_report_preserves_uncertainty_for_timezone_orphaned_daily_rows(
     assert all(not bucket["history_complete"] for bucket in report["buckets"])
 
 
+def test_timezone_orphaned_hourly_rows_reconcile_against_utc_slices(
+    tmp_path: Path,
+) -> None:
+    """A local-day owner outside the current grid cannot hide a missing hour."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    counts = {
+        "requests": 2,
+        "token_reports": 2,
+        "input_tokens": 20,
+        "cached_input_tokens": 0,
+        "output_tokens": 2,
+    }
+    try:
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps([{
+                "day": "2026-09-25",
+                "source_id": "src-timezone-orphan-hourly",
+                "model_id": "model-timezone-orphan-hourly",
+                **counts,
+                "last_metered_at": "2026-09-24T23:15:00+00:00",
+                "hourly_history_complete": True,
+                "hourly_expired_totals": {
+                    "requests": 0,
+                    "token_reports": 0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                },
+                "hours": [{
+                    "key": "2026-09-24T23:00:00+00:00",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": 10,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "last_metered_at": "2026-09-24T23:15:00+00:00",
+                }],
+            }]),
+            encoding="utf-8",
+        )
+
+        os.environ["TZ"] = "Pacific/Honolulu"
+        time.tzset()
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 1
+    assert all(not bucket["history_complete"] for bucket in report["buckets"])
+
+
 @pytest.mark.parametrize(
     ("zone", "now", "calls", "from_day", "to_day", "window_days"),
     [
@@ -1537,6 +1598,33 @@ def test_degraded_ledger_history_is_not_published_as_complete_zero(
 
     assert all(not bucket["history_complete"] for bucket in daily["buckets"])
     assert all(not bucket["history_complete"] for bucket in hourly["buckets"])
+
+
+def test_degraded_ledger_history_survives_a_followup_write(tmp_path: Path) -> None:
+    """A later write cannot turn discarded history into a complete zero."""
+
+    now = NOW
+    ledger = _ledger(tmp_path, now=_Clock(now))
+    ledger.path.parent.mkdir(parents=True)
+    ledger.path.write_text("not json", encoding="utf-8")
+
+    ledger.record(
+        source_id="src_after-degraded-read",
+        model_id="model-after-degraded-read",
+        usage=ProtocolUsageReport(input_tokens=7),
+        at=now,
+    )
+
+    fresh = _ledger(tmp_path, now=_Clock(now))
+    daily = fresh.report(window="7d", now=now)
+    hourly = fresh.report(window="24h", now=now)
+    persisted = json.loads(fresh.path.read_text(encoding="utf-8"))
+
+    assert daily["totals"]["requests"] == 1
+    assert hourly["totals"]["requests"] == 1
+    assert all(not bucket["history_complete"] for bucket in daily["buckets"])
+    assert all(not bucket["history_complete"] for bucket in hourly["buckets"])
+    assert all(row["history_degraded"] is True for row in persisted)
 
 
 def test_a_window_excludes_days_outside_it(tmp_path: Path) -> None:

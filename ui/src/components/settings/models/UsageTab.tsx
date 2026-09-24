@@ -324,6 +324,10 @@ function UsageChart({
   const activeValue = bucket && !bucket.history_complete && bucketRows.length === 0
     ? null
     : usageMetricValue(bucketTotals, metric);
+  const currentPartialHour = bucket !== null
+    && report.window_key === '24h'
+    && activeIndex === report.buckets.length - 1
+    && Date.parse(bucket.end_at) - Date.parse(bucket.start_at) < 60 * 60 * 1000;
   const tickIndexes = report.buckets.length <= 7
     ? report.buckets.map((_, index) => index)
     : [...new Set([0, Math.floor((report.buckets.length - 1) / 2), report.buckets.length - 1])];
@@ -651,6 +655,7 @@ function UsageChart({
                 {' '}
                 {t('settings.models.usage.requests.unit')}
               </span>
+              {currentPartialHour && <span>{t('settings.models.usage.chart.currentPartial')}</span>}
               <span>{bucket.history_complete ? t('settings.models.usage.chart.complete') : t('settings.models.usage.chart.partial')}</span>
             </div>
           </div>
