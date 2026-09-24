@@ -22,6 +22,10 @@ owner signal in this interleaved stream; Assistant frames do not carry that fiel
 - Treat a missing or unknown origin as foreground only when no competing Activity
   evidence exists; otherwise preserve it as detached output and leave the pending
   human request untouched.
+- Keep a synthetic owner for detached output until the durable emit succeeds.
+  A failed emit retains the text and idempotency identity for receiver-end
+  retry; it must not be replaced by a generic EOF failure or release the runtime
+  gate early.
 - Preserve durable prewrite evidence so a write that definitely did not happen can
   be explicitly retried without replaying an attempted or ambiguous native write.
 
@@ -54,6 +58,9 @@ Turn, Run, or delivery ownership.
    claim, or unsolicited routing. A late human Result is consumed silently,
    while the existing attempted-versus-definitely-unsent evidence remains
    available for recovery.
+7. Provenance classification updates the in-memory Activity ownership before its
+   durable snapshot. A persistence failure records retryable recovery evidence
+   and cannot cause the already-consumed terminal Result to be skipped.
 
 The registry uses one FIFO candidate-selection and receipt-binding algorithm
 for metadata eligibility, Turn constraints, retries, and persisted local-only

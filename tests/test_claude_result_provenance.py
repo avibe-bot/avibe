@@ -1498,6 +1498,252 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(terminal), 1)
         self.assertEqual(terminal[0].kwargs["level"], "silent")
 
+    async def test_stop_owned_prewrite_keeps_agent_service_gate_until_cleanup(self):
+        key = "session-stop-service-gate:/tmp/work"
+        agent, service = _build_agent()
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler.get_or_create_claude_session = AsyncMock()
+        agent.session_handler.handle_session_error = AsyncMock(return_value=True)
+        cleanup_entered = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        query_started = asyncio.Event()
+
+        class _Client:
+            _vibe_runtime_base_session_id = "sess-stop-service-gate"
+            _vibe_runtime_session_key = key
+
+            async def query(self, *_args, **_kwargs):
+                query_started.set()
+
+            async def interrupt(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        client = _Client()
+        agent.claude_sessions[key] = client
+
+        async def get_client(*_args, **_kwargs):
+            agent.claude_sessions[key] = client
+            return client
+
+        agent.session_handler.get_or_create_claude_session.side_effect = get_client
+
+        original_cleanup = agent._cleanup_runtime_session
+        async def hold_cleanup(*_args, **_kwargs):
+            cleanup_entered.set()
+            await release_cleanup.wait()
+            await original_cleanup(*_args, **_kwargs)
+
+        agent._cleanup_runtime_session = hold_cleanup
+
+        async def settle_stop(context, *_args, **_kwargs):
+            service.release_runtime_turn(context)
+
+        agent.controller.emit_agent_message = AsyncMock(side_effect=settle_stop)
+        admission = agent._steering_lock(key)
+        await admission.acquire()
+
+        def _request(text: str):
+            return SimpleNamespace(
+                context=_context(key, turn_token=text),
+                message=text,
+                working_path="/tmp/work",
+                base_session_id="sess-stop-service-gate",
+                composite_session_id=key,
+                session_key="session-key",
+                subagent_name=None,
+                subagent_model=None,
+                subagent_reasoning_effort=None,
+                vibe_agent_model="claude-fixture",
+                vibe_agent_reasoning_effort=None,
+                vibe_agent_system_prompt=None,
+                input_metadata=None,
+                ack_message_id=None,
+                ack_reaction_message_id=None,
+                ack_reaction_emoji=None,
+                files=None,
+            )
+
+        stop_request = SimpleNamespace(
+            context=_context(key, turn_token="stop"),
+            composite_session_id=key,
+            stop_failure_reason=None,
+        )
+        stop = asyncio.create_task(service.handle_stop("claude", stop_request))
+        await asyncio.sleep(0)
+        primary = asyncio.create_task(service.handle_message("claude", _request("primary")))
+        await asyncio.sleep(0)
+        gate = service._get_turn_gate(key)
+        service._stamp_runtime_turn(stop_request, key, gate.token)
+        admission.release()
+
+        await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+        successor_request = _request("successor")
+        successor = asyncio.create_task(
+            service.handle_message("claude", successor_request)
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(query_started.is_set())
+        self.assertTrue(gate.lock.locked())
+
+        release_cleanup.set()
+        await asyncio.wait_for(stop, timeout=1)
+        await asyncio.wait_for(query_started.wait(), timeout=1)
+        primary_result = await asyncio.wait_for(primary, timeout=1)
+        self.assertIsNone(primary_result)
+        await asyncio.wait_for(successor, timeout=1)
+        self.assertTrue(gate.lock.locked())
+        service.release_runtime_turn(successor_request.context)
+        self.assertFalse(gate.lock.locked())
+
+    async def test_provenance_persistence_failure_still_settles_terminal_result(self):
+        key = "session-provenance-persistence-failure:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        service.activities.classify_provisional_provenance = Mock(
+            side_effect=RuntimeError("activity store unavailable")
+        )
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(
+                        _block(
+                            ToolUseBlock,
+                            id="tool-persistence-failure",
+                            name="Bash",
+                            input={"command": "fixture"},
+                        )
+                    ),
+                    TaskStartedMessage(
+                        "task-persistence-failure",
+                        tool_use_id="tool-persistence-failure",
+                    ),
+                    ResultMessage("human reply", origin={"kind": "human"}),
+                ]
+            ),
+            "sess-provenance-persistence-failure",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertEqual(
+            agent._provenance_recovery_evidence[key]["owner"],
+            "human",
+        )
+        self.assertEqual(
+            agent._provenance_recovery_evidence[key]["activity_ids"],
+            ("task-persistence-failure",),
+        )
+
+    async def test_detached_synthetic_owner_releases_before_next_human_admission(self):
+        key = "session-synthetic-detached-release:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        agent.emit_result_message = _dispatcher_owned_emit(service)
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(_block(TextBlock, text="detached progress")),
+                    ResultMessage(
+                        "detached completion",
+                        origin={"kind": "task-notification"},
+                    ),
+                ]
+            ),
+            "sess-synthetic-detached-release",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertNotIn(key, agent._synthetic_pending_owners)
+        gate = service._get_turn_gate(key)
+        self.assertFalse(gate.lock.locked())
+        self.assertTrue(agent.emit_result_message.await_args.kwargs["output"].detached)
+
+        next_context = _context(key, turn_token="next-human")
+        next_token = await service.begin_agent_initiated_turn(
+            "claude",
+            next_context,
+            key,
+        )
+        self.assertTrue(next_token)
+        service.release_runtime_turn(next_context)
+
+    async def test_detached_synthetic_delivery_retries_with_same_output_identity(self):
+        key = "session-synthetic-detached-retry:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        attempts = []
+
+        async def emit_with_one_transient_failure(*_args, **kwargs):
+            attempts.append(kwargs["output"])
+            if len(attempts) == 1:
+                raise RuntimeError("temporary delivery failure")
+            return "message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=emit_with_one_transient_failure)
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(_block(TextBlock, text="background progress")),
+                    ResultMessage(
+                        "background completion",
+                        origin={"kind": "task-notification"},
+                    ),
+                ]
+            ),
+            "sess-synthetic-detached-retry",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertIs(attempts[0], attempts[1])
+        self.assertEqual(
+            attempts[0].idempotency_key,
+            attempts[1].idempotency_key,
+        )
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertNotIn(key, agent._synthetic_pending_owners)
+        self.assertNotIn(key, agent._detached_unsolicited_outputs)
+        self.assertNotIn(key, agent._detached_unsolicited_text)
+        self.assertFalse(service._get_turn_gate(key).lock.locked())
+
+        # The synthetic owner is retired only after the retry succeeds; a
+        # subsequent human turn can then acquire the same runtime gate.
+        next_context = _context(key, turn_token="next-human")
+        next_token = await service.begin_agent_initiated_turn(
+            "claude",
+            next_context,
+            key,
+        )
+        self.assertTrue(next_token)
+        service.release_runtime_turn(next_context)
+
     async def test_proven_human_background_activity_keeps_run_lineage(self):
         key = "session-positive-background-lineage:/tmp/work"
         agent, service = _build_agent()

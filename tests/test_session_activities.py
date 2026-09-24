@@ -984,6 +984,83 @@ def test_requeued_bound_batch_does_not_absorb_later_same_turn_completion():
     assert later[0].metadata["output_batch_id"] != first_batch_id
 
 
+def test_provisional_classification_updates_memory_before_retryable_persistence():
+    class _Store:
+        def __init__(self):
+            self.records = {}
+            self.fail = True
+
+        def upsert_activity(self, activity, *, phase):
+            if self.fail and activity["metadata"].get("provenance_human"):
+                raise RuntimeError("provenance store unavailable")
+            self.records[activity["id"]] = {
+                "activity": dict(activity),
+                "phase": phase,
+            }
+
+    store = _Store()
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-provenance-retry",
+        session_id="ses-provenance-retry",
+        activity_id="task-provisional",
+        kind="background_task",
+        metadata={
+            "provenance_pending": True,
+            "provenance_phase_id": "phase-1",
+        },
+    )
+
+    classified = registry.classify_provisional_provenance(
+        "claude",
+        "runtime-provenance-retry",
+        activity_ids={"task-provisional"},
+        parent_activity_ids=set(),
+        turn_id="human-turn",
+        run_ids=["human-run"],
+        delivery_key_external="delivery-human",
+        phase_id="phase-1",
+        detached=False,
+    )
+
+    assert classified[0].turn_id == "human-turn"
+    assert classified[0].run_id == "human-run"
+    assert classified[0].metadata["provenance_human"] is True
+    assert registry.active_for_runtime("claude", "runtime-provenance-retry") == classified
+    assert registry.provenance_persistence_recovery(
+        "claude",
+        "runtime-provenance-retry",
+    ) == {"task-provisional": "active: RuntimeError: provenance store unavailable"}
+    assert store.records["task-provisional"]["activity"]["metadata"][
+        "provenance_pending"
+    ] is True
+
+    store.fail = False
+    assert registry.classify_provisional_provenance(
+        "claude",
+        "runtime-provenance-retry",
+        activity_ids={"task-provisional"},
+        parent_activity_ids=set(),
+        turn_id="human-turn",
+        run_ids=["human-run"],
+        delivery_key_external="delivery-human",
+        phase_id="phase-1",
+        detached=False,
+    ) == []
+
+    assert registry.provenance_persistence_recovery(
+        "claude",
+        "runtime-provenance-retry",
+    ) == {}
+    assert store.records["task-provisional"]["activity"]["metadata"][
+        "provenance_human"
+    ] is True
+    assert "provenance_pending" not in store.records["task-provisional"]["activity"][
+        "metadata"
+    ]
+
+
 def test_batch_callbacks_run_after_all_claims_release_and_outside_registry_lock():
     registry = SessionActivityRegistry()
     for activity_id in ("task-a", "task-b"):

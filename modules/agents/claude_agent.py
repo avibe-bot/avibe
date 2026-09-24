@@ -120,6 +120,7 @@ class ClaudeAgent(BaseAgent):
         self._detached_assistant_text: dict[str, str] = {}
         self._detached_unsolicited_outputs: set[str] = set()
         self._detached_unsolicited_text: dict[str, str] = {}
+        self._detached_unsolicited_message_outputs: dict[str, MessageOutput] = {}
         self._activity_flush_tasks: dict[str, asyncio.Task] = {}
         self._activity_settle_events: dict[str, asyncio.Event] = {}
         self._buffered_assistant_messages: dict[str, list[tuple[object, int | None]]] = {}
@@ -137,6 +138,8 @@ class ClaudeAgent(BaseAgent):
         self._resolved_provisional_phase_ids: dict[str, str] = {}
         self._detached_foreground_tool_use_ids: dict[str, set[str]] = {}
         self._detached_foreground_task_ids: dict[str, set[str]] = {}
+        self._synthetic_pending_owners: dict[str, AgentRequest] = {}
+        self._provenance_recovery_evidence: dict[str, dict[str, object]] = {}
 
         # Question handler for AskUserQuestion support (disabled)
         # NOTE: Uncomment when SDK adds AskUserQuestion support
@@ -294,6 +297,7 @@ class ClaudeAgent(BaseAgent):
         turn_registered = False
         client = None
         input_receipt = None
+        stop_owned = False
 
         # Question callback handling (disabled - SDK doesn't support AskUserQuestion response)
         # if self.ENABLE_ASK_USER_QUESTION and request.message.startswith("claude_question:"):
@@ -407,7 +411,8 @@ class ClaudeAgent(BaseAgent):
                 self._remove_pending_request(runtime_session_key, request)
                 self._mark_session_idle_if_no_pending_requests(runtime_session_key)
                 await self._delete_ack(context, request)
-                self._release_service_runtime_turn(context)
+                if not bool(getattr(request, "_claude_stop_owned", False)):
+                    self._release_service_runtime_turn(context)
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
@@ -531,7 +536,11 @@ class ClaudeAgent(BaseAgent):
                         contained=contained is True,
                     )
             finally:
-                self._release_service_runtime_turn(context)
+                # Stop owns a prewrite rejection's terminal settlement. Keep the
+                # service gate held until handle_stop finishes cleanup and emits
+                # its single silent terminal result.
+                if not stop_owned:
+                    self._release_service_runtime_turn(context)
         finally:
             await self._delete_ack(context, request)
 
@@ -966,6 +975,7 @@ class ClaudeAgent(BaseAgent):
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
         self._suppressed_synthetic_error_text.pop(composite_key, None)
+        self._synthetic_pending_owners.pop(composite_key, None)
         if not preserve_pending_request_state:
             self._pending_reactions.pop(composite_key, None)
             pending_requests = self._pending_requests.pop(composite_key, None) or []
@@ -1166,6 +1176,7 @@ class ClaudeAgent(BaseAgent):
         if ambiguous_interrupts is not None:
             ambiguous_interrupts.discard(composite_key)
         self._stop_owned_terminal_keys.discard(composite_key)
+        self._synthetic_pending_owners.pop(composite_key, None)
         self._activity_provenance_barriers.discard(composite_key)
         self._activity_provenance_barrier_owners.pop(composite_key, None)
         self._steering_closing_keys().discard(composite_key)
@@ -2141,6 +2152,10 @@ class ClaudeAgent(BaseAgent):
                                         detached_activities,
                                     )
                                 raise
+                            self._retire_synthetic_pending_owner(
+                                composite_key,
+                                context,
+                            )
                             # The detached Activity output has no authority over
                             # a newer pending request. Its Turn stays owned by its
                             # own backend query and liveness/timeout path.
@@ -2162,8 +2177,17 @@ class ClaudeAgent(BaseAgent):
                                 raw_result_text,
                                 detached_text,
                             )
-                            self._detached_unsolicited_text.pop(composite_key, None)
-                            self._detached_unsolicited_outputs.discard(composite_key)
+                            if result_text:
+                                # Keep the payload and its idempotency identity until
+                                # the durable emit returns. A receiver-level exception
+                                # must be able to replay this same detached output
+                                # without creating a duplicate or releasing the
+                                # synthetic owner early.
+                                self._detached_unsolicited_text[composite_key] = result_text
+                            output = self._detached_unsolicited_message_outputs.setdefault(
+                                composite_key,
+                                self._unsolicited_message_output(message),
+                            )
                             if result_text:
                                 await self.emit_result_message(
                                     context,
@@ -2171,8 +2195,18 @@ class ClaudeAgent(BaseAgent):
                                     subtype=getattr(message, "subtype", "") or "",
                                     duration_ms=getattr(message, "duration_ms", 0),
                                     parse_mode="markdown",
-                                    output=self._unsolicited_message_output(message),
+                                    output=output,
                                 )
+                            self._detached_unsolicited_text.pop(composite_key, None)
+                            self._detached_unsolicited_outputs.discard(composite_key)
+                            self._detached_unsolicited_message_outputs.pop(
+                                composite_key,
+                                None,
+                            )
+                            self._retire_synthetic_pending_owner(
+                                composite_key,
+                                context,
+                            )
                             self._clear_detached_foreground_tool_state(composite_key)
                             self._resolved_provisional_phase_ids.pop(
                                 composite_key,
@@ -2266,6 +2300,14 @@ class ClaudeAgent(BaseAgent):
                                     # ResultMessage.result already contains the last
                                     # AssistantMessage, so only the terminal owner emits it.
                                     pending_request = self._pop_pending_request(composite_key)
+                                    if (
+                                        self._synthetic_pending_owners.get(composite_key)
+                                        is pending_request
+                                    ):
+                                        self._synthetic_pending_owners.pop(
+                                            composite_key,
+                                            None,
+                                        )
                                     self._refresh_activity_provenance_barrier(composite_key)
                                     output_activities = self._request_activities(pending_request)
                                     output_activity = output_activities[-1] if output_activities else None
@@ -2467,7 +2509,18 @@ class ClaudeAgent(BaseAgent):
                 terminal_steering_generation=self._steering_generation(composite_key),
             )
             eof_steering_generation = self._steering_generation(composite_key)
-            had_pending_requests = self._has_pending_requests(composite_key)
+            pending_requests = self._pending_requests.get(composite_key) or []
+            synthetic_owner = self._synthetic_pending_owners.get(composite_key)
+            synthetic_delivery_pending = (
+                synthetic_owner is not None
+                and pending_requests == [synthetic_owner]
+                and composite_key in self._detached_unsolicited_outputs
+            )
+            # A failed detached emit still has a live synthetic owner. It is not
+            # an EOF-without-result turn: settle the retained output first so
+            # _handle_receiver_eof cannot replace it with a generic error or
+            # release the gate before durable delivery.
+            had_pending_requests = bool(pending_requests) and not synthetic_delivery_pending
             if had_pending_requests:
                 if buffered_failure is None:
                     await self._handle_receiver_eof(composite_key, context)
@@ -2556,8 +2609,15 @@ class ClaudeAgent(BaseAgent):
                     self._requeue_activities(registry, detached_activities)
                     self._schedule_completed_activity_flush(composite_key, context)
             self._detached_assistant_text.pop(composite_key, None)
-            self._detached_unsolicited_outputs.discard(composite_key)
-            self._detached_unsolicited_text.pop(composite_key, None)
+            # A detached synthetic owner is still holding the runtime gate when
+            # delivery failed. Preserve its payload and stable output identity so
+            # the receiver-end retry (or the next recovery pass) can finish the
+            # same durable output exactly once. Successful delivery clears these
+            # maps before reaching this finally block.
+            if composite_key not in self._synthetic_pending_owners:
+                self._detached_unsolicited_outputs.discard(composite_key)
+                self._detached_unsolicited_text.pop(composite_key, None)
+                self._detached_unsolicited_message_outputs.pop(composite_key, None)
             self._end_activity_runtime(
                 composite_key,
                 activation_identity=receiver_activation_identity,
@@ -3348,6 +3408,26 @@ class ClaudeAgent(BaseAgent):
             return []
         return list(getattr(request, "output_activities", None) or [])
 
+    def _retire_synthetic_pending_owner(
+        self,
+        composite_key: str,
+        context: MessageContext,
+    ) -> bool:
+        """Release only a synthetic owner after detached delivery is durable."""
+
+        synthetic = self._synthetic_pending_owners.pop(composite_key, None)
+        if synthetic is None:
+            return False
+        pending = self._pending_requests.get(composite_key) or []
+        if pending and pending[0] is synthetic:
+            self._pop_pending_request(composite_key)
+        self._clear_request_activities(synthetic)
+        self._mark_session_idle_if_no_pending_requests(composite_key)
+        self._release_service_runtime_turn(
+            getattr(synthetic, "context", None) or context
+        )
+        return True
+
     def _attach_request_activities(
         self,
         request: AgentRequest,
@@ -3689,21 +3769,44 @@ class ClaudeAgent(BaseAgent):
 
         if registry is None or not activity_ids and not provisional_tool_ids:
             return
-        classified = registry.classify_provisional_provenance(
-            self.name,
-            composite_key,
-            activity_ids=activity_ids,
-            parent_activity_ids=(
-                provisional_tool_ids
-                if owner == "detached"
-                else provisional_tool_ids - unbound_tool_ids
-            ),
-            turn_id=turn_id,
-            run_ids=run_ids,
-            delivery_key_external=delivery_key,
-            phase_id=phase_id,
-            detached=detached,
-        )
+        classification_failed = False
+        try:
+            classified = registry.classify_provisional_provenance(
+                self.name,
+                composite_key,
+                activity_ids=activity_ids,
+                parent_activity_ids=(
+                    provisional_tool_ids
+                    if owner == "detached"
+                    else provisional_tool_ids - unbound_tool_ids
+                ),
+                turn_id=turn_id,
+                run_ids=run_ids,
+                delivery_key_external=delivery_key,
+                phase_id=phase_id,
+                detached=detached,
+            )
+        except Exception as error:
+            # Terminal Result provenance is authoritative even when the
+            # registry's durable classification write is temporarily
+            # unavailable. Keep a bounded recovery record and let the shared
+            # Result path settle the request exactly once; the receiver must
+            # not skip this already-consumed terminal frame.
+            self._provenance_recovery_evidence[composite_key] = {
+                "owner": owner,
+                "phase_id": phase_id,
+                "activity_ids": tuple(sorted(activity_ids)),
+                "tool_use_ids": tuple(sorted(provisional_tool_ids)),
+                "error": f"{type(error).__name__}: {error}",
+            }
+            logger.warning(
+                "Claude provisional provenance classification needs recovery "
+                "for %s; continuing with terminal owner %s",
+                composite_key,
+                owner,
+                exc_info=True,
+            )
+            classification_failed = True
         if owner == "human":
             # Keep uncorrelated task facts provisional for a later detached
             # Result. Only a TaskStarted tied to a tool phase proves that the
@@ -3725,6 +3828,8 @@ class ClaudeAgent(BaseAgent):
             self._provisional_foreground_tool_use_ids.pop(composite_key, None)
             self._provisional_foreground_task_ids.pop(composite_key, None)
             self._provisional_phase_ids.pop(composite_key, None)
+        if classification_failed:
+            return
         if classified and phase_id:
             claimed = registry.claim_completed_output_batch(
                 self.name,
@@ -3778,8 +3883,9 @@ class ClaudeAgent(BaseAgent):
             return True
         registry = self._activity_registry()
         pending = self._pending_requests.get(composite_key) or []
+        pending_context = getattr(pending[0], "context", None) if pending else None
         current_turn_id = (
-            self._current_turn_id(composite_key, pending[0].context)
+            self._current_turn_id(composite_key, pending_context)
             if pending
             else None
         )
@@ -4219,7 +4325,8 @@ class ClaudeAgent(BaseAgent):
             return True
         foreground_tool_ids = self._foreground_tool_use_ids.get(composite_key) or set()
         provisional_foreground_tool_ids = (
-            self._provisional_foreground_tool_use_ids.get(composite_key) or set()
+            getattr(self, "_provisional_foreground_tool_use_ids", {}).get(composite_key)
+            or set()
         )
         foreground = bool(
             (existing_activity is not None and existing_activity.foreground)
@@ -4545,16 +4652,27 @@ class ClaudeAgent(BaseAgent):
     ) -> None:
         if composite_key not in self._detached_unsolicited_outputs:
             return
-        text = self._detached_unsolicited_text.pop(composite_key, "").strip()
-        self._detached_unsolicited_outputs.discard(composite_key)
+        text = self._detached_unsolicited_text.get(composite_key, "").strip()
         if not text:
+            self._detached_unsolicited_outputs.discard(composite_key)
+            self._detached_unsolicited_text.pop(composite_key, None)
+            self._detached_unsolicited_message_outputs.pop(composite_key, None)
+            self._retire_synthetic_pending_owner(composite_key, context)
             return
+        output = self._detached_unsolicited_message_outputs.setdefault(
+            composite_key,
+            self._unsolicited_message_output(None),
+        )
         await self.emit_result_message(
             context,
             text,
             parse_mode="markdown",
-            output=self._unsolicited_message_output(None),
+            output=output,
         )
+        self._detached_unsolicited_outputs.discard(composite_key)
+        self._detached_unsolicited_text.pop(composite_key, None)
+        self._detached_unsolicited_message_outputs.pop(composite_key, None)
+        self._retire_synthetic_pending_owner(composite_key, context)
 
     async def _flush_detached_activity_output(
         self,
@@ -4920,6 +5038,29 @@ class ClaudeAgent(BaseAgent):
             return "activity"
         if composite_key in self._detached_unsolicited_outputs:
             return "detached"
+        synthetic_owner = self._synthetic_pending_owners.get(composite_key)
+        if (
+            message_type == "result"
+            and result_owner == "detached"
+            and synthetic_owner is not None
+        ):
+            completed_activities = []
+            if registry is not None:
+                completed_activities = registry.claim_completed_output_batch(
+                    self.name,
+                    composite_key,
+                    metadata_match={"provenance_pending": True},
+                )
+                if not completed_activities:
+                    completed_activities = registry.claim_completed_output_batch(
+                        self.name,
+                        composite_key,
+                    )
+            if completed_activities:
+                self._detached_activity_outputs[composite_key] = completed_activities
+                return "activity"
+            self._detached_unsolicited_outputs.add(composite_key)
+            return "detached"
         # A structured AssistantMessage failure pops the turn's real pending
         # request and arms ``_suppressed_synthetic_results`` for its paired
         # ResultMessage. Opening an agent-initiated turn for that duplicate frame
@@ -5069,6 +5210,7 @@ class ClaudeAgent(BaseAgent):
             output_activities=completed_activities,
         )
         self._pending_requests.setdefault(composite_key, []).append(request)
+        self._synthetic_pending_owners[composite_key] = request
         logger.info(
             "Opened agent-initiated turn for session %s (unsolicited backend output)",
             composite_key,

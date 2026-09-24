@@ -274,6 +274,9 @@ class SessionActivityRegistry:
             str, list[tuple[datetime, str]]
         ] = defaultdict(list)
         self._recovered_terminals: deque[SessionActivity] = deque()
+        self._provenance_persistence_recovery: dict[
+            tuple[str, str], dict[str, str]
+        ] = {}
         self._restore()
 
     def set_output_settled_callback(
@@ -400,6 +403,63 @@ class SessionActivityRegistry:
         except Exception:
             logger.warning("Failed to persist Activity %s", activity.id, exc_info=True)
             raise
+
+    def _record_provenance_persistence_recovery(
+        self,
+        activity: SessionActivity,
+        *,
+        phase: str,
+        error: BaseException,
+    ) -> None:
+        key = (activity.backend, activity.runtime_key)
+        self._provenance_persistence_recovery.setdefault(key, {})[
+            activity.id
+        ] = f"{phase}: {type(error).__name__}: {error}"
+
+    def provenance_persistence_recovery(
+        self,
+        backend: str,
+        runtime_key: str,
+    ) -> dict[str, str]:
+        """Return provenance writes that remain retryable after a store failure."""
+
+        with self._lock:
+            return dict(
+                self._provenance_persistence_recovery.get(
+                    (str(backend), str(runtime_key)),
+                    {},
+                )
+            )
+
+    def _retry_provenance_persistence_locked(
+        self,
+        key: tuple[str, str],
+    ) -> None:
+        pending = self._provenance_persistence_recovery.get(key)
+        if not pending:
+            return
+
+        activities: dict[str, SessionActivity] = {}
+        for activity_key, activity in self._active.items():
+            if activity_key[:2] == key and activity.id in pending:
+                activities[activity.id] = activity
+        for entry in self._completed_outputs.get(key) or ():
+            if entry.activity.id in pending:
+                activities[entry.activity.id] = entry.activity
+        for claimed in self._claimed_completed_outputs.values():
+            activity = claimed.entry.activity
+            if (activity.backend, activity.runtime_key) == key and activity.id in pending:
+                activities[activity.id] = activity
+
+        for activity_id, activity in activities.items():
+            phase = pending.get(activity_id, "awaiting_output").split(":", 1)[0]
+            try:
+                self._persist_activity(activity, phase=phase)
+            except Exception:
+                continue
+            pending.pop(activity_id, None)
+        if not pending:
+            self._provenance_persistence_recovery.pop(key, None)
 
     def _delete_activity(self, activity: SessionActivity) -> None:
         delete = getattr(self._store, "delete_activity", None)
@@ -1080,12 +1140,24 @@ class SessionActivityRegistry:
             )
 
         with self._lock:
+            self._retry_provenance_persistence_locked(key)
             for activity_key, activity in list(self._active.items()):
                 if activity_key[:2] != key or not matches(activity):
                     continue
                 updated = classify(activity)
-                self._persist_activity(updated, phase="active")
                 self._active[activity_key] = updated
+                try:
+                    self._persist_activity(updated, phase="active")
+                    self._provenance_persistence_recovery.get(key, {}).pop(
+                        updated.id,
+                        None,
+                    )
+                except Exception as error:
+                    self._record_provenance_persistence_recovery(
+                        updated,
+                        phase="active",
+                        error=error,
+                    )
                 classified.append(updated)
 
             queue = self._completed_outputs.get(key)
@@ -1094,8 +1166,19 @@ class SessionActivityRegistry:
                 for entry in queue:
                     if entry.activity and matches(entry.activity):
                         updated = classify(entry.activity)
-                        self._persist_activity(updated, phase="awaiting_output")
                         entry = replace(entry, activity=updated)
+                        try:
+                            self._persist_activity(updated, phase="awaiting_output")
+                            self._provenance_persistence_recovery.get(key, {}).pop(
+                                updated.id,
+                                None,
+                            )
+                        except Exception as error:
+                            self._record_provenance_persistence_recovery(
+                                updated,
+                                phase="awaiting_output",
+                                error=error,
+                            )
                         classified.append(updated)
                     updated_entries.append(entry)
                 self._completed_outputs[key] = updated_entries
@@ -1105,12 +1188,25 @@ class SessionActivityRegistry:
                 if (activity.backend, activity.runtime_key) != key or not matches(activity):
                     continue
                 updated = classify(activity)
-                self._persist_activity(updated, phase="awaiting_output")
                 self._claimed_completed_outputs[activity_key] = replace(
                     claimed,
                     entry=replace(claimed.entry, activity=updated),
                 )
+                try:
+                    self._persist_activity(updated, phase="awaiting_output")
+                    self._provenance_persistence_recovery.get(key, {}).pop(
+                        updated.id,
+                        None,
+                    )
+                except Exception as error:
+                    self._record_provenance_persistence_recovery(
+                        updated,
+                        phase="awaiting_output",
+                        error=error,
+                    )
                 classified.append(updated)
+            if not self._provenance_persistence_recovery.get(key):
+                self._provenance_persistence_recovery.pop(key, None)
         return classified
 
     def has_competing_output(
