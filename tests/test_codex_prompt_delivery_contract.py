@@ -13,7 +13,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from aiohttp import web
 import pytest
@@ -87,7 +87,12 @@ def _tool_names(tools):
 async def _native_server(tmp_path, *, configured_instructions=None):
     requests = []
     completed = asyncio.Queue()
-    harness = SimpleNamespace(requests=requests, next_input_tokens=10)
+    harness = SimpleNamespace(
+        requests=requests,
+        next_input_tokens=10,
+        response_gate=None,
+        response_started=asyncio.Event(),
+    )
 
     async def responses(request):
         requests.append(await request.json())
@@ -117,6 +122,9 @@ async def _native_server(tmp_path, *, configured_instructions=None):
         ]
         if compacting:
             events[1]["item"] = {"type": "compaction", "encrypted_content": "CONTRACT_SUMMARY"}
+        if harness.response_gate is not None:
+            harness.response_started.set()
+            await harness.response_gate.wait()
         return web.Response(
             text="".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events),
             content_type="text/event-stream",
@@ -209,6 +217,8 @@ async def _native_server(tmp_path, *, configured_instructions=None):
             if not any(item.get("type") == "compaction_trigger" for item in model_request["input"]):
                 assert {"exec_command", "write_stdin"} <= names
     finally:
+        if harness.response_gate is not None:
+            harness.response_gate.set()
         await harness.native.stop()
         server.close()
         await server.wait_closed()
@@ -478,6 +488,68 @@ async def test_native_baseline_survives_auto_compaction_and_cold_promotion(tmp_p
         assert text.count(configured) == 1
         assert text.count(changed) == 1 + int(not retention_pressure)
         assert text.count(snapshot) == int(not retention_pressure)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_completed", [False, True])
+async def test_native_fork_uses_bounded_inclusive_turn_history(tmp_path, source_completed):
+    """A real app-server must honor the boundary, not merely accept a field."""
+    async with _native_server(tmp_path) as harness:
+        native = harness.native
+        request = _request(tmp_path)
+        source = _agent({})
+        source_id = await source._start_or_resume_thread(native, request)
+        preserved = "必须保留的上下文 KEEP-FORK-2168 🧪"
+        reserved = "正在执行的输入 RESERVED-FORK-2168"
+        for text in (preserved, reserved):
+            if text == reserved:
+                harness.response_gate = asyncio.Event()
+            source._build_input = Mock(return_value=[{"type": "text", "text": text, "text_elements": []}])
+            await source._start_turn(native, request, source_id)
+            if text == preserved:
+                await harness.finish_turn()
+        await asyncio.wait_for(harness.response_started.wait(), timeout=30)
+        page = await native.send_request(
+            "thread/turns/list",
+            {"threadId": source_id, "limit": 2, "itemsView": "notLoaded", "sortDirection": "desc"},
+        )
+        reserved_turn, previous_turn = page["data"]
+        assert reserved_turn["status"] == "inProgress"
+        assert not reserved_turn["items"]
+        assert previous_turn["status"] == "completed"
+        if source_completed:
+            harness.response_gate.set()
+            await harness.finish_turn()
+
+        target = _agent({})
+        target._turn_registry.get_active_turn = Mock(return_value=reserved_turn["id"])
+        target._should_trim_forked_running_turn = AsyncMock(return_value=True)
+        target_id = await target._fork_thread(
+            native,
+            request,
+            {
+                "source_session_id": "contract-session",
+                "source_native_session_id": source_id,
+                "trim_latest_running_turn": True,
+                "native_turn_started": True,
+            },
+        )
+        assert target_id != source_id
+        fork_page = await native.send_request(
+            "thread/turns/list",
+            {"threadId": target_id, "limit": 2, "itemsView": "notLoaded", "sortDirection": "desc"},
+        )
+        boundary = reserved_turn if source_completed else previous_turn
+        assert fork_page["data"][0]["id"] == boundary["id"]
+        assert len(fork_page["data"]) == (2 if source_completed else 1)
+        if not source_completed:
+            harness.response_gate.set()
+            await harness.finish_turn()
+        await target._start_turn(native, request, target_id)
+        await harness.finish_turn()
+        model_input = json.dumps(harness.requests[-1]["input"], ensure_ascii=False)
+        assert preserved in model_input
+        assert (reserved in model_input) == source_completed
 
 
 @pytest.mark.asyncio

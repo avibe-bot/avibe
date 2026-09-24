@@ -2596,6 +2596,7 @@ class CodexAgent(BaseAgent):
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
             "threadId": source_thread_id,
+            "excludeTurns": True,
             "cwd": request.working_path,
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
@@ -2626,20 +2627,18 @@ class CodexAgent(BaseAgent):
                 source_still_running, last_completed_turn_id = (
                     await self._fork_source_last_completed_turn_id(transport, fork)
                 )
-                if source_still_running and not last_completed_turn_id:
+                if not last_completed_turn_id:
                     raise RuntimeError(
                         "Cannot fork Codex thread while the source turn boundary "
                         "is unknown"
                     )
-                if source_still_running:
-                    # `lastTurnId` is the stable thread/fork boundary supported
-                    # by the Codex app-server versions Avibe supports. It is
-                    # inclusive, so use the completed turn immediately before
-                    # the active source turn.
-                    params["lastTurnId"] = last_completed_turn_id
-                else:
-                    # The source completed between fork reservation and the
-                    # protocol read. Preserve the now-complete turn.
+                # `lastTurnId` is the stable thread/fork boundary supported by
+                # the Codex app-server versions Avibe supports. It is
+                # inclusive: use the preceding terminal turn while the source
+                # is active, or the source turn itself if it completed during
+                # this race.
+                params["lastTurnId"] = last_completed_turn_id
+                if not source_still_running:
                     logger.debug(
                         "Codex source turn completed during fork boundary read; "
                         "preserving completed history"
@@ -2827,11 +2826,12 @@ class CodexAgent(BaseAgent):
     ) -> tuple[bool, Optional[str]]:
         """Resolve the inclusive fork boundary immediately before a live turn.
 
-        ``thread/fork.lastTurnId`` cannot point at an in-progress turn. Read the
-        source thread and return the preceding terminal turn instead. The
-        boolean distinguishes a source that completed during this race from an
-        unknown boundary, so the caller can preserve the former and reject the
-        latter without copying an active turn accidentally.
+        ``thread/fork.lastTurnId`` cannot point at an in-progress turn. Page
+        through the source turns in reverse chronological order and return the
+        preceding terminal turn instead. If the reserved turn completed during
+        this race, use that turn itself: ``lastTurnId`` is inclusive, so this
+        still excludes any later turn that may have started while the fork
+        request was being prepared.
         """
 
         active_turn_id = await self._fork_source_native_turn_id(fork)
@@ -2839,58 +2839,60 @@ class CodexAgent(BaseAgent):
         if not active_turn_id or not source_thread_id:
             return True, None
 
+        cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
+        active_turn_seen = False
         try:
-            response = await transport.send_request(
-                "thread/read",
-                {
+            while True:
+                params: dict[str, Any] = {
                     "threadId": source_thread_id,
-                    "includeTurns": True,
-                },
-            )
-        except (CodexRPCError, ConnectionError, TimeoutError):
+                    "limit": 2,
+                    "itemsView": "notLoaded",
+                    "sortDirection": "desc",
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                response = await transport.send_request("thread/turns/list", params)
+
+                turns = response.get("data") if isinstance(response, dict) else None
+                if not isinstance(turns, list):
+                    return True, None
+
+                for turn in turns:
+                    if not isinstance(turn, dict):
+                        return True, None
+                    turn_id = str(turn.get("id") or "").strip()
+                    status = str(turn.get("status") or "").strip()
+                    if turn_id == active_turn_id:
+                        if status in {"completed", "interrupted", "failed"}:
+                            return False, active_turn_id
+                        if status != "inProgress":
+                            return True, None
+                        active_turn_seen = True
+                    elif active_turn_seen:
+                        # Descending pages contain the predecessor after the
+                        # active turn, possibly on the next page. Do not skip
+                        # an unproven boundary and silently discard history.
+                        if not turn_id or status not in {"completed", "interrupted", "failed"}:
+                            return True, None
+                        return True, turn_id
+
+                next_cursor = response.get("nextCursor")
+                if (
+                    not isinstance(next_cursor, str)
+                    or not next_cursor
+                    or next_cursor in seen_cursors
+                ):
+                    return True, None
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+        except (CodexRPCError, CodexResponseTooLargeError, ConnectionError, TimeoutError):
             logger.debug(
                 "Could not read Codex fork boundary for source thread %s",
                 source_thread_id,
                 exc_info=True,
             )
             return True, None
-
-        thread = response.get("thread") if isinstance(response, dict) else None
-        turns = thread.get("turns") if isinstance(thread, dict) else None
-        if not isinstance(turns, list):
-            turns = response.get("turns") if isinstance(response, dict) else None
-        if not isinstance(turns, list):
-            return True, None
-
-        active_index: Optional[int] = None
-        active_turn: Optional[dict[str, Any]] = None
-        for index, turn in enumerate(turns):
-            if not isinstance(turn, dict):
-                continue
-            if str(turn.get("id") or "").strip() == active_turn_id:
-                active_index = index
-                active_turn = turn
-                break
-        if active_index is None or active_turn is None:
-            return True, None
-
-        status = str(active_turn.get("status") or "").strip()
-        if status != "inProgress":
-            return False, None
-
-        for turn in reversed(turns[:active_index]):
-            if not isinstance(turn, dict):
-                continue
-            if str(turn.get("status") or "").strip() not in {
-                "completed",
-                "interrupted",
-                "failed",
-            }:
-                continue
-            turn_id = str(turn.get("id") or "").strip()
-            if turn_id:
-                return True, turn_id
-        return True, None
 
     def _resolve_codex_agent_settings(
         self,
