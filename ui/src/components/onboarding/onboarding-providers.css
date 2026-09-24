@@ -398,6 +398,16 @@
   text-align: center;
 }
 .setup-provider-summary[data-tone='error'] { color: var(--destructive-ink); }
+/* The summary rests on the stage's floor, the line the welcome's return wire and the
+   assistants hint share, even at a tier where another screen is the tallest and this
+   diagram is shorter than its stage. The stage fills that room and splits the slack
+   between the two auto margins, so the diagram above stays exactly where centring put
+   it and only the summary drops to the floor. */
+@media (min-width: 760px) {
+  .onboarding-stage > .setup-provider-stage { flex: 1; }
+  .setup-provider-stage > .setup-provider-grid,
+  .setup-provider-stage > .setup-provider-summary { margin-top: auto; }
+}
 
 /* ---- Add-source dialog --------------------------------------------------- */
 

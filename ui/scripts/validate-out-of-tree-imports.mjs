@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { repoRelativePosix } from './repoRelativePosix.mjs';
+
 const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const DOCKERFILE = fileURLToPath(new URL('../../Dockerfile', import.meta.url));
@@ -28,14 +30,20 @@ const sourceFiles = (dir) =>
       return /\.tsx?$/.test(entry.name) ? [full] : [];
     });
 
-/** Repository-relative paths that ``ui/src`` imports from outside ``ui/``. */
+/**
+ * Repository-relative POSIX paths that ``ui/src`` imports from outside ``ui/``.
+ *
+ * POSIX because everything these targets meet below is written that way — the
+ * Dockerfile's ``COPY`` sources, the ``${source}/`` prefix test, and the
+ * ``path.posix`` joins — and this is the one place a host path becomes one of them.
+ */
 function escapingImports() {
   const found = new Set();
   for (const file of sourceFiles(path.join(UI_ROOT, 'src'))) {
     const source = fs.readFileSync(file, 'utf8');
     for (const [, specifier] of source.matchAll(RELATIVE_SPECIFIER)) {
       const resolved = path.resolve(path.dirname(file), specifier);
-      if (!resolved.startsWith(UI_ROOT)) found.add(path.relative(REPO_ROOT, resolved));
+      if (!resolved.startsWith(UI_ROOT)) found.add(repoRelativePosix(REPO_ROOT, resolved));
     }
   }
   return [...found].sort();

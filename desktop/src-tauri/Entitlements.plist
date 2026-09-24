@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Deliberately empty. WKWebView's JavaScript engine JITs in
+	     WebKit-owned helper processes, so the embedding Tauri process needs
+	     no executable-memory exception, and the notary does not require one.
+	     Granting com.apple.security.cs.allow-unsigned-executable-memory here
+	     would weaken the hardened runtime for the whole process. Re-adding
+	     any entitlement must carry evidence that the app process itself
+	     needs it. -->
+</dict>
+</plist>

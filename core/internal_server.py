@@ -1,11 +1,10 @@
-"""Controller-side ASGI server bound to a Unix Domain Socket.
+"""Controller-side ASGI server on the platform control IPC transport.
 
 This is the C4 piece of Plan 2 from
 ``docs/plans/workbench-dispatch-architecture.md``: the controller process
-exposes a minimal FastAPI app on
-``~/.vibe_remote/state/dispatch.sock`` so cross-process callers (the
-separate UI server subprocess, future ``vibe agent run --sync`` flows)
-can submit turns to the controller-owned session turn manager.
+exposes a minimal FastAPI app over a POSIX UDS or authenticated Windows
+loopback listener so cross-process callers can invoke
+the controller-owned session turn manager.
 
 Three properties matter:
 
@@ -13,12 +12,10 @@ Three properties matter:
    background ``asyncio.Task`` on the loop that ``Controller.run()``
    creates. IM adapters share that loop. No cross-loop futures, no
    second uvicorn worker, no thread bridge.
-2. **Local-only.** Unix sockets are bind to a file path on the local
-   filesystem; no TCP listen, so external network exposure is
-   impossible.
-3. **Restrictive permissions.** The socket file is created under a
-   restrictive umask and chmod'd to ``0o600`` when the filesystem supports
-   it — defense in depth against shared hosts.
+2. **Local-only.** POSIX binds a Unix socket. Windows binds an authenticated
+   ephemeral listener on the literal IPv4 loopback address.
+3. **Restrictive discovery.** Unix sockets and Windows endpoint descriptors
+   use the narrowest practical current-user permissions.
 
 The endpoint set is intentionally tiny; follow-ups can grow it without
 changing the bind contract.
@@ -28,22 +25,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import errno
+import hmac
 import json
 import logging
 import os
 import re
 import socket
-import stat
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from config import paths
+from core import control_ipc
 from config.atomic_io import write_atomic
 from core.delivery_target import normalize_message_kind
 from core.services.dispatch import SOURCE_SCHEDULED
@@ -56,18 +53,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 
-_SOCKET_MODE = 0o600
-_SOCKET_UMASK_MODE = 0o700
-_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
-_UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
-    value
-    for value in (
-        errno.EINVAL,
-        getattr(errno, "ENOTSUP", None),
-        getattr(errno, "EOPNOTSUPP", None),
-    )
-    if value is not None
-)
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
@@ -99,13 +84,15 @@ def default_socket_path() -> Path:
     support Unix-socket permission operations.
     """
 
-    override = os.environ.get("VIBE_INTERNAL_DISPATCH_SOCKET")
-    if override:
-        return Path(override).expanduser()
-    return paths.get_state_dir() / "dispatch.sock"
+    return control_ipc.default_unix_socket_path()
 
 
-def create_app(controller: "Controller") -> FastAPI:
+def create_app(
+    controller: "Controller",
+    *,
+    instance_id: Optional[str] = None,
+    bearer_token: Optional[str] = None,
+) -> FastAPI:
     """Build the minimal FastAPI app the internal server exposes.
 
     Factored out so tests can mount the same routes against a fake
@@ -120,6 +107,36 @@ def create_app(controller: "Controller") -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+    if (instance_id is None) != (bearer_token is None):
+        raise ValueError("Windows control IPC requires both instance ID and bearer token")
+    if instance_id is not None and bearer_token is not None:
+
+        @app.exception_handler(Exception)
+        async def _windows_control_ipc_server_error(_request: Request, _exc: Exception):
+            return PlainTextResponse(
+                "Internal Server Error",
+                status_code=500,
+                headers={control_ipc.CONTROL_IPC_INSTANCE_HEADER: instance_id},
+            )
+
+        @app.middleware("http")
+        async def _authenticate_windows_control_ipc(request: Request, call_next):
+            scheme, separator, credential = request.headers.get("authorization", "").partition(" ")
+            authorized = (
+                separator == " "
+                and scheme.lower() == "bearer"
+                and bool(credential)
+                and hmac.compare_digest(credential, bearer_token)
+            )
+            if not authorized:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "unauthorized"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            response = await call_next(request)
+            response.headers[control_ipc.CONTROL_IPC_INSTANCE_HEADER] = instance_id
+            return response
     from core.skill_observability import SkillObservationRecorder
 
     skill_recorder = SkillObservationRecorder()
@@ -608,7 +625,13 @@ def create_app(controller: "Controller") -> FastAPI:
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
-        return {"ok": True, "service": "vibe-remote-internal", "version": 1}
+        from vibe.desktop_runtime import desktop_runtime_id
+
+        payload = {"ok": True, "service": "vibe-remote-internal", "version": 1}
+        runtime_id = desktop_runtime_id()
+        if runtime_id is not None:
+            payload["desktop_runtime_id"] = runtime_id
+        return payload
 
     @app.post("/internal/show-access/settings-read")
     async def _show_access_settings_read(request: Request) -> Any:
@@ -1248,26 +1271,35 @@ def create_app(controller: "Controller") -> FastAPI:
     return app
 
 
-async def serve(controller: "Controller", *, socket_path: Optional[Path] = None) -> None:
+async def serve(
+    controller: "Controller",
+    *,
+    socket_path: Optional[Path] = None,
+    descriptor_path: Optional[Path] = None,
+    platform_name: Optional[str] = None,
+) -> None:
     """Run the internal server forever on the current event loop.
 
-    Returns when the underlying uvicorn server exits (typically when the
-    controller's loop is shut down). Each call binds a fresh socket
-    file; pre-existing files at ``socket_path`` are removed first so
-    restarts don't fail with "address already in use".
-
-    Permissions: we tighten ``os.umask`` to ``0o077`` *before* uvicorn
-    binds the socket so the file is created with mode ``0o700`` and is
-    never readable / connectable by other local users — even briefly.
-    A best-effort post-bind ``os.chmod`` then forces the final mode in
-    case the platform's umask handling differs (some BSDs ignore umask
-    for AF_UNIX bind). Without the umask wrap there is a TOCTOU window
-    where the socket would be world-accessible between bind and chmod.
+    Returns when the underlying uvicorn server exits. POSIX pre-binds the
+    existing restrictive UDS endpoint. Windows pre-binds an authenticated
+    ephemeral loopback listener and atomically publishes its descriptor before
+    uvicorn starts accepting requests.
     """
 
     import uvicorn
 
-    app = create_app(controller)
+    host = control_ipc.select_control_ipc_host(
+        platform_name=platform_name,
+        socket_path=socket_path,
+        descriptor_path=descriptor_path,
+    )
+    app_kwargs: dict[str, str] = {}
+    if host.instance_id is not None and host.bearer_token is not None:
+        app_kwargs = {
+            "instance_id": host.instance_id,
+            "bearer_token": host.bearer_token,
+        }
+    app = create_app(controller, **app_kwargs)
     skill_recorder = controller.skill_observability
     try:
         recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
@@ -1281,20 +1313,14 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
             lifespan="off",
         )
         server = _create_controller_loop_server(config)
-
-        listener, target = _bind_socket(socket_path)
+        bound = host.bind()
         try:
+            host.publish(bound)
             _write_internal_server_status("ready")
-            await server.serve(sockets=[listener])
+            await server.serve(sockets=[bound.listener])
         finally:
-            try:
-                listener.close()
-            except OSError:
-                pass
-            _remove_owned_socket(target)
+            host.cleanup(bound)
     finally:
-        # Lifespan is disabled: this server task owns the recorder's cleanup,
-        # including cancellation during controller recovery or socket setup.
         await skill_recorder.close()
 
 
@@ -1307,81 +1333,11 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     uvicorn's path chmod while keeping the endpoint local-only.
     """
 
-    # Bind and report the canonical path so platform aliases (for example
-    # macOS ``/var`` -> ``/private/var``) do not produce a mismatched endpoint.
-    target = (socket_path or default_socket_path()).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _remove_stale_owned_socket(target)
-
-    previous_umask = os.umask(0o077)
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        listener.bind(str(target))
-        listener.listen(2048)
-        listener.setblocking(False)
-        try:
-            os.chmod(target, _SOCKET_MODE)
-        except OSError as error:
-            if error.errno not in _UNSUPPORTED_SOCKET_CHMOD_ERRNOS:
-                raise
-            logger.debug("internal dispatch socket chmod is unsupported for %s", target)
-            _verify_owned_socket(target, allow_umask_mode=True)
-        else:
-            _verify_owned_socket(target)
-        return listener, target
-    except Exception:
-        listener.close()
-        _remove_socket_after_bind_failure(target)
-        raise
-    finally:
-        os.umask(previous_umask)
-
-
-def _remove_stale_owned_socket(target: Path) -> None:
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        return
-    if hasattr(os, "getuid") and info.st_uid != os.getuid():
-        raise OSError("internal dispatch socket owner mismatch")
-    # lstat + unlink removes the directory entry itself, including a symlink;
-    # it never follows or mutates the path the stale entry may point at.
-    target.unlink()
-
-
-def _remove_owned_socket(target: Path) -> None:
-    try:
-        _verify_owned_socket(target, allow_umask_mode=True)
-        target.unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        logger.debug("could not unlink internal dispatch socket %s", target, exc_info=True)
-
-
-def _remove_socket_after_bind_failure(target: Path) -> None:
-    """Remove only a socket still owned by this user after a failed hardening step."""
-
-    try:
-        info = target.lstat()
-        if stat.S_ISSOCK(info.st_mode) and (not hasattr(os, "getuid") or info.st_uid == os.getuid()):
-            target.unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        logger.debug("could not remove failed internal dispatch socket %s", target, exc_info=True)
-
-
-def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> None:
-    info = target.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISSOCK(info.st_mode):
-        raise OSError("internal dispatch socket is unsafe")
-    if hasattr(os, "getuid") and info.st_uid != os.getuid():
-        raise OSError("internal dispatch socket owner mismatch")
-    if _CHECK_POSIX_SOCKET_MODE:
-        allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
-        if stat.S_IMODE(info.st_mode) not in allowed_modes:
-            raise OSError("internal dispatch socket mode mismatch")
+    bound = control_ipc.PosixUnixSocketHost(socket_path).bind()
+    if bound.socket_path is None:
+        bound.listener.close()
+        raise RuntimeError("Unix control IPC bind returned no socket path")
+    return bound.listener, bound.socket_path
 
 
 def _write_internal_server_status(
@@ -1412,7 +1368,13 @@ def _write_internal_server_status(
         logger.warning("could not persist internal dispatch server status", exc_info=True)
 
 
-def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> asyncio.Task:
+def start(
+    controller: "Controller",
+    *,
+    socket_path: Optional[Path] = None,
+    descriptor_path: Optional[Path] = None,
+    platform_name: Optional[str] = None,
+) -> asyncio.Task:
     """Schedule the internal server to run on the controller's loop.
 
     Called from ``Controller.run`` once the loop is alive. Returns the
@@ -1422,7 +1384,15 @@ def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> as
 
     loop = asyncio.get_event_loop()
     _write_internal_server_status("starting")
-    task = loop.create_task(serve(controller, socket_path=socket_path), name="internal-dispatch-server")
+    task = loop.create_task(
+        serve(
+            controller,
+            socket_path=socket_path,
+            descriptor_path=descriptor_path,
+            platform_name=platform_name,
+        ),
+        name="internal-dispatch-server",
+    )
 
     def _on_done(t: asyncio.Task) -> None:
         if t.cancelled():

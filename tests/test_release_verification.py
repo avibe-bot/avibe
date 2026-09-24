@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler
 import os
@@ -170,7 +172,7 @@ def test_noncanonical_official_tags_fail_before_artifact_construction(
 
 
 @pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
-def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workflow_name, job_name, checkout_name, workflow_ref):
+def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, monkeypatch, workflow_name, job_name, checkout_name, workflow_ref):
     job = _job(workflow_name, job_name)
     checkout = _step(job, checkout_name)
     assert checkout["uses"].startswith("actions/checkout@")
@@ -182,21 +184,31 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
     verification = _step(job, "Verify built distribution contracts")
     assert "release-automation/tests/test_distribution_artifacts.py" in verification["run"]
     assert "AVIBE_CORE_WHEEL=" in verification["run"] and "AVIBE_CORE_SDIST=" in verification["run"]
+    assert "working-directory" not in verification
     assert job["steps"].index(checkout) < job["steps"].index(verification)
     # Replay the path/ref contract: release source lacks the automation, while
     # the workflow commit supplies it via the declared sparse checkout.
     remote = tmp_path / "remote"
     remote.mkdir()
     _fixture_git(remote, "init")
-    _fixture_git(remote, "commit", "--allow-empty", "-m", "release source")
+    source_skill = remote / "skills" / "use-avibe" / "SKILL.md"
+    source_skill.parent.mkdir(parents=True)
+    source_skill.write_text("Released skill content\n", encoding="utf-8")
+    (remote / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    _fixture_git(remote, "add", ".")
+    _fixture_git(remote, "commit", "-m", "release source")
     release = _fixture_git(remote, "rev-parse", "HEAD")
+    source_skill.write_text("Workflow-only revision\n", encoding="utf-8")
     for name in files:
         target = remote / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        if workflow_name == "publish.yml" and (name.startswith("tests/e2e/") or name == "tests/__init__.py"):
+        if name == "tests/test_distribution_artifacts.py" or (
+            workflow_name == "publish.yml"
+            and (name.startswith("tests/e2e/") or name == "tests/__init__.py")
+        ):
             shutil.copy2(ROOT / name, target)
         else:
-            target.write_text("print('workflow-owned automation')\n")
+            target.write_text("print('workflow-owned automation')\n", encoding="utf-8")
     _fixture_git(remote, "add", ".")
     _fixture_git(remote, "commit", "-m", "workflow automation")
     workflow = _fixture_git(remote, "rev-parse", "HEAD")
@@ -207,6 +219,21 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
     assert _fixture_git(destination, "rev-parse", "HEAD") != release
     for name in files:
         assert (destination / name).is_file()
+    assert not (destination / "skills").exists()
+    source_checkout = tmp_path / "build-source"
+    _fixture_git(tmp_path, "clone", "--no-checkout", str(remote), str(source_checkout))
+    _fixture_git(source_checkout, "checkout", release)
+    contract = destination / "tests/test_distribution_artifacts.py"
+    spec = importlib.util.spec_from_file_location("sparse_distribution_contract", contract)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with monkeypatch.context() as scoped:
+        scoped.chdir(source_checkout)
+        expected = module._expected_builtin_skills_snapshot()
+    assert expected["use-avibe/SKILL.md"]["sha256"] == hashlib.sha256(
+        b"Released skill content\n"
+    ).hexdigest()
     if workflow_name == "publish.yml":
         upload = _step(job, "Upload GitHub release assets")
         script = "release-automation/scripts/github_release.py"
@@ -222,6 +249,13 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
         )
         assert collected.returncode == 0, collected.stdout + collected.stderr
         assert "1 test collected" in collected.stdout
+
+
+def test_preview_python_assets_build_from_the_desktop_source_sha():
+    # The desktop packages are built from the resolved TEST source; the Python
+    # assets published beside them must come from that same commit.
+    checkout = _step(_job("release_ai.yml", "build-assets"), "Checkout")
+    assert checkout["with"]["ref"] == "${{ needs.resolve-desktop-release.outputs.source_sha }}"
 
 
 @pytest.mark.parametrize("workflow", ["publish.yml", "release_ai.yml"])
@@ -245,6 +279,9 @@ def test_preview_upload_validates_all_existing_bytes_before_runtime_then_package
              "avibe_memory-1.0.0-py3-none-any.whl"]
     for name in names:
         (dist / name).write_bytes(b"immutable asset")
+    desktop_asset = "desktop-dist/Avibe-1.0.0rc1-macos-aarch64.dmg"
+    (tmp_path / "desktop-dist").mkdir()
+    (tmp_path / desktop_asset).write_bytes(b"desktop asset")
     binaries = tmp_path / "bin"
     binaries.mkdir()
     log = tmp_path / "calls.jsonl"
@@ -266,7 +303,8 @@ elif args[:2] == ["release", "download"]:
     command = command.replace("${{ steps.tag.outputs.tag }}", "gh-v1.0.0rc1").replace("${{ steps.release_type.outputs.prerelease }}", "true")
     result = subprocess.run(["bash", "-c", command], cwd=tmp_path,
                             env={**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}",
-                                 "GITHUB_REPOSITORY": "fixture/repo"}, capture_output=True, text=True)
+                                 "GITHUB_REPOSITORY": "fixture/repo", "SOURCE_SHA": "0" * 40},
+                            capture_output=True, text=True)
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     uploads = [call for call in calls if call[1:3] == ["release", "upload"]]
     if existing == "different":
@@ -277,7 +315,10 @@ elif args[:2] == ["release", "download"]:
         assert result.returncode == 0, result.stdout + result.stderr
         assert len(uploads) == 2
         assert uploads[0][-2:] == [f"dist/{name}" for name in names[:2]]
-        assert uploads[1][6:] == [f"dist/{name}" for name in names[2:] if existing == "none" or name != names[-1]]
+        assert uploads[1][6:] == [
+            *(f"dist/{name}" for name in names[2:] if existing == "none" or name != names[-1]),
+            desktop_asset,
+        ]
         assert "finalize" in calls[-1]
 
 
@@ -466,7 +507,14 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     for directory, assets in ((dist, packages), (runtime, runtimes)):
         for name, data in assets.items():
             (directory / name).write_bytes(data)
-    all_assets = {**packages, **runtimes}
+    desktop = {}
+    if workflow_name == "release_ai.yml":
+        desktop_dir = workspace / "desktop-dist"
+        desktop_dir.mkdir()
+        desktop = {"Avibe_3.1.0-rc.1_aarch64-apple-darwin.dmg": b"desktop installer"}
+        for name, data in desktop.items():
+            (desktop_dir / name).write_bytes(data)
+    all_assets = {**packages, **runtimes, **desktop}
     existing = dict(all_assets) if state == "identical" else {}
     if state not in {"empty", "identical"}:
         existing = {name: all_assets[name] for name in (
@@ -526,7 +574,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
         cwd=workspace, env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
-                            "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe"},
+                            "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe", "SOURCE_SHA": "a" * 40},
         capture_output=True, text=True, timeout=20,
     )
     success = state in {"empty", "identical", "partial"}
@@ -542,38 +590,43 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
         if uploads:
             first_upload = events.index(uploads[0])
             assert all(event[1] != "download" for event in events[first_upload:])
-        kinds = [name in packages for name in uploaded]
+        kinds = [name in packages or name in desktop for name in uploaded]
         assert kinds == sorted(kinds), "Runtime uploads must complete before package uploads"
     assert not list(temporary.iterdir())
 
 
 @pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
 @pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("desktop_result", ["success", "skipped", "failure", "cancelled"])
 @pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
-def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(tag, build_result, cancelled, event):
+def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
+    tag, build_result, desktop_result, cancelled, event,
+):
     workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
     jobs = workflow["jobs"]
     preview_condition = "startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
     for name in ("resolve-show-runtime-ref",):
         assert jobs[name]["if"] == preview_condition
     assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
-    assert jobs["build-assets"]["needs"] == ["show-runtime-bundles"]
-    assert jobs["release"]["needs"] == "build-assets"
+    assert jobs["build-assets"]["needs"] == ["resolve-desktop-release", "show-runtime-bundles"]
+    assert jobs["release"]["needs"] == ["build-assets", "resolve-desktop-release", "desktop-packages"]
     # Evaluate the actual bounded job expression for both event kinds. This
     # catches skipped-needs propagation without replacing the condition itself.
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("needs.build-assets.result", "build_result")
+    expression = expression.replace("needs.desktop-packages.result", "desktop_result")
+    expression = expression.replace("needs.resolve-desktop-release.result", "desktop_result")
     expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
     expression = expression.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
-        "build_result": build_result, "input_tag": tag if event == "workflow_dispatch" else "",
+        "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
         "ref": "master" if event == "workflow_dispatch" else tag,
         "cancelled": lambda: cancelled,
         "startsWith": lambda value, prefix: value.startswith(prefix),
     })
     expected = not cancelled and (
         build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
-    )
+    ) and (not tag.startswith("gh-v") or desktop_result == "success")
     assert result == expected

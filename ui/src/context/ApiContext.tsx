@@ -1858,6 +1858,7 @@ export type VersionInfo = {
   latest: string | null;
   has_update: boolean;
   error: string | null;
+  managed_by?: 'desktop';
   build?: {
     kind: 'package' | 'source';
     revision?: string;
@@ -1870,6 +1871,7 @@ export type UpgradeResult = {
   message: string;
   output: string | null;
   restarting: boolean;
+  code?: string;
 };
 
 export type InstallResult = {
@@ -1879,6 +1881,7 @@ export type InstallResult = {
   path?: string | null;
   job_id?: string;
   status?: 'running' | 'succeeded' | 'failed' | 'rejected';
+  poll_timeout_seconds?: number;
   reason?: string | null;
   action_class?: 'operator_only';
   download_error?: DependencyDownloadError | null;
@@ -1911,7 +1914,12 @@ export type DependencyItem = {
   inspection_error?: { kind: string; message: string } | null;
 };
 
-export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
+export type DependenciesResult = {
+  ok: boolean;
+  deps: DependencyItem[];
+  reconciling?: boolean;
+  reconciling_dependencies?: string[];
+};
 export type DependencyReadOptions = { ids?: readonly string[]; signal?: AbortSignal };
 
 export type BackendConnectionState = {
@@ -1939,6 +1947,7 @@ export type BackendRuntimeInfo = {
   current_version?: string | null;
   latest_version?: string | null;
   has_update?: boolean;
+  managed_by?: 'desktop';
   supports_restart?: boolean;
   process_status?: 'running' | 'stopped' | 'unknown';
   error?: string;
@@ -3293,7 +3302,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const jobId = typeof started?.job_id === 'string' ? started.job_id : null;
     if (!jobId) return started;
 
-    const deadline = Date.now() + 310_000;
+    const serverBudgetSeconds = started?.poll_timeout_seconds;
+    const pollBudgetMs =
+      typeof serverBudgetSeconds === 'number' && Number.isFinite(serverBudgetSeconds)
+        ? Math.max(310_000, serverBudgetSeconds * 1000)
+        : 390_000;
+    const deadline = Date.now() + pollBudgetMs;
     let last = started;
     while (Date.now() < deadline) {
       await sleep(1000);

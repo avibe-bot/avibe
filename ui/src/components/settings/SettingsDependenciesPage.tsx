@@ -25,7 +25,9 @@ import { useApi } from '@/context/ApiContext';
 import type { DependencyItem, InstallResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import {
+  dependencyIsStartupRepairing,
   dependencyHasInstallAction,
+  dependencyNeedsStartupRepair,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
@@ -93,6 +95,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusText = (d: DependencyItem) => {
+    if (checks[d.id]?.reconciling && dependencyIsStartupRepairing(d, checks[d.id].reconcilingDependencies)) return t('settings.dependencies.installing');
         // Closed non-installed failure states render distinctly, ahead
     // of the generic "not installed" fallback.
     if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
@@ -109,6 +112,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusVariant = (d: DependencyItem): 'secondary' | 'success' | 'warning' | 'destructive' => {
+    if (checks[d.id]?.reconciling && dependencyIsStartupRepairing(d, checks[d.id].reconcilingDependencies)) return 'warning';
     if (d.status === 'not_required') return 'secondary';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unknown') return 'warning';
@@ -194,6 +198,8 @@ export const SettingsDependenciesPage: React.FC = () => {
               );
             }
             const installing = busy === d.id;
+            const startupInstalling = Boolean(check.reconciling) && dependencyIsStartupRepairing(d, check.reconcilingDependencies);
+            const startupRepairPending = Boolean(check.reconciling) && dependencyNeedsStartupRepair(d);
             const showAction = dependencyHasInstallAction(d);
             const repairBlockedBySidecar = false;
             const dependencyOperationBusy = busy !== null || check.checking || check.error !== null;
@@ -238,17 +244,17 @@ export const SettingsDependenciesPage: React.FC = () => {
                       <Button
                         variant={d.installed ? 'secondary' : 'brand'}
                         size="xs"
-                        disabled={dependencyOperationBusy || repairBlockedBySidecar}
+                        disabled={dependencyOperationBusy || repairBlockedBySidecar || startupInstalling || startupRepairPending}
                         onClick={() => void install(d, id)}
                       >
-                        {installing ? (
+                        {installing || startupInstalling ? (
                           <Loader2 className="size-3.5 animate-spin" />
                         ) : d.installed || d.status === 'error' ? (
                           <RefreshCw className="size-3.5" />
                         ) : (
                           <Download className="size-3.5" />
                         )}
-                        {actionText(d, installing)}
+                        {actionText(d, installing || startupInstalling)}
                       </Button>
                     )}
                   </>

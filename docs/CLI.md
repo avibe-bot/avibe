@@ -5,6 +5,7 @@
 ```bash
 vibe              # Alias for vibe start
 vibe start        # Start Avibe if needed (opens web UI)
+vibe start --no-open-browser  # Start/reuse Avibe without opening a browser
 vibe status       # Check service status
 vibe restart      # Restart all services (use --delay-seconds when agent-triggered)
 vibe remote       # Guided Avibe Cloud remote-access setup
@@ -52,15 +53,17 @@ vibe
 
 ### `vibe start`
 
-Start Avibe if needed. Opens the web UI in your browser.
+Start Avibe if needed. Opens the web UI in your browser unless you suppress it.
 
 ```bash
 vibe start
+vibe start --no-open-browser
 ```
 
 **Behavior:**
 - Reuses the main service and Web UI if they are already running
 - Opens the setup wizard at `http://127.0.0.1:5123`
+- With `--no-open-browser`, keeps the service/UI lifecycle the same but does not launch a system browser window
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
 
 ### `vibe stop`

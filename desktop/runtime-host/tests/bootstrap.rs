@@ -1,0 +1,969 @@
+//! Behavioural coverage for the bootstrap state machine.
+//!
+//! Every test drives a real `RuntimeHost` through fake collaborators, so the
+//! guarantees under test are the ones the shell actually relies on: adopt what
+//! is already running, start what is not, never start twice, never navigate
+//! before the Runtime answers.
+//!
+//! Time is virtual (`start_paused`), so the 120-second production wait is
+//! exercised in microseconds.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use avibe_runtime_host::deep_link::DeepLinks;
+use avibe_runtime_host::{
+    parse_avibe_readiness_body, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError,
+    LaunchWatch, LaunchedRuntime, LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings,
+    RuntimeLauncher, RuntimeReadiness, RuntimeRemovalState, StatusSink,
+};
+
+const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
+const EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY: &str =
+    include_str!("../../../tests/fixtures/desktop_ready_external_controller_bundled_ui.json");
+type RemovalRecord = RuntimeRemovalState;
+
+/// Answers "not yet" until the given probe call, then "ready" forever.
+struct FakeProbe {
+    healthy_from: usize,
+    runtime_id: Option<String>,
+    ui_runtime_id: Option<String>,
+    identity_mismatch_at: Option<usize>,
+    calls: AtomicUsize,
+}
+
+impl FakeProbe {
+    fn healthy_from(call: usize) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: call,
+            runtime_id: None,
+            ui_runtime_id: None,
+            identity_mismatch_at: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn healthy_from_readiness(call: usize, readiness: &RuntimeReadiness) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: call,
+            runtime_id: readiness.desktop_runtime_id.clone(),
+            ui_runtime_id: readiness.desktop_ui_runtime_id.clone(),
+            identity_mismatch_at: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn healthy_managed(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: 1,
+            runtime_id: Some(runtime_id.to_owned()),
+            ui_runtime_id: None,
+            identity_mismatch_at: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn mismatched_managed(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: usize::MAX,
+            runtime_id: Some(runtime_id.to_owned()),
+            ui_runtime_id: None,
+            identity_mismatch_at: Some(1),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn mismatch_after_launch_then_healthy(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: 3,
+            runtime_id: Some(runtime_id.to_owned()),
+            ui_runtime_id: None,
+            identity_mismatch_at: Some(2),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn never_healthy() -> Arc<Self> {
+        Self::healthy_from(usize::MAX)
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl HealthProbe for FakeProbe {
+    async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        (call >= self.healthy_from).then(|| RuntimeReadiness {
+            desktop_runtime_id: self.runtime_id.clone(),
+            desktop_ui_runtime_id: self.ui_runtime_id.clone(),
+        })
+    }
+
+    async fn mismatched_runtime_identity(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        (self.identity_mismatch_at == Some(self.calls())).then(|| RuntimeReadiness {
+            desktop_runtime_id: self.runtime_id.clone(),
+            desktop_ui_runtime_id: None,
+        })
+    }
+}
+
+/// Records launch attempts; the first `failures` of them report no executable.
+struct FakeLauncher {
+    calls: Arc<AtomicUsize>,
+    failures: usize,
+    dies_immediately: bool,
+    succeeds_immediately: bool,
+    runtime_id: Option<String>,
+    handovers: Arc<AtomicUsize>,
+    cleanups: Arc<AtomicUsize>,
+    removals: Arc<Mutex<Vec<RemovalRecord>>>,
+}
+
+impl FakeLauncher {
+    fn working() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures: 0,
+            dies_immediately: false,
+            succeeds_immediately: false,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn managed(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures: 0,
+            dies_immediately: false,
+            succeeds_immediately: false,
+            runtime_id: Some(runtime_id.to_owned()),
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn failing_first(failures: usize) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures,
+            dies_immediately: false,
+            succeeds_immediately: false,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    /// Spawns successfully, then exits non-zero without starting a Runtime —
+    /// what an installed `vibe` too old for the shell's arguments does.
+    fn dying() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures: 0,
+            dies_immediately: true,
+            succeeds_immediately: false,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    /// The start helper exits zero, but no Runtime ever answers `/ready`.
+    fn zero_exit_without_runtime() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures: 0,
+            dies_immediately: false,
+            succeeds_immediately: true,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl RuntimeLauncher for FakeLauncher {
+    fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+        Ok(Arc::new(Self {
+            calls: self.calls.clone(),
+            failures: self.failures,
+            dies_immediately: self.dies_immediately,
+            succeeds_immediately: self.succeeds_immediately,
+            runtime_id: self.runtime_id.clone(),
+            handovers: self.handovers.clone(),
+            cleanups: self.cleanups.clone(),
+            removals: self.removals.clone(),
+        }))
+    }
+
+    fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
+        self.removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .push(state);
+        if state == RuntimeRemovalState::Unknown {
+            return Err(LaunchError::RuntimeRemoval);
+        }
+        Ok(true)
+    }
+}
+
+impl ResolvedRuntimeLauncher for FakeLauncher {
+    fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+        Ok(LoopbackOrigin::parse(TEST_ORIGIN).expect("the test endpoint is valid"))
+    }
+
+    fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call <= self.failures {
+            return Err(LaunchError::ExecutableNotFound);
+        }
+        Ok(LaunchedRuntime {
+            pid: 4242,
+            watch: if self.dies_immediately {
+                LaunchWatch::exited(false)
+            } else if self.succeeds_immediately {
+                LaunchWatch::exited(true)
+            } else {
+                LaunchWatch::default()
+            },
+        })
+    }
+
+    fn expected_runtime_id(&self) -> Option<&str> {
+        self.runtime_id.as_deref()
+    }
+
+    fn handover(&self) -> Result<(), LaunchError> {
+        self.handovers.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn prune_superseded(&self) {
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Default)]
+struct Recorder {
+    statuses: Mutex<Vec<BootstrapStatus>>,
+}
+
+impl Recorder {
+    fn statuses(&self) -> Vec<BootstrapStatus> {
+        self.statuses.lock().expect("recorder is not poisoned").clone()
+    }
+
+    fn phases(&self) -> Vec<BootstrapPhase> {
+        self.statuses().iter().map(|status| status.phase).collect()
+    }
+}
+
+impl StatusSink for Recorder {
+    fn publish(&self, status: BootstrapStatus) {
+        self.statuses.lock().expect("recorder is not poisoned").push(status);
+    }
+}
+
+/// Production defaults, minus the wall-clock wait: the shell polls every 500ms
+/// for two seconds, which under virtual time is five probes.
+fn fast_settings() -> RuntimeHostSettings {
+    RuntimeHostSettings {
+        ready_timeout: Duration::from_secs(2),
+        ..RuntimeHostSettings::default()
+    }
+}
+
+fn immediate_timeout_settings() -> RuntimeHostSettings {
+    RuntimeHostSettings {
+        ready_timeout: Duration::ZERO,
+        ..RuntimeHostSettings::default()
+    }
+}
+
+fn host(probe: Arc<FakeProbe>, launcher: Arc<FakeLauncher>, settings: RuntimeHostSettings) -> RuntimeHost {
+    RuntimeHost::new(probe, launcher, settings)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cold_link_is_consumed_only_after_ready_navigation_commits_and_never_replayed() {
+    let launcher = FakeLauncher::working();
+    let host = host(FakeProbe::healthy_from(3), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+    let mut links = DeepLinks::default();
+    links.receive(["avibe", "avibe://show/cold.session"]);
+    let ready = host.bootstrap(&recorder).await;
+    for status in recorder
+        .statuses
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|status| status.phase != BootstrapPhase::Ready)
+    {
+        assert!(links.bootstrap_navigation(status).is_none());
+    }
+    assert_eq!(ready.phase, BootstrapPhase::Ready);
+    let destination = links.bootstrap_navigation(&ready).unwrap();
+    assert_eq!(
+        destination.url().as_str(),
+        format!("{}/apps/show/cold.session", ready.origin)
+    );
+    assert_eq!(links.bootstrap_navigation(&ready).unwrap().url(), destination.url());
+    assert!(links.commit_navigation(&destination, true, 1, 1));
+    assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
+    assert_eq!(launcher.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bootstrap_failure_discards_the_link_without_navigating_or_replaying_on_retry() {
+    let host = host(FakeProbe::never_healthy(), FakeLauncher::working(), fast_settings());
+    let recorder = Recorder::default();
+    let mut links = DeepLinks::default();
+    links.receive(["avibe://session/failed"]);
+    let failed = host.bootstrap(&recorder).await;
+    assert_eq!(failed.phase, BootstrapPhase::Failed);
+    assert!(links.bootstrap_navigation(&failed).is_none());
+    links.receive(["avibe://session/arrived-after-failure"]);
+    let healthy = RuntimeHost::new(FakeProbe::healthy_from(1), FakeLauncher::working(), fast_settings());
+    let ready = healthy.bootstrap(&recorder).await;
+    assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_link_survives_failed_handoffs_until_the_current_window_accepts_it() {
+    let host = host(FakeProbe::healthy_from(1), FakeLauncher::working(), fast_settings());
+    let mut links = DeepLinks::default();
+    links.receive(["avibe://session/retry"]);
+    let ready = host.bootstrap(&Recorder::default()).await;
+    let origin = LoopbackOrigin::parse(&ready.origin).unwrap();
+    let first = links.bootstrap_navigation(&ready).unwrap();
+    assert!(!links.commit_navigation(&first, false, 1, 1));
+    let handoff_failed = BootstrapStatus::failed(
+        &origin,
+        ready.attempt,
+        avibe_runtime_host::BootstrapNotice::new(BootstrapNoticeCode::WorkbenchNavigationFailed),
+        true,
+    );
+    assert!(links.bootstrap_navigation(&handoff_failed).is_none());
+    let retried = host.bootstrap(&Recorder::default()).await;
+    let replacement = links.bootstrap_navigation(&retried).unwrap();
+    assert_eq!(replacement.url(), first.url());
+    assert!(!links.commit_navigation(&replacement, true, 1, 2));
+    let current = links.bootstrap_navigation(&retried).unwrap();
+    assert_eq!(current.url(), first.url());
+    assert!(links.commit_navigation(&current, true, 2, 2));
+    assert_eq!(links.bootstrap_navigation(&retried).unwrap().url().path(), "/");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_already_running_runtime_is_adopted_without_starting_anything() {
+    let probe = FakeProbe::healthy_from(1);
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(status.origin, TEST_ORIGIN);
+    assert_eq!(status.attempt, 1);
+    assert_eq!(launcher.calls(), 0, "an adopted Runtime must never be re-started");
+    assert_eq!(probe.calls(), 1);
+    assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Ready]);
+    assert!(!host.has_launched());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_matching_desktop_runtime_is_adopted_and_superseded_installs_are_pruned() {
+    let runtime_id = "a".repeat(64);
+    let probe = FakeProbe::healthy_managed(&runtime_id);
+    let launcher = FakeLauncher::managed(&runtime_id);
+    let host = host(probe, launcher.clone(), fast_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(launcher.calls(), 0);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn uninstall_marks_an_adopted_private_runtime_as_managed() {
+    let runtime_id = "a".repeat(64);
+    let probe = FakeProbe::healthy_managed(&runtime_id);
+    let launcher = FakeLauncher::managed(&runtime_id);
+    let host = host(probe, launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert!(host
+        .remove_private_runtime(Some(&origin))
+        .await
+        .expect("private Runtime removal"));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Managed]
+    );
+}
+
+#[tokio::test]
+async fn uninstall_refuses_to_remove_files_when_an_adopted_runtime_stops_answering() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::managed(&"a".repeat(64));
+    let host = host(probe, launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert!(matches!(
+        host.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown]
+    );
+}
+
+#[tokio::test]
+async fn uninstall_can_remove_an_inactive_private_runtime_without_probing_or_launching() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::managed(&"a".repeat(64));
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+
+    assert!(host
+        .remove_private_runtime(None)
+        .await
+        .expect("inactive private Runtime removal"));
+    assert_eq!(probe.calls(), 0);
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Inactive]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_superseded_desktop_runtime_is_stopped_before_the_successor_starts() {
+    let expected = "b".repeat(64);
+    let probe = FakeProbe::mismatched_managed(&"a".repeat(64));
+    let launcher = FakeLauncher::managed(&expected);
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 1);
+    assert_eq!(launcher.calls(), 1);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unknown_predecessor_never_authorizes_initial_or_polling_handover() {
+    for mismatch_at in [1, 2] {
+        let probe = Arc::new(FakeProbe {
+            healthy_from: usize::MAX,
+            runtime_id: None,
+            ui_runtime_id: None,
+            identity_mismatch_at: Some(mismatch_at),
+            calls: AtomicUsize::new(0),
+        });
+        let launcher = FakeLauncher::managed(&"b".repeat(64));
+        let host = host(probe, launcher.clone(), fast_settings());
+        assert_eq!(host.bootstrap(&Recorder::default()).await.phase, BootstrapPhase::Failed);
+        assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+        assert_eq!(launcher.calls(), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_identity_mismatch_discovered_while_polling_hands_over_and_relaunches_immediately() {
+    let expected = "b".repeat(64);
+    let probe = FakeProbe::mismatch_after_launch_then_healthy(&expected);
+    let launcher = FakeLauncher::managed(&expected);
+    let host = host(probe, launcher.clone(), fast_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        launcher.calls(),
+        2,
+        "the post-handover successor must launch in the same run"
+    );
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_absent_runtime_is_started_and_adopted_once_it_answers() {
+    let probe = FakeProbe::healthy_from(3);
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(launcher.calls(), 1, "exactly one Runtime is started");
+    assert!(host.has_launched());
+    assert_eq!(
+        recorder.phases(),
+        vec![
+            BootstrapPhase::Probing,
+            BootstrapPhase::Starting,
+            BootstrapPhase::Starting,
+            BootstrapPhase::Ready,
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_helper_adopts_untagged_readiness_after_launch_without_handover_or_pruning() {
+    // The first probe misses, so the bundled helper is started. The next
+    // probe is the real external-adoption shape produced by `/ready`: the
+    // Controller is healthy but has no desktop identity.
+    let readiness = parse_avibe_readiness_body(r#"{"schema_version":1,"product":"avibe","ready":true}"#)
+        .expect("the Python /ready payload is accepted by the Rust parser");
+    assert_eq!(readiness.desktop_runtime_id, None);
+    let probe = FakeProbe::healthy_from_readiness(2, &readiness);
+    let launcher = FakeLauncher::managed(&"b".repeat(64));
+    let host = host(probe, launcher.clone(), fast_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::Adopted);
+    assert_eq!(launcher.calls(), 1);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 0);
+    assert!(!host.has_owned_runtime());
+
+    // The helper may have created the UI from the private tree even though the
+    // adopted Controller is external. Do not delete that tree on a no-ID
+    // readiness response while launch liveness is still uncertain.
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+    assert!(matches!(
+        host.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown]
+    );
+}
+
+#[tokio::test]
+async fn uninstall_keeps_a_preexisting_untagged_external_runtime_external() {
+    let readiness = parse_avibe_readiness_body(r#"{"schema_version":1,"product":"avibe","ready":true}"#)
+        .expect("the Python /ready payload is accepted by the Rust parser");
+    let probe = FakeProbe::healthy_from_readiness(1, &readiness);
+    let launcher = FakeLauncher::working();
+    let host = host(probe, launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert!(host
+        .remove_private_runtime(Some(&origin))
+        .await
+        .expect("external private-runtime cleanup"));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::External]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_external_controller_with_a_bundled_ui_stays_unknown_after_shell_reopen() {
+    let readiness = parse_avibe_readiness_body(EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY)
+        .expect("the tagged UI readiness payload is accepted by the Rust parser");
+    let probe = FakeProbe::healthy_from_readiness(2, &readiness);
+    let launcher = FakeLauncher::managed(&"b".repeat(64));
+    let first = host(probe.clone(), launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert_eq!(
+        first.bootstrap(&Recorder::default()).await.notice.code,
+        BootstrapNoticeCode::Adopted
+    );
+    assert!(matches!(
+        first.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+
+    // Closing the shell drops in-memory state, but the same UI identity in
+    // /ready still proves that private UI files may be serving the Controller.
+    drop(first);
+    let reopened = host(probe, launcher.clone(), fast_settings());
+    assert_eq!(
+        reopened.bootstrap(&Recorder::default()).await.notice.code,
+        BootstrapNoticeCode::Adopted
+    );
+    assert!(matches!(
+        reopened.remove_private_runtime(Some(&origin)).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "reopening adopts the surviving UI without relaunching it"
+    );
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown, RuntimeRemovalState::Unknown]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_shell_learns_of_readiness_only_after_the_runtime_answers() {
+    let probe = FakeProbe::healthy_from(4);
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+    let statuses = recorder.statuses();
+
+    // Ready is emitted once, last, and only on the probe call that succeeded.
+    assert_eq!(statuses.iter().filter(|s| s.phase == BootstrapPhase::Ready).count(), 1);
+    assert_eq!(statuses.last().map(|s| s.phase), Some(BootstrapPhase::Ready));
+    assert_eq!(status.attempt as usize, probe.calls());
+    assert!(status.phase.is_terminal());
+    assert_eq!(
+        Some(&status),
+        statuses.last(),
+        "the returned status is the published one"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runtime_that_never_answers_fails_with_a_retryable_timeout() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert!(status.retryable, "a slow machine deserves another try");
+    assert_eq!(status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert_eq!(status.notice.seconds, Some(2));
+    assert!(status.attempt > 1, "the wait is polled, not a single shot");
+    assert_eq!(launcher.calls(), 1);
+    assert!(
+        !recorder.phases().contains(&BootstrapPhase::Ready),
+        "a timed-out run must never report readiness"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retrying_after_a_timeout_never_starts_a_second_runtime() {
+    // Call 6 is the retry's first probe; the Runtime answers on call 7, after the
+    // first run has already given up.
+    let probe = FakeProbe::healthy_from(7);
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(launcher.calls(), 1);
+
+    let recorder = Recorder::default();
+    let second = host.bootstrap(&recorder).await;
+
+    assert_eq!(second.phase, BootstrapPhase::Ready);
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "the retry must adopt the Runtime it already started"
+    );
+    assert!(
+        recorder.phases().contains(&BootstrapPhase::Starting),
+        "the retry still waits on the Runtime it started earlier"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launcher_failure_observed_after_timeout_is_rechecked_on_retry() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::dying();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    // The zero-length budget expires before the polling loop can inspect the
+    // watch, matching a real launcher whose non-zero exit lands just after a
+    // normal timeout.
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(first.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert_eq!(first.notice.seconds, Some(0));
+    assert!(host.has_launched(), "the timed-out launch watch must be retained");
+    assert_eq!(launcher.calls(), 1);
+
+    let second = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert_eq!(second.notice.code, BootstrapNoticeCode::LauncherExited);
+    assert!(
+        !host.has_launched(),
+        "a retained non-zero exit must release the launch slot"
+    );
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "observing the failed launch must not start a replacement in the same retry"
+    );
+    assert!(matches!(
+        host.remove_private_runtime(None).await,
+        Err(LaunchError::RuntimeRemoval)
+    ));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [RuntimeRemovalState::Unknown],
+        "a failed helper does not prove that a previously launched Runtime is absent"
+    );
+
+    let third = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(third.phase, BootstrapPhase::Failed);
+    assert_eq!(launcher.calls(), 2, "the next retry may start the Runtime again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_running_launcher_is_retained_across_repeated_timeouts() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    let second = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert!(first.retryable && second.retryable);
+    assert!(host.has_launched());
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "an unresolved launcher watch remains the same launch across retries"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_zero_exit_launch_without_readiness_can_be_retried() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::zero_exit_without_runtime();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(first.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert!(
+        !host.has_launched(),
+        "a completed zero-exit helper must not block a retry after readiness timed out"
+    );
+    assert_eq!(launcher.calls(), 1);
+
+    let second = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert_eq!(
+        launcher.calls(),
+        2,
+        "Retry may re-run the idempotent start command once the prior helper completed"
+    );
+}
+
+#[tokio::test]
+async fn readiness_loss_keeps_a_pending_helper_deduplicated() {
+    let launcher = FakeLauncher::working();
+    let host = host(
+        FakeProbe::never_healthy(),
+        launcher.clone(),
+        immediate_timeout_settings(),
+    );
+
+    assert_eq!(
+        host.bootstrap(&Recorder::default()).await.notice.code,
+        BootstrapNoticeCode::ReadyTimeout
+    );
+    assert!(host.has_launched(), "the timeout retains the pending helper");
+    host.release_after_readiness_loss();
+
+    assert!(
+        host.has_launched(),
+        "a pending helper remains the single recovery owner"
+    );
+    assert_eq!(launcher.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_bootstraps_start_at_most_one_runtime() {
+    let probe = FakeProbe::healthy_from(3);
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+
+    let (left, right) = (Recorder::default(), Recorder::default());
+    let (first, second) = tokio::join!(host.bootstrap(&left), host.bootstrap(&right));
+
+    assert_eq!(first.phase, BootstrapPhase::Ready);
+    assert_eq!(second.phase, BootstrapPhase::Ready);
+    assert_eq!(launcher.calls(), 1, "two racing runs must not start two Runtimes");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_missing_executable_fails_retryably_and_the_next_attempt_may_start_one() {
+    let probe = FakeProbe::healthy_from(3);
+    let launcher = FakeLauncher::failing_first(1);
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert!(first.retryable);
+    assert_eq!(launcher.calls(), 1);
+    assert!(
+        !host.has_launched(),
+        "a launch that failed did not start anything, so it must not block the retry"
+    );
+
+    let second = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(second.phase, BootstrapPhase::Ready);
+    assert_eq!(launcher.calls(), 2, "the retry is allowed to start the Runtime");
+    assert!(host.has_launched());
+}
+
+/// An installed `vibe` too old for the shell's arguments spawns fine, rejects an
+/// argument, and exits without starting anything. The rest of the ready timeout
+/// would then be spent polling an address that will never answer.
+#[tokio::test(start_paused = true)]
+async fn a_launcher_that_exits_without_starting_anything_gives_up_early() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::dying();
+    let host = host(probe.clone(), launcher.clone(), fast_settings());
+    let recorder = Recorder::default();
+
+    let started = tokio::time::Instant::now();
+    let status = host.bootstrap(&recorder).await;
+    let waited = started.elapsed();
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert!(status.retryable, "updating the Runtime makes the next attempt viable");
+    assert_eq!(status.notice.code, BootstrapNoticeCode::LauncherExited);
+    assert!(
+        waited < fast_settings().ready_timeout,
+        "waited {waited:?}, which is the full timeout this abort exists to avoid"
+    );
+    assert!(!recorder.phases().contains(&BootstrapPhase::Ready));
+
+    // Nothing is running, so the retry has to be allowed to start one.
+    assert!(!host.has_launched());
+    assert_eq!(host.bootstrap(&Recorder::default()).await.phase, BootstrapPhase::Failed);
+    assert_eq!(launcher.calls(), 2, "the retry starts a Runtime again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_non_loopback_origin_fails_immediately_and_is_not_retryable() {
+    let probe = FakeProbe::healthy_from(1);
+    let launcher = FakeLauncher::working();
+    let settings = RuntimeHostSettings {
+        origin_override: Some("http://avibe.example.com:5123".to_owned()),
+        ..fast_settings()
+    };
+    let host = host(probe.clone(), launcher.clone(), settings);
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert!(!status.retryable, "retrying cannot make a remote origin acceptable");
+    assert_eq!(status.attempt, 0);
+    assert_eq!(probe.calls(), 0, "a rejected origin is never contacted");
+    assert_eq!(launcher.calls(), 0);
+    assert_eq!(recorder.phases(), vec![BootstrapPhase::Failed]);
+    // The rejected value is unvalidated input on its way to a WebView, so it is
+    // dropped and represented only by a typed notice.
+    assert!(status.origin.is_empty(), "got {:?}", status.origin);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::InvalidOrigin);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_override_origin_is_adopted_only_and_never_starts_the_default_runtime() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let settings = RuntimeHostSettings {
+        origin_override: Some(TEST_ORIGIN.to_owned()),
+        ..fast_settings()
+    };
+    let host = host(probe.clone(), launcher.clone(), settings);
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert!(status.retryable);
+    assert_eq!(status.origin, TEST_ORIGIN);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeNotFound);
+    assert_eq!(probe.calls(), 1, "the override origin is probed directly");
+    assert_eq!(launcher.calls(), 0, "override mode must not launch the default Runtime");
+    assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Failed]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_production_wait_is_bounded() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let host = host(probe.clone(), launcher.clone(), RuntimeHostSettings::default());
+
+    let started = tokio::time::Instant::now();
+    let status = host.bootstrap(&Recorder::default()).await;
+    let waited = started.elapsed();
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert!(status.retryable);
+    let budget = RuntimeHostSettings::default().ready_timeout;
+    assert!(waited >= budget, "waited {waited:?}, expected at least {budget:?}");
+    assert!(
+        waited < budget + Duration::from_secs(5),
+        "waited {waited:?}, which overruns the bound"
+    );
+}

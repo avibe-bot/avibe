@@ -19,6 +19,7 @@ import {
   showPageWindowOrigin,
   type ViewportPoint,
 } from '../../lib/showPageLaunch';
+import { isDesktopShell } from '../../lib/desktopShell';
 import { isDesktopViewport } from '../../lib/useIsDesktop';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { Button } from '../ui/button';
@@ -62,7 +63,9 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
 
   const canLaunch = !showPageMode && !busy && Boolean(sessionId);
   const windowTitle = title?.trim() || t('chat.untitled');
-  const linkHref = appTabHref({ appId: 'showpage', sessionId });
+  // The desktop shell hands web links to the system browser and never yields a
+  // pre-opened tab, so this document has nothing to navigate: offer no link item.
+  const linkHref = isDesktopShell() ? null : appTabHref({ appId: 'showpage', sessionId });
 
   const clearHoverTimer = useCallback(() => {
     if (hoverTimerRef.current === null) return;

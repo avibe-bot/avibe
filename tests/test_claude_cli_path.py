@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
@@ -15,7 +16,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.handlers.session_handler as session_handler_module
 from config.v2_compat import to_app_config
-from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
+from config.v2_config import (
+    AgentsConfig,
+    ClaudeConfig,
+    CodexConfig,
+    OpenCodeConfig,
+    RuntimeConfig,
+    SlackConfig,
+    V2Config,
+)
 from config.v2_settings import RoutingSettings
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
@@ -153,6 +162,90 @@ def test_to_app_config_preserves_claude_cli_path() -> None:
     compat = to_app_config(v2)
 
     assert compat.claude.cli_path == "/usr/local/bin/claude-proxy"
+
+
+def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp_path: Path) -> None:
+    binaries = {
+        "claude": tmp_path / ".local" / "bin" / "claude",
+        "codex": tmp_path / ".local" / "bin" / "codex",
+        "opencode": tmp_path / ".opencode" / "bin" / "opencode",
+    }
+    for binary in binaries.values():
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        binary.chmod(0o755)
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
+    v2 = V2Config(
+        mode="self_host",
+        version="2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd="/tmp/workdir"),
+        agents=AgentsConfig(
+            claude=ClaudeConfig(cli_path="claude"),
+            codex=CodexConfig(cli_path="codex"),
+            opencode=OpenCodeConfig(cli_path="opencode"),
+        ),
+    )
+
+    compat = to_app_config(v2)
+
+    assert compat.claude.cli_path == str(binaries["claude"])
+    assert compat.codex is not None
+    assert compat.codex.binary == str(binaries["codex"])
+    assert compat.opencode is not None
+    assert compat.opencode.binary == str(binaries["opencode"])
+
+
+def test_to_app_config_keeps_missing_private_backend_selectors_off_path(monkeypatch, tmp_path: Path) -> None:
+    from vibe.cli_paths import resolve_cli_path
+
+    private_root = tmp_path / "private-backends"
+    external_root = tmp_path / "external-bin"
+    external_root.mkdir()
+    suffix = ".exe" if os.name == "nt" else ""
+    selected = {}
+    for backend in ("claude", "codex", "opencode"):
+        name = backend + suffix
+        selected[backend] = private_root / backend / "releases" / "missing" / name
+        external = external_root / name
+        external.write_bytes(b"MZ\0\0" if os.name == "nt" else b"#!/bin/sh\n")
+        external.chmod(0o755)
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("AVIBE_DESKTOP_BACKENDS_ROOT", str(private_root))
+    monkeypatch.setenv("PATH", str(external_root))
+    monkeypatch.setattr(
+        "vibe.cli_paths._candidate_cli_paths",
+        lambda binary, **_kwargs: [Path(binary)] if Path(binary).is_absolute() else [],
+    )
+    v2 = V2Config(
+        mode="self_host",
+        version="2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd=str(tmp_path)),
+        agents=AgentsConfig(
+            claude=ClaudeConfig(cli_path=str(selected["claude"])),
+            codex=CodexConfig(cli_path=str(selected["codex"])),
+            opencode=OpenCodeConfig(cli_path=str(selected["opencode"])),
+        ),
+    )
+
+    compat = to_app_config(v2)
+
+    assert compat.claude.cli_path == str(selected["claude"])
+    assert compat.codex is not None and compat.codex.binary == str(selected["codex"])
+    assert compat.opencode is not None and compat.opencode.binary == str(selected["opencode"])
+    assert resolve_cli_path(str(tmp_path / "other" / ("claude" + suffix)), include_npm_global=False) == str(
+        external_root / ("claude" + suffix)
+    )
+
+    published = tmp_path / "published" / ("codex" + suffix)
+    monkeypatch.setattr("vibe.cli_paths.resolve_published_desktop_backend", lambda _backend: str(published))
+    assert resolve_cli_path(str(selected["codex"]), include_npm_global=False) == str(published)
 
 
 def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path: Path) -> None:
@@ -3500,3 +3593,51 @@ def test_tracking_a_create_retires_the_previous_teardown_record(monkeypatch, tmp
 
     assert asyncio.run(scenario()) is False
     assert composite_key not in handler.claude_intentional_teardowns
+
+
+def test_to_app_config_never_spawns_npm_on_async_request_paths(monkeypatch, tmp_path: Path) -> None:
+    """Runtime path projection must not shell out to npm.
+
+    ``to_app_config`` is reached from async request handlers, and the npm-global
+    branch of the resolver runs ``npm config get prefix`` with a five-second
+    timeout. One missing backend would stall an event loop for that long.
+    """
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
+
+    # Recorded rather than raised: ``_npm_prefix_for`` wraps its spawn in a bare
+    # ``except Exception``, so an assertion raised here would be swallowed and
+    # the test would pass while the subprocess still ran.
+    spawned: list[object] = []
+
+    def _record_spawn(*args, **kwargs):
+        spawned.append(args)
+        raise FileNotFoundError("npm")
+
+    monkeypatch.setattr("vibe.cli_paths.subprocess.run", _record_spawn)
+
+    v2 = V2Config(
+        mode="self_host",
+        version="2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd="/tmp/workdir"),
+        # Names no host can resolve, so every cheap candidate misses and the
+        # npm-global branch is actually reached. Real binary names would be
+        # found in Homebrew or /usr/local on a developer machine and the test
+        # would pass without proving anything.
+        agents=AgentsConfig(
+            claude=ClaudeConfig(cli_path="avibe-absent-claude-cli"),
+            codex=CodexConfig(cli_path="avibe-absent-codex-cli"),
+            opencode=OpenCodeConfig(cli_path="avibe-absent-opencode-cli"),
+        ),
+    )
+
+    compat = to_app_config(v2)
+
+    assert spawned == [], f"resolution spawned {len(spawned)} subprocess(es) on an async request path"
+    # Unresolvable selectors fall through to the saved value rather than failing.
+    assert compat.claude.cli_path == "avibe-absent-claude-cli"
+    assert compat.codex is not None and compat.codex.binary == "avibe-absent-codex-cli"
+    assert compat.opencode is not None and compat.opencode.binary == "avibe-absent-opencode-cli"

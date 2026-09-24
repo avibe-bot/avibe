@@ -478,10 +478,25 @@ async def _health_round_trip():
     return resp
 
 
-def test_health_endpoint():
+def test_health_endpoint(monkeypatch):
+    monkeypatch.delenv("AVIBE_DESKTOP_RUNTIME_ID", raising=False)
     resp = asyncio.run(_health_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+
+def test_health_endpoint_reports_the_controller_runtime_identity(monkeypatch):
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
+
+    resp = asyncio.run(_health_round_trip())
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "service": "vibe-remote-internal",
+        "version": 1,
+        "desktop_runtime_id": "a" * 64,
+    }
 
 
 @pytest.mark.parametrize("env_value", [None, "1"])
@@ -7903,7 +7918,6 @@ def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
 
 def test_boot_publishes_app_then_waits_for_controller_recovery(
     monkeypatch,
-    tmp_path,
 ):
     """HFR-152: HTTP serving waits for controller-owned runtime recovery."""
     import uvicorn
@@ -7931,6 +7945,14 @@ def test_boot_publishes_app_then_waits_for_controller_recovery(
             calls.append("serve")
 
     listener = SimpleNamespace(close=lambda: calls.append("close"))
+    bound = SimpleNamespace(listener=listener)
+    host = SimpleNamespace(
+        instance_id=None,
+        bearer_token=None,
+        bind=lambda: bound,
+        publish=lambda _bound: None,
+        cleanup=lambda _bound: listener.close(),
+    )
 
     def _create_app(_controller):
         calls.append("app")
@@ -7939,9 +7961,9 @@ def test_boot_publishes_app_then_waits_for_controller_recovery(
 
     monkeypatch.setattr(internal_server, "create_app", _create_app)
     monkeypatch.setattr(
-        internal_server,
-        "_bind_socket",
-        lambda _path: (listener, tmp_path / "internal.sock"),
+        internal_server.control_ipc,
+        "select_control_ipc_host",
+        lambda **_kwargs: host,
     )
     monkeypatch.setattr(uvicorn, "Config", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(uvicorn, "Server", _Server)

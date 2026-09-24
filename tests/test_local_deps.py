@@ -2144,6 +2144,8 @@ def test_dependencies_status_shape(monkeypatch):
     )
     out = api.dependencies_status()
     assert out["ok"]
+    assert out["reconciling"] is False
+    assert out["reconciling_dependencies"] == []
     by = {d["id"]: d for d in out["deps"]}
     assert list(by) == [
         "askill",
@@ -2165,6 +2167,65 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["model-hub-engine"]["latest_version"] == "v7.2.149"
     assert by["model-hub-engine"]["status"] == "ready"
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+def test_dependencies_status_preserves_reconciliation_seen_before_probes(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
+    import core.show_runtime as srt_mod
+
+    class _ShowRuntime:
+        def status(self):
+            return {"installed": True, "node_available": True, "node_version": "22.0"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _ShowRuntime())
+
+    class _LockSnapshot:
+        def __init__(self):
+            self._calls = 0
+
+        def locked(self):
+            self._calls += 1
+            return self._calls == 1
+
+    monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _LockSnapshot())
+
+    assert api.dependencies_status(offline=True)["reconciling"] is True
+
+
+def test_dependencies_status_detects_reconciliation_during_probes(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
+    import core.show_runtime as srt_mod
+
+    class _ShowRuntime:
+        def status(self):
+            return {"installed": True, "node_available": True, "node_version": "22.0"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _ShowRuntime())
+
+    import core.tmux_runtime as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
+    monkeypatch.setattr(api, "_startup_dependency_state_snapshot", iter([(7, set()), (8, set())]).__next__)
+
+    class _Unlocked:
+        def locked(self):
+            return False
+
+    monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _Unlocked())
+    result = api.dependencies_status()
+
+    assert result["reconciling"] is True
+    assert result["reconciling_dependencies"] == []
 
 
 @pytest.mark.parametrize(
@@ -2329,6 +2390,7 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     askill_calls = []
     avault_calls = []
     model_hub_calls = []
+    model_hub_active_dependencies = []
 
     def fake_ensure(force=False):
         askill_calls.append(force)
@@ -2341,18 +2403,40 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
         return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
 
     monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure_avault)
+
     monkeypatch.setattr(
         api,
-        "ensure_model_hub_engine_installed",
-        lambda *, force=False: model_hub_calls.append(force)
-        or {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"},
+        "_model_hub_engine_dependency_status",
+        lambda: {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": True,
+            "version": "v7.2.149",
+            "latest_version": "v7.2.149",
+            "has_update": False,
+            "status": "ready",
+            "action_class": "none",
+            "reason": None,
+            "download_error": None,
+        },
     )
+
+    def fake_ensure_model_hub_engine(*, force=False):
+        model_hub_calls.append(force)
+        model_hub_active_dependencies.append(
+            api.dependencies_status(dependency_ids=["model-hub-engine"])["reconciling_dependencies"]
+        )
+        return {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"}
+
+    monkeypatch.setattr(api, "ensure_model_hub_engine_installed", fake_ensure_model_hub_engine)
 
     import core.show_runtime as srt_mod
 
     class _Mgr:
         def __init__(self):
             self.prepared = []
+            self.auto_install = True
 
         def status(self, *, offline=False):
             assert offline is True
@@ -2384,6 +2468,8 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     assert askill_calls == [False]
     assert avault_calls == [False]
     assert model_hub_calls == [False]
+    assert model_hub_active_dependencies == [["model-hub-engine"]]
+    assert api.dependencies_status(dependency_ids=["model-hub-engine"])["reconciling_dependencies"] == []
     assert out["model_hub_engine"]["version"] == "v7.2.149"
     assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"

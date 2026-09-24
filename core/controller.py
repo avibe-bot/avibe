@@ -1936,7 +1936,7 @@ class Controller:
             asyncio.set_event_loop(self._loop)
             self._schedule_model_hub_snapshot_reconcile()
             self.show_git_checkpoint_service.start()
-            # Internal Unix-socket ASGI server for the Web UI / future
+            # Internal control-IPC ASGI server for the Web UI / future
             # ``vibe agent run --sync`` cross-process callers. Lives on
             # the same loop as the IM dispatch path so they share one
             # asyncio scheduler. See core/internal_server.py.
@@ -1972,18 +1972,19 @@ class Controller:
             self.cleanup_sync()
             if not getattr(self, "_shutdown_tainted", False):
                 self._service_lock_safe_to_release = True
-            # Best-effort: remove the dispatch socket so the next controller
-            # boot starts from a clean filesystem state. uvicorn unlinks
-            # the path on exit when it bound the socket itself, but it
-            # can be left behind on hard crashes.
+            # Let the transport owner close its listener and remove only the
+            # endpoint it published. This is required for the Windows descriptor:
+            # a stale Controller must not unlink a successor's endpoint.
             try:
-                from core import internal_server as _internal_server
-
-                sock_path = _internal_server.default_socket_path()
-                if sock_path.exists():
-                    sock_path.unlink()
-            except Exception:
+                internal_task = getattr(self, "_internal_server_task", None)
+                if internal_task is not None and not internal_task.done():
+                    internal_task.cancel()
+                    self._loop.run_until_complete(internal_task)
+            except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                logger.debug("Internal control IPC cleanup skipped: %s", exc)
+            self._internal_server_task = None
             if self._loop is not None:
                 try:
                     self._loop.stop()

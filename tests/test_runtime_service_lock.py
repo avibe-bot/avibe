@@ -12,6 +12,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vibe import runtime
 
 
+def _spawned(process):
+    """Stand in for the spawn primitive, which hands a child over before returning it."""
+
+    def spawn(*args, hand_over=None, **kwargs):
+        if hand_over is not None:
+            hand_over(process)
+        return process
+
+    return spawn
+
+
 class RuntimeServiceLockTests(unittest.TestCase):
     def setUp(self):
         self._extra_service_pids = patch("vibe.runtime.extra_service_process_pids", return_value=[])
@@ -63,8 +74,11 @@ class RuntimeServiceLockTests(unittest.TestCase):
             pid_path = Path(tmpdir) / "service.pid"
             pid_path.write_text("12345", encoding="utf-8")
 
-            def fake_spawn(args, stdout_name, stderr_name, env=None):
-                return SimpleNamespace(pid=67890, poll=lambda: None)
+            def fake_spawn(args, stdout_name, stderr_name, env=None, *, hand_over, **kwargs):
+                # The primitive hands the child over before it returns it.
+                process = SimpleNamespace(pid=67890, poll=lambda: None)
+                hand_over(process)
+                return process
 
             with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
                 with patch("vibe.runtime.pid_alive", return_value=True):
@@ -185,7 +199,7 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
                 with patch("vibe.runtime.service_instance_lock_available", return_value=(True, None)):
-                    with patch("vibe.runtime.spawn_service_background_process", return_value=process):
+                    with patch("vibe.runtime.spawn_service_background_process", side_effect=_spawned(process)):
                         with patch("vibe.runtime.wait_for_service_pid", return_value=False):
                             with patch("vibe.runtime.pid_alive", return_value=True):
                                 pid = runtime.start_service(wait_for_ready=False)
@@ -200,7 +214,7 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
                 with patch("vibe.runtime.service_instance_lock_available", return_value=(True, None)):
-                    with patch("vibe.runtime.spawn_service_background_process", return_value=process):
+                    with patch("vibe.runtime.spawn_service_background_process", side_effect=_spawned(process)):
                         with patch("vibe.runtime.wait_for_service_pid", return_value=True) as wait_for_pid:
                             with patch("vibe.runtime.pid_alive", return_value=True):
                                 pid = runtime.start_service(wait_for_ready=False, initial_ready_timeout=0)
@@ -216,7 +230,7 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
                 with patch("vibe.runtime.service_instance_lock_available", return_value=(True, None)):
-                    with patch("vibe.runtime.spawn_service_background_process", return_value=process):
+                    with patch("vibe.runtime.spawn_service_background_process", side_effect=_spawned(process)):
                         with patch("vibe.runtime.wait_for_service_pid", return_value=False):
                             with patch("vibe.runtime.pid_alive", return_value=True):
                                 with self.assertRaises(RuntimeError):
@@ -231,7 +245,7 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
                 with patch("vibe.runtime.service_instance_lock_available", return_value=(True, None)):
-                    with patch("vibe.runtime.spawn_service_background_process", return_value=process):
+                    with patch("vibe.runtime.spawn_service_background_process", side_effect=_spawned(process)):
                         with patch("vibe.runtime.wait_for_service_pid", side_effect=[False, True]) as wait_for_pid:
                             with patch("vibe.runtime.pid_alive", return_value=True):
                                 pid = runtime.start_service()
@@ -1000,8 +1014,10 @@ class ServiceReadinessGateTests(unittest.TestCase):
             if already_recorded:
                 pid_path.write_text(str(pid), encoding="utf-8")
 
-            def fake_spawn(args, stdout_name, stderr_name, env=None, **kwargs):
-                return SimpleNamespace(pid=pid, poll=lambda: None)
+            def fake_spawn(args, stdout_name, stderr_name, env=None, *, hand_over, **kwargs):
+                process = SimpleNamespace(pid=pid, poll=lambda: None)
+                hand_over(process)
+                return process
 
             with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
                 with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):

@@ -15,8 +15,9 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import psutil
 
@@ -31,6 +32,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from core.process_isolation import isolated_subprocess_kwargs
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -49,6 +51,21 @@ SERVICE_SLOW_START_TIMEOUT_SECONDS = 120.0
 #: a success by then.
 SERVICE_PHASE_STARTING = "starting"
 SERVICE_PHASE_RUNNING = "running"
+
+
+@dataclass
+class ProcessStartInfo:
+    pid: int | None = None
+    create_unix_ms: float | None = None
+    reused: bool = False
+
+    def capture(self, pid: int, *, reused: bool) -> int:
+        if self.pid != pid:
+            created = process_create_time(pid)
+            self.pid = pid
+            self.create_unix_ms = created * 1000 if created is not None else None
+        self.reused = reused
+        return pid
 
 
 def get_package_root() -> Path:
@@ -146,6 +163,8 @@ MAIN_PATH = get_service_main_path()
 _SERVICE_LOCK = threading.Lock()
 _SERVICE_INSTANCE_LOCK_HANDLE = None
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
+# /ready can spend up to two seconds in the Controller health probe.
+UI_ADOPTION_PROBE_TIMEOUT_SECONDS = 3.0
 
 
 def _rounded_seconds(seconds: float) -> float:
@@ -249,13 +268,48 @@ def _lock_file_pid(lock_file) -> int | None:
     return pid if isinstance(pid, int) and pid > 0 else None
 
 
+# The byte this file's lock lives on, on Windows only.
+#
+# Windows byte-range locks are mandatory and scoped to a HANDLE, not a process:
+# an exclusive lock denies every other handle -- including a second handle this
+# same process opens -- both read and write access to the locked range. This
+# lock file is also the record naming its holder, so locking the bytes the
+# record occupies hid that record for exactly as long as the lock meant
+# anything, and every reader below treats an unreadable record as "nobody holds
+# this". Locking past end-of-file is legal, costs no disk and does not extend
+# the file, so a byte out here still names this file while leaving every byte
+# anyone reads unlocked. It sits far beyond any record this writes.
+#
+# POSIX keeps its whole-file advisory ``flock``: it never denied a read, so it
+# has no defect to fix and an installed base that must keep excluding today's
+# releases.
+_WINDOWS_LOCK_BYTE_OFFSET = 1 << 30
+
+
+def _windows_lock_byte(lock_file, mode: int) -> None:
+    """Take or drop the Windows lock byte, leaving the handle where it was.
+
+    ``msvcrt.locking`` locks ``nbytes`` from the descriptor's CURRENT position,
+    so the offset has to be applied to the raw descriptor -- a text handle
+    cannot seek to an arbitrary byte. Restoring position 0 afterwards keeps the
+    buffered handle coherent for the record write and read that follow.
+    """
+
+    import msvcrt
+
+    os.lseek(lock_file.fileno(), _WINDOWS_LOCK_BYTE_OFFSET, os.SEEK_SET)
+    try:
+        msvcrt.locking(lock_file.fileno(), mode, 1)
+    finally:
+        lock_file.seek(0)
+
+
 def _try_lock_file(lock_file) -> bool:
     if os.name == "nt":
         import msvcrt
 
         try:
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            _windows_lock_byte(lock_file, msvcrt.LK_NBLCK)
             return True
         except OSError:
             return False
@@ -274,8 +328,7 @@ def _unlock_file(lock_file) -> None:
         import msvcrt
 
         try:
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            _windows_lock_byte(lock_file, msvcrt.LK_UNLCK)
         except OSError:
             logger.debug("Failed to unlock service instance lock", exc_info=True)
         return
@@ -586,6 +639,14 @@ def _terminate_process_windows(pid: int, timeout: float = 5) -> bool:
         return False
 
 
+# One shell that never answers must not be able to hold a `vibe stop` open.
+# This lookup names a single process for a log line or an identity check, so a
+# bound that costs it an unanswered question is cheaper than an unbounded wait
+# on a lifecycle path. The existing `except Exception: continue` already moves
+# on to the next shell, and TimeoutExpired arrives there.
+_WINDOWS_COMMAND_LOOKUP_TIMEOUT_SECONDS = 5.0
+
+
 def _get_process_command_windows(pid: int) -> str | None:
     script = f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; if ($p) {{ $p.CommandLine }}'
     for shell in ("powershell", "pwsh"):
@@ -595,6 +656,7 @@ def _get_process_command_windows(pid: int) -> str | None:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=_WINDOWS_COMMAND_LOOKUP_TIMEOUT_SECONDS,
             )
         except Exception:
             continue
@@ -772,13 +834,26 @@ def _process_is_service_session_leader(pid: int) -> bool:
 
 
 def _process_command_from_info(proc) -> str | None:
+    """Name a scanned process from what psutil already collected, or not at all.
+
+    This is asked for every process on the machine, so it has to be cheap. It
+    used to fall back to `get_process_command`, which on Windows launches
+    `powershell -Command Get-CimInstance ...` -- and a second `pwsh` when the
+    first says nothing -- once per process. A per-process external shell inside
+    a whole-machine walk is invisible on Linux, where that fallback is a /proc
+    read, and on Windows it is a `vibe stop` that prints nothing and never
+    returns. That is how gh-v3.1.1rc10 died.
+
+    Nothing is lost by stopping here. The scan looks for lock-less Avibe
+    daemons; those are processes this install started, whose command line
+    psutil can read. One it cannot read is by construction not ours, and the
+    authoritative owner comes from the service lock rather than from this scan.
+    """
+
     info = getattr(proc, "info", {}) or {}
     cmdline = info.get("cmdline")
     if cmdline:
         return shlex.join(str(part) for part in cmdline if str(part))
-    pid = info.get("pid")
-    if isinstance(pid, int):
-        return get_process_command(pid)
     return None
 
 
@@ -994,9 +1069,9 @@ def _spawn_runtime_log_sink(path: Path) -> subprocess.Popen:
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
         cwd=str(get_working_dir()),
         close_fds=True,
+        **isolated_subprocess_kwargs(),
     )
 
 
@@ -1036,36 +1111,158 @@ def independent_process_env(
     return child_env
 
 
-def spawn_background(
+#: How long a child that was killed because its spawn failed is waited for.
+#: SIGKILL and TerminateProcess are not refusable, so this only bounds a kernel
+#: that is slow to deliver them.
+SPAWN_DISCARD_REAP_TIMEOUT_SECONDS = 5.0
+
+
+def discard_spawned_child(process: subprocess.Popen) -> None:
+    """Kill and reap a child whose handover to its caller failed.
+
+    Called from inside an ``except`` that re-raises, so it must not replace the
+    failure it is cleaning up after: anything it cannot do is logged instead.
+    """
+
+    try:
+        process.kill()
+    except OSError:
+        logger.error("Failed to kill pid=%s after its spawn failed", process.pid, exc_info=True)
+        return
+    try:
+        process.wait(timeout=SPAWN_DISCARD_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "Killed pid=%s after its spawn failed, but it had not exited after %.0fs",
+            process.pid,
+            SPAWN_DISCARD_REAP_TIMEOUT_SECONDS,
+        )
+
+
+def _spawn_owned_process(
     args,
-    pid_path,
     stdout_name: str,
     stderr_name: str,
-    env: dict[str, str] | None = None,
-):
+    env: dict[str, str] | None,
+    *,
+    hand_over: Callable[[subprocess.Popen], None] | None = None,
+    withdraw: Callable[[int], None] | None = None,
+) -> subprocess.Popen:
+    """Start a process the caller owns, or leave no process at all.
+
+    A caller can only undo what it knows about. Every step between ``Popen``
+    and the moment the caller knows -- closing the parent's copies of the
+    child's handles, the pid record that lets any other process find it, the
+    caller's own note that it created the child -- used to be able to raise
+    with the child already running, and then no caller could see it:
+    `cmd_start`'s rollback looked for a UI it had created and found none, and
+    the orphan kept the listener every later start then failed to bind. So a
+    failure anywhere in that span kills and reaps the child before it
+    propagates, and every caller inherits the rule instead of each rolling back
+    a window it cannot observe.
+
+    ``hand_over`` is the caller's side of that span: it records the child and
+    captures it as created, and it runs inside the guarded region so that
+    nothing is handed back half-owned. Once it returns, the caller's own
+    rollback can find the child. If the child is discarded instead,
+    ``withdraw`` removes whatever part of that record already exists -- but
+    only once the child is known to be gone, so a child that could not be
+    reaped stays findable.
+    """
+
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
     stdin = open(os.devnull, "rb")
+    # The child holds its own copies of these once it starts; the parent's must
+    # still close, or a log sink never sees end-of-file.
+    parent_handles = [stdin, stdout_sink.stdin, stderr_sink.stdin]
+    process: subprocess.Popen | None = None
     try:
         process = subprocess.Popen(
             args,
             stdin=stdin,
             stdout=stdout_sink.stdin,
             stderr=stderr_sink.stdin,
-            start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
             env=independent_process_env(env),
+            **isolated_subprocess_kwargs(),
         )
-    finally:
-        if stdin is not subprocess.PIPE:
-            stdin.close()
-        stdout_sink.stdin.close()
-        stderr_sink.stdin.close()
-    pid_path.write_text(str(process.pid), encoding="utf-8")
-    return process.pid
+        # Closing can fail too, so it happens inside this region and before the
+        # handover: once the caller owns the child, nothing here can raise.
+        _close_parent_handles(parent_handles)
+        if hand_over is not None:
+            hand_over(process)
+    except BaseException:
+        if process is not None:
+            discard_spawned_child(process)
+            if withdraw is not None and process.returncode is not None:
+                _withdraw_quietly(withdraw, process.pid)
+        _close_parent_handles(parent_handles, quietly=True)
+        raise
+    return process
+
+
+def _withdraw_quietly(withdraw: Callable[[int], None], pid: int) -> None:
+    """Remove a discarded child's record without replacing the failure being raised."""
+
+    try:
+        withdraw(pid)
+    except Exception:
+        logger.error("Failed to remove the record of discarded pid=%s", pid, exc_info=True)
+
+
+def _close_parent_handles(handles: list, *, quietly: bool = False) -> None:
+    """Close every handle, then raise the first failure unless ``quietly``.
+
+    Closing an already closed file is a no-op, so the failure path may call this
+    again after a close that raised part way through the list.
+    """
+
+    first_failure: Exception | None = None
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception as exc:
+            if quietly:
+                logger.debug("Failed to close a spawn handle after the spawn failed", exc_info=True)
+            elif first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure
+
+
+def spawn_background(
+    args,
+    pid_path,
+    stdout_name: str,
+    stderr_name: str,
+    env: dict[str, str] | None = None,
+    *,
+    start_info: ProcessStartInfo | None = None,
+):
+    """Start a process recorded in ``pid_path``; the record exists iff the child does.
+
+    With ``start_info`` the child is also captured as created before this
+    returns, inside the same guarded region: a caller that rolls back what
+    ``start_info`` names cannot miss a child this started.
+    """
+
+    def hand_over(process: subprocess.Popen) -> None:
+        pid_path.write_text(str(process.pid), encoding="utf-8")
+        if start_info is not None:
+            start_info.capture(process.pid, reused=False)
+
+    return _spawn_owned_process(
+        args,
+        stdout_name,
+        stderr_name,
+        env,
+        hand_over=hand_over,
+        withdraw=lambda pid: _forget_pid_record(pid_path, pid),
+    ).pid
 
 
 def spawn_service_background_process(
@@ -1073,29 +1270,18 @@ def spawn_service_background_process(
     stdout_name: str,
     stderr_name: str,
     env: dict[str, str] | None = None,
+    *,
+    hand_over: Callable[[subprocess.Popen], None] | None = None,
+    withdraw: Callable[[int], None] | None = None,
 ) -> subprocess.Popen:
-    stdout_path = _log_path(stdout_name)
-    stderr_path = _log_path(stderr_name)
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = open(os.devnull, "rb")
-    try:
-        process = subprocess.Popen(
-            args,
-            stdin=stdin,
-            stdout=stdout_sink.stdin,
-            stderr=stderr_sink.stdin,
-            start_new_session=True,
-            cwd=str(get_working_dir()),
-            close_fds=True,
-            env=independent_process_env(env),
-        )
-    finally:
-        if stdin is not subprocess.PIPE:
-            stdin.close()
-        stdout_sink.stdin.close()
-        stderr_sink.stdin.close()
-    return process
+    return _spawn_owned_process(
+        args,
+        stdout_name,
+        stderr_name,
+        env,
+        hand_over=hand_over,
+        withdraw=withdraw,
+    )
 
 
 def spawn_service_background(args, stdout_name: str, stderr_name: str, env: dict[str, str] | None = None) -> int:
@@ -1129,12 +1315,13 @@ def _reap_service_start_process(pid: int) -> None:
 
 def _clear_service_pid_reservation(pid: int) -> None:
     _reap_service_start_process(pid)
-    pid_path = paths.get_runtime_pid_path()
-    try:
-        recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return
-    if recorded_pid == pid:
+    _forget_pid_record(paths.get_runtime_pid_path(), pid)
+
+
+def _forget_pid_record(pid_path: Path, pid: int) -> None:
+    """Remove ``pid_path`` only while it still names ``pid``."""
+
+    if _read_pid_file(pid_path) == pid:
         pid_path.unlink(missing_ok=True)
 
 
@@ -1775,6 +1962,7 @@ def start_service(
     *,
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
+    start_info: ProcessStartInfo | None = None,
     launcher: ServiceLauncher | None = None,
 ) -> int:
     """Start the service and return the pid, by default only once it is up.
@@ -1812,12 +2000,15 @@ def start_service(
         wait_for_ready=wait_for_ready,
         initial_ready_timeout=initial_ready_timeout,
         launcher=launcher,
+        start_info=start_info,
     )
     if not wait_for_ready:
         return pid
     ready_pid = wait_for_service_ready(pid, timeout=max(0.0, deadline - time.monotonic()))
     if ready_pid is None:
         _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    if start_info is not None:
+        start_info.capture(ready_pid, reused=start_info.reused)
     return ready_pid
 
 
@@ -1826,6 +2017,7 @@ def _resolve_service_pid(
     wait_for_ready: bool,
     initial_ready_timeout: float,
     launcher: ServiceLauncher | None,
+    start_info: ProcessStartInfo | None,
 ) -> int:
     """Which process is the service, starting one if nothing holds the lock.
 
@@ -1835,6 +2027,10 @@ def _resolve_service_pid(
     """
 
     from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    def result(pid: int, *, reused: bool) -> int:
+        return start_info.capture(pid, reused=reused) if start_info is not None else pid
+
     guard_source_checkout_default_state_bootstrap()
     with _SERVICE_LOCK:
         pid_path = paths.get_runtime_pid_path()
@@ -1847,14 +2043,14 @@ def _resolve_service_pid(
             if existing_pid and pid_alive(existing_pid):
                 if not _pid_mismatches_service(existing_pid):
                     if service_pid_recorded(existing_pid):
-                        return existing_pid
+                        return result(existing_pid, reused=True)
                     if _pid_reservation_is_fresh(pid_path, existing_pid):
                         # A reservation this recent names the service whether or
                         # not it is up yet, so the question is answered. Waiting
                         # for the running phase used to happen here, and only
                         # here, which is precisely why every other return below
                         # answered a question it had not asked.
-                        return existing_pid
+                        return result(existing_pid, reused=True)
                     logger.warning(
                         "Ignoring stale service pid file pid=%s because it never acquired the service lock",
                         existing_pid,
@@ -1868,7 +2064,7 @@ def _resolve_service_pid(
                                 "match this CLI install",
                                 existing_pid,
                             )
-                            return lock_holder_pid
+                            return result(lock_holder_pid, reused=True)
                         raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
                     raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
                 logger.warning(
@@ -1880,7 +2076,7 @@ def _resolve_service_pid(
         lock_available, lock_holder_pid = service_instance_lock_available()
         if not lock_available:
             if lock_holder_pid and lock_holder_pid == existing_pid and pid_alive(lock_holder_pid):
-                return lock_holder_pid
+                return result(lock_holder_pid, reused=True)
             raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
 
         extra_pids = extra_service_process_pids()
@@ -1891,7 +2087,18 @@ def _resolve_service_pid(
         scope_prefix = maybe_systemd_scope_prefix()
         if scope_prefix:
             logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
-        spawn_kwargs = {}
+        # The reservation is how anything outside this frame finds a service that
+        # has not taken the lock yet -- `stop_service()` included, and so every
+        # rollback -- and `start_info` is how the caller knows it created one.
+        # Both are written inside the spawn primitive's guarded region, so a
+        # failure or a signal before the last of them kills the child instead of
+        # leaving one that nothing can stop. Only a findable child is recorded as
+        # created: whoever reads `start_info` may rely on the reservation too.
+        def hand_over(process: subprocess.Popen) -> None:
+            _SERVICE_START_PROCESSES[process.pid] = process
+            _record_service_pid_reservation(process.pid)
+            result(process.pid, reused=False)
+
         process = spawn_service_background_process(
             [*scope_prefix, launcher.python, launcher.main],
             "service_stdout.log",
@@ -1901,19 +2108,19 @@ def _resolve_service_pid(
                 "VIBE_DISABLE_STDOUT_LOGGING": "1",
                 SHUTDOWN_INTENT_ENV: "1",
             },
-            **spawn_kwargs,
+            hand_over=hand_over,
+            withdraw=_clear_service_pid_reservation,
         )
         pid = process.pid
-        _SERVICE_START_PROCESSES[pid] = process
-        _record_service_pid_reservation(pid)
         if scope_prefix:
             # Scoped launches resolve their pid via the authoritative lock holder
             # (poll-and-adopt), never by trusting the spawn pid alone.
-            return _start_scoped_service_result(
+            resolved_pid = _start_scoped_service_result(
                 pid,
                 initial_ready_timeout=initial_ready_timeout,
                 wait_for_ready=wait_for_ready,
             )
+            return result(resolved_pid, reused=False)
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
         exit_code = _service_start_exit_code(pid)
@@ -1941,7 +2148,9 @@ def _resolve_service_pid(
 
 
 def _ui_health_url(host: str, port: int) -> str:
-    health_host = (host or "127.0.0.1").strip()
+    from vibe.desktop_runtime import _normalized_bind_host
+
+    health_host = _normalized_bind_host(host)
     if health_host in {"0.0.0.0", ""}:
         health_host = "127.0.0.1"
     elif health_host in {"::", "::0"}:
@@ -1953,12 +2162,95 @@ def _ui_health_url(host: str, port: int) -> str:
     return f"http://{health_host}:{port}/health"
 
 
-def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
+def _ui_health_urls(host: str, port: int) -> tuple[str, ...]:
+    from vibe.desktop_runtime import desktop_origin
+
+    primary_url = _ui_health_url(host, port)
+    desktop_url = f"{desktop_origin(host, port)}/ready"
+    urls = [primary_url]
+    if desktop_url not in urls:
+        urls.append(desktop_url)
+    return tuple(urls)
+
+
+def _ui_ready_identity_state(response) -> bool | None:
     try:
-        with urllib.request.urlopen(_ui_health_url(host, port), timeout=timeout) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
-        return False
+        payload = json.loads(response.read().decode("utf-8"))
+    except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        return None
+    if payload.get("product") != "avibe" or type(payload.get("ready")) is not bool:
+        return None
+
+    controller_runtime_id = payload.get("desktop_runtime_id")
+    ui_runtime_id = payload.get("desktop_ui_runtime_id")
+    expected_ready = {"schema_version", "product", "ready"}
+    if controller_runtime_id is not None and ui_runtime_id is not None:
+        return None
+    for field, runtime_id in (
+        ("desktop_runtime_id", controller_runtime_id),
+        ("desktop_ui_runtime_id", ui_runtime_id),
+    ):
+        if runtime_id is None:
+            continue
+        if (
+            not isinstance(runtime_id, str)
+            or len(runtime_id) != 64
+            or any(character not in "0123456789abcdef" for character in runtime_id)
+        ):
+            return None
+        expected_ready.add(field)
+    if response.status == 200 and set(payload) == expected_ready and payload["ready"] is True:
+        return True
+
+    code = payload.get("code")
+    if (
+        response.status == 503
+        and isinstance(code, str)
+        and bool(code)
+        and payload
+        == {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": code,
+        }
+    ):
+        return None if code == "runtime_identity_invalid" else False
+    return None
+
+
+def _ui_server_readiness(host: str, port: int, timeout: float = 0.5) -> bool | None:
+    for health_url in _ui_health_urls(host, port):
+        try:
+            with urllib.request.urlopen(health_url, timeout=timeout) as response:
+                if health_url.endswith("/ready"):
+                    return _ui_ready_identity_state(response)
+                if response.status != 200:
+                    return None
+        except urllib.error.HTTPError as exc:
+            if health_url.endswith("/ready"):
+                return _ui_ready_identity_state(exc)
+            return None
+        except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+            return None
+    return None
+
+
+def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
+    return _ui_server_readiness(host, port, timeout=timeout) is True
+
+
+def _ui_server_compatible(
+    host: str,
+    port: int,
+    timeout: float = UI_ADOPTION_PROBE_TIMEOUT_SECONDS,
+) -> bool:
+    return _ui_server_readiness(host, port, timeout=timeout) is not None
 
 
 def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -2054,8 +2346,12 @@ def start_ui(
     port,
     *,
     wait_for_ready: bool = True,
+    start_info: ProcessStartInfo | None = None,
     launcher: ServiceLauncher | None = None,
 ):
+    from vibe.desktop_runtime import normalize_desktop_port
+
+    port = normalize_desktop_port(port)
     pid_path = paths.get_runtime_ui_pid_path()
     if pid_path.exists():
         try:
@@ -2063,15 +2359,27 @@ def start_ui(
         except Exception:
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
-            if _pid_matches_ui_server(existing_pid) and ui_server_healthy(host, port):
+            if _pid_matches_ui_server(existing_pid) and _ui_server_compatible(host, port):
+                if start_info is not None:
+                    start_info.capture(existing_pid, reused=True)
                 return existing_pid
             if _pid_matches_ui_server(existing_pid):
                 logger.warning(
-                    "Stopping stale UI process pid=%s because health check failed for %s",
+                    "Stopping stale UI process pid=%s because required listener or identity checks failed for %s",
                     existing_pid,
-                    _ui_health_url(host, port),
+                    ", ".join(_ui_health_urls(host, port)),
                 )
-                stop_pid(existing_pid)
+                if not stop_pid(existing_pid):
+                    # The stale process still owns the configured listener, so a
+                    # replacement would only die on bind while that process kept
+                    # serving. Preserve the pid record naming the process that has
+                    # to be stopped: unlinking it here would leave the incompatible
+                    # UI running with nothing pointing at it.
+                    logger.error(
+                        "Failed to stop stale UI process pid=%s; preserving pid state and not starting a replacement",
+                        existing_pid,
+                    )
+                    return None
             else:
                 logger.warning(
                     "Ignoring stale UI pid file pid=%s because it does not match the Vibe UI server",
@@ -2085,6 +2393,11 @@ def start_ui(
     # idea of startup inside the replaced install.
     command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
     spawn_kwargs = {}
+    # `start_info` is captured inside the spawn, not after it returns: in between,
+    # a signal left a live UI with a pid record that `cmd_start`'s rollback,
+    # which undoes only what `start_info` names as created, never looked at.
+    if start_info is not None:
+        spawn_kwargs["start_info"] = start_info
     pid = spawn_background(
         [(launcher or current_service_launcher()).python, "-c", command],
         pid_path,
@@ -2093,7 +2406,11 @@ def start_ui(
         **spawn_kwargs,
     )
     if wait_for_ready and not wait_for_ui_server(host, port):
-        logger.warning("Started UI pid=%s but health check did not pass for %s", pid, _ui_health_url(host, port))
+        logger.warning(
+            "Started UI pid=%s but required health checks did not pass for %s",
+            pid,
+            ", ".join(_ui_health_urls(host, port)),
+        )
     return pid
 
 

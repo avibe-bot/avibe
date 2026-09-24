@@ -516,7 +516,10 @@
 
 /* ---- Collaboration story ------------------------------------------------ */
 
-.onboarding-story { position: relative; width: 100%; display: flex; align-items: flex-start; justify-content: center; }
+/* The story fills its stage and centres the diagram in it, which is where the stage
+   alone would put it — but it makes the story's box the stage's box, so the return
+   loop below can hang from the cards to the stage's own floor. */
+.onboarding-story { position: relative; width: 100%; flex: 1; display: flex; align-items: center; justify-content: center; }
 /* The diagram is the card plus the return wire's band beneath it: the reference draws
    a 296-tall box around a 232-tall card, a 326 around a 262 and a 394 around a 330 —
    the card plus 64 at every reading. It keeps that box even where the stage around it
@@ -796,12 +799,8 @@
   100% { color: var(--mint-ink); border-color: var(--ob-check-border); background: var(--ob-check-done); }
 }
 
-/* The wires are stretched over the card grid plus the return band, so every coordinate
-   stays proportional: the handoffs cross the cards' midline at y=116 of the 296 box and
-   the return loop runs under the cards at y=261. */
 /* The wire box is the card times the reference's own 350/300, hung from the diagram's
-   top: the handoffs then sit on the cards' midline at every tier, and the return loop
-   lands inside the band the stage reserves under the cards. */
+   top: the handoffs then sit on the cards' midline at every tier. */
 .onboarding-wires {
   position: absolute;
   top: 0;
@@ -845,23 +844,36 @@
   92%, 100% { stroke-dashoffset: -100; opacity: 0; }
 }
 
-/* The caption rides the return wire rather than the container floor: the wire's
-   horizontal run is at y=338 of the wire box, whose height is the card times 350/300,
-   so this is the same line at every tier. Centring on it (rather than sitting under
-   it) is what makes the capsule read as a label cut into the wire.
-   The fill is the page at 90% so the wire stays faintly legible through it
+/* The return loop runs from the third card's floor to the first's along the line the
+   other setup screens set their bottom text on: half a summary row above the stage's
+   floor. The diagram is centred in the story, so the cards' floor is the story's middle
+   less half the diagram plus a card; the box spans the diagram's width, and its bottom
+   edge is the wire's horizontal run. */
+.onboarding-return {
+  position: absolute;
+  left: 50%;
+  width: min(100%, var(--ob-content-w));
+  transform: translateX(-50%);
+  top: calc(50% - var(--ob-diagram-h) / 2 + var(--ob-card-h));
+  bottom: calc(var(--ob-summary-h) / 2);
+  pointer-events: none;
+}
+.onboarding-return-wire { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+/* The caption is centred on the run, which makes the capsule read as a label cut into
+   the wire. The fill is the page at 90% so the wire stays faintly legible through it
    instead of being erased — a mask, not a patch. */
 .onboarding-story-caption {
   position: absolute;
-  top: calc(var(--ob-card-h) * 338 / 300);
+  top: 100%;
   left: 50%;
   transform: translate(-50%, -50%);
   padding: 0 12px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--background) 90%, transparent);
   color: var(--ob-caption);
-  font-size: 10px;
-  line-height: 18px;
+  /* The same size as the providers screen's summary line, the caption's counterpart. */
+  font-size: var(--ob-cap-fs);
+  line-height: 1.5;
   white-space: nowrap;
   transition: color 300ms;
 }
@@ -1293,7 +1305,7 @@
 
   /* The story becomes the stack the connection already is. The wires go with the
      columns — there is no handoff to draw between cards that are above one another —
-     and the caption, which rode the return wire, returns to normal flow under them.
+     and so do the return loop and the caption it carries.
      The cards take the rest of the reserved height in three equal rows, which is how
      the introduction reaches the same floor as the connection. */
   .onboarding-story { flex: 1; align-items: stretch; }
@@ -1305,8 +1317,7 @@
     height: auto;
     flex: 1;
   }
-  .onboarding-wires { display: none; }
-  .onboarding-story-caption { position: static; transform: none; align-self: center; }
+  .onboarding-wires, .onboarding-return { display: none; }
   .onboarding-assistants-list { grid-template-columns: minmax(0, 1fr); gap: var(--ob-stack-gap); }
   /* Six 52px logos cannot sit on one 350px row, so the row folds into two of three —
      the reference's own mobile arrangement — and gives up the fixed 560 span with it. */
@@ -1414,15 +1425,7 @@
    desktop tier, 60 on a phone — and it is the step that carries the OpenCode permission
    block, the tallest thing the slot ever holds. 48 is what every tier can give it
    without reaching the cards; the block scrolls inside that. */
-/* Align the captions without moving the shared heading, card, or action anchors. */
 @media (min-width: 760px) {
-  .onboarding-shell {
-    --ob-caption-drop: calc(var(--ob-story-band) - var(--ob-summary-h) / 2 - var(--ob-card-h) * 38 / 300);
-    --ob-caption-nudge: 36px;
-  }
-  [data-setup-screen-root="intro"] .onboarding-story-caption {
-    top: calc(var(--ob-card-h) * 338 / 300 + (var(--ob-stage-h) - var(--ob-diagram-h)) / 2 + var(--ob-caption-drop) + var(--ob-caption-nudge));
-  }
   /* The hint grows around the caption line inside the room above the action. */
   .onboarding-step[data-setup-screen="assistants"] > .onboarding-screens > .onboarding-action-aside:not(:empty) {
     --ob-aside-half: calc(var(--ob-card-h) * 38 / 300 - 8px);
@@ -1432,12 +1435,6 @@
     justify-content: center;
   }
 }
-@media (max-height: 800px) and (min-width: 760px) {
-  .onboarding-shell { --ob-caption-nudge: 37.5px; }
-}
-@media (min-width: 1600px) and (min-height: 950px) {
-  .onboarding-shell { --ob-caption-nudge: 19.5px; }
-}
 @media (max-width: 759px) {
   .onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
 }
@@ -1445,8 +1442,11 @@
 /* Sentence centred on the action's axis, rescan beside it: equal flanking columns put
    the middle one in the middle of the slot whatever the link costs, and the link starts
    where the sentence ends. Both columns can give all their width back, so a narrow
-   window wraps the sentence instead of pushing the link off the screen. */
-.onboarding-setup-hint-line { display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline; gap: 6px; }
+   window wraps the sentence instead of pushing the link off the screen.
+   The line wears the providers summary's type, and the link is centred on the sentence
+   rather than baseline-aligned: its icon would otherwise lift it above the text. */
+.onboarding-setup-hint-line { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 6px; }
+.onboarding-setup-hint-line, .onboarding-setup-hint-line > * { font-size: var(--ob-cap-fs); line-height: 1.5; }
 .onboarding-setup-hint-line > span { grid-column: 2; }
 .onboarding-setup-hint-line > :not(span) { grid-column: 3; justify-self: start; }
 
@@ -1472,5 +1472,4 @@
 }
 @media (max-width: 759px) {
   .onboarding-shell { --ob-provider-card-h: 116px; --ob-provider-card-pad: 10px; --ob-provider-card-gap: 6px; --ob-provider-card-logo: 25px; --ob-provider-card-name: 13px; --ob-provider-card-key: 10px; --ob-wire-h: 42px; --ob-gap: 7px; --ob-destination-h: 120px; --ob-content-w: 460px; }
-  .onboarding-story-caption { display: none; }
 }

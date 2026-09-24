@@ -40,6 +40,18 @@ def native_safety(monkeypatch, _isolate_vibe_remote_home):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
     monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
     monkeypatch.setattr(psutil, "process_iter", forbidden)
+    # The connection projection deliberately observes inherited launch
+    # credentials. Keep the fixture independent from the coding agent's own
+    # process environment so direct native-store cases exercise their stated
+    # source and do not accidentally select an ambient API key.
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
 
 

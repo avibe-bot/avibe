@@ -1,10 +1,10 @@
-"""``httpx`` wrapper for talking to the controller's internal Unix socket.
+"""``httpx`` wrapper for the Controller's cross-platform control IPC.
 
 C5 of Plan 2 (see ``docs/plans/workbench-dispatch-architecture.md``).
 The UI server runs as its own subprocess; this module is how it reaches
 ``core.internal_server`` to start agent turns and observe their lifecycle.
 
-Single responsibility: keep all the socket-path / httpx-transport /
+Single responsibility: keep all the endpoint discovery / httpx-transport /
 SSE-parsing boilerplate out of the UI route bodies. Routes call
 ``dispatch_async(...)`` to start a fire-and-forget turn (the reply arrives over
 the persistent ``message.new`` session stream, not the response),
@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator, Optional
 
 import httpx
 
-from config import paths
+from core import control_ipc
 logger = logging.getLogger(__name__)
 
 _SOCKET_ERRORS = (httpx.TransportError, OSError)
@@ -60,10 +60,62 @@ def default_socket_path() -> Path:
     boundaries clean.
     """
 
-    override = os.environ.get("VIBE_INTERNAL_DISPATCH_SOCKET")
-    if override:
-        return Path(override).expanduser()
-    return paths.get_state_dir() / "dispatch.sock"
+    return control_ipc.default_unix_socket_path()
+
+
+def _platform_name() -> str:
+    return os.name
+
+
+def _resolve_endpoint(socket_path: Optional[Path]) -> control_ipc.ControlIpcClientEndpoint:
+    platform_name = _platform_name()
+    if socket_path is not None or platform_name != "nt":
+        return control_ipc.ControlIpcClientEndpoint(
+            transport="unix",
+            socket_path=_verified_socket_path(socket_path),
+        )
+    try:
+        endpoint = control_ipc.resolve_client_endpoint(
+            platform_name=platform_name,
+            socket_path=socket_path,
+        )
+    except control_ipc.ControlIpcDescriptorError as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return endpoint
+
+
+async def _resolve_endpoint_async(
+    socket_path: Optional[Path],
+) -> control_ipc.ControlIpcClientEndpoint:
+    """Keep endpoint discovery and filesystem checks off the UI event loop."""
+
+    return await asyncio.to_thread(_resolve_endpoint, socket_path)
+
+
+def _async_transport(endpoint: control_ipc.ControlIpcClientEndpoint) -> httpx.AsyncBaseTransport:
+    if endpoint.transport == "unix":
+        return httpx.AsyncHTTPTransport(uds=str(endpoint.socket_path))
+    return httpx.AsyncHTTPTransport()
+
+
+def _sync_transport(endpoint: control_ipc.ControlIpcClientEndpoint) -> httpx.BaseTransport:
+    if endpoint.transport == "unix":
+        return httpx.HTTPTransport(uds=str(endpoint.socket_path))
+    return httpx.HTTPTransport()
+
+
+def _validate_response(
+    response: httpx.Response,
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+) -> None:
+    descriptor = endpoint.descriptor
+    if descriptor is None:
+        return
+    if response.status_code == 401:
+        raise InternalServerUnavailable("control IPC authentication was rejected")
+    response_instance = response.headers.get(control_ipc.CONTROL_IPC_INSTANCE_HEADER)
+    if not control_ipc.response_instance_matches(descriptor, response_instance):
+        raise InternalServerUnavailable("control IPC response came from a stale instance")
 
 
 def _verified_socket_path(socket_path: Optional[Path]) -> Path:
@@ -85,12 +137,6 @@ def _verified_socket_path(socket_path: Optional[Path]) -> Path:
     return target
 
 
-async def _verified_socket_path_async(socket_path: Optional[Path]) -> Path:
-    """Keep socket metadata checks off the UI server's event loop."""
-
-    return await asyncio.to_thread(_verified_socket_path, socket_path)
-
-
 async def stream_dispatch(
     payload: dict[str, Any],
     *,
@@ -109,13 +155,13 @@ async def stream_dispatch(
     flow (``_run_show_event_dispatch`` re-publishes each event as ``show.dispatch``).
     """
 
-    target = await _verified_socket_path_async(socket_path)
+    endpoint = await _resolve_endpoint_async(socket_path)
 
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url, headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             try:
@@ -124,6 +170,7 @@ async def stream_dispatch(
                 raise InternalServerUnavailable(str(exc)) from exc
 
             async with stream as resp:
+                _validate_response(resp, endpoint)
                 if resp.status_code >= 400:
                     detail = await resp.aread()
                     raise InternalServerUnavailable(
@@ -165,13 +212,13 @@ async def stream_events(
     subscriber loop can back off and reconnect.
     """
 
-    target = await _verified_socket_path_async(socket_path)
-
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(None, connect=5.0),
         ) as client:
             try:
@@ -180,6 +227,7 @@ async def stream_events(
                 raise InternalServerUnavailable(str(exc)) from exc
 
             async with stream as resp:
+                _validate_response(resp, endpoint)
                 if resp.status_code >= 400:
                     detail = await resp.aread()
                     raise InternalServerUnavailable(
@@ -216,16 +264,17 @@ async def publish_event(
 ) -> dict[str, Any]:
     """Ask the Controller process to publish an allowlisted SSE notification."""
 
-    target = await _verified_socket_path_async(socket_path)
-
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=2.0),
         ) as client:
             resp = await client.post("/internal/events", json={"type": event_type, "data": data})
+            _validate_response(resp, endpoint)
             if resp.status_code >= 400:
                 detail = await resp.aread()
                 raise InternalServerUnavailable(f"events publish returned {resp.status_code}: {detail!r}")
@@ -245,16 +294,17 @@ def publish_event_sync(
 ) -> dict[str, Any]:
     """Synchronous wrapper for CLI/child-process notification publishers."""
 
-    target = _verified_socket_path(socket_path)
-
-    transport = httpx.HTTPTransport(uds=str(target))
+    endpoint = _resolve_endpoint(socket_path)
+    transport = _sync_transport(endpoint)
     try:
         with httpx.Client(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=2.0),
         ) as client:
             resp = client.post("/internal/events", json={"type": event_type, "data": data})
+            _validate_response(resp, endpoint)
             if resp.status_code >= 400:
                 raise InternalServerUnavailable(
                     f"events publish returned {resp.status_code}: {resp.content!r}"
@@ -271,14 +321,15 @@ def record_skill_observation_sync(
     timeout: float = 0.25,
 ) -> dict[str, Any]:
     """Best-effort queue submission; the response is not a durable receipt."""
-    target = _verified_socket_path(socket_path)
+    endpoint = _resolve_endpoint(socket_path)
     try:
         with httpx.Client(
-            transport=httpx.HTTPTransport(uds=str(target)),
-            base_url="http://localhost",
+            transport=_sync_transport(endpoint),
+            base_url=endpoint.base_url, headers=endpoint.headers,
             timeout=httpx.Timeout(timeout),
         ) as client:
             response = client.post("/internal/skill-observations", json=observation)
+            _validate_response(response, endpoint)
             if response.status_code != 202:
                 raise InternalServerUnavailable("Skill observation rejected")
             return response.json()
@@ -303,15 +354,17 @@ async def dispatch_async(
     ``InternalServerTimeout`` because acceptance is unknown.
     """
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             resp = await client.post("/internal/dispatch_async", json=payload)
+            _validate_response(resp, endpoint)
     except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     except httpx.TimeoutException as exc:
@@ -323,11 +376,17 @@ async def dispatch_async(
 
 async def archive_session(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
     """Await accepted archive completion, without a transport reporting deadline."""
-    target = await _verified_socket_path_async(socket_path)
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
-        transport = httpx.AsyncHTTPTransport(uds=str(target))
-        async with httpx.AsyncClient(transport=transport, base_url="http://localhost", timeout=httpx.Timeout(None, connect=5.0)) as client:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(None, connect=5.0),
+        ) as client:
             resp = await client.post("/internal/sessions/archive", json={"session_id": session_id})
+            _validate_response(resp, endpoint)
     except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     except httpx.TimeoutException as exc:
@@ -342,15 +401,17 @@ async def reconcile_platforms(
 ) -> dict[str, Any]:
     """Ask the controller to hot-apply the persisted platform configuration."""
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             resp = await client.post("/internal/reconcile-platforms")
+            _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
@@ -363,15 +424,16 @@ async def invalidate_activity_streaming(
 ) -> dict[str, Any]:
     """Make the controller re-read the persisted Agent Activity display flag."""
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url, headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=2.0),
         ) as client:
             resp = await client.post("/internal/invalidate-activity-streaming")
+            _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
@@ -384,13 +446,14 @@ async def backend_application(
 
     if backend not in AGENT_BACKENDS:
         raise ValueError("unsupported_backend")
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://localhost", timeout=timeout,
+            transport=transport, base_url=endpoint.base_url, headers=endpoint.headers, timeout=timeout,
         ) as client:
             response = await client.get(f"/internal/backend-application/{backend}")
+            _validate_response(response, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": response.status_code, "body": response.json() if response.content else {}}
@@ -404,18 +467,20 @@ async def reconcile_agent_backends(
 ) -> dict[str, Any]:
     """Ask the controller to hot-apply persisted Agent backend config."""
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             resp = await client.post(
                 "/internal/reconcile-agent-backends",
                 json={"backends": backends},
             )
+            _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
@@ -430,18 +495,20 @@ async def test_backend_auth(
 ) -> dict[str, Any]:
     """Run a Settings connection probe on the controller-owned Agent runtime."""
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     payload: dict[str, Any] = {"backend": backend}
     if model:
         payload["model"] = model
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             resp = await client.post("/internal/backend-auth/test", json=payload)
+            _validate_response(resp, endpoint)
     except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     except httpx.TimeoutException as exc:
@@ -457,15 +524,17 @@ async def notify_vault_request_created(
 ) -> dict[str, Any]:
     """Ask the controller to send the IM degradation notice for a Vault request."""
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=2.0),
         ) as client:
             resp = await client.post("/internal/vault/request-created", json={"request": request_payload})
+            _validate_response(resp, endpoint)
             if resp.status_code >= 400:
                 detail = await resp.aread()
                 raise InternalServerUnavailable(
@@ -486,16 +555,17 @@ def notify_vault_request_created_sync(
 ) -> dict[str, Any]:
     """Synchronous wrapper for CLI/UI-server Vault request notifications."""
 
-    target = _verified_socket_path(socket_path)
-
-    transport = httpx.HTTPTransport(uds=str(target))
+    endpoint = _resolve_endpoint(socket_path)
+    transport = _sync_transport(endpoint)
     try:
         with httpx.Client(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=2.0),
         ) as client:
             resp = client.post("/internal/vault/request-created", json={"request": request_payload})
+            _validate_response(resp, endpoint)
             if resp.status_code >= 400:
                 raise InternalServerUnavailable(
                     f"vault request notification returned {resp.status_code}: {resp.content!r}"
@@ -521,12 +591,13 @@ async def cancel_dispatch(
     so the UI route can fall back gracefully.
     """
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             # The cancel now WAITS for the backend interrupt to confirm before
             # acking (so a refused stop keeps the turn cancellable), and a
             # Claude interrupt / OpenCode abort can take a few seconds — give it
@@ -537,6 +608,7 @@ async def cancel_dispatch(
                 f"/internal/cancel/{session_id}",
                 params={"run_id": run_id} if run_id is not None else None,
             )
+            _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
@@ -551,15 +623,17 @@ async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Pa
     so the timeout matches ``cancel_dispatch``.
     """
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(30.0, connect=1.0),
         ) as client:
             resp = await client.post("/internal/running-agents/end", json=payload)
+            _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
@@ -572,15 +646,16 @@ async def _show_access_request(
     read_timeout: float | None,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url, headers=endpoint.headers,
             timeout=httpx.Timeout(read_timeout, connect=1.0),
         ) as client:
             resp = await client.post(path, json=payload)
+            _validate_response(resp, endpoint)
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
     except _SOCKET_ERRORS as exc:
@@ -629,12 +704,13 @@ async def send_now(
     failure so the UI route can degrade.
     """
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             # send-now interrupts the running turn before flushing, and that
             # backend stop can take a few seconds — match the cancel timeout so a
             # slow-but-successful interrupt isn't read-timed-out.
@@ -648,6 +724,7 @@ async def send_now(
                     else None
                 ),
             )
+            _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
@@ -659,15 +736,17 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
     ``{status_code, body}``; raises ``InternalServerUnavailable`` on socket
     failure so the route can degrade (assume idle)."""
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(1.0, connect=0.2),
         ) as client:
             resp = await client.get(f"/internal/turn-state/{session_id}")
+            _validate_response(resp, endpoint)
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
     except _SOCKET_CONNECT_ERRORS as exc:
@@ -689,12 +768,13 @@ async def list_running_agents(
     than ``turn_state``.
     """
 
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
     try:
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(3.0, connect=0.5),
         ) as client:
             if run_ids is None:
@@ -704,11 +784,79 @@ async def list_running_agents(
                     "/internal/running-agents/snapshot",
                     json={"run_ids": run_ids},
                 )
+            _validate_response(resp, endpoint)
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
     except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+def _parse_health_response(
+    response: httpx.Response,
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+) -> dict[str, Any] | None:
+    _validate_response(response, endpoint)
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("service") != "vibe-remote-internal"
+        or payload.get("version") != 1
+    ):
+        return None
+
+    runtime_id = payload.get("desktop_runtime_id")
+    if runtime_id is not None:
+        from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
+
+        if (
+            not isinstance(runtime_id, str)
+            or desktop_runtime_id({DESKTOP_RUNTIME_ID_ENV: runtime_id}) != runtime_id
+        ):
+            return None
+    return payload
+
+
+async def health_identity(socket_path: Optional[Path] = None) -> dict[str, Any] | None:
+    """Return the validated Controller health identity, or ``None`` on failure."""
+
+    try:
+        endpoint = await _resolve_endpoint_async(socket_path)
+        transport = _async_transport(endpoint)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(2.0, connect=1.0),
+        ) as client:
+            response = await client.get("/internal/health")
+            return _parse_health_response(response, endpoint)
+    except Exception:
+        return None
+
+
+def health_identity_sync(socket_path: Optional[Path] = None) -> dict[str, Any] | None:
+    """Synchronous Controller identity probe for CLI lifecycle decisions."""
+
+    try:
+        endpoint = _resolve_endpoint(socket_path)
+        transport = _sync_transport(endpoint)
+        with httpx.Client(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(2.0, connect=1.0),
+        ) as client:
+            response = client.get("/internal/health")
+            return _parse_health_response(response, endpoint)
+    except Exception:
+        return None
 
 
 async def health(socket_path: Optional[Path] = None) -> bool:
@@ -719,21 +867,7 @@ async def health(socket_path: Optional[Path] = None) -> bool:
     longer-lived dispatch stream.
     """
 
-    try:
-        target = await _verified_socket_path_async(socket_path)
-    except InternalServerUnavailable:
-        return False
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
-    try:
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://localhost",
-            timeout=httpx.Timeout(2.0, connect=1.0),
-        ) as client:
-            resp = await client.get("/internal/health")
-            return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
-    except Exception:
-        return False
+    return await health_identity(socket_path) is not None
 
 
 def health_sync(
@@ -749,17 +883,18 @@ def health_sync(
     """
 
     try:
-        target = _verified_socket_path(socket_path)
+        endpoint = _resolve_endpoint(socket_path)
     except InternalServerUnavailable:
         return False
-    transport = httpx.HTTPTransport(uds=str(target))
+    transport = _sync_transport(endpoint)
     try:
         with httpx.Client(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url, headers=endpoint.headers,
             timeout=httpx.Timeout(timeout, connect=min(timeout, 1.0)),
         ) as client:
             resp = client.get("/internal/health")
+            _validate_response(resp, endpoint)
             return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
     except Exception:
         return False
