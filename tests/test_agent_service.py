@@ -464,6 +464,40 @@ def test_activity_runtime_disconnect_retains_snapshot_until_run_settles(
     engine.dispose()
 
 
+def test_activity_runtime_end_closes_unresolved_provenance_before_run_settlement():
+    settled = []
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(
+            settle_activity_runs=settled.append,
+        ),
+    )
+    service = AgentService(controller)
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="session-1",
+        activity_id="task-failed",
+        kind="background_task",
+        metadata={"provenance_pending": True, "provenance_phase_id": "phase-1"},
+    )
+    service.activities.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+
+    completed = service.end_activity_runtime("claude", "runtime-1")
+
+    assert [(activity.id, activity.status) for activity in completed] == [
+        ("task-failed", "failed"),
+    ]
+    assert settled[0].metadata["provenance_generation_ended"] is True
+    assert settled[0].metadata["provenance_unresolved"] is True
+    assert service.activities.has_backend_work("claude") is False
+
+
 def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:
     async def _run():
         controller = _Controller()

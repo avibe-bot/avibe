@@ -77,6 +77,21 @@ Turn, Run, or delivery ownership.
    owner and admits the next human Turn. Detached output that arrives while a
    real human request is pending retains its own retry payload, but does not
    become a synthetic owner or hold the human request's runtime gate.
+10. Retained detached output is keyed by its response phase and output identity.
+    A later Assistant frame is provisional until its own Result is classified; it
+    cannot overwrite the selected text or idempotency identity of an earlier
+    retained phase. Once the earlier payload settles, the later phase may create
+    its own durable output identity.
+11. `awaiting_output` receipts and terminal snapshots have separate acknowledgers.
+    Activity Run classification may notify the Run owner, but only completed
+    output settlement releases a claimed receipt, and only terminal-snapshot
+    acknowledgement deletes a terminal snapshot. This keeps queued output
+    recoverable across a crash or restart.
+12. Receiver EOF/error/replacement retires the exact dead Claude client
+    generation even when a detached recovery owner remains. Generation end also
+    closes any still-provisional terminal Activity conservatively as unresolved
+    detached state, so no future Result is required and backend work cannot stay
+    permanently blocked by an owner that cannot arrive.
 
 The registry uses one FIFO candidate-selection and receipt-binding algorithm
 for metadata eligibility, Turn constraints, retries, and persisted local-only

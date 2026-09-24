@@ -412,6 +412,74 @@ def test_activity_ack_replaces_undeletable_snapshot_with_terminal_evidence():
     assert store.upsert_activity.call_args.kwargs["phase"] == "terminal"
 
 
+def test_ack_recovered_terminal_does_not_delete_awaiting_output_receipt():
+    delete_activity = mock.Mock()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=delete_activity,
+    )
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+
+    registry.ack_recovered_terminal(claimed)
+
+    delete_activity.assert_not_called()
+    assert registry.has_claimed_output("claude", "runtime-1") is True
+
+
+def test_generation_end_finalizes_unresolved_terminal_snapshot_for_recovery():
+    delete_activity = mock.Mock()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=delete_activity,
+    )
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-failed",
+        kind="background_task",
+        metadata={"provenance_pending": True, "provenance_phase_id": "phase-1"},
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+
+    ended = registry.end_runtime("claude", "runtime-1")
+
+    assert [(activity.id, activity.status) for activity in ended] == [
+        ("task-failed", "failed"),
+    ]
+    assert ended[0].metadata["provenance_generation_ended"] is True
+    assert ended[0].metadata["provenance_unresolved"] is True
+    assert "provenance_pending" not in ended[0].metadata
+    assert registry.has_backend_work("claude") is True
+
+    registry.ack_recovered_terminal(ended[0])
+    delete_activity.assert_called_once()
+    assert registry.has_backend_work("claude") is False
+
+
 def test_delivered_output_without_durable_evidence_stays_claimed_when_terminal_write_fails():
     callback = mock.Mock()
     store = SimpleNamespace(

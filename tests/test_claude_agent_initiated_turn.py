@@ -1095,6 +1095,141 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         release_receiver.set()
         await asyncio.wait_for(receiver, timeout=1)
 
+    async def test_retained_detached_text_is_not_overwritten_by_later_assistant_phase(
+        self,
+    ):
+        agent, _service = _build_agent()
+        composite_key = "session-retained-detached-phase:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_session_id": "sess-retained-detached-phase",
+            },
+        )
+        agent._detached_unsolicited_outputs.add(composite_key)
+        agent._detached_unsolicited_text[composite_key] = "retained payload"
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        assistant_seen = asyncio.Event()
+        release_result = asyncio.Event()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    assistant = AssistantMessage()
+                    assistant.content = [TextBlock(text="later phase")]
+                    yield assistant
+                    assistant_seen.set()
+                    await release_result.wait()
+                    result = ResultMessage()
+                    result.origin = {"kind": "task-notification"}
+                    yield result
+
+                return _iterate()
+
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _Client(),
+                "sess-retained-detached-phase",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        await asyncio.wait_for(assistant_seen.wait(), timeout=1)
+        self.assertEqual(
+            agent._detached_unsolicited_text[composite_key],
+            "retained payload",
+        )
+        self.assertEqual(
+            agent._detached_unsolicited_provisional_text[composite_key],
+            ["later phase"],
+        )
+        self.assertEqual(
+            len(agent._detached_unsolicited_provisional_phase_ids[composite_key]),
+            1,
+        )
+        release_result.set()
+        await asyncio.wait_for(receiver, timeout=1)
+
+        self.assertEqual(agent.emit_result_message.await_count, 2)
+        self.assertEqual(
+            agent.emit_result_message.await_args_list[0].args[1],
+            "retained payload",
+        )
+        self.assertEqual(
+            agent.emit_result_message.await_args_list[1].args[1],
+            "later phase",
+        )
+        first_output = agent.emit_result_message.await_args_list[0].kwargs["output"]
+        later_output = agent.emit_result_message.await_args_list[1].kwargs["output"]
+        self.assertNotEqual(
+            first_output.idempotency_key,
+            later_output.idempotency_key,
+        )
+        self.assertNotEqual(
+            first_output.metadata["provenance_phase_id"],
+            later_output.metadata["provenance_phase_id"],
+        )
+        self.assertNotIn(composite_key, agent._detached_unsolicited_text)
+
+    async def test_eof_retires_dead_client_while_detached_recovery_owner_survives(self):
+        agent, service = _build_agent()
+        composite_key = "session-dead-client-recovery:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_session_id": "sess-dead-client-recovery",
+            },
+        )
+        agent.emit_result_message = AsyncMock(
+            side_effect=RuntimeError("delivery unavailable"),
+        )
+        receiver_started = asyncio.Event()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    assistant = AssistantMessage()
+                    assistant.content = [TextBlock(text="detached payload")]
+                    yield assistant
+                    receiver_started.set()
+                    result = ResultMessage()
+                    result.origin = {"kind": "task-notification"}
+                    yield result
+
+                return _iterate()
+
+        client = _Client()
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "sess-dead-client-recovery",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver
+        await asyncio.wait_for(receiver_started.wait(), timeout=1)
+        await asyncio.wait_for(receiver, timeout=1)
+
+        self.assertNotIn(composite_key, agent.claude_sessions)
+        self.assertNotIn(composite_key, agent.receiver_tasks)
+        self.assertTrue(agent._has_synthetic_delivery_pending(composite_key))
+        self.assertTrue(service.runtime_turn_active(composite_key))
+
+        recovery_task = agent._activity_flush_tasks.pop(composite_key, None)
+        if recovery_task is not None:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+
     async def test_pending_activity_batch_scans_past_older_queue_head(self):
         agent, service = _build_agent()
         composite_key = "session-interleaved-batch:/tmp/work"

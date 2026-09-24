@@ -892,6 +892,55 @@ class SessionActivityRegistry:
             self._active_identities.pop(key, None)
         return completed
 
+    def _finalize_generation_ended_snapshot_locked(
+        self,
+        activity: SessionActivity,
+    ) -> SessionActivity | None:
+        """Close provenance waiting when its native generation cannot answer."""
+
+        key = (activity.backend, activity.runtime_key)
+        snapshots = self._terminal_snapshots.get(key)
+        current = snapshots.get(activity.id) if snapshots is not None else None
+        if current is None or not current.metadata.get("provenance_pending"):
+            return None
+
+        metadata = dict(current.metadata)
+        metadata.pop("provenance_pending", None)
+        metadata.pop("provenance_human", None)
+        metadata.pop("provenance_detached", None)
+        metadata["provenance_generation_ended"] = True
+        metadata["provenance_unresolved"] = True
+        finalized = replace(
+            current,
+            foreground=False,
+            detached_from_run=True,
+            turn_id=None,
+            run_id=None,
+            metadata=metadata,
+            updated_at=_now_iso(),
+        )
+        snapshots[finalized.id] = finalized
+        try:
+            self._persist_activity(finalized, phase=TERMINAL_SNAPSHOT_PHASE)
+            self._provenance_persistence_recovery.get(key, {}).pop(
+                finalized.id,
+                None,
+            )
+        except Exception as error:
+            self._record_provenance_persistence_recovery(
+                finalized,
+                phase=TERMINAL_SNAPSHOT_PHASE,
+                error=error,
+            )
+        if not any(
+            previous.backend == finalized.backend
+            and previous.runtime_key == finalized.runtime_key
+            and previous.id == finalized.id
+            for previous in self._recovered_terminals
+        ):
+            self._recovered_terminals.append(finalized)
+        return finalized
+
     def active_for_runtime(self, backend: str, runtime_key: str) -> list[SessionActivity]:
         prefix = (str(backend), str(runtime_key))
         with self._lock:
@@ -2179,15 +2228,19 @@ class SessionActivityRegistry:
         """Delete a recovered live snapshot only after its Run policy settles."""
 
         with self._lock:
-            if activity.metadata.get("provenance_pending"):
-                return
-            self._delete_activity(activity)
             key = (str(activity.backend), str(activity.runtime_key))
             snapshots = self._terminal_snapshots.get(key)
-            if snapshots is not None:
-                snapshots.pop(str(activity.id), None)
-                if not snapshots:
-                    self._terminal_snapshots.pop(key, None)
+            current = snapshots.get(str(activity.id)) if snapshots is not None else None
+            # Awaiting-output and claimed receipts have their own settlement
+            # protocol. This acknowledgement is only for an actual terminal
+            # snapshot; otherwise deleting the store row would lose a delivery
+            # receipt that is still retryable after restart.
+            if current is None or current.metadata.get("provenance_pending"):
+                return
+            self._delete_activity(current)
+            snapshots.pop(str(activity.id), None)
+            if not snapshots:
+                self._terminal_snapshots.pop(key, None)
 
     def has_backend_work(self, backend: str) -> bool:
         """Whether a backend has live Activities or undelivered completions."""
@@ -2366,7 +2419,14 @@ class SessionActivityRegistry:
                     retain_terminal_snapshot=retain_terminal_snapshots,
                 )
                 if activity is not None:
-                    completed.append(activity)
+                    finalized = self._finalize_generation_ended_snapshot_locked(activity)
+                    completed.append(finalized or activity)
+            for activity in list(self._terminal_snapshots.get(key, {}).values()):
+                finalized = self._finalize_generation_ended_snapshot_locked(activity)
+                if finalized is not None and not any(
+                    existing.id == finalized.id for existing in completed
+                ):
+                    completed.append(finalized)
         return completed
 
     def session_state(self, session_id: str) -> dict[str, Any]:

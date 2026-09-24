@@ -121,6 +121,13 @@ class ClaudeAgent(BaseAgent):
         self._detached_unsolicited_outputs: set[str] = set()
         self._detached_unsolicited_text: dict[str, str] = {}
         self._detached_unsolicited_message_outputs: dict[str, MessageOutput] = {}
+        self._detached_unsolicited_phase_ids: dict[str, str] = {}
+        # A retained detached payload is already owned by a stable output
+        # identity.  Assistant frames from a later phase must not overwrite it;
+        # keep their text provisional until their own Result classifies that
+        # phase.
+        self._detached_unsolicited_provisional_text: dict[str, list[str]] = {}
+        self._detached_unsolicited_provisional_phase_ids: dict[str, list[str]] = {}
         self._activity_flush_tasks: dict[str, asyncio.Task] = {}
         self._activity_settle_events: dict[str, asyncio.Event] = {}
         self._buffered_assistant_messages: dict[str, list[tuple[object, int | None]]] = {}
@@ -925,6 +932,7 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         *,
         current_receiver_task: asyncio.Task | None = None,
+        expected_client=None,
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
         activation_retired: bool = False,
@@ -937,6 +945,7 @@ class ClaudeAgent(BaseAgent):
             await self._cleanup_runtime_session_state(
                 composite_key,
                 current_receiver_task=current_receiver_task,
+                expected_client=expected_client,
                 preserve_pending_request_state=preserve_pending_request_state,
                 runtime_lock_held=runtime_lock_held,
                 activation_retired=activation_retired,
@@ -950,6 +959,7 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         *,
         current_receiver_task: asyncio.Task | None = None,
+        expected_client=None,
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
         activation_retired: bool = False,
@@ -976,6 +986,9 @@ class ClaudeAgent(BaseAgent):
         self._provisional_phase_ids.pop(composite_key, None)
         self._resolved_provisional_phase_ids.pop(composite_key, None)
         self._clear_detached_foreground_tool_state(composite_key)
+        self._detached_unsolicited_provisional_text.pop(composite_key, None)
+        self._detached_unsolicited_provisional_phase_ids.pop(composite_key, None)
+        self._detached_unsolicited_phase_ids.pop(composite_key, None)
         self._native_session_ids.pop(composite_key, None)
         self._suppressed_synthetic_results.discard(composite_key)
         self._suppressed_synthetic_error_text.pop(composite_key, None)
@@ -989,12 +1002,29 @@ class ClaudeAgent(BaseAgent):
         cleanup_name = "_cleanup_session_locked" if runtime_lock_held else "cleanup_session"
         cleanup = getattr(self.session_handler, cleanup_name, None)
         if callable(cleanup):
-            await cleanup(
-                composite_key,
-                current_receiver_task=current_receiver_task,
-                activation_retired=activation_retired,
-                reason=reason,
-            )
+            cleanup_kwargs = {
+                "current_receiver_task": current_receiver_task,
+                "activation_retired": activation_retired,
+                "reason": reason,
+            }
+            if expected_client is not None:
+                cleanup_kwargs["expected_client"] = expected_client
+            try:
+                await cleanup(composite_key, **cleanup_kwargs)
+            except TypeError as error:
+                # A few lightweight session-handler test doubles still expose
+                # the pre-generation-aware cleanup signature. Preserve the
+                # exact-client guard for the real handler while remaining
+                # compatible with those narrow adapters.
+                if "expected_client" not in str(error):
+                    raise
+                cleanup_kwargs.pop("expected_client", None)
+                await cleanup(composite_key, **cleanup_kwargs)
+            return
+        if (
+            expected_client is not None
+            and self.claude_sessions.get(composite_key) is not expected_client
+        ):
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
@@ -1919,7 +1949,10 @@ class ClaudeAgent(BaseAgent):
                         assistant_text = self._extract_text_blocks(message, context)
                         if output_mode == "detached":
                             if assistant_text:
-                                self._detached_unsolicited_text[composite_key] = assistant_text
+                                self._retain_detached_unsolicited_assistant_text(
+                                    composite_key,
+                                    assistant_text,
+                                )
                             continue
                         if composite_key in self._detached_activity_outputs:
                             if assistant_text and not self._detached_assistant_text.get(
@@ -2174,6 +2207,16 @@ class ClaudeAgent(BaseAgent):
                             )
                             continue
                         if output_mode == "detached":
+                            provisional_text = (
+                                self._pop_detached_unsolicited_provisional_text(
+                                    composite_key
+                                )
+                            )
+                            provisional_phase_id = (
+                                self._pop_detached_unsolicited_provisional_phase_id(
+                                    composite_key
+                                )
+                            )
                             detached_text = self._detached_unsolicited_text.get(
                                 composite_key
                             )
@@ -2192,7 +2235,12 @@ class ClaudeAgent(BaseAgent):
                                 self._detached_unsolicited_text[composite_key] = result_text
                             output = self._detached_unsolicited_message_outputs.setdefault(
                                 composite_key,
-                                self._unsolicited_message_output(message),
+                                self._unsolicited_message_output(
+                                    message,
+                                    phase_id=self._detached_unsolicited_phase_ids.get(
+                                        composite_key
+                                    ),
+                                ),
                             )
                             if result_text:
                                 try:
@@ -2207,6 +2255,15 @@ class ClaudeAgent(BaseAgent):
                                 except asyncio.CancelledError:
                                     raise
                                 except Exception:
+                                    if provisional_text:
+                                        self._prepend_detached_unsolicited_provisional_text(
+                                            composite_key,
+                                            provisional_text,
+                                        )
+                                        self._prepend_detached_unsolicited_provisional_phase_id(
+                                            composite_key,
+                                            provisional_phase_id,
+                                        )
                                     # Keep the synthetic owner, payload, and
                                     # idempotency identity alive while the shared
                                     # per-runtime recovery path retries. A
@@ -2235,6 +2292,37 @@ class ClaudeAgent(BaseAgent):
                                 composite_key,
                                 None,
                             )
+                            self._detached_unsolicited_phase_ids.pop(
+                                composite_key,
+                                None,
+                            )
+                            if provisional_text:
+                                # A later Assistant phase was buffered while
+                                # the previous detached payload was retryable.
+                                # Give it a fresh output identity only after the
+                                # retained payload has crossed its durable
+                                # boundary.
+                                self._detached_unsolicited_outputs.add(composite_key)
+                                self._detached_unsolicited_text[
+                                    composite_key
+                                ] = provisional_text
+                                self._detached_unsolicited_phase_ids[
+                                    composite_key
+                                ] = provisional_phase_id or (
+                                    f"{composite_key}:detached:{uuid.uuid4().hex}"
+                                )
+                                self._detached_unsolicited_message_outputs[
+                                    composite_key
+                                ] = self._unsolicited_message_output(
+                                    message,
+                                    phase_id=self._detached_unsolicited_phase_ids[
+                                        composite_key
+                                    ],
+                                )
+                                self._schedule_completed_activity_flush(
+                                    composite_key,
+                                    context,
+                                )
                             self._retire_synthetic_pending_owner(
                                 composite_key,
                                 context,
@@ -2567,10 +2655,23 @@ class ClaudeAgent(BaseAgent):
             )
             await self._flush_detached_activity_output(composite_key, context)
             await self._flush_detached_unsolicited_output(composite_key, context)
+            if synthetic_delivery_pending:
+                # The receiver generation is dead even when its detached
+                # recovery owner remains alive. Retire only this exact client;
+                # the retained owner and gate are generation-independent.
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    expected_client=client,
+                    preserve_pending_request_state=True,
+                    reason="receiver_eof_with_retained_detached_output",
+                )
+                return
             if not had_pending_requests and not self._has_pending_requests(composite_key):
                 await self._cleanup_runtime_session(
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
+                    expected_client=client,
                     preserve_pending_request_state=True,
                     reason="receiver_eof",
                 )
@@ -2608,6 +2709,7 @@ class ClaudeAgent(BaseAgent):
                 context,
                 e,
                 buffered_failure=buffered_failure,
+                expected_client=client,
             )
             await self._flush_completed_activity_outputs(
                 composite_key,
@@ -2940,6 +3042,7 @@ class ClaudeAgent(BaseAgent):
         error: Exception,
         *,
         buffered_failure: _BufferedClaudeFailureReplay | None = None,
+        expected_client=None,
     ) -> None:
         retain_runtime_turn = False
         # A receiver exception retires this client generation.  Close native
@@ -2983,6 +3086,7 @@ class ClaudeAgent(BaseAgent):
                 await self._cleanup_runtime_session(
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
+                    expected_client=expected_client,
                     preserve_pending_request_state=True,
                     reason="receiver_error_with_retained_detached_output",
                 )
@@ -4266,6 +4370,8 @@ class ClaudeAgent(BaseAgent):
         self._provisional_foreground_task_ids.pop(composite_key, None)
         self._provisional_phase_ids.pop(composite_key, None)
         self._resolved_provisional_phase_ids.pop(composite_key, None)
+        self._detached_unsolicited_provisional_text.pop(composite_key, None)
+        self._detached_unsolicited_provisional_phase_ids.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
         self._turns_with_foreground_tools.discard(composite_key)
         self._refresh_activity_provenance_barrier(composite_key)
@@ -4394,6 +4500,90 @@ class ClaudeAgent(BaseAgent):
         if self._detached_foreground_tool_use_ids.get(composite_key):
             return "<silent>Claude turn completed without assistant text.</silent>"
         return sdk_result
+
+    def _retain_detached_unsolicited_assistant_text(
+        self,
+        composite_key: str,
+        text: str,
+    ) -> None:
+        """Keep later detached phases separate from a retained payload."""
+
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        if (
+            composite_key in self._detached_unsolicited_outputs
+            and str(self._detached_unsolicited_text.get(composite_key) or "").strip()
+        ):
+            self._detached_unsolicited_phase_ids.setdefault(
+                composite_key,
+                f"{composite_key}:detached:{uuid.uuid4().hex}",
+            )
+            self._detached_unsolicited_provisional_text.setdefault(
+                composite_key,
+                [],
+            ).append(normalized)
+            self._detached_unsolicited_provisional_phase_ids.setdefault(
+                composite_key,
+                [],
+            ).append(f"{composite_key}:detached:{uuid.uuid4().hex}")
+            return
+        self._detached_unsolicited_text[composite_key] = normalized
+        self._detached_unsolicited_phase_ids[composite_key] = (
+            f"{composite_key}:detached:{uuid.uuid4().hex}"
+        )
+
+    def _pop_detached_unsolicited_provisional_text(
+        self,
+        composite_key: str,
+    ) -> str:
+        values = self._detached_unsolicited_provisional_text.get(composite_key)
+        if not values:
+            return ""
+        text = values.pop(0)
+        if not values:
+            self._detached_unsolicited_provisional_text.pop(composite_key, None)
+        return text
+
+    def _pop_detached_unsolicited_provisional_phase_id(
+        self,
+        composite_key: str,
+    ) -> str:
+        values = self._detached_unsolicited_provisional_phase_ids.get(composite_key)
+        if not values:
+            return ""
+        phase_id = values.pop(0)
+        if not values:
+            self._detached_unsolicited_provisional_phase_ids.pop(
+                composite_key,
+                None,
+            )
+        return phase_id
+
+    def _prepend_detached_unsolicited_provisional_text(
+        self,
+        composite_key: str,
+        text: str,
+    ) -> None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        self._detached_unsolicited_provisional_text.setdefault(
+            composite_key,
+            [],
+        ).insert(0, normalized)
+
+    def _prepend_detached_unsolicited_provisional_phase_id(
+        self,
+        composite_key: str,
+        phase_id: str,
+    ) -> None:
+        if not phase_id:
+            return
+        self._detached_unsolicited_provisional_phase_ids.setdefault(
+            composite_key,
+            [],
+        ).insert(0, phase_id)
 
     def _current_turn_id(
         self,
@@ -4786,7 +4976,11 @@ class ClaudeAgent(BaseAgent):
         self._require_activity_delivery(activity, message_id)
 
     @staticmethod
-    def _unsolicited_message_output(message) -> MessageOutput:
+    def _unsolicited_message_output(
+        message,
+        *,
+        phase_id: str | None = None,
+    ) -> MessageOutput:
         native_id = str(
             getattr(message, "uuid", "")
             or getattr(message, "message_id", "")
@@ -4811,13 +5005,18 @@ class ClaudeAgent(BaseAgent):
                 # Older SDK frames expose no stable identity. Allocate one once
                 # for this MessageOutput instead of deduplicating by visible text.
                 identity = uuid.uuid4().hex
+        if phase_id:
+            identity = f"{identity}:{phase_id}"
+        metadata = {"backend": "claude", "source": "agent_initiated"}
+        if phase_id:
+            metadata["provenance_phase_id"] = phase_id
         return MessageOutput(
             completes_turn=False,
             completes_run=False,
             detached=True,
             idempotency_key=f"claude-unsolicited:{identity}",
             causation_id=native_id or None,
-            metadata={"backend": "claude", "source": "agent_initiated"},
+            metadata=metadata,
         )
 
     async def _flush_detached_unsolicited_output(
@@ -4858,6 +5057,7 @@ class ClaudeAgent(BaseAgent):
         self._detached_unsolicited_outputs.discard(composite_key)
         self._detached_unsolicited_text.pop(composite_key, None)
         self._detached_unsolicited_message_outputs.pop(composite_key, None)
+        self._detached_unsolicited_phase_ids.pop(composite_key, None)
         self._retire_synthetic_pending_owner(composite_key, context)
         return False
 
