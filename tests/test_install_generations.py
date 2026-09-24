@@ -219,8 +219,10 @@ def test_existing_alias_receipt_failure_leaves_launcher_and_receipt_unchanged(
     assert upgrade._launcher_generation(launcher, root) == first.parent.parent
 
 
-@pytest.mark.parametrize("marker", ["missing", "stale"])
-def test_copied_launcher_is_retained_even_when_generation_marker_is_wrong(installation, tmp_path, marker):
+@pytest.mark.parametrize("marker", ["missing", "stale", "points-to-other-owned"])
+def test_copied_launcher_is_retained_even_when_generation_marker_is_wrong(
+    installation, tmp_path, marker,
+):
     root, launcher = installation
     first = _activate(root, launcher, "first")
     alias = tmp_path / "other" / "vibe"
@@ -230,8 +232,11 @@ def test_copied_launcher_is_retained_even_when_generation_marker_is_wrong(instal
     marker_path = alias.parent / ".vibe.avibe-generation"
     if marker == "missing":
         marker_path.unlink()
-    else:
+    elif marker == "stale":
         marker_path.write_text(str(root / "absent"))
+    else:
+        other = _activate(root, launcher, "other")
+        marker_path.write_text(str(other.parent.parent))
     for index in range(4):
         _activate(root, launcher, f"next-{index}")
     assert first.exists()
@@ -406,6 +411,22 @@ def test_windows_process_exit_during_owner_inspection_is_ignored(monkeypatch):
     )
 
     with pytest.raises(psutil.NoSuchProcess):
+        retention._process_owner(process)
+
+
+def test_windows_live_invalid_parameter_owner_error_stays_fail_closed(monkeypatch):
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(pid=24688, is_running=lambda: True, username=lambda: None)
+    error = OSError(87, "invalid parameter")
+    monkeypatch.setattr(retention.os, "name", "nt")
+    monkeypatch.setattr(
+        retention,
+        "_windows_process_owner",
+        lambda _: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(retention._ProcessInspectionUnavailable):
         retention._process_owner(process)
 
 

@@ -287,7 +287,16 @@ def _windows_process_owner(process: psutil.Process) -> _OwnerIdentity:
         process.pid,
     )  # PROCESS_QUERY_LIMITED_INFORMATION
     if not process_handle:
-        raise OSError(ctypes.get_last_error(), f"OpenProcess failed for pid {process.pid}")
+        error_code = ctypes.get_last_error()
+        if error_code == 87:  # ERROR_INVALID_PARAMETER: snapshot PID no longer exists
+            try:
+                if not process.is_running():
+                    raise psutil.NoSuchProcess(process.pid)
+            except psutil.NoSuchProcess:
+                raise
+            except psutil.Error:
+                pass
+        raise OSError(error_code, f"OpenProcess failed for pid {process.pid}")
     token_handle = ctypes.c_void_p()
     try:
         if not open_process_token(process_handle, 0x0008, ctypes.byref(token_handle)):
@@ -790,14 +799,6 @@ def collect_before_activation(activation: AtomicActivation) -> list[Path]:
                 launcher_bytes = launcher.read_bytes()
             except FileNotFoundError:
                 continue
-            try:
-                marker = launcher.parent / f".{launcher.name}.avibe-generation"
-                marked = Path(marker.read_text(encoding="utf-8-sig").strip())
-                if (generation := upgrade._generation_for_path(marked, root)) in owned:
-                    kept.add(generation)
-                    continue
-            except FileNotFoundError:
-                pass
             # A copied launcher can outlive a failed/stale marker write.
             # Read fresh bytes: filecmp's stat-based cache cannot prove identity
             # after a same-size/same-mtime replacement.

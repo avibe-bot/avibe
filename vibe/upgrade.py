@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import filecmp
 import json
 import logging
 import os
@@ -479,7 +478,10 @@ def _launcher_generation(launcher: Path, root: Path) -> Path | None:
     # as a hint and prove that it still describes the live launcher before use.
     candidate = generation / "bin" / launcher.name
     try:
-        return generation if filecmp.cmp(launcher, candidate, shallow=False) else None
+        # Read both files on every check. Marker validation is a safety
+        # boundary, and stat-keyed filecmp caching could reuse a comparison
+        # after a same-size/same-mtime copy fallback was replaced.
+        return generation if launcher.read_bytes() == candidate.read_bytes() else None
     except OSError:
         return None
 

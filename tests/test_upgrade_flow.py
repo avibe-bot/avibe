@@ -516,6 +516,31 @@ def test_copy_marker_must_match_the_live_launcher(monkeypatch, tmp_path):
     assert upgrade._launcher_generation(launcher, root) == current.resolve()
 
 
+def test_copy_marker_validation_reads_fresh_bytes_after_same_stat_replacement(
+    monkeypatch, tmp_path,
+):
+    from vibe import upgrade
+
+    root = tmp_path / "home" / "runtime" / "install-generations"
+    generation = root / "current"
+    launcher = tmp_path / ".local" / "bin" / "vibe.exe"
+    marker = launcher.parent / ".vibe.exe.avibe-generation"
+    candidate = generation / "bin" / "vibe.exe"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("current\n", encoding="utf-8")
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("current\n", encoding="utf-8")
+    marker.write_text(str(generation), encoding="utf-8")
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+
+    assert upgrade._launcher_generation(launcher, root) == generation.resolve()
+    original_stat = launcher.stat()
+    launcher.write_text("replaced\n", encoding="utf-8")
+    os.utime(launcher, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    assert upgrade._launcher_generation(launcher, root) is None
+
+
 def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, tmp_path):
     from vibe import upgrade
 
