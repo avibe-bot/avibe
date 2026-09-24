@@ -106,7 +106,14 @@ export function groupMigrationCandidates(
     const required = requiredBackends(carried, [backend]);
     const linkedRows = candidates.filter((item) => required.has(item.backend));
     const linkedImportRows = linkedRows.filter(importableHere);
-    const blockedRows = linkedRows.filter((item) => !importableHere(item));
+    // A linked backend with nothing to carry can never join the batch, yet the
+    // server still requires it: the shared credential it reads would be moved
+    // out from under it. Its native rows explain why the group cannot move.
+    const stranded = [...required].filter((linked) => !carried.some((item) => item.backend === linked));
+    const blockedRows = [
+      ...linkedRows.filter((item) => !importableHere(item)),
+      ...items.filter((item) => stranded.includes(item.backend) && !isImportable(item)),
+    ];
     return {
       backend,
       rows,
@@ -114,7 +121,7 @@ export function groupMigrationCandidates(
       required,
       linkedImportRows,
       blockedRows,
-      blocked: blockedRows.length > 0,
+      blocked: blockedRows.length > 0 || stranded.length > 0,
     };
   }).filter((group) => group.rows.length > 0);
 }

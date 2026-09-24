@@ -334,3 +334,9 @@ def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path):
     _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path):
+    _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": "bad"}}')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "opencode" and item.config_blocker for item in _items(service, ()))

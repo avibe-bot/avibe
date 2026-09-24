@@ -856,10 +856,12 @@ def _opencode_candidates(
         names: tuple[str, ...] = ()
         auth_names: tuple[str, ...] = ()
 
-        def blocked(identity: str, reason: str = "config") -> NativeMigrationItem:
+        def blocked(
+            identity: str, reason: str = "config", *, config_blocker: bool = False,
+        ) -> NativeMigrationItem:
             return _blocked_item(
                 "opencode", identity, reason, source_paths=paths, shell_variables=names,
-                shell_auth_variables=auth_names,
+                shell_auth_variables=auth_names, config_blocker=config_blocker,
             )
 
         if (
@@ -873,7 +875,9 @@ def _opencode_candidates(
             continue
         provider_config = provider_configs.get(provider_id, {})
         if not isinstance(provider_config, dict):
-            items.append(blocked(f"{locator}:{provider_id}"))
+            # OpenCode validates the whole provider map before any Hub
+            # override applies, so one malformed entry fails every launch.
+            items.append(blocked(f"{locator}:{provider_id}", config_blocker=True))
             continue
         options = provider_config.get("options")
         if not isinstance(options, dict):

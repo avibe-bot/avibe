@@ -562,6 +562,29 @@ describe('MigrationDialog — shared persisted files', () => {
     await waitFor(() => expect(applied).toEqual([linked.map((item) => item.id)]));
   });
 
+  it('blocks a linked group whose other backend has nothing the Hub can carry', async () => {
+    // The server requires every linked backend in the batch; one with no
+    // carried row can never be selected, so offering the rest always fails.
+    serve([
+      { ...CODEX_KEY, source_paths: ['/home/用户/.profile'], required_backends: ['codex', 'opencode'] },
+      {
+        ...LEGACY,
+        id: 'blocked_headers',
+        proposed_action: 'keep_native',
+        notes_key: 'settings.models.migration.blocked.headers',
+        source_paths: ['/home/用户/.profile'],
+        required_backends: ['codex', 'opencode'],
+      },
+    ]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+    const [checkbox] = within(dialog).getAllByRole('checkbox');
+    expect((checkbox as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('keeps a transitive three-backend closure visible and selected from one entry point', async () => {
     const items: MigrationItem[] = [SUBSCRIPTION, CODEX_KEY, LEGACY].map((item) => ({
       ...item,
