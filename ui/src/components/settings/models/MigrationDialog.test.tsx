@@ -602,9 +602,28 @@ describe('MigrationDialog — shared persisted files', () => {
     renderDialog();
 
     const dialog = await screen.findByRole('dialog');
-    await within(dialog).findByText('OpenAI');
+    await within(dialog).findAllByText('OpenAI');
     const [checkbox] = within(dialog).getAllByRole('checkbox');
     expect((checkbox as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('names a standalone config blocker the user has to repair', async () => {
+    serve([{
+      ...CODEX_KEY,
+      id: 'blocked_config',
+      masked_detail: '',
+      proposed_action: 'reauth',
+      selected: false,
+      notes_key: 'settings.models.migration.blocked.config',
+      source_paths: ['/home/用户/.codex/config.toml'],
+      config_blocker: true,
+    }]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    expect((await within(dialog).findAllByText('/home/用户/.codex/config.toml')).length).toBeGreaterThan(0);
+    expect(within(dialog).getByRole('status')).toBeTruthy();
     expect((within(dialog).getByRole('button', { name: 'Start migration' }) as HTMLButtonElement).disabled).toBe(true);
   });
 

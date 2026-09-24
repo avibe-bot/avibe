@@ -334,38 +334,62 @@ def plan_native_cleanup(
                     payload.pop(key, None)
 
         edit_json(auth_path, clear_auth, guard_unchanged=True)
+        managed_ids = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
+        # An env_key is carried only when a selected row resolved it to a
+        # selected key; an unresolved or unselected one stays native.
+        carried_env_keys = {
+            name for item in items if item.backend == "codex"
+            for name, value in item.shell_values
+            if value.strip() in selected_by_backend.get("codex", set())
+        }
+
+        def codex_auth_retained(provider_id: str, provider: dict) -> bool:
+            if provider_id in managed_ids:
+                return False
+            env_key = provider.get("env_key")
+            return bool(
+                any(provider.get(field) for field in ("http_headers", "env_http_headers"))
+                or (provider.get("experimental_bearer_token")
+                    and not selected_api_key(provider["experimental_bearer_token"], "codex"))
+                or (env_key and env_key not in carried_env_keys)
+            )
+
+        layers: list[tuple[Path, bytes | None, dict | None]] = []
         for config_path in codex_config_paths(home, project_roots):
             content = _read_regular(config_path)
             if config_path in edits and content != edits[config_path].before:
                 raise TakeoverStateError("native configuration changed")
             edits.setdefault(config_path, NativeFileEdit(config_path, content, content))
             if content is None:
+                layers.append((config_path, None, None))
                 continue
             try:
-                config = tomllib.loads(content.decode())
+                layers.append((config_path, content, tomllib.loads(content.decode())))
             except (ValueError, UnicodeError):
                 raise TakeoverStateError("native configuration cannot be parsed") from None
+        # Codex merges its layers, so authentication migration did not carry,
+        # in any layer, keeps the whole provider native in every layer,
+        # selectors included, or direct mode would stop using what was kept.
+        retained_ids = {
+            provider_id
+            for _, _, config in layers if config is not None
+            for provider_id, provider in (
+                config["model_providers"].items() if isinstance(config.get("model_providers"), dict) else ()
+            )
+            if isinstance(provider, dict) and codex_auth_retained(provider_id, provider)
+        }
+        for config_path, content, config in layers:
+            if config is None:
+                continue
             before = json.dumps(config, sort_keys=True, default=str)
-            managed_ids = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
             removable = set(managed_ids)
             removable.update(item.native_provider_id for item in items if item.backend == "codex" and item.native_provider_id)
+            removable -= retained_ids
             providers = config.get("model_providers")
             if isinstance(providers, dict):
                 for provider_id in sorted(removable):
                     provider = providers.get(provider_id)
                     if not isinstance(provider, dict):
-                        continue
-                    uncarried_headers = provider_id not in managed_ids and any(
-                        provider.get(field) for field in ("http_headers", "env_http_headers")
-                    )
-                    if uncarried_headers or (
-                        provider.get("experimental_bearer_token")
-                        and not selected_api_key(provider["experimental_bearer_token"], "codex")
-                    ):
-                        # Authentication migration did not carry stays native as
-                        # a whole provider, selectors included, or direct mode
-                        # would stop using what was kept.
-                        removable.discard(provider_id)
                         continue
                     # Retain user labels, capabilities, and timeout preferences.
                     for key in ("base_url", "env_key", "experimental_bearer_token", "requires_openai_auth"):
@@ -406,8 +430,24 @@ def plan_native_cleanup(
 
         native_auth = read_native_config(opencode_auth_path(home)) or {}
         retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor))}
-        # OpenCode merges its layers, so header auth kept in any one of them
-        # still sends to the endpoint another layer names.
+
+        def api_key_retained(value: object) -> bool:
+            if not value or selected_api_key(value, "opencode"):
+                return False
+            # The inventory bound the saved assignment, or proved its absence
+            # before selecting the auth.json fallback.
+            return not (
+                isinstance(value, str)
+                and value.startswith("{env:") and value.endswith("}")
+                and (
+                    not shell_values.get(value[5:-1])
+                    or shell_values[value[5:-1]].strip() in selected_by_backend.get("opencode", set())
+                )
+            )
+
+        # OpenCode merges its layers, so a credential kept native in any one of
+        # them, header auth or an unselected key, still sends to the endpoint
+        # another layer names.
         for path in opencode_config_paths(home, project_roots):
             staged = edits.get(path.absolute())
             raw = staged.before if staged else _read_regular(path.absolute())
@@ -416,12 +456,11 @@ def plan_native_cleanup(
             providers = _object(raw, jsonc=True).get("provider")
             if not isinstance(providers, dict):
                 continue
-            retained_auth.update(
-                vendor for vendor in vendors
-                if isinstance(providers.get(vendor), dict)
-                and isinstance(providers[vendor].get("options"), dict)
-                and providers[vendor]["options"].get("headers")
-            )
+            for vendor in vendors:
+                provider = providers.get(vendor)
+                options = provider.get("options") if isinstance(provider, dict) else None
+                if isinstance(options, dict) and (options.get("headers") or api_key_retained(options.get("apiKey"))):
+                    retained_auth.add(vendor)
 
         def clear_providers(payload: dict) -> None:
             providers = payload.get("provider")
@@ -435,24 +474,12 @@ def plan_native_cleanup(
                     continue
                 options = provider.get("options")
                 if isinstance(options, dict):
-                    value = options.get("apiKey")
-                    if value and not selected_api_key(value, "opencode"):
-                        # The inventory bound the saved assignment, or proved
-                        # its absence before selecting the auth.json fallback.
-                        reference = (
-                            isinstance(value, str)
-                            and value.startswith("{env:") and value.endswith("}")
-                            and (
-                                not shell_values.get(value[5:-1])
-                                or shell_values[value[5:-1]].strip() in selected_by_backend.get("opencode", set())
-                            )
-                        )
-                        if not reference:
-                            continue
+                    if api_key_retained(options.get("apiKey")):
+                        continue
                     options.pop("apiKey", None)
                     if vendor not in retained_auth:
-                        # A retained same-vendor credential, in auth.json or as
-                        # header auth in any layer, keeps its endpoint.
+                        # A retained same-vendor credential, in auth.json or in
+                        # any layer's config, keeps its endpoint.
                         options.pop("baseURL", None)
                     if not options:
                         provider.pop("options", None)

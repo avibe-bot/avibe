@@ -432,3 +432,41 @@ def test_scan_payload_exposes_configuration_blockers(home, tmp_path):
     service, _, _ = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert any(row["backend"] == "codex" and row["config_blocker"] for row in rows)
+
+
+def test_opencode_unselected_key_in_one_layer_keeps_another_layers_endpoint(home, tmp_path):
+    user = home / ".config/opencode/opencode.json"
+    project = home / "project/opencode.json"
+    _write(user, json.dumps({"provider": {"openrouter": {"options": {"apiKey": "fixture-kept-native"}}}}))
+    _write(project, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1", "apiKey": KEY}}}}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [
+        item for item in _items(service, roots)
+        if item.proposed_action == "import" and item.secret == KEY
+    ]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert json.loads(user.read_text())["provider"]["openrouter"]["options"] == {"apiKey": "fixture-kept-native"}
+    assert json.loads(project.read_text())["provider"]["openrouter"]["options"] == {
+        "baseURL": "https://relay.example/api/v1"}
+
+
+def test_codex_unresolved_env_key_in_one_layer_keeps_the_provider_native(home, tmp_path):
+    user = home / ".codex/config.toml"
+    project = home / "project/.codex/config.toml"
+    _write(user, 'model_provider = "relay"\n[model_providers.relay]\nenv_key = "FIXTURE_UNSET_KEY"\n')
+    _write(project, '[model_providers.relay]\nbase_url = "https://relay.example/v1"\n'
+           f"experimental_bearer_token = {json.dumps(KEY)}\n")
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    items = _items(service, roots)
+    importable = [item for item in items if item.proposed_action == "import"]
+    assert importable and any(item.proposed_action != "import" for item in items if item.backend == "codex")
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert 'env_key = "FIXTURE_UNSET_KEY"' in user.read_text()
+    assert 'model_provider = "relay"' in user.read_text()
+    assert "relay.example" in project.read_text()

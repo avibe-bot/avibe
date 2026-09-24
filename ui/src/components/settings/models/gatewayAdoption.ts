@@ -1,4 +1,4 @@
-import { isImportable } from './migrationGrouping';
+import { isMigrationCandidate } from './migrationGrouping';
 import { apiFailure, type ModelsApi } from './modelsApi';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { resumeInstallAndStartRuntime } from './runtimeLifecycle';
@@ -98,8 +98,9 @@ export async function resumeGatewayAdoption(
 
   try {
     const scan = await api.scanMigration();
-    // Rows the Hub cannot carry stay native and never hold the switch back.
-    const candidates = scan.items.filter((item) => item.backend === backend && isImportable(item));
+    // Rows the Hub cannot carry stay native and never hold the switch back; a
+    // config blocker does, so the review opens and names the file to repair.
+    const candidates = scan.items.filter((item) => item.backend === backend && isMigrationCandidate(item));
     return { ok: true, agent: current, runtime, candidates };
   } catch (error) {
     return {

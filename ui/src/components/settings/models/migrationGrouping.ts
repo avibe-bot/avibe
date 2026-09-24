@@ -5,8 +5,8 @@
 // and which rows a selection actually submits — without owning a second answer.
 // A group is the unit of consent, not a row: shared persisted assignments link
 // backends into one custody boundary. Rows the Hub cannot carry are not shown at
-// all — they stay native and never block their group, unless the row says the
-// backend's native config cannot be parsed at all.
+// all — they stay native and never block their group — unless the backend's
+// native config cannot be parsed at all.
 import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, MigrationItem, MigrationScan } from './types';
 
@@ -25,6 +25,12 @@ export type MigrationSelection = {
 export const BACKEND_ORDER: AgentBackend[] = ['claude', 'codex', 'opencode'];
 
 export const isImportable = (item: MigrationItem) => item.proposed_action === 'import';
+
+/**
+ * A row the review has to show: one the Hub can carry, or a native config the
+ * CLI cannot parse, which blocks its whole backend and must be repaired first.
+ */
+export const isMigrationCandidate = (item: MigrationItem) => isImportable(item) || item.config_blocker === true;
 
 /**
  * The transitive closure of backends that share persisted assignments with any
@@ -96,8 +102,9 @@ export function groupMigrationCandidates(
   takeable: (item: MigrationItem) => boolean = () => true,
 ): MigrationGroup[] {
   // Only what the Hub can carry is a candidate. Everything else stays native,
-  // shadowed by the Hub launch, so offering it would only show what cannot move.
-  const carried = items.filter(isImportable);
+  // shadowed by the Hub launch, so offering it would only show what cannot move,
+  // except a config blocker, which holds its whole backend back.
+  const carried = items.filter(isMigrationCandidate);
   const scope = scopedBackends(carried, eligible);
   const candidates = carried.filter((item) => scope.has(item.backend));
   const importableHere = (item: MigrationItem) => isImportable(item) && takeable(item);
@@ -111,13 +118,10 @@ export function groupMigrationCandidates(
     // server still requires it: the shared credential it reads would be moved
     // out from under it. Its native rows explain why the group cannot move.
     const stranded = [...required].filter((linked) => !carried.some((item) => item.backend === linked));
-    // A backend whose native config cannot be parsed would fail every Hub
-    // launch, so its blocker row blocks the group the other native rows don't.
-    const blockedRows = [...new Set([
+    const blockedRows = [
       ...linkedRows.filter((item) => !importableHere(item)),
       ...items.filter((item) => stranded.includes(item.backend) && !isImportable(item)),
-      ...items.filter((item) => required.has(item.backend) && item.config_blocker),
-    ])];
+    ];
     return {
       backend,
       rows,

@@ -71,6 +71,19 @@ describe('resumeGatewayAdoption', () => {
     expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 
+  it('hands a standalone config blocker to the dialog instead of switching', async () => {
+    const client = api({
+      scanMigration: vi.fn().mockResolvedValue({
+        items: [
+          { id: 'broken', backend: 'claude', kind: 'api_key', masked_detail: '', proposed_action: 'reauth', selected: false, config_blocker: true },
+        ],
+      }),
+    });
+
+    await expect(adopt(client)).resolves.toMatchObject({ ok: true, candidates: [{ id: 'broken' }] });
+    expect(client.setAgentMode).not.toHaveBeenCalled();
+  });
+
   it('starts an idle runtime before scanning the one backend', async () => {
     const client = api({ getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_started')) });
 
