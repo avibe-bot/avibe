@@ -146,6 +146,8 @@ def test_codex_quota_parser_reads_primary_secondary_and_additional_limits():
         (parse_claude_quota, None),
         (parse_codex_quota, json.dumps({"detail": "nope"})),
         (parse_codex_quota, b"\xff\xfe"),
+        pytest.param(parse_codex_quota, json.dumps({"additional_rate_limits": [], "pad": "x" * (512 * 1024)}),
+                     id="oversized-body"),
     ],
 )
 def test_quota_parsers_reject_a_malformed_body_as_one_source_failure(parser, body):
@@ -161,10 +163,10 @@ def test_quota_parsers_stop_reading_a_runaway_row_list():
     """MH-QUOTA-004: A body with a huge row list costs a bounded read, not one row per upstream entry."""
 
     row = {"kind": "weekly_scoped", "percent": 5, "scope": {"model": {"display_name": "M"}}}
-    parsed = parse_claude_quota(json.dumps({"limits": [row] * 100_000}))
+    parsed = parse_claude_quota(json.dumps({"limits": [row] * 2_000}))
     assert len(parsed["windows"]) == 1  # dedup by id; the slice is what bounds the work
     additional = [{"limit_name": f"m{i}", "rate_limit": {"primary_window": {"used_percent": 1, "limit_window_seconds": 3600}}}
-                  for i in range(10_000)]
+                  for i in range(2_000)]
     parsed = parse_codex_quota(json.dumps({"additional_rate_limits": additional}))
     assert len(parsed["windows"]) == 16
 
@@ -187,6 +189,15 @@ def test_quota_parsers_bound_values_from_a_hostile_body():
     assert parsed["windows"][1]["used_pct"] == 0.0
     assert len(parsed["windows"][1]["label"]) == 64
     assert all(window["id"] != "seven_day" for window in parsed["windows"])
+
+    # A composed label and an out-of-range timestamp stay inside the contract.
+    codex = {"additional_rate_limits": [{"limit_name": "m" * 64, "rate_limit": {"primary_window": {
+        "used_percent": 1, "limit_window_seconds": 3600, "reset_at": 10**12}}}]}
+    parsed = parse_codex_quota(json.dumps(codex))
+    _validate_windows(parsed)
+    assert len(parsed["windows"][0]["label"]) == 64
+    parsed = parse_claude_quota(json.dumps({"five_hour": {"utilization": 1, "resets_at": "9999-12-31T23:59:00-05:00"}}))
+    assert parsed["windows"][0]["resets_at"] is None
 
 
 class _Clock:
@@ -300,6 +311,24 @@ async def test_quota_cache_forced_refresh_is_rate_limited_and_429_cools_down():
     assert len(fetch.calls) == 2
     clock.now += timedelta(minutes=1)
     assert (await cache.summary([_CLAUDE]))["sources"][0]["state"] == "ok"
+    assert len(fetch.calls) == 3
+
+
+async def test_quota_cache_caps_a_huge_retry_after_at_the_ceiling():
+    """MH-QUOTA-008: A hostile Retry-After records the one-hour ceiling instead of overflowing the refresh."""
+
+    clock, fetch = _Clock(), _Fetch()
+    cache = SubscriptionQuotaCache(fetch, now=clock)
+    await cache.summary([_CLAUDE])
+    clock.now += QUOTA_REFRESH_INTERVAL
+    fetch.results = [SubscriptionQuotaError("rate_limited", retry_after_seconds=1e15)]
+    limited = (await cache.summary([_CLAUDE]))["sources"][0]
+    assert limited["error_key"] == "models.quota.error.rate_limited"
+    clock.now += timedelta(minutes=59)
+    await cache.summary([_CLAUDE], force=True)
+    assert len(fetch.calls) == 2
+    clock.now += timedelta(minutes=1)
+    await cache.summary([_CLAUDE], force=True)
     assert len(fetch.calls) == 3
 
 

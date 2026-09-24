@@ -37,6 +37,8 @@ _MAX_WINDOWS: Final = 16
 # Rows read from any one upstream array or object. A report carries a handful;
 # a hostile or runaway body stops costing work here, before anything is built.
 _MAX_UPSTREAM_ROWS: Final = 64
+# A usage report is a few KiB; refuse anything far larger before decoding it.
+_MAX_BODY_BYTES: Final = 256 * 1024
 
 QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex"})
 
@@ -97,11 +99,11 @@ def _iso_timestamp(value: object) -> Optional[str]:
         return None
     try:
         moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return _iso(moment)
+    except (OverflowError, ValueError):
         return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return _iso(moment)
 
 
 def _unix_timestamp(value: object) -> Optional[str]:
@@ -127,7 +129,8 @@ def _window(
     window: dict[str, Any] = {
         "id": window_id[:128],
         "kind": kind,
-        "label": label,
+        # Labels are composed from upstream parts, so bound the final text here.
+        "label": _label(label) or window_id[:_MAX_LABEL_CHARS],
         "used_pct": used_pct,
         "window_seconds": window_seconds,
         "resets_at": resets_at,
@@ -139,6 +142,9 @@ def _window(
 
 def _load_object(body: object) -> dict[str, Any]:
     if not isinstance(body, (str, bytes, bytearray)):
+        raise SubscriptionQuotaError("malformed")
+    size = len(body.encode("utf-8", "surrogatepass")) if isinstance(body, str) else len(body)
+    if size > _MAX_BODY_BYTES:
         raise SubscriptionQuotaError("malformed")
     try:
         payload = json.loads(body)
@@ -385,8 +391,11 @@ class _QuotaEntry:
 
 
 def _cooldown(now: datetime, retry_after_seconds: Optional[float]) -> datetime:
-    delay = timedelta(seconds=retry_after_seconds) if retry_after_seconds else _RATE_LIMIT_COOLDOWN_FLOOR
-    return now + min(_RATE_LIMIT_COOLDOWN_CEILING, max(_RATE_LIMIT_COOLDOWN_FLOOR, delay))
+    # Clamp in seconds first: a hostile Retry-After must not overflow timedelta.
+    floor = _RATE_LIMIT_COOLDOWN_FLOOR.total_seconds()
+    ceiling = _RATE_LIMIT_COOLDOWN_CEILING.total_seconds()
+    seconds = retry_after_seconds if retry_after_seconds and math.isfinite(retry_after_seconds) else floor
+    return now + timedelta(seconds=min(ceiling, max(floor, seconds)))
 
 
 class SubscriptionQuotaCache:
