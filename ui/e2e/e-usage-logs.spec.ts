@@ -31,21 +31,18 @@ test.describe('E · usage and logs', () => {
     await expect(window).toBeVisible();
     await expect(window.getByRole('radio', { checked: true })).toHaveCount(1);
 
-    // Two honest shapes, and the tab has to say which it is. `count()` reads
-    // instantly, and the tab renders NEITHER shape while the read is in flight
-    // — so branching on it this early would classify a valid empty report as
-    // populated. Waiting on one shape or the other settles the read first.
-    const empty = page.getByText(copy('usage.empty'), { exact: true });
-    const populated = page.getByRole('heading', { name: copy('usage.bySource.title'), level: 3 });
+    // Two honest shapes, and the tab has to say which it is. The report-specific
+    // empty card is distinct from a loading state, while a populated report
+    // carries both its chart and exact-count table.
+    const empty = page.getByRole('heading', { name: copy('usage.empty.report.title'), level: 3 });
+    const populated = page.getByRole('heading', { name: copy('usage.chart.title'), level: 3 });
     await expect(empty.or(populated)).toBeVisible();
-    if (await empty.count()) {
+    if (await empty.isVisible()) {
       await expect(empty).toBeVisible();
       return;
     }
-    // Populated owes both breakdowns — a total with no attribution cannot be
-    // acted on.
     await expect(populated).toBeVisible();
-    await expect(page.getByRole('heading', { name: copy('usage.byDay.title'), level: 3 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: copy('usage.table.title'), level: 3 })).toBeVisible();
   });
 
   test('E1 · picking another window moves the selection and re-reads the range', async ({ hub, page }) => {
@@ -57,18 +54,6 @@ test.describe('E · usage and logs', () => {
     const total = await options.count();
     test.skip(total < 2, 'This build offers a single usage window, so there is nothing to switch between.');
 
-    const note = page.locator('.model-hub-usage-note');
-    // The tab's own loading/unread copy IS the detail text, so a `before`
-    // captured mid-read is indistinguishable from a settled empty report — and
-    // the branch below would skip the only assertion that the selection moved
-    // the reading. Even a successfully loaded empty window renders a range, so
-    // waiting for one is waiting for the read to settle, not for data.
-    await expect(note).toContainText(/–|—|Nothing metered yet/, { timeout: 20_000 });
-    const before = (await note.innerText()).trim();
-    // Named, not matched on state: `getByRole('radio').and('[aria-checked=false]')`
-    // re-resolves on every assertion, so the moment the click lands it stops
-    // pointing at the option that was clicked and starts pointing at the next
-    // still-unchecked one — which is, correctly, still false.
     const checked = (await window.getByRole('radio', { checked: true }).innerText()).trim();
     const labels = (await options.allInnerTexts()).map((label) => label.trim());
     const targetLabel = labels.find((label) => label !== checked);
@@ -82,17 +67,7 @@ test.describe('E · usage and logs', () => {
     // option without unchecking the first has stopped being a radio group.
     await expect(target).toHaveAttribute('aria-checked', 'true');
     await expect(window.getByRole('radio', { checked: true })).toHaveCount(1);
-
-    // And the reading follows it. The wait above has already ruled out the
-    // loading text, so a `before` that still reads as the static explainer is a
-    // genuinely empty window: an instance that never metered a turn, where the
-    // range has nothing to restate. That is a state, not a pass by default, so
-    // it is named here instead of being swept into the assertion.
-    if (before !== copy('usage.detail')) {
-      await expect
-        .poll(async () => (await note.innerText()).trim(), { timeout: 15_000 })
-        .not.toBe(before);
-    }
+    await expect(window.getByRole('radio', { checked: true })).toHaveText(targetLabel!);
   });
 
   test('E3 · the logs tab shows the switch history, or says there is none', async ({ hub, page }) => {

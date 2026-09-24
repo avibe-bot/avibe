@@ -15,7 +15,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { SettingsModelsPage } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageReport } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -118,7 +118,7 @@ const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head
 const takeoverMappingTitle = /Replacement source → gpt-5\.6-sol \((?:Taken over|已自动切换)\)/i;
 const headMappingTitle = /^Paused source → gpt-5\.6-sol$/i;
 
-const usageSummary: UsageSummary = {
+const usageSummary: UsageReport = {
   window_days: 30,
   from_day: '2026-07-20',
   to_day: '2026-08-18',
@@ -135,6 +135,48 @@ const usageSummary: UsageSummary = {
     models: [{ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
   }],
   days: [{ day: '2026-08-18', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
+  window_key: '24h',
+  granularity: 'hour',
+  from_at: '2026-08-18T00:00:00+00:00',
+  to_at: '2026-08-18T04:00:00+00:00',
+  buckets: [
+    {
+      key: '2026-08-18T00:00:00+00:00',
+      start_at: '2026-08-18T00:00:00+00:00',
+      end_at: '2026-08-18T01:00:00+00:00',
+      history_complete: true,
+      rows: [{
+        source_id: 'src_retained',
+        model_id: 'claude-opus-4-6',
+        requests: 12,
+        token_reports: 12,
+        input_tokens: 148230,
+        cached_input_tokens: 96010,
+        output_tokens: 4120,
+      }],
+    },
+    {
+      key: '2026-08-18T01:00:00+00:00',
+      start_at: '2026-08-18T01:00:00+00:00',
+      end_at: '2026-08-18T02:00:00+00:00',
+      history_complete: true,
+      rows: [],
+    },
+    {
+      key: '2026-08-18T02:00:00+00:00',
+      start_at: '2026-08-18T02:00:00+00:00',
+      end_at: '2026-08-18T03:00:00+00:00',
+      history_complete: true,
+      rows: [],
+    },
+    {
+      key: '2026-08-18T03:00:00+00:00',
+      start_at: '2026-08-18T03:00:00+00:00',
+      end_at: '2026-08-18T04:00:00+00:00',
+      history_complete: true,
+      rows: [],
+    },
+  ],
 };
 
 /**
@@ -2231,7 +2273,7 @@ describe('SettingsModelsPage usage region', () => {
 
       await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(3));
       await openUsage();
-      await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith(30));
+      await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith('24h'));
     }
   });
 
@@ -2244,7 +2286,7 @@ describe('SettingsModelsPage usage region', () => {
     // not be part of the read that draws it.
     expect(read).not.toHaveBeenCalled();
     await openUsage();
-    await waitFor(() => expect(read).toHaveBeenCalledWith(30));
+    await waitFor(() => expect(read).toHaveBeenCalledWith('24h'));
   });
 
   it('re-reads with the span the control was moved to', async () => {
@@ -2254,8 +2296,8 @@ describe('SettingsModelsPage usage region', () => {
     const read = vi.mocked(modelsApi.getUsageSummary);
     await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
-    await userEvent.click(screen.getByRole('radio', { name: /^7d$|^7 天$/ }));
-    await waitFor(() => expect(read).toHaveBeenLastCalledWith(7));
+    await userEvent.click(screen.getByRole('radio', { name: /^7 days$|^7 天$/ }));
+    await waitFor(() => expect(read).toHaveBeenLastCalledWith('7d'));
   });
 
   it('re-reads on every open, because the figure is live', async () => {
@@ -2279,6 +2321,6 @@ describe('SettingsModelsPage usage region', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/ }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    expect(read.mock.calls.map(([days]) => days)).toEqual([30, 30]);
+    expect(read.mock.calls.map(([window]) => window)).toEqual(['24h', '24h']);
   });
 });

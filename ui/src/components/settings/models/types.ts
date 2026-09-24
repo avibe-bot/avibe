@@ -811,11 +811,36 @@ export type UsageSummary = {
   days: UsageByDay[];
 };
 
+export type UsageWindowKey = '24h' | '7d' | '30d' | '60d';
+
+export type UsageBucketRow = UsageCounters & {
+  source_id: string;
+  model_id: string;
+};
+
+export type UsageBucket = {
+  key: string;
+  start_at: string;
+  end_at: string;
+  history_complete: boolean;
+  rows: UsageBucketRow[];
+};
+
+/** The modern temporal report consumed by the Model Hub analytics surface. */
+export type UsageReport = UsageSummary & {
+  window_key: UsageWindowKey;
+  granularity: 'hour' | 'day';
+  from_at: string;
+  to_at: string;
+  buckets: UsageBucket[];
+};
+
 /** `window_days` bounds from the schema. The offered options live in
  *  `usageProjection` and are gated against these. */
 export const USAGE_WINDOW_MIN_DAYS = 1 as const;
 export const USAGE_WINDOW_MAX_DAYS = 62 as const;
 export const USAGE_DEFAULT_WINDOW_DAYS = 30 as const;
+export const USAGE_DEFAULT_WINDOW: UsageWindowKey = '24h';
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;

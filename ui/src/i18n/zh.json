@@ -1328,7 +1328,11 @@
         "detail": "模型网关代理的对话所计量的 token，按本地日期汇总。",
         "window": {
           "label": "区间",
-          "option": "{{days}} 天"
+          "option": "{{days}} 天",
+          "24h": "24 小时",
+          "7d": "7 天",
+          "30d": "30 天",
+          "60d": "60 天"
         },
         "range": "{{from}} – {{to}} · 近 {{days}} 天",
         "empty": "还没有计量数据。模型网关完成请求后，这里就会有内容。",
@@ -1340,6 +1344,7 @@
         },
         "requests": {
           "label": "请求数",
+          "unit": "次请求",
           "reported": "每次请求都回报了 token",
           "shortfall_one": "{{count}} 次请求没有回报 token",
           "shortfall_other": "{{count}} 次请求没有回报 token"
@@ -1373,7 +1378,128 @@
           "quiet": "这个区间没有任何一天有计量数据",
           "unreported": "有请求，但没有任何一天回报了 token",
           "zero": "有回报 token 的日子，回报的都是 0"
-        }
+        },
+        "metric": {
+          "label": "指标",
+          "tokens": "全部 Tokens",
+          "input": "输入（含缓存）",
+          "output": "输出",
+          "cache": "缓存读取",
+          "requests": "请求数"
+        },
+        "filters": {
+          "source": "供应商",
+          "model": "模型",
+          "all": "全部{{label}}",
+          "selected": "{{label}} · 已选 {{count}} 个",
+          "search": "搜索{{label}}",
+          "noMatch": "没有匹配项",
+          "hint": "多选会同步更新整份报表",
+          "reset": "重置筛选",
+          "allSources": "全部供应商",
+          "allModels": "全部模型",
+          "sourceCount_one": "{{count}} 个供应商",
+          "sourceCount_other": "{{count}} 个供应商",
+          "modelCount_one": "{{count}} 个模型",
+          "modelCount_other": "{{count}} 个模型"
+        },
+        "stats": {
+          "tokens": "全部 Tokens",
+          "requests": "请求数",
+          "cached": "输入缓存占比",
+          "tokenSplit": "输入 {{input}} · 输出 {{output}}",
+          "shortfall_one": "{{count}} 次请求没有回报 token",
+          "shortfall_other": "{{count}} 次请求没有回报 token",
+          "allReported": "每次请求都回报了 token",
+          "cacheUnknown": "暂无已知输入 token",
+          "cacheSplit": "输入 {{input}} 中有 {{cached}} 来自缓存"
+        },
+        "unknownTokens": "部分请求没有回报 token，相关 token 数值不可用",
+        "partialHistory": "部分时间桶的历史记录不完整",
+        "unknownModel": "未知模型",
+        "granularity": {
+          "hour": "按小时",
+          "day": "按天"
+        },
+        "group": {
+          "label": "分组",
+          "total": "总量",
+          "type": "Token 类型",
+          "model": "模型",
+          "source": "供应商"
+        },
+        "series": {
+          "input": "输入（非缓存）",
+          "cache": "缓存读取",
+          "output": "输出",
+          "requests": "请求数"
+        },
+        "chart": {
+          "title": "用量趋势",
+          "subtitle": "按所选时间桶显示精确数量",
+          "aria": "{{kind}}用量趋势",
+          "lines": "折线",
+          "bars": "堆叠柱状图",
+          "bucket": "用量时间桶 {{bucket}}",
+          "detail": "时间桶用量详情",
+          "legend": "图表图例",
+          "pin": "固定这个时间桶",
+          "unpin": "取消固定时间桶",
+          "pinned": "已固定",
+          "complete": "历史完整",
+          "partial": "历史不完整",
+          "points": "{{count}} 个{{granularity}}数据点",
+          "legendOnly": "图例显隐只影响图表",
+          "interaction": "悬停或聚焦时间桶 · 点击查看详情"
+        },
+        "table": {
+          "title": "精确用量明细",
+          "range": "明细表与图表使用相同筛选条件",
+          "bucket": "正在显示 {{bucket}}",
+          "allBuckets": "查看全部时间桶",
+          "group": "明细分组",
+          "byModel": "按模型",
+          "bySource": "按供应商",
+          "export": "导出 CSV",
+          "identity": "模型 / 供应商",
+          "requests": "请求数",
+          "input": "输入",
+          "nonCache": "非缓存输入",
+          "cache": "缓存读取",
+          "output": "输出",
+          "tokens": "全部 Tokens",
+          "share": "占比",
+          "total": "合计",
+          "empty": "没有符合条件的用量",
+          "accounting": "全部 Tokens = 输入 + 输出。缓存读取已包含在输入中，同时单独列出。"
+        },
+        "csv": {
+          "bucketKey": "时间桶键",
+          "startAt": "开始时间",
+          "endAt": "结束时间",
+          "historyComplete": "历史完整",
+          "sourceId": "供应商 ID",
+          "modelId": "模型 ID",
+          "sourceLabel": "供应商",
+          "modelLabel": "模型",
+          "inputTokens": "输入 token",
+          "nonCachedInputTokens": "非缓存输入 token",
+          "cachedInputTokens": "缓存输入 token",
+          "outputTokens": "输出 token",
+          "totalTokens": "总 token"
+        },
+        "empty": {
+          "report": {
+            "title": "这个区间没有用量",
+            "body": "模型网关在所选时间范围内还没有记录请求。"
+          },
+          "filter": {
+            "title": "没有符合条件的用量",
+            "body": "试试其他供应商或模型，或重置筛选。"
+          }
+        },
+        "failure": "暂时没能读取用量报表。",
+        "retry": "重试"
       },
       "supplyTooltip": {
         "label": "使用："
