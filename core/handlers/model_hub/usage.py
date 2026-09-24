@@ -1365,17 +1365,25 @@ class BoundedUsageLedger:
             if row["requests"] <= 0:
                 continue
             row_day = _calendar_day(row["day"])
-            if row_day is None:
-                continue
             if row.get("hourly_history_complete") is not True:
-                for index, start in enumerate(starts):
-                    end = (
-                        starts[index + 1]
-                        if index + 1 < len(starts)
-                        else report_instant
-                    )
-                    if _overlaps_local_day(start, end, row_day):
-                        incomplete.add(index)
+                overlapping = False
+                if row_day is not None:
+                    for index, start in enumerate(starts):
+                        end = (
+                            starts[index + 1]
+                            if index + 1 < len(starts)
+                            else report_instant
+                        )
+                        if _overlaps_local_day(start, end, row_day):
+                            incomplete.add(index)
+                            overlapping = True
+                if not overlapping:
+                    # A legacy daily-only row can still be selected by its
+                    # durable last-metered instant after a timezone change,
+                    # while its persisted local day no longer maps to this
+                    # bucket grid. Its requests cannot be allocated to any
+                    # current hour, so every bucket remains uncertain.
+                    incomplete.update(range(len(starts)))
             for item in row.get("hours") or ():
                 parts = _hour_key_parts(item.get("key"))
                 if parts is None:

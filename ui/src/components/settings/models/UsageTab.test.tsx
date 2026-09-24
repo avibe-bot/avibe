@@ -325,6 +325,17 @@ describe('UsageTab', () => {
     expect(screen.getByRole('dialog', { name: 'Usage bucket details' })).toBeTruthy();
   });
 
+  it('dismisses pinned details on the first Escape', async () => {
+    draw(report());
+    fireEvent.pointerEnter(screen.getAllByRole('button', { name: /Usage bucket/ })[0]!);
+    await userEvent.click(screen.getByRole('button', { name: 'Pin this bucket' }));
+    expect(screen.getByRole('dialog', { name: 'Usage bucket details' })).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+  });
+
   it('clears a pinned bucket that disappears from a same-window refresh', async () => {
     const value = report();
     const rendered = draw(value);

@@ -345,8 +345,10 @@ function UsageChart({
     cancelHoverClear();
     if (pinnedKey !== null) {
       onPin(null);
-      setEscapeDismissed(false);
-      setDismissed(false);
+      setEscapeDismissed(true);
+      setHovered(null);
+      setInspected(null);
+      setDismissed(true);
       return;
     }
     setEscapeDismissed(true);

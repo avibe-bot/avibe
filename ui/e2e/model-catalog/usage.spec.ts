@@ -45,9 +45,7 @@ test.describe('hermetic UsageTab', () => {
     await dialog.getByRole('button', { name: 'Pin this bucket' }).click();
     await expect(dialog).toHaveAttribute('data-pinned', 'true');
     await dialog.getByRole('button', { name: 'Unpin this bucket' }).focus();
-    await page.keyboard.press('Escape');
-    await expect(dialog).toHaveAttribute('data-pinned', 'false');
-    await page.mouse.click(4, 4);
+    await page.locator('body').press('Escape');
     await expect(dialog).toHaveCount(0);
   });
 

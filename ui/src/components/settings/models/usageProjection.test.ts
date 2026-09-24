@@ -8,6 +8,8 @@ import {
   pairKey,
   reportHasPartialHistory,
   seriesFor,
+  sourceIdentityLabel,
+  usageLabelContext,
   usageIsEmpty,
   usageNonCachedInput,
   usageTotalTokens,
@@ -109,6 +111,28 @@ describe('usageProjection', () => {
       'Supplier · 未知模型 · source-a · removed-model',
       'Supplier · 未知模型 · source-a · model-a',
     ]);
+  });
+
+  it('keeps final source labels unique when a suffix collides with a literal label', () => {
+    const value = reportWith([
+      bucket('00', [
+        row({ source_id: 'source-a' }),
+        row({ source_id: 'source-b' }),
+        row({ source_id: 'source-c' }),
+      ]),
+    ]);
+    value.sources = [
+      { source_id: 'source-a', label: 'Provider', last_metered_at: null, ...counters(), models: [] },
+      { source_id: 'source-b', label: 'Provider', last_metered_at: null, ...counters(), models: [] },
+      { source_id: 'source-c', label: 'Provider · source-a', last_metered_at: null, ...counters(), models: [] },
+    ];
+    const context = usageLabelContext(value);
+    const labels = ['source-a', 'source-b', 'source-c'].map((sourceId) => (
+      sourceIdentityLabel(value, sourceId, context)
+    ));
+
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels.every((label) => label.length > 0)).toBe(true);
   });
 
   it('renders incomplete empty buckets as unavailable gaps, not zero', () => {

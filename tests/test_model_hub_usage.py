@@ -1269,6 +1269,47 @@ def test_hourly_report_uses_utc_evidence_after_a_timezone_change(
     assert all(bucket["history_complete"] for bucket in report["buckets"])
 
 
+def test_hourly_report_preserves_uncertainty_for_timezone_orphaned_daily_rows(
+    tmp_path: Path,
+) -> None:
+    """A daily-only row outside the new local day cannot claim empty hours."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps([{
+                "day": "2026-09-25",
+                "source_id": "src-timezone-orphan",
+                "model_id": "model-timezone-orphan",
+                "requests": 1,
+                "token_reports": 1,
+                "input_tokens": 7,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+                "last_metered_at": "2026-09-24T23:30:00+00:00",
+            }]),
+            encoding="utf-8",
+        )
+
+        os.environ["TZ"] = "Pacific/Honolulu"
+        time.tzset()
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 0
+    assert all(not bucket["history_complete"] for bucket in report["buckets"])
+
+
 @pytest.mark.parametrize(
     ("zone", "now", "calls", "from_day", "to_day", "window_days"),
     [

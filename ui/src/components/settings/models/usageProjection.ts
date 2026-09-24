@@ -26,6 +26,7 @@ export type UsageIdentity = {
 
 export type UsageLabelContext = {
   sourceCollisionLabels: ReadonlySet<string>;
+  sourceDisplayLabels: ReadonlyMap<string, string>;
   identityCollisionLabels: ReadonlySet<string>;
   identityModelCollisionKeys: ReadonlySet<string>;
 };
@@ -180,10 +181,42 @@ export function usageLabelContext(
   rows: readonly UsageBucketRow[] = report.buckets.flatMap((bucket) => bucket.rows),
   locale = 'en',
 ): UsageLabelContext {
+  const sourceIds = [...new Set([
+    ...report.sources.map((source) => source.source_id),
+    ...rows.map((row) => row.source_id),
+  ])];
+  const sourceLabels = new Map(
+    sourceIds.map((sourceId) => [sourceId, sourceLabel(report, sourceId)] as const),
+  );
   const sourceLabelCounts = new Map<string, number>();
-  for (const source of report.sources) {
-    const label = sourceLabel(report, source.source_id);
+  for (const label of sourceLabels.values()) {
     sourceLabelCounts.set(label, (sourceLabelCounts.get(label) ?? 0) + 1);
+  }
+  const sourceCollisionLabels = new Set(
+    [...sourceLabelCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([label]) => label),
+  );
+  const sourceDisplayLabels = new Map(
+    [...sourceLabels.entries()].map(([sourceId, label]) => [
+      sourceId,
+      sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label,
+    ]),
+  );
+  for (;;) {
+    const displayCounts = new Map<string, number>();
+    for (const label of sourceDisplayLabels.values()) {
+      displayCounts.set(label, (displayCounts.get(label) ?? 0) + 1);
+    }
+    const collisions = [...displayCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([label]) => label);
+    if (collisions.length === 0) break;
+    for (const [sourceId, label] of sourceDisplayLabels) {
+      if (collisions.includes(label)) {
+        sourceDisplayLabels.set(sourceId, `${label} · ${sourceId}`);
+      }
+    }
   }
 
   const identityLabelCounts = new Map<string, number>();
@@ -206,11 +239,8 @@ export function usageLabelContext(
       .map(([label]) => label),
   );
   return {
-    sourceCollisionLabels: new Set(
-      [...sourceLabelCounts.entries()]
-        .filter(([, count]) => count > 1)
-        .map(([label]) => label),
-    ),
+    sourceCollisionLabels,
+    sourceDisplayLabels,
     identityCollisionLabels,
     identityModelCollisionKeys: new Set(
       identities
@@ -230,7 +260,8 @@ export function sourceIdentityLabel(
   context = usageLabelContext(report),
 ): string {
   const label = sourceLabel(report, sourceId);
-  return context.sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label;
+  return context.sourceDisplayLabels.get(sourceId)
+    ?? (context.sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label);
 }
 
 export function identityDisplayLabel(
