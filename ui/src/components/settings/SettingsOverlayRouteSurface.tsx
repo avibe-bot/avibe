@@ -62,7 +62,9 @@ const getOutsideFocusTarget = (target: EventTarget | null): HTMLElement | null =
 
 const isNavigationOwner = (target: EventTarget | null): boolean => (
   target instanceof Element
-  && target.closest('a[href], [data-settings-toggle="true"]') !== null
+  && target.closest(
+    'a[href], [data-settings-toggle="true"], [data-settings-navigation-owner="true"]',
+  ) !== null
 );
 
 export const SettingsOverlayRouteSurface = ({

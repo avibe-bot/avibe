@@ -191,6 +191,26 @@ const PortaledShellControl = () => createPortal(
   document.body,
 );
 
+const PortaledWindowOwner = ({ handoffRef }: { handoffRef: { current: boolean } }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const origin = useSettingsOverlayOrigin(location);
+  return createPortal(
+    <button
+      type="button"
+      data-settings-navigation-owner="true"
+      onClick={() => {
+        if (!origin) return;
+        handoffRef.current = true;
+        closeSettingsOverlay(navigate, origin);
+      }}
+    >
+      dock-window-tile
+    </button>,
+    document.body,
+  );
+};
+
 const AgentationEscapeProbe = () => {
   const [active, setActive] = useState(true);
   return createPortal(
@@ -307,6 +327,7 @@ const Harness = ({ desktop }: { desktop: boolean }) => {
         themselves to `document.body` to clear the route panel's stacking
         context, so they belong to the sidebar without descending from it. */}
     <PortaledShellControl />
+    <PortaledWindowOwner handoffRef={handoffRef} />
     <button type="button">shell-elsewhere</button>
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/setup" element={<SetupProbe />} />
@@ -776,6 +797,23 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(resizer);
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(resizer));
+  });
+
+  it('lets a portaled window owner close inline Settings exactly once', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    window.history.replaceState({ idx: 1 }, '');
+    await user.click(screen.getByRole('button', { name: 'dock-window-tile' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
   });
 
   it('keeps standalone Settings open when an outside control is clicked', async () => {
