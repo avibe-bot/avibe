@@ -16,6 +16,7 @@ import { GripVertical, Lock, LoaderCircle, Pencil, Plus, Search, Trash2 } from '
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -207,12 +208,17 @@ export const BackendModelCatalogDialog: React.FC<{
    *  Route with it has to say whose hop goes away — so the page's own Sources
    *  answer it, and an id they do not cover simply goes unnamed. */
   sourceNames: Readonly<Record<string, string>>;
-  onClose: () => void;
+  /** `removed` says the focused model left the saved list, so an opener that
+   *  was showing it has nothing to return to. */
+  onClose: (result?: { removed: boolean }) => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   onObserved: (observed: AgentSupply) => void | Promise<void>;
   catalogWrite: PendingWrite;
   /** Open straight onto one row's edit or removal, for an opener that already
-   *  named the model. Applied once the catalog it names has been read. */
+   *  named the model. Applied once the catalog it names has been read, and
+   *  shown without the list: the editor or the removal confirmation is the
+   *  whole dialog, and answering it saves. The list appears only when that
+   *  answer needs it — a row it cannot open, or a save it has to explain. */
   focus?: CatalogFocus | null;
 }> = ({ open, backend, canReadSources, sourceNames, onClose, onSaved, onObserved, catalogWrite, focus = null }) => {
   const { t } = useTranslation();
@@ -227,6 +233,10 @@ export const BackendModelCatalogDialog: React.FC<{
   const [picking, setPicking] = React.useState<{ seed: ReadonlySet<string> } | null>(null);
   const [removing, setRemoving] = React.useState<RemovalQuestion | null>(null);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
+  /** A focused opening that fell back to the full list. */
+  const [expanded, setExpanded] = React.useState(false);
+  /** The focused removal the user confirmed, kept on screen while it saves. */
+  const [answered, setAnswered] = React.useState<RemovalQuestion | null>(null);
   const [announcement, setAnnouncement] = React.useState<Announcement>(null);
   const readAttempt = React.useRef(0);
   const grips = React.useRef(new Map<string, HTMLButtonElement>());
@@ -331,6 +341,8 @@ export const BackendModelCatalogDialog: React.FC<{
     guardedRef.current = [];
     setPicking(null);
     setRemoving(null);
+    setExpanded(false);
+    setAnswered(null);
     loadBaseline(false);
     return () => { readAttempt.current += 1; };
   }, [loadBaseline, open]);
@@ -528,7 +540,9 @@ export const BackendModelCatalogDialog: React.FC<{
    * that moment on and a re-read must not re-ask it.
    */
   const openFocus = useLatestRef((model: BackendModel) => {
-    if (focus?.action === 'remove') removeModel(model);
+    // With no list behind it, the confirmation is the only place the removal
+    // can be answered, so it asks even when no route goes with the row.
+    if (focus?.action === 'remove') setRemoving({ modelId: model.id, plan: removalPreview(model.id), account: 'draft' });
     else setEditing({ model });
   });
   const focusOpened = React.useRef<CatalogFocus | null>(null);
@@ -539,7 +553,19 @@ export const BackendModelCatalogDialog: React.FC<{
     // A locked row offers neither action in the list, so it offers neither here.
     const model = draftRef.current.find((entry) => entry.id === focus.modelId);
     if (model && !model.locked) openFocus.current(model);
+    else setExpanded(true);
   }, [editable, focus, open, openFocus]);
+  const direct = focus !== null && !expanded;
+  // A list this build cannot write, a read that failed and a save that failed
+  // all need the list to explain themselves.
+  const needsList = legacy || readState === 'error' || saveFailedKey !== null;
+  React.useEffect(() => {
+    if (direct && needsList) setExpanded(true);
+  }, [direct, needsList]);
+  /** A save closes the dialog; a focused opener learns whether its row survived. */
+  const closeSaved = () => {
+    onClose(focus !== null && !draftRef.current.some((entry) => entry.id === focus.modelId) ? { removed: true } : undefined);
+  };
 
   const commitEdit = (model: BackendModel) => {
     const existing = draft.findIndex((entry) => entry.id === model.id);
@@ -685,7 +711,7 @@ export const BackendModelCatalogDialog: React.FC<{
     const intent = backendCatalogIntent(baselineModels, requested);
     setSaveFailedKey(null);
     const body = putBody(baselineModels, requested);
-    void catalogWrite.track(async () => {
+    return catalogWrite.track(async () => {
       let echoed: AgentSupply;
       try {
         echoed = await modelsApi.putAgentModels(backend, body);
@@ -873,7 +899,7 @@ export const BackendModelCatalogDialog: React.FC<{
           if (current && landed && !decided) {
             applyBaseline(observed, current);
             await Promise.resolve(onSaved(observed.agent)).catch(() => {});
-            onClose();
+            closeSaved();
             return;
           }
           applyBaseline(observed, current ? applyBackendCatalogIntent(current, intent) : []);
@@ -891,7 +917,7 @@ export const BackendModelCatalogDialog: React.FC<{
         return;
       }
       await Promise.resolve(onSaved(echoed)).catch(() => {});
-      onClose();
+      closeSaved();
     });
   };
 
@@ -981,7 +1007,7 @@ export const BackendModelCatalogDialog: React.FC<{
   return (
     <>
       <Dialog
-        open={open}
+        open={open && !direct}
         onOpenChange={(next) => { if (!next && !busy) onClose(); }}
       >
         <DialogContent
@@ -1127,7 +1153,7 @@ export const BackendModelCatalogDialog: React.FC<{
                 type="button"
                 variant="outline"
                 className="model-hub-catalog-control rounded-md px-5 text-[12.5px] font-semibold"
-                onClick={onClose}
+                onClick={() => onClose()}
                 disabled={busy}
               >
                 {t('settings.models.gateway.catalog.cancel')}
@@ -1199,6 +1225,46 @@ export const BackendModelCatalogDialog: React.FC<{
           )}
         </DialogContent>
       </Dialog>
+      {open && direct && editing && (
+        <BackendModelEditorDialog
+          open
+          backend={backend}
+          model={editing.model}
+          seedId={editing.seedId}
+          takenIds={takenIds}
+          effortSuggestions={effortSuggestions}
+          onCancel={() => onClose()}
+          onCommit={(model) => { commitEdit(model); void save(); }}
+        />
+      )}
+      {open && direct && (removing ?? answered) && (() => {
+        const asked = (removing ?? answered)!;
+        const row = draft.find((entry) => entry.id === asked.modelId);
+        return (
+          <ConfirmDialog
+            open
+            destructive
+            onOpenChange={(next) => { if (!next && !busy) onClose(); }}
+            title={t('settings.models.gateway.catalog.removeTitle', { model: row ? displayLabel(row) : asked.modelId })}
+            description={t('settings.models.gateway.catalog.removeDescription')}
+            confirmLabel={t('settings.models.gateway.catalog.removeConfirm') as string}
+            cancelLabel={t('settings.models.gateway.catalog.cancel') as string}
+            confirmDisabled={busy}
+            onConfirm={() => {
+              setAnswered(asked);
+              acceptRemoval(asked);
+              askNextGuarded();
+              return save()?.finally(() => setAnswered(null));
+            }}
+          >
+            {(asked.plan.hops.length > 0 || (asked.plan.gaps?.length ?? 0) > 0) && (
+              <div className="model-hub-catalog-consequence" role="alert">
+                <GuardImpact hops={asked.plan.hops} gaps={asked.plan.gaps} sourceNames={sourceNames} />
+              </div>
+            )}
+          </ConfirmDialog>
+        );
+      })()}
     </>
   );
 };

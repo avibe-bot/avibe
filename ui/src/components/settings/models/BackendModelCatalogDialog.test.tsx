@@ -137,10 +137,19 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('2 models')).toBeTruthy();
   });
 
-  it('opens straight onto the named row\'s editor once, never on a locked row', async () => {
+  it('opens the named row\'s editor alone and saves its answer, never on a locked row', async () => {
+    const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
-    renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([locked, model('alpha', { display_name: 'Alpha' })]));
+    const { onClose, onSaved } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
     expect(await screen.findByRole('button', { name: 'Save model' })).toBeTruthy();
+    // The editor is the whole dialog: the list is not shown behind it.
+    expect(screen.queryByRole('heading', { name: 'Claude Code models' })).toBeNull();
+    await user.type(screen.getByLabelText('Display name'), 'Alpha');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(onSaved).toHaveBeenCalled();
     cleanup();
 
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
@@ -149,15 +158,44 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.queryByRole('button', { name: 'Save model' })).toBeNull();
   });
 
-  it('opens a routed row\'s removal on the same confirmation its own button asks', async () => {
-    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], {
-      routes: { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } },
-    }));
+  it('closes a focused editor without writing or showing the list', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
     const write = vi.spyOn(modelsApi, 'putAgentModels');
-    renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
-    const asked = await screen.findByRole('alert');
-    expect(asked.textContent).toContain('beta-air');
-    expect(screen.getByText('2 models')).toBeTruthy();
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose.mock.calls[0][0]?.removed).toBeFalsy();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['routed', { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } }],
+    ['unrouted', {}],
+  ])('removes a %s focused row straight from one confirmation', async (_, routes) => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], { routes }));
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    if (Object.keys(routes).length > 0) expect(within(confirm).getByRole('alert').textContent).toContain('beta-air');
+    expect(screen.queryByText('2 models')).toBeNull();
+    expect(write).not.toHaveBeenCalled();
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0][1].models.map((entry: BackendModel) => entry.id)).toEqual(['alpha']);
+  });
+
+  it('cancels a focused removal without writing', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels');
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose.mock.calls[0][0]?.removed).toBeFalsy();
     expect(write).not.toHaveBeenCalled();
   });
 

@@ -1586,12 +1586,16 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} focus={catalogFocus} onClose={() => {
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} focus={catalogFocus} onClose={(result) => {
         setMenuBackend(null);
         setCatalogFocus(null);
         const origin = catalogOriginRef.current;
         catalogOriginRef.current = null;
-        if (origin) focusRouteDestination(origin);
+        if (!origin) return;
+        // The route dialog handed its model over and comes back once the
+        // catalog answers, unless the answer removed the model it was showing.
+        if (result?.removed) focusRouteDestination(origin);
+        else setRouteTarget(origin);
       }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
@@ -1605,7 +1609,8 @@ export const SettingsModelsPage: React.FC = () => {
         }}
         onManageModel={(action) => {
           // The catalog dialog is the one writer of the model list; the route
-          // dialog closes and hands it the model it was showing.
+          // dialog steps aside while it edits or removes the model it was
+          // showing, then reopens on that model.
           if (!routeTarget) return;
           catalogOriginRef.current = routeTarget;
           setRouteTarget(null);

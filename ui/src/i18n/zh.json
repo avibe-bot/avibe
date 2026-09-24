@@ -941,6 +941,8 @@
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
           "removeConfirm": "移除",
+          "removeTitle": "移除 {{model}}？",
+          "removeDescription": "该模型会从此后端的模型列表中移除，它的路由也会一并删除。",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
