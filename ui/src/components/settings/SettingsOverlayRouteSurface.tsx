@@ -50,6 +50,21 @@ const isAgentationActive = (): boolean => (
   ) !== null
 );
 
+const getOutsideFocusTarget = (target: EventTarget | null): HTMLElement | null => {
+  if (!(target instanceof Element)) return null;
+  const candidate = target.closest<HTMLElement>(
+    'a[href], button:not([disabled]), input:not([disabled]), '
+      + 'select:not([disabled]), textarea:not([disabled]), '
+      + '[tabindex]:not([tabindex="-1"])',
+  );
+  return candidate instanceof HTMLElement && candidate.isConnected ? candidate : null;
+};
+
+const isNavigationOwner = (target: EventTarget | null): boolean => (
+  target instanceof Element
+  && target.closest('a[href], [data-settings-toggle="true"]') !== null
+);
+
 export const SettingsOverlayRouteSurface = ({
   children,
   fallbackElement,
@@ -66,6 +81,7 @@ export const SettingsOverlayRouteSurface = ({
   const locationRef = useRef(location);
   const settingsVisitRef = useRef(0);
   const focusFrameRef = useRef<number | null>(null);
+  const outsideFocusRef = useRef<HTMLElement | null>(null);
   const focusHandoffRef = useSettingsFocusHandoff();
   useLayoutEffect(() => {
     settingsSurfaceOpenRef.current = settingsSurfaceOpen;
@@ -169,16 +185,23 @@ export const SettingsOverlayRouteSurface = ({
                 : 'left-0 border-l-0 md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
-                // Standalone Settings stays open while the user interacts with
-                // another portalled tool, such as the built-in feedback toolbar.
-                // Inline Settings is a panel beside the shell, so an interaction
-                // outside its panel dismisses it.
                 const target = event.target;
-                if (target instanceof Element && target.closest('[data-settings-toggle="true"]')) {
-                  event.preventDefault();
-                  return;
+                const isToggle = target instanceof Element
+                  && target.closest('[data-settings-toggle="true"]') !== null;
+                // Keep focus on the control that caused an inline dismissal.
+                // The toggle is the same handoff for standalone's explicit
+                // close; other standalone interactions do not close Settings
+                // and must not leave a stale target for a later close.
+                if (!standaloneMenu || isToggle) {
+                  outsideFocusRef.current = getOutsideFocusTarget(target);
                 }
-                if (standaloneMenu) event.preventDefault();
+                // Navigation-owning controls must perform the only navigation:
+                // a sidebar Link pushes its destination, while the Settings
+                // toggle calls closeSettingsOverlay itself. Preventing Radix's
+                // automatic dismissal keeps it from racing either path.
+                if (isToggle || standaloneMenu || isNavigationOwner(target)) {
+                  event.preventDefault();
+                }
               }}
               onEscapeKeyDown={(event) => {
                 // Radix listens in the document capture phase, while Agentation
@@ -193,6 +216,7 @@ export const SettingsOverlayRouteSurface = ({
                   focusFrameRef.current = null;
                 }
                 settingsVisitRef.current += 1;
+                outsideFocusRef.current = null;
                 // Freeze the origin focus for this visit. Retained app windows
                 // may focus themselves on return, before Radix's deferred close
                 // callback runs; that must not replace the initiating control.
@@ -211,7 +235,8 @@ export const SettingsOverlayRouteSurface = ({
                 }
                 const visit = settingsVisitRef.current;
                 const expectedOrigin = origin;
-                const target = returnFocusRef.current;
+                const outsideTarget = outsideFocusRef.current;
+                const returnTarget = returnFocusRef.current;
                 focusFrameRef.current = window.requestAnimationFrame(() => {
                   focusFrameRef.current = null;
                   // A close callback may outlive a rapid Settings reopen or a
@@ -223,8 +248,12 @@ export const SettingsOverlayRouteSurface = ({
                     || expectedOrigin === null
                     || locationPath(locationRef.current) !== locationPath(expectedOrigin.location)
                   ) return;
-                  if (target?.isConnected && !target.closest('[inert]')) {
-                    target.focus({ preventScroll: true });
+                  if (outsideTarget?.isConnected && !outsideTarget.closest('[inert]')) {
+                    outsideTarget.focus({ preventScroll: true });
+                    return;
+                  }
+                  if (returnTarget?.isConnected && !returnTarget.closest('[inert]')) {
+                    returnTarget.focus({ preventScroll: true });
                     return;
                   }
                   if (isForegroundFocusOwner(document.activeElement)) return;

@@ -745,6 +745,7 @@ describe('SettingsOverlayRouteSurface', () => {
   it('keeps inline navigation on the clicked sidebar destination', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    window.history.replaceState({ idx: 0 }, '');
     render(
       <MemoryRouter initialEntries={['/chat/ses_1']}>
         <RoutedHarness />
@@ -752,9 +753,29 @@ describe('SettingsOverlayRouteSurface', () => {
     );
 
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    // Model the browser history index that production's createBrowserRouter
+    // records when Settings is pushed above the retained origin. If outside
+    // dismissal also runs, closeSettingsOverlay would race this Link's push.
+    window.history.replaceState({ idx: 1 }, '');
     await user.click(screen.getByRole('link', { name: 'sidebar-chat-link' }));
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
+  });
+
+  it('keeps focus on the inline control that dismisses Settings', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    const resizer = screen.getByRole('button', { name: 'shell-resizer' });
+    await user.click(resizer);
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(resizer));
   });
 
   it('keeps standalone Settings open when an outside control is clicked', async () => {
