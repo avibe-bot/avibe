@@ -1740,7 +1740,9 @@ async def _prepare_takeover(
         # reintroduced by an external writer. Its current Hub refs are already
         # authoritative; never provision that old OAuth snapshot again.
         for item in selected:
-            if item.id in retained_item_ids:
+            # A static key reuses its existing Source below, which also
+            # records the copy's receipt; only a login is never re-provisioned.
+            if item.id in retained_item_ids and item.kind == "oauth_native":
                 continue
             protocol = item.protocol
             auth_options = {"auth_scheme": item.auth_scheme} if item.auth_scheme is not None else {}
@@ -2218,12 +2220,15 @@ async def apply_native_migration(
                 raise MigrationConflictError
             # Receipts predating the option always cleaned native keys. A
             # pending journal from before it already staged that decision and
-            # resumes as staged.
-            if replayable and same_selection and (
+            # resumes as staged. A completed batch is replayed only with its
+            # own choice; with another one the rows migrate afresh, which
+            # requires the native credentials to be present again.
+            option_changed = replayable and same_selection and (
                 "clean_api_keys" in record or record["phase"] == "complete"
-            ) and record.get("clean_api_keys", True) != clean_api_keys:
+            ) and record.get("clean_api_keys", True) != clean_api_keys
+            if option_changed and record["phase"] != "complete":
                 raise MigrationConflictError
-            if same_selection and replayable:
+            if same_selection and replayable and not option_changed:
                 if record["phase"] == "complete":
                     async with host.migration_guard(tuple(record["backends"])) as verify_idle:
                         async with host._mutation_lock:

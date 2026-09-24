@@ -914,3 +914,27 @@ def test_pending_journal_from_before_the_cleanup_option_resumes(monkeypatch, tmp
     service.migration_journal.save(record)
     adapter.validate_oauth_credential = validate
     assert asyncio.run(service.migration_apply(ids))["applied"] == len(ids)
+
+
+@pytest.mark.parametrize("restore", ["same_row", "same_receipt_identity", "new_bytes"])
+def test_a_key_restored_after_cleanup_can_be_copied_and_stays_hidden(monkeypatch, tmp_path, restore):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    auth, config = home / ".codex/auth.json", home / ".codex/config.toml"
+    _write(auth, json.dumps({"OPENAI_API_KEY": "fixture-key-123456"}))
+    _write(config, 'cli_auth_credentials_store = "file"\n')
+    service, store, _adapter = _service(tmp_path, migration_home=home)
+    first = [row["id"] for row in service.migration_scan()["items"]]
+    assert asyncio.run(service.migration_apply(first, clean_api_keys=True))["applied"] == 1
+    # A sync restores the key: the same row, the same receipt identity under
+    # another file snapshot (cleanup dropped the store selector), or new bytes.
+    indent = 2 if restore == "new_bytes" else None
+    _write(auth, json.dumps({"OPENAI_API_KEY": "fixture-key-123456"}, indent=indent))
+    if restore != "same_receipt_identity":
+        _write(config, 'cli_auth_credentials_store = "file"\n')
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert len(ids) == 1 and (ids == first) == (restore == "same_row")
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert json.loads(auth.read_text()) == {"OPENAI_API_KEY": "fixture-key-123456"}
+    assert len(store.config.sources) == 1
+    assert service.migration_scan()["items"] == []
