@@ -2,9 +2,9 @@
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useLayoutEffect } from 'react';
+import { useEffect, useLayoutEffect } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import { AuthGuard } from './App';
 import { Summary } from './components/steps/Summary';
@@ -12,6 +12,9 @@ import { useInstanceAuthorization } from './context/InstanceAuthorizationContext
 import { DENIED_INSTANCE_CAPABILITIES, OWNER_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
 import { isOwnerOnlyPath } from './lib/adminNavigation';
 import { reportRemoteAuthorizationState, REMOTE_AUTH_STATE_EVENT } from './lib/remoteAuth';
+import { DESKTOP_OPEN_SETTINGS_EVENT } from './lib/desktopShell';
+import { DesktopSettingsCommand } from './components/DesktopSettingsCommand';
+import { SettingsOverlayNavigationBoundary } from './components/settings/SettingsOverlayNavigationBoundary';
 
 vi.hoisted(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
@@ -223,6 +226,49 @@ describe('AuthGuard setup-bypass authorization', () => {
     expect(await screen.findByText('model-hub-page')).toBeTruthy();
     expect(api.getConfig).toHaveBeenCalledOnce();
     expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthGuard General Settings over setup', () => {
+  it('opens the desktop Settings request over the wizard without leaving it', async () => {
+    api.getAuthSession.mockResolvedValue({
+      remote: false,
+      instance_kind: 'personal',
+      instance_role: 'owner',
+      capabilities: OWNER_INSTANCE_CAPABILITIES,
+    });
+    api.getConfig.mockResolvedValue({ mode: 'v2', setup_state: { needs_setup: true } });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    const mounts = { count: 0 };
+    const SetupSurface = () => {
+      const { pathname } = useLocation();
+      useEffect(() => { mounts.count += 1; }, []);
+      return <div>at {pathname}</div>;
+    };
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/setup']}>
+          <AuthGuard>
+            <SettingsOverlayNavigationBoundary desktop>
+              <DesktopSettingsCommand />
+              <SetupSurface />
+            </SettingsOverlayNavigationBoundary>
+          </AuthGuard>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByText('at /setup')).toBeTruthy();
+
+      act(() => {
+        window.dispatchEvent(new Event(DESKTOP_OPEN_SETTINGS_EVENT, { cancelable: true }));
+      });
+
+      expect(await screen.findByText('at /settings/general')).toBeTruthy();
+      expect(mounts.count).toBe(1);
+      expect(api.getConfig).toHaveBeenCalledOnce();
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    }
   });
 });
 
