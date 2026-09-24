@@ -426,6 +426,20 @@ def test_invalid_codex_auth_file_blocks_hub_mode(home, tmp_path):
     assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
 
 
+@pytest.mark.parametrize("config", [
+    {"provider": {"openrouter": {"options": {"apiKey": KEY}}}},
+    {"provider": {"openrouter": "bad"}},
+])
+def test_unreadable_opencode_auth_file_blocks_hub_mode_and_scans_config_layers(home, tmp_path, config):
+    _write(home / ".local/share/opencode/auth.json", "{1: 2}")
+    user = home / ".config/opencode/opencode.json"
+    _write(user, json.dumps(config))
+    service, _, _ = _service(tmp_path, migration_home=home)
+    items = [item for item in _items(service, ()) if item.backend == "opencode"]
+    assert any(item.config_blocker and item.notes_key.endswith(".unreadable") for item in items)
+    assert any(str(user) in item.source_paths for item in items)
+
+
 def test_apply_rejects_a_config_blocker_found_by_the_guarded_rescan(home, tmp_path, monkeypatch):
     from contextlib import asynccontextmanager
 

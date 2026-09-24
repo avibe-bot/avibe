@@ -1011,10 +1011,13 @@ def _opencode_items(
     try:
         auth_entries = read_native_config(opencode_auth_path(home)) or {}
     except (TakeoverStateError, OSError):
-        return [_blocked_item(
+        # Hub mode cannot prove what an unreadable auth map would shadow, so
+        # it blocks; config layers still surface their own rows beside it.
+        auth_entries = {}
+        items.append(_blocked_item(
             "opencode", "auth-file", "unreadable",
-            source_paths=(str(opencode_auth_path(home)),),
-        )]
+            source_paths=(str(opencode_auth_path(home)),), config_blocker=True,
+        ))
     provider_catalog = _load_opencode_provider_catalog(persisted)
     seen_providers: set[str] = set()
     for path in opencode_config_paths(home, project_roots):
