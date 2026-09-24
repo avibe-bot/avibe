@@ -1038,7 +1038,12 @@ export const UsageTab: React.FC<{
                       <td>{tokenText(tableTotal, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                       <td>{tokenText(tableTotal, 'output', count, t('settings.models.usage.blank') as string)}</td>
                       <td>{metricText(tableTotal)}</td>
-                      <td>{usageMetricValue(tableTotal, metric) === null ? t('settings.models.usage.blank') : '100%'}</td>
+                      <td>{(() => {
+                        const totalValue = usageMetricValue(tableTotal, metric);
+                        return totalValue === null || totalValue === 0
+                          ? t('settings.models.usage.blank')
+                          : '100%';
+                      })()}</td>
                     </tr>
                   </tfoot>
                 )}

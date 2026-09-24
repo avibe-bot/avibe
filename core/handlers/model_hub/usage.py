@@ -1136,7 +1136,18 @@ class BoundedUsageLedger:
         for row in read.rows:
             latest = _instant(row.get("last_metered_at"))
             if latest is not None and latest < horizon_start:
-                continue
+                has_in_horizon_hour = False
+                for item in row.get("hours") or ():
+                    parts = _hour_key_parts(item.get("key"))
+                    if parts is None:
+                        continue
+                    _key, start = parts
+                    start = start.astimezone(timezone.utc)
+                    if horizon_start <= start <= current_start:
+                        has_in_horizon_hour = True
+                        break
+                if not has_in_horizon_hour:
+                    continue
             row_day = _calendar_day(row["day"])
             if row_day is not None and _overlaps_local_day(
                 horizon_start,

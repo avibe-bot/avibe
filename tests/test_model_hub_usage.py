@@ -1461,6 +1461,59 @@ def test_expired_legacy_rows_do_not_reenter_hourly_history_after_timezone_change
     assert daily["totals"]["requests"] == 1
 
 
+def test_recent_hourly_evidence_survives_a_stale_daily_timestamp(
+    tmp_path: Path,
+) -> None:
+    """A valid UTC slice remains authoritative when the daily recency is stale."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    counts = {
+        "requests": 1,
+        "token_reports": 1,
+        "input_tokens": 7,
+        "cached_input_tokens": 0,
+        "output_tokens": 1,
+    }
+    try:
+        os.environ["TZ"] = "Pacific/Honolulu"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(json.dumps([{
+            "day": "2026-09-25",
+            "source_id": "src-recent-hour",
+            "model_id": "model-recent-hour",
+            **counts,
+            "last_metered_at": "2026-09-24T10:00:00+00:00",
+            "hourly_history_complete": True,
+            "hourly_expired_totals": {
+                "requests": 0,
+                "token_reports": 0,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+            },
+            "hours": [{
+                "key": "2026-09-25T11:00:00+00:00",
+                **counts,
+                "last_metered_at": "2026-09-25T11:15:00+00:00",
+            }],
+        }]), encoding="utf-8")
+
+        report = ledger.report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 1
+    assert report["totals"]["input_tokens"] == 7
+    assert all(bucket["history_complete"] for bucket in report["buckets"])
+
+
 @pytest.mark.parametrize(
     "content",
     [

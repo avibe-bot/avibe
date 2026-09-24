@@ -213,6 +213,23 @@ describe('UsageTab', () => {
     expect(card?.textContent).toContain('0');
   });
 
+  it('does not claim a 100% share when the selected total is zero', () => {
+    const measuredZero = counters({
+      requests: 4,
+      token_reports: 4,
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+    });
+    const { container } = draw(report({
+      totals: measuredZero,
+      sources: [],
+      buckets: [bucket('00', [row(measuredZero)])],
+    }));
+
+    expect(container.querySelector('tfoot')?.textContent).not.toContain('100%');
+  });
+
   it('MH-USAGE-026: every token figure on screen states its own coverage', () => {
     const unreported = counters({
       requests: 2,
