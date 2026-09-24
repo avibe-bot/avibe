@@ -340,6 +340,11 @@ def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home
     '{ supports_websockets = "bad" }',
     '{ websocket_connect_timeout_ms = -1 }',
     '{ auth = "bad" }',
+    '{ aws = { profile = 1 }, http_headers = { X = "y" } }',
+    '{ aws = { credential_export = { args = ["x"] } } }',
+    '{ auth = { command = "fixture", timeout_ms = 0 } }',
+    '{ auth = { command = "fixture", unknown = 1 } }',
+    '{ gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", delivery = { kind = "query", name = "x" } } }',
 ])
 def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
     _write(home / ".codex/config.toml", f"model_providers = {{ relay = {entry} }}\n")
@@ -358,7 +363,11 @@ def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry
 
 def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
     _write(home / ".codex/config.toml", 'model_providers = { relay = { http_headers = { X = "y" }, '
-           'supports_websockets = true, wire_api = "responses", future_field = 1 } }\n')
+           'supports_websockets = true, wire_api = "responses", future_field = 1, '
+           'auth = { command = "fixture", args = ["x"], refresh_interval_ms = 0 }, '
+           'aws = { profile = "p", credential_export = { command = "fixture" } }, '
+           'gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", '
+           'delivery = { kind = "header", name = "X" } } } }\n')
     _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"options": {"headers": {"X": "y"}}}}}')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert not any(item.config_blocker for item in _items(service, ()))
@@ -470,3 +479,20 @@ def test_codex_unresolved_env_key_in_one_layer_keeps_the_provider_native(home, t
     assert 'env_key = "FIXTURE_UNSET_KEY"' in user.read_text()
     assert 'model_provider = "relay"' in user.read_text()
     assert "relay.example" in project.read_text()
+
+
+def test_unresolved_opencode_reference_in_another_layer_stays_with_its_endpoint(home, tmp_path):
+    user = home / ".config/opencode/opencode.json"
+    project = home / "project/opencode.json"
+    _write(user, json.dumps({"provider": {"openrouter": {"options": {"apiKey": "{env:FIXTURE_MISSING_KEY}"}}}}))
+    _write(project, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1", "apiKey": KEY}}}}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, roots) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    assert json.loads(user.read_text())["provider"]["openrouter"]["options"] == {"apiKey": "{env:FIXTURE_MISSING_KEY}"}
+    assert json.loads(project.read_text())["provider"]["openrouter"]["options"] == {
+        "baseURL": "https://relay.example/api/v1"}

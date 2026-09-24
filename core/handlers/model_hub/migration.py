@@ -776,6 +776,7 @@ _CODEX_PROVIDER_FIELDS: dict[str, str] = {
         "experimental_bearer_token", "model_catalog_url",
     ), "text"),
     **dict.fromkeys(("http_headers", "env_http_headers", "query_params"), "text_map"),
+    **{field: field for field in ("auth", "aws", "gateway_oauth")},
     **dict.fromkeys((
         "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms",
         "websocket_connect_timeout_ms",
@@ -783,8 +784,33 @@ _CODEX_PROVIDER_FIELDS: dict[str, str] = {
     **dict.fromkeys((
         "requires_openai_auth", "supports_websockets", "supports_standalone_web_search",
     ), "flag"),
-    **dict.fromkeys(("auth", "aws", "gateway_oauth"), "table"),
     "wire_api": "wire_api",
+}
+
+
+# The nested tables Codex deserializes strictly (unknown keys rejected, the
+# required ones present), from the same schema. A value is a kind name, a
+# nested spec, or a tuple of alternative specs (a tagged enum).
+_CodexSpec = dict[str, object]
+_COMMAND_SPEC: _CodexSpec = {"command": "text", "args": "texts", "timeout_ms": "positive_count"}
+_CODEX_NESTED_SPECS: dict[str, tuple[_CodexSpec, frozenset[str]]] = {
+    "auth": ({
+        "command": "text", "args": "texts", "cwd": "text",
+        "refresh_interval_ms": "count", "timeout_ms": "positive_count",
+    }, frozenset({"command"})),
+    "aws": ({
+        "profile": "text", "region": "text",
+        "auth_refresh": (_COMMAND_SPEC, frozenset({"command"})),
+        "credential_export": (_COMMAND_SPEC, frozenset({"command"})),
+    }, frozenset()),
+    "gateway_oauth": ({
+        "authorization_url": "text", "client_id": "text", "token_url": "text",
+        "resource": "text", "scopes": "texts", "redirect_port": "port",
+        "delivery": (
+            ({"kind": ("header",), "name": "text", "scheme": "text"}, frozenset({"kind", "name"})),
+            ({"kind": ("cookie",), "name": "text"}, frozenset({"kind", "name"})),
+        ),
+    }, frozenset({"authorization_url", "client_id", "delivery", "token_url"})),
 }
 
 
@@ -804,11 +830,34 @@ def _codex_field_well_typed(kind: str, value: object) -> bool:
         return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**63
     if kind == "flag":
         return isinstance(value, bool)
-    if kind == "table":
-        return isinstance(value, dict)
+    if kind in _CODEX_NESTED_SPECS:
+        return _codex_table_well_typed(_CODEX_NESTED_SPECS[kind], value)
     # An unknown variant fails deserialization. `chat` stays accepted: older
     # CLIs still run it, and migration carries it as openai_chat.
     return value in ("chat", "responses")
+
+
+def _codex_table_well_typed(spec: object, value: object) -> bool:
+    if isinstance(spec, str):
+        if spec == "texts":
+            return isinstance(value, list) and all(isinstance(item, str) for item in value)
+        if spec in ("positive_count", "port"):
+            limit = 2**16 if spec == "port" else 2**63
+            minimum = 1 if spec == "positive_count" else 0
+            return isinstance(value, int) and not isinstance(value, bool) and minimum <= value < limit
+        return _codex_field_well_typed(spec, value)
+    if isinstance(spec, tuple) and spec and isinstance(spec[0], tuple):
+        # A tagged enum: exactly one variant has to accept the table.
+        return any(_codex_table_well_typed(variant, value) for variant in spec)
+    if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[0], dict):
+        fields, required = spec
+        return (
+            isinstance(value, dict)
+            and required <= value.keys() <= fields.keys()
+            and all(_codex_table_well_typed(fields[key], item) for key, item in value.items())
+        )
+    # A literal-choice tuple, such as a variant tag.
+    return value in spec
 
 
 def _codex_provider_well_typed(provider: object) -> bool:

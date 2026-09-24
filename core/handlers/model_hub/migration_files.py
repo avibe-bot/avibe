@@ -431,14 +431,20 @@ def plan_native_cleanup(
         native_auth = read_native_config(opencode_auth_path(home)) or {}
         retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor))}
 
+        # References a selected row read: bound to its saved assignment, or
+        # proved empty before it selected the auth.json fallback. Any other
+        # reference (unresolved, or never scanned into a selection) stays.
+        carried_references = {
+            name for item in items if item.backend == "opencode" for name in item.shell_variables
+        }
+
         def api_key_retained(value: object) -> bool:
             if not value or selected_api_key(value, "opencode"):
                 return False
-            # The inventory bound the saved assignment, or proved its absence
-            # before selecting the auth.json fallback.
             return not (
                 isinstance(value, str)
                 and value.startswith("{env:") and value.endswith("}")
+                and value[5:-1] in carried_references
                 and (
                     not shell_values.get(value[5:-1])
                     or shell_values[value[5:-1]].strip() in selected_by_backend.get("opencode", set())
