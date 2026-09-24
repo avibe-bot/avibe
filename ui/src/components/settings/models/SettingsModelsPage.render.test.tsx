@@ -311,6 +311,25 @@ describe('SettingsModelsPage surface branches', () => {
     expect(apply).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['nothing at all', []],
+    ['only native auth the Hub cannot carry', 'blocked'],
+  ] as const)('offers no migrate entry when the scan finds %s', async (_, items) => {
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const scan = vi.spyOn(modelsApi, 'scanMigration')
+      .mockResolvedValue({ items: items === 'blocked' ? [blockedMigrationCandidate] : [] });
+    renderPage([retainedSource], [{
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+    }]);
+
+    await waitFor(() => expect(scan).toHaveBeenCalled());
+    // Settled, so the absence below is the answer rather than a scan in flight.
+    await act(async () => { await scan.mock.results[0].value; });
+    expect(screen.queryByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeNull();
+  });
+
   it('installs and starts the runtime inline without an install confirmation dialog', async () => {
     const notInstalled = {
       ...runtime,

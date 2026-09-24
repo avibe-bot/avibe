@@ -66,6 +66,7 @@ import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { handOffProviderTab } from './providerTab';
 import { resumeGatewayAdoption } from './gatewayAdoption';
+import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
@@ -371,6 +372,11 @@ export const SettingsModelsPage: React.FC = () => {
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [migrationOpen, setMigrationOpen] = React.useState(false);
   const [migrationBackend, setMigrationBackend] = React.useState<AgentBackend | null>(null);
+  /** Whether the header's migrate entry has anything to open onto: the same
+   *  groups the dialog would list, so the button and the dialog cannot
+   *  disagree. `null` until a scan answers; a failed scan keeps the entry,
+   *  because the dialog is where that failure is explained. */
+  const [migrationAvailable, setMigrationAvailable] = React.useState<boolean | null>(null);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
@@ -489,6 +495,20 @@ export const SettingsModelsPage: React.FC = () => {
   const runtimeConfigurationVisible = (
     runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing')
   ) && !stoppingRuntime;
+  React.useEffect(() => {
+    // Re-asked whenever the dialog closes, since applying it is what empties
+    // the scan.
+    if (!runtimeConfigurationVisible || migrationOpen) return;
+    let cancelled = false;
+    modelsApi.scanMigration()
+      .then((scan) => {
+        if (!cancelled) setMigrationAvailable(groupMigrationCandidates(scan.items, () => true).length > 0);
+      })
+      .catch(() => {
+        if (!cancelled) setMigrationAvailable(true);
+      });
+    return () => { cancelled = true; };
+  }, [migrationOpen, runtimeConfigurationVisible]);
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
       || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
@@ -1361,7 +1381,7 @@ export const SettingsModelsPage: React.FC = () => {
                 stopping={stoppingRuntime}
                 directCount={directEmpty ? installedAgents.length : undefined}
               />
-              {runtimeConfigurationVisible && (
+              {runtimeConfigurationVisible && migrationAvailable === true && (
                 <Button
                   type="button"
                   variant="outline"
