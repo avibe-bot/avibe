@@ -211,9 +211,12 @@ def native_store_items(
         item.secret.strip() for item in items
         if clean_api_keys and item.backend == "codex" and item.kind != "oauth_native" and item.secret
     )
+    withdraw_login = clean_api_keys or any(
+        item.backend == "codex" and item.kind == "oauth_native" for item in items
+    )
     return [
         replace(item, native_store_edit=codex_edit_keeping_api_key(
-            item.native_store_edit, withdrawn_keys=withdrawn,
+            item.native_store_edit, withdrawn_keys=withdrawn, withdraw_login=withdraw_login,
         ))
         if item.backend == "codex" and item.native_store_edit else item
         for item in items

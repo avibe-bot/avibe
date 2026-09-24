@@ -670,3 +670,49 @@ def test_cleanup_keeps_an_unimported_avibe_saved_key(monkeypatch, tmp_path):
     loaded = V2Config.load(config_path=config_path)
     assert loaded.agents.claude.api_key == "fixture-saved-key"
     assert loaded.agents.claude.base_url == "ftp://saved.example/v1"
+
+
+def _keychain_codex_key_migrated(monkeypatch, tmp_path):
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    _write(home / ".codex/config.toml", 'cli_auth_credentials_store = "keyring"\n')
+    account = "cli|" + hashlib.sha256(str((home / ".codex").resolve()).encode()).hexdigest()[:16]
+    locator = ("Codex Auth", account)
+    keychain.items[locator] = ('{"OPENAI_API_KEY":"fixture-key-123456"}', "fixture-original")
+    service, store, _adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    asyncio.run(service.migration_apply(ids))
+    assert service.migration_scan()["items"] == []
+    return home, keychain, locator, service
+
+
+def test_kept_keychain_key_is_offered_again_after_codex_routing_changes(monkeypatch, tmp_path):
+    home, _keychain, _locator, service = _keychain_codex_key_migrated(monkeypatch, tmp_path)
+    _write(home / ".codex/config.toml", (
+        'cli_auth_credentials_store = "keyring"\nmodel_provider = "Relay"\n\n'
+        '[model_providers.Relay]\nbase_url = "https://relay.example/v1"\nwire_api = "responses"\n'
+    ))
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["codex"]
+
+
+def test_retained_receipt_binds_only_the_verified_store_revision(monkeypatch, tmp_path):
+    from core.handlers.model_hub.migration import _record_retained_store_revisions
+
+    home, keychain, locator, service = _keychain_codex_key_migrated(monkeypatch, tmp_path)
+    record = {
+        "retained_native_ids": {"key_fixture": {
+            "source_id": "src_fixture", "credential_ref": "cred_fixture",
+            "store_backend": "codex", "store_routing": "",
+        }},
+        "verified_store_revisions": {"codex": "codex:keychain:verified-before-external-write"},
+    }
+    keychain.items[locator] = ('{"OPENAI_API_KEY":"fixture-other-key"}', "fixture-external")
+    keychain.mdates[locator] += 1
+    asyncio.run(_record_retained_store_revisions(service, record))
+    assert "store_revision" not in record["retained_native_ids"]["key_fixture"]

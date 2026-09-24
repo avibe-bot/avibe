@@ -233,6 +233,8 @@ class NativeMigrationItem:
     # A metadata-only OS-store row represents one selected credential
     # container. Its API-key/OAuth components are resolved after consent.
     native_store_placeholder: bool = False
+    # Codex routing (provider, URL, wire API) the store's credential feeds.
+    native_store_routing: Optional[str] = field(default=None, repr=False)
     source_paths: tuple[str, ...] = ()
     required_backends: tuple[str, ...] = ()
     shell_variables: tuple[str, ...] = field(default=(), repr=False)
@@ -558,7 +560,13 @@ def _native_store_items(
             _oauth_text(state, "wire_api") or "",
             _oauth_text(state, "active_provider_id") or "",
         )
-        items = [replace(item, id=f"mig_{_stable_suffix(item.id, routing_revision)}") for item in items]
+        items = [
+            replace(
+                item, id=f"mig_{_stable_suffix(item.id, routing_revision)}",
+                native_store_routing=routing_revision,
+            )
+            for item in items
+        ]
     return items
 
 
@@ -1565,6 +1573,7 @@ def scan_native_configs(
             continue
         if item.native_store_placeholder and any(
             copy.get("store_backend") == item.backend
+            and copy.get("store_routing", "") == (item.native_store_routing or "")
             and copy.get("store_revision") == item.native_store_revision
             and _retained_copy_live(copy, live_credentials)
             for copy in (retained_native_ids or {}).values()
@@ -1762,7 +1771,9 @@ async def _prepare_takeover(
                         source_ids.append(candidate.id)
                         item_sources[_retained_key_identity(item)] = {
                             "source_id": candidate.id, "credential_ref": candidate.credential_ref,
-                            **({"store_backend": item.backend} if item.native_store_revision else {}),
+                            **({
+                        "store_backend": item.backend, "store_routing": item.native_store_routing or "",
+                    } if item.native_store_revision else {}),
                         }
                         break
                 else:
@@ -1847,7 +1858,9 @@ async def _prepare_takeover(
             if item.kind != "oauth_native":
                 item_sources[_retained_key_identity(item)] = {
                     "source_id": source.id, "credential_ref": source.credential_ref,
-                    **({"store_backend": item.backend} if item.native_store_revision else {}),
+                    **({
+                        "store_backend": item.backend, "store_routing": item.native_store_routing or "",
+                    } if item.native_store_revision else {}),
                 }
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
@@ -1976,7 +1989,13 @@ async def _record_retained_store_revisions(host: MigrationHost, record: dict[str
         # hidden only while the copied Hub source is live.
         record.get("clean_native_stores", {}).pop(backend, None)
         snapshot = await asyncio.to_thread(read_native_oauth, backend, home=host.migration_home)
-        if snapshot is not None and (snapshot.payload or {}).get("status") == "metadata_only":
+        verified = record.get("verified_store_revisions", {}).get(backend)
+        # Bind only the revision verified against our post-edit image; a later
+        # external write stays unbound, so its store is offered again.
+        if (
+            snapshot is not None and (snapshot.payload or {}).get("status") == "metadata_only"
+            and (verified is None or snapshot.revision == verified)
+        ):
             copy["store_revision"] = snapshot.revision
 
 
@@ -2072,6 +2091,8 @@ async def _resume_takeover(
                 # Bind the public metadata revision to the verified private
                 # post-state. A detected intervening login prevents completion.
                 await asyncio.to_thread(check_keychain_edit, edit, applied=True)
+                if snapshot is not None:
+                    record.setdefault("verified_store_revisions", {})[edit["backend"]] = snapshot.revision
                 if snapshot and (snapshot.payload or {}).get("status") == "metadata_only":
                     record["clean_native_stores"][edit["backend"]] = snapshot.revision
         await verify_idle()

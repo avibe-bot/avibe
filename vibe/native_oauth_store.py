@@ -383,6 +383,7 @@ def _remove_codex_oauth(payload: Mapping[str, Any], *, keep_api_key: bool = Fals
 
 def codex_edit_keeping_api_key(
     edit: Mapping[str, Any] | None, *, withdrawn_keys: frozenset[str] = frozenset(),
+    withdraw_login: bool = True,
 ) -> dict[str, Any] | None:
     """Withdraw only the login from a Codex store edit; its static key stays
     unless it is one of ``withdrawn_keys``.
@@ -407,9 +408,14 @@ def codex_edit_keeping_api_key(
             operations.append(operation)
             continue
         key = payload.get("OPENAI_API_KEY")
-        after_payload = _remove_codex_oauth(
-            payload, keep_api_key=not (isinstance(key, str) and key.strip() in withdrawn_keys),
-        )
+        withdraw_key = isinstance(key, str) and key.strip() in withdrawn_keys
+        if withdraw_login:
+            after_payload = _remove_codex_oauth(payload, keep_api_key=not withdraw_key)
+        else:
+            # No login is withdrawn: only a carried key leaves, byte-for-byte otherwise.
+            after_payload = dict(payload)
+            if withdraw_key:
+                after_payload.pop("OPENAI_API_KEY", None)
         if after_payload == payload:
             after: dict[str, Any] = dict(before)
         elif operation.get("kind") == "file":

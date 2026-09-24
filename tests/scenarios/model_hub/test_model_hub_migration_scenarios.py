@@ -1869,3 +1869,22 @@ def test_mh_mig_007_cleanup_keeps_an_excluded_key_in_the_withdrawn_store(
     assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == len(ids)
     auth = json.loads(auth_path.read_text(encoding="utf-8"))
     assert auth["OPENAI_API_KEY"] == "sk-openai-test-123456" and "tokens" not in auth
+
+
+def test_mh_mig_007_default_copy_leaves_a_key_only_codex_store_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: with no login selected, a key-only Codex store is not rewritten."""
+    native_home = tmp_path / "native-home"
+    auth_path = native_home / ".codex" / "auth.json"
+    _write(auth_path, json.dumps({
+        "OPENAI_API_KEY": "sk-openai-test-123456", "auth_mode": "chatgpt",
+        "tokens": {}, "last_refresh": "2026-01-01T00:00:00Z",
+    }))
+    _isolate_native_home(monkeypatch, native_home)
+    before = auth_path.read_bytes()
+    service, _store, _adapter = _service(tmp_path)
+    ids = [item["id"] for item in service.migration_scan()["items"] if item["proposed_action"] == "import"]
+    assert ids
+    assert asyncio.run(service.migration_apply(ids))["applied"] == len(ids)
+    assert auth_path.read_bytes() == before
