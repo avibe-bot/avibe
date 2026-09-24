@@ -122,39 +122,19 @@ Hard rules:
   explicitly with
   `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
   when merged, abandoned, or stale
-- `reconcile` lists every worktree environment Incus holds — including ones
-  created outside the runner, which no metadata-driven command can see — and
-  forgets metadata rows whose environment is already gone. It never deletes an
-  environment: no recorded field can prove one is unwanted, so that call stays
-  with the operator. It reports the names the daemon gave, never re-derived from
-  the slug, because a discovered name is bounded by what Incus accepts and
-  `--slug` is stricter; one it would reject gets its objects named for a manual
-  reclamation instead of a command that would exit on its own argument
-- a metadata row is dropped only when the daemon that owns it completed a
-  listing whose every entry was readable, that listing held neither its project
-  nor its instance, and the row is not a reservation whose `up` may still be
-  running. A reservation lives exactly as long as its run: an `up` that fails
-  gives its row back while the daemon reports no project for that slug and the
-  row is still the one that run wrote, both read at that moment rather than
-  remembered from an earlier one — so a project that may bind the port, a
-  listing that cannot answer, and a concurrent `up` that took the slug over all
-  keep the row. `worktrees.json` is reached only through an accessor bound to the
-  daemon it describes — it reserves host ports on this machine and records what
-  this machine's daemon holds — so a `--remote` command cannot name it and
-  neither reads nor writes it: `reconcile --remote` reports the remote inventory
-  with no local provenance, `delete --remote` keeps the local row, and
-  `up --remote` requires `--host-port`
+- `reconcile` reports every worktree environment held by Incus, including
+  environments created outside the runner, and only forgets metadata for
+  environments that are no longer present. It never deletes an environment.
+- a metadata row is dropped only after a complete, readable listing shows that
+  the daemon holds neither its project nor instance and the row is not a live
+  `up` reservation
 - never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
   Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
 - after any regression update, verify service health before reporting success
 
-State and lookup notes:
-
-- regression product state lives under `/home/avibe/.avibe`; `/home/avibe/.vibe_remote` is only the compatibility symlink
-- metadata lives under the primary checkout's `.runtime/incus-regression/`, even
-  when the runner is invoked from a task worktree
-- `.env.regression` is read from the current worktree first, then the primary checkout
-- branch/master regression defaults to a locally built Show Runtime archive; packaged release installs use the packaged manifest path
+The runner's reconciliation, reservation, daemon ownership, and state lookup
+semantics live in `docs/regression/README.md`. Read that document when changing
+the runner or diagnosing metadata cleanup.
 
 ## 4. Configuration and Routing Model
 
@@ -219,16 +199,10 @@ Source-of-truth rule:
   contract, require an exact-head Codex review, zero unresolved review threads,
   and passing CI before close-out, apply the review-loop circuit breaker, and
   never merge without explicit owner instruction
-- the fallback change contract names the intended behavior, affected boundaries,
-  and validation evidence; pause patching when one root-cause class appears on
-  two reviewed heads, or after three findings-bearing heads following an
-  architecture or data-model rewrite, then diagnose the whole class before
-  continuing
-- use the `background-watch-hook` skill for managed review and CI waits
-- keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
-- only an explicit owner decision may make Codex findings advisory for an
-  architecture/spec-only PR; ordinary documentation and every product or test
-  code PR retain the Skill's normal gates
+- use `background-watch-hook` for managed review and CI waits
+- the change contract names intended behavior, affected boundaries, and
+  validation evidence; use the Skill's circuit breaker when findings repeat
+- ordinary documentation, product, and test PRs retain the Skill's normal gates
 
 ### Pre-Push Requirements
 
@@ -298,13 +272,11 @@ Source-of-truth rule:
 - be careful with persisted state under `~/.avibe/`, legacy `~/.vibe_remote/`, and `.runtime/incus-regression/`
 - do not reset or wipe regression data unless the user explicitly asks for it
 
-## 9. Release Notes
+## 9. Release Workflow
 
-- tags follow the latest version number +1 (for example `v1.0.1` -> `v1.0.2`)
-- before publishing a release, explicitly decide whether the version should notify users; put `<!-- avibe:update-notification=none -->` in the annotated tag message when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The workflow emits both the current and legacy `vibe-remote` markers into the GitHub Release body for installed-client compatibility.
-- for an official `v*` release, the annotated tag is the operator's only release-state input: put silent-update intent in the tag annotation, push the tag, and do not pre-create or manually edit a GitHub Release
-- the official workflows stage assets and generated notes in a Draft; `Release (AI Notes)` may update notes but never publishes. The `Publish to PyPI` workflow is the single finalizer: it verifies the exact notes run, publishes the asset-complete GitHub Release, and only then allows PyPI publication so package manifests never point at private Draft assets
-- GitHub-only pre-releases should use the `gh-vX.Y.ZrcN` format (for example `gh-v2.2.8rc2`) so they stay distinct from PyPI-triggering `v*` tags
-- GitHub-only pre-releases must include installable artifacts in the GitHub release assets: a wheel built with `ui/dist` and bundled `vibe/show_runtime/*.tgz`, plus the sdist
-- releases are published automatically by workflow after tagging/push
-- Published managed-runtime manifests are availability contracts. Keep their release URLs under a scheduled manifest-verified backup/recovery guard, and publish the new assets before changing a pinned manifest so the guard never restores bytes from a different release.
+- release automation is workflow-owned; do not pre-create or manually edit
+  official GitHub Releases
+- keep tag naming, update-notification markers, artifact requirements, and
+  managed-runtime manifest safeguards in `docs/release.md`
+- published managed-runtime URLs are availability contracts; publish replacement
+  assets before changing a pinned manifest
