@@ -661,9 +661,10 @@ def _codex_items(
         if config is None:
             continue
         providers = config.get("model_providers", {})
-        if not isinstance(providers, dict) or not _codex_top_level_well_typed(config):
-            # Codex deserializes every recognized top-level field before any
-            # Hub override applies, so one of the wrong type fails launches.
+        # Only the provider map migration reads and rewrites is checked here.
+        # The rest of the file belongs to the installed CLI, whose accepted
+        # shapes differ by version, and fails in direct mode alike.
+        if not isinstance(providers, dict):
             items.append(_blocked_item(
                 "codex", str(path), source_paths=(str(path),), config_blocker=True,
             ))
@@ -822,69 +823,6 @@ _CODEX_NESTED_SPECS: dict[str, tuple[_CodexSpec, frozenset[str]]] = {
 }
 
 
-# Codex's top-level `ConfigToml` fields other than `model_providers`, from the
-# same schema. Tables are checked only as tables; their own fields are left
-# to the CLI. An enum is a tuple of its variants.
-_CODEX_TOP_LEVEL_FIELDS: dict[str, object] = {
-    **dict.fromkeys((
-        "apps_mcp_product_sku", "chatgpt_base_url", "compact_prompt", "default_permissions",
-        "developer_instructions", "experimental_compact_prompt_file",
-        "experimental_realtime_start_instructions", "experimental_realtime_webrtc_call_base_url",
-        "experimental_realtime_ws_backend_prompt", "experimental_realtime_ws_base_url",
-        "experimental_realtime_ws_model", "experimental_realtime_ws_startup_context",
-        "instructions", "log_dir", "mcp_oauth_callback_url", "model", "model_catalog_json",
-        "model_instructions_file", "model_provider", "model_reasoning_effort", "openai_base_url",
-        "oss_provider", "plan_mode_reasoning_effort", "profile", "review_model", "service_tier",
-        "sqlite_home",
-    ), "text"),
-    **dict.fromkeys((
-        "allow_login_shell", "allow_symlinked_codex_home", "check_for_update_on_startup",
-        "disable_paste_burst", "experimental_use_unified_exec_tool", "hide_agent_reasoning",
-        "include_apps_instructions", "include_collaboration_mode_instructions",
-        "include_environment_context", "include_permissions_instructions",
-        "show_raw_agent_reasoning", "suppress_unstable_features_warning",
-    ), "flag"),
-    **dict.fromkeys((
-        "background_terminal_max_timeout", "mcp_optional_startup_grace_ms",
-        "project_doc_max_bytes", "thread_unload_delay_secs", "tool_output_token_limit",
-    ), "count"),
-    **dict.fromkeys(("model_auto_compact_token_limit", "model_context_window"), "int"),
-    **dict.fromkeys(("notify", "project_doc_fallback_filenames", "project_root_markers"), "texts"),
-    **dict.fromkeys((
-        "agents", "analytics", "apps", "audio", "auto_review", "browser_use", "cloud",
-        "computer_use", "desktop", "experimental_thread_store", "features", "feedback",
-        "ghost_snapshot", "goals", "history", "hooks", "marketplaces",
-        "mcp_enterprise_managed_auth", "mcp_servers", "memories", "notice", "orchestrator",
-        "otel", "permissions", "plugins", "profiles", "projects", "realtime",
-        "responses_api_metadata", "sandbox_workspace_write", "shell_environment_policy",
-        "skills", "tool_suggest", "tools", "tui", "windows",
-    ), "table"),
-    "mcp_oauth_callback_port": "port",
-    "model_post_turn_compact_threshold_percent": "percent",
-    "forced_chatgpt_workspace_id": "text_or_texts",
-    "approval_policy": "approval_policy",
-    "approvals_reviewer": ("user", "auto_review", "guardian_subagent"),
-    "cli_auth_credentials_store": ("file", "keyring", "auto", "ephemeral"),
-    "file_opener": ("vscode", "vscode-insiders", "windsurf", "cursor", "none"),
-    "forced_login_method": ("chatgpt", "api"),
-    "mcp_oauth_credentials_store": ("auto", "file", "keyring"),
-    "model_auto_compact_token_limit_scope": ("total", "body_after_prefix"),
-    "model_reasoning_summary": ("auto", "concise", "detailed", "none"),
-    "model_verbosity": ("low", "medium", "high"),
-    "personality": ("none", "friendly", "pragmatic"),
-    "sandbox_mode": ("read-only", "workspace-write", "danger-full-access"),
-    "web_search": ("disabled", "cached", "indexed", "live"),
-}
-
-
-def _codex_top_level_well_typed(config: dict[str, object]) -> bool:
-    """Whether Codex can deserialize the recognized top-level fields."""
-    return all(
-        _codex_table_well_typed(_CODEX_TOP_LEVEL_FIELDS[field], value)
-        for field, value in config.items() if field in _CODEX_TOP_LEVEL_FIELDS
-    )
-
-
 def _text_map(value: object) -> bool:
     return isinstance(value, dict) and all(
         isinstance(key, str) and isinstance(item, str) for key, item in value.items()
@@ -901,16 +839,6 @@ def _codex_field_well_typed(kind: str, value: object) -> bool:
         return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**63
     if kind == "flag":
         return isinstance(value, bool)
-    if kind == "int":
-        return isinstance(value, int) and not isinstance(value, bool) and -(2**63) <= value < 2**63
-    if kind == "percent":
-        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**8
-    if kind == "table":
-        return isinstance(value, dict)
-    if kind == "text_or_texts":
-        return isinstance(value, str) or (isinstance(value, list) and all(isinstance(item, str) for item in value))
-    if kind == "approval_policy":
-        return value in ("on-request", "never", "untrusted", "on-failure") or isinstance(value, dict)
     if kind in _CODEX_NESTED_SPECS:
         return _codex_table_well_typed(_CODEX_NESTED_SPECS[kind], value)
     # An unknown variant fails deserialization. `chat` stays accepted: older

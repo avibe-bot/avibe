@@ -379,19 +379,13 @@ def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
 
 
 @pytest.mark.parametrize("field", [
-    "model = 1", 'model_context_window = "big"', "notify = \"say\"", 'sandbox_mode = "open"',
-    "hide_agent_reasoning = 1", "mcp_oauth_callback_port = 70000", 'tui = "bad"',
+    "model = 1", "model_post_turn_compact_threshold_percent = 12.5", '[features]\nunified_exec = "bad"',
 ])
-def test_codex_malformed_top_level_field_blocks_hub_mode(home, tmp_path, field):
-    _write(home / ".codex/config.toml", f'{field}\n[model_providers.relay]\nhttp_headers = {{ X = "y" }}\n')
-    service, _, _ = _service(tmp_path, migration_home=home)
-    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
-
-
-def test_codex_well_typed_top_level_fields_do_not_block_hub_mode(home, tmp_path):
-    _write(home / ".codex/config.toml", 'model = "gpt-5"\napproval_policy = "never"\n'
-           'model_context_window = 200000\nnotify = ["say"]\nforced_chatgpt_workspace_id = "w"\n'
-           'future_field = 1\n[tui]\nanything = 1\n')
+def test_codex_fields_outside_the_provider_map_stay_with_the_cli(home, tmp_path, field):
+    # Accepted shapes differ by CLI version and fail direct launches alike;
+    # migration neither reads nor rewrites them.
+    _write(home / ".codex/config.toml", f'{field}\n[model_providers.relay]\nhttp_headers = {{ X = "y" }}\n'
+           if not field.startswith("[") else f'[model_providers.relay]\nhttp_headers = {{ X = "y" }}\n{field}\n')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert not any(item.config_blocker for item in _items(service, ()))
 
