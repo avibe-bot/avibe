@@ -215,6 +215,31 @@ def native_store_items(
     ]
 
 
+def _codex_store_holds_api_key(
+    items: list[NativeMigrationItem], auth_path: Path, edits: dict[Path, NativeFileEdit],
+) -> bool:
+    """Whether the Codex credential store (auth.json or Keychain) holds a static key."""
+    staged = edits.get(auth_path.absolute())
+    raw = staged.before if staged else _read_regular(auth_path.absolute())
+    values: list[object] = [raw.decode(errors="replace")] if raw is not None else []
+    for item in items:
+        if item.backend != "codex":
+            continue
+        for operation in (item.native_store_edit or {}).get("operations", []):
+            before = operation.get("before")
+            if isinstance(before, dict) and before.get("exists"):
+                values.append(before.get("raw", before.get("value")))
+    for value in values:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                continue
+        if isinstance(value, dict) and isinstance(value.get("OPENAI_API_KEY"), str) and value["OPENAI_API_KEY"].strip():
+            return True
+    return False
+
+
 def plan_native_cleanup(
     items: list[NativeMigrationItem],
     *,
@@ -379,6 +404,9 @@ def plan_native_cleanup(
             auth_path, clear_auth if clean_api_keys or "codex" in oauth_backends else _keep,
             guard_unchanged=True,
         )
+        # A key kept beside the withdrawn login (selected or not) still routes
+        # through the login's provider, so that routing stays too.
+        codex_key_kept = not clean_api_keys and _codex_store_holds_api_key(items, auth_path, edits)
         managed_ids = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
         # An env_key is carried only when a selected row resolved it to a
         # selected key; an unresolved or unselected one stays native.
@@ -438,7 +466,7 @@ def plan_native_cleanup(
             if not clean_api_keys:
                 removable -= {
                     item.native_provider_id for item in items
-                    if item.backend == "codex" and item.kind != "oauth_native"
+                    if item.backend == "codex" and (item.kind != "oauth_native" or codex_key_kept)
                 }
             providers = config.get("model_providers")
             if isinstance(providers, dict):

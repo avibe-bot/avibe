@@ -1563,6 +1563,15 @@ def scan_native_configs(
             # only unrelated native data (e.g. MCP OAuth). Do not read it again
             # merely to rediscover the absence of subscription credentials.
             continue
+        if item.native_store_placeholder and any(
+            copy.get("store_backend") == item.backend
+            and copy.get("store_revision") == item.native_store_revision
+            and _retained_copy_live(copy, live_credentials)
+            for copy in (retained_native_ids or {}).values()
+        ):
+            # An opaque store whose only credential is a kept, copied key. Its
+            # metadata revision was recorded at completion; any change re-offers.
+            continue
         if (
             item.kind != "oauth_native" and item.secret
             and _retained_copy_live(
@@ -1753,6 +1762,7 @@ async def _prepare_takeover(
                         source_ids.append(candidate.id)
                         item_sources[_retained_key_identity(item)] = {
                             "source_id": candidate.id, "credential_ref": candidate.credential_ref,
+                            **({"store_backend": item.backend} if item.native_store_revision else {}),
                         }
                         break
                 else:
@@ -1837,6 +1847,7 @@ async def _prepare_takeover(
             if item.kind != "oauth_native":
                 item_sources[_retained_key_identity(item)] = {
                     "source_id": source.id, "credential_ref": source.credential_ref,
+                    **({"store_backend": item.backend} if item.native_store_revision else {}),
                 }
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
@@ -1938,6 +1949,20 @@ async def _verify_clean_native_stores(host: MigrationHost, record: Mapping[str, 
             or (snapshot.payload or {}).get("status") != "metadata_only"
         ):
             raise MigrationConflictError
+
+
+async def _record_retained_store_revisions(host: MigrationHost, record: dict[str, Any]) -> None:
+    """Bind each kept key held in an opaque store to that store's final revision."""
+    for copy in record.get("retained_native_ids", {}).values():
+        backend = copy.get("store_backend")
+        if backend is None:
+            continue
+        # The store still holds this key, so it is not verified clean: it stays
+        # hidden only while the copied Hub source is live.
+        record.get("clean_native_stores", {}).pop(backend, None)
+        snapshot = await asyncio.to_thread(read_native_oauth, backend, home=host.migration_home)
+        if snapshot is not None and (snapshot.payload or {}).get("status") == "metadata_only":
+            copy["store_revision"] = snapshot.revision
 
 
 async def _resume_takeover(
@@ -2086,6 +2111,7 @@ async def _resume_takeover(
             host.migration_journal.save(record)
             return _finish_rejected_takeover(host, record)
         host._reconcile_native_auth(tuple(record["backends"]))
+        await _record_retained_store_revisions(host, record)
         host.migration_journal.complete(record)
         host.migration_blocked_backends.difference_update(record["backends"])
         return len(record["items"]), [

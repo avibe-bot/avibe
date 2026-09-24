@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from config import paths
-from config.v2_config import V2Config
+from config.v2_config import ModelHubConfig, V2Config
 from core.handlers.model_hub.migration import MigrationConflictError
 from core.handlers.model_hub.service import ModelHubError, V2ModelHubConfigStore
 from vibe.native_oauth_store import NativeOAuthSnapshot
@@ -567,3 +567,37 @@ def test_duplicate_apply_joins_owned_operation_and_shutdown_waits(monkeypatch, t
 
     asyncio.run(exercise())
     assert len(adapter.provisioned) == 1
+
+
+def test_kept_keychain_codex_key_is_not_offered_again(monkeypatch, tmp_path):
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    _write(home / ".codex/config.toml", 'cli_auth_credentials_store = "keyring"\n')
+    account = "cli|" + hashlib.sha256(str((home / ".codex").resolve()).encode()).hexdigest()[:16]
+    locator = ("Codex Auth", account)
+    keychain.items[locator] = ('{"OPENAI_API_KEY":"fixture-key-123456"}', "fixture-original")
+    original = dict(keychain.items)
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    assert ids
+    asyncio.run(service.migration_apply(ids))
+    assert store.config.agents["codex"].mode == "hub"
+    assert len(adapter.provisioned) == 1
+    assert keychain.items == original
+    assert not keychain.write_calls and not keychain.delete_calls
+    assert service.migration_scan()["items"] == []
+    # The store still holds the kept key: it is hidden only while the copy lives.
+    [copy] = service.migration_journal.completed()["retained_native_ids"].values()
+    payload = store.config.to_payload()
+    payload["sources"] = [source for source in payload["sources"] if source["id"] != copy["source_id"]]
+    for agent in payload["agents"].values():
+        agent["sources"]["order"] = [value for value in agent["sources"]["order"] if value != copy["source_id"]]
+        agent["routes"] = {}
+    store.config = ModelHubConfig.from_payload(payload)
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["codex"]
