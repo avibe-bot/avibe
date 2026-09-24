@@ -1,0 +1,270 @@
+name: desktop-self-contained-package
+
+# Manual artifacts retain optional Apple identity signing. Reusable TEST builds
+# receive no signing secrets and always use an ad-hoc app / unsigned installer.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer version stamped into the desktop application and installer
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      source_sha:
+        description: Exact peeled commit of the validated TEST tag
+        required: true
+        type: string
+      release_tag:
+        description: Canonical gh-vX.Y.ZrcN TEST tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+            bundle: app
+            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            bundle: app
+            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bundle: nsis
+            artifact_glob: desktop/target/release/bundle/nsis/*setup.exe
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_sha || github.sha }}
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.23.1"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-desktop-package-
+
+      - name: Build Workbench
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build bootstrap UI
+        working-directory: desktop
+        run: |
+          npm ci
+          npm run build
+
+      - name: Prepare package version
+        shell: bash
+        env:
+          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          python scripts/desktop_release.py prepare \
+            --version "$AVIBE_DESKTOP_VERSION" --tag "$RELEASE_TAG" \
+            --source-sha "$SOURCE_SHA" --config desktop/tauri.release.conf.json \
+            --env-file "$GITHUB_ENV"
+
+      - name: Build verified private Runtime
+        run: >
+          python desktop/scripts/build-runtime-bundle.py
+          --target "${{ matrix.target }}"
+
+      - name: Clean prior bundle output
+        shell: bash
+        run: rm -rf desktop/target/release/bundle
+
+      # Secrets that are unset expand to the empty string, which tauri-bundler
+      # would read as a present-but-empty certificate and fail on. Export each
+      # variable only when its secret is non-empty, so absence keeps the
+      # unsigned acceptance path exactly as before.
+      - name: Export Apple signing credentials when configured
+        if: runner.os == 'macOS' && inputs.release_tag == ''
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -eu
+          # Validate the credential set atomically. Half-configured sets must
+          # fail the build rather than silently produce a lesser artifact:
+          # certificate without notarization credentials would ship
+          # Developer-ID-signed but unnotarized; notarization credentials
+          # without the certificate would submit the unsigned acceptance
+          # build to Apple. All-or-nothing.
+          # Any-set implies all-set within each group; then the two groups
+          # must agree. A partially populated group is an operator error and
+          # fails loudly instead of silently passing as "absent".
+          cert_vars="APPLE_CERTIFICATE:$APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD:$APPLE_CERTIFICATE_PASSWORD"
+          api_vars="APPLE_API_KEY:$APPLE_API_KEY APPLE_API_ISSUER:$APPLE_API_ISSUER APPLE_API_PRIVATE_KEY:$APPLE_API_PRIVATE_KEY"
+          check_group() {
+            group_name="$1"; shift
+            set_count=0; total=0; missing=""
+            for pair in "$@"; do
+              name="${pair%%:*}"; value="${pair#*:}"
+              total=$((total + 1))
+              if [ -n "$value" ]; then set_count=$((set_count + 1)); else missing="$missing $name"; fi
+            done
+            if [ "$set_count" -gt 0 ] && [ "$set_count" -ne "$total" ]; then
+              echo "::error::${group_name} credential group is partially configured; missing:$missing. Set the whole group, or none of it."
+              exit 1
+            fi
+            [ "$set_count" -eq "$total" ]
+          }
+          if check_group "Apple signing" $cert_vars; then have_cert=1; else have_cert=0; fi
+          if check_group "Apple notarization" $api_vars; then have_api=1; else have_api=0; fi
+          if [ "$have_cert" != "$have_api" ]; then
+            echo "::error::Apple credentials are half-configured: the signing group (APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD) and the notarization group (APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_PRIVATE_KEY) must be set together or omitted together."
+            exit 1
+          fi
+          if [ "$have_cert" = "1" ]; then
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+            if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            fi
+            # The ApiKey notarization auth needs the .p8 private key ON DISK at
+            # APPLE_API_KEY_PATH; without it tauri-bundler falls back to
+            # searching ./private_keys and $HOME, which the runner never has,
+            # and notarization is skipped with only a warning.
+            key_dir="$(mktemp -d)"
+            key_file="$key_dir/AuthKey_${APPLE_API_KEY}.p8"
+            printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_file"
+            echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
+            echo "APPLE_API_KEY_PATH=$key_file" >> "$GITHUB_ENV"
+            echo "apple_signing=enabled" >> "$GITHUB_ENV"
+          else
+            echo "apple_signing=absent" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build self-contained installer
+        working-directory: desktop
+        run: >
+          npm run tauri --
+          build
+          --bundles "${{ matrix.bundle }}"
+          --features bundled-runtime
+          --config tauri.release.conf.json
+
+      # Assert the inner app matches the credentials that were exported. NOTE
+      # the layer boundary recorded here: this describes the .app INSIDE the
+      # DMG only. The DMG image itself and the Mach-O binaries inside the
+      # embedded runtime.zip are NOT signed/notarized by this workflow yet —
+      # those layers are tracked in the distribution-signing-completion issue
+      # and remain release gates.
+      - name: Verify macOS app signature matches the signing path
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -eu
+          app="target/release/bundle/macos/Avibe.app"
+          [ -d "$app" ] || { echo "Avibe.app not found at $app" >&2; exit 1; }
+          # Same detection as create-macos-dmg.sh: identity signatures print
+          # `Signature size=...` and Authority lines (verbose=4); only ad-hoc
+          # prints `Signature=adhoc`.
+          adhoc="$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=adhoc$/p' || true)"
+          authority="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
+          if [ "${apple_signing:-absent}" = "enabled" ]; then
+            if [ -n "$adhoc" ] || [ -z "$authority" ]; then
+              echo "signing credentials were exported but Avibe.app is not identity-signed" >&2
+              exit 1
+            fi
+            codesign --verify --deep --strict "$app"
+            echo "signature_state=app-identity-signed (${authority})" >> "$GITHUB_ENV"
+          else
+            # Seal the complete app before DMG staging and prove the TEST layer.
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict "$app"
+            codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
+            echo "signature_state=app-adhoc" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create headless-safe DMG
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        run: >
+          sh scripts/create-macos-dmg.sh
+          target/release/bundle/macos/Avibe.app
+          "target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
+
+      - name: Verify unsigned Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          $signature = Get-AuthenticodeSignature $installers[0].FullName
+          if ($signature.Status -ne 'NotSigned') { throw "Expected an unsigned TEST installer" }
+
+      - name: Record artifact hashes
+        shell: bash
+        env:
+          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET: ${{ matrix.target }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          installers=(${{ matrix.artifact_glob }})
+          [ "${#installers[@]}" -eq 1 ] || { echo "Expected exactly one installer" >&2; exit 1; }
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            signing="${signature_state}"$'\ndmg-unsigned-unnotarized'
+          else
+            signing="installer-unsigned"
+          fi
+          python scripts/desktop_release.py record \
+            --version "$AVIBE_DESKTOP_VERSION" --target "$TARGET" --tag "$RELEASE_TAG" \
+            --source-sha "$(git rev-parse HEAD)" --installer "${installers[0]}" \
+            --runtime desktop/src-tauri/resources/runtime --output desktop-package \
+            --signing "$signing"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: avibe-desktop-${{ inputs.version }}-${{ matrix.target }}
+          path: desktop-package/
+          if-no-files-found: error
+          retention-days: 14

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
+import { SourcePrivacyToggle } from './SourcePrivacy';
 import type { AgentBackend, Source } from './types';
 
 export const SourcesCard: React.FC<{
@@ -45,7 +46,10 @@ export const SourcesCard: React.FC<{
             className="model-hub-upstream-info"
           />
         </span>
-        {sources !== undefined && <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>}
+        {sources !== undefined && <span className="flex items-center gap-2">
+          {sources.some((source) => source.account_label || source.base_url || source.masked_credential) && <SourcePrivacyToggle />}
+          <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>
+        </span>}
       </div>
       <div className="flex-1 space-y-2.5 p-3">
         {read.kind === 'loading' && sources === undefined

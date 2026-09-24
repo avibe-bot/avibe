@@ -421,7 +421,7 @@ test.describe('desktop reference geometry', () => {
       const travelling = name.startsWith('handoff') || name === 'return-to-pm';
       await expect(page.getByTestId('handoff-pulse')).toHaveCount(travelling ? 1 : 0);
       await settleEffects(page);
-      await page.locator('.onboarding-collaboration').screenshot({ path: info.outputPath(`phase-${name}.png`) });
+      await page.locator('.onboarding-story').screenshot({ path: info.outputPath(`phase-${name}.png`) });
     }
     expect(denied).toEqual([]);
   });
@@ -575,7 +575,7 @@ const expectSamePair = async (page: Page, before: Pair) => {
  */
 test.describe('shared screen anchors', () => {
   for (const viewport of [{ width: 1132, height: 664 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }]) {
-    test(`${viewport.width} desktop captions share one horizontal line`, async ({ page }) => {
+    test(`${viewport.width} desktop captions sit on their own lines`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await serveProduct(page);
       await serveModelHub(page);
@@ -584,16 +584,39 @@ test.describe('shared screen anchors', () => {
         const rect = await box(page, selector);
         return rect.y + rect.height / 2;
       };
+      const fontSize = (selector: string) =>
+        page.locator(selector).first().evaluate((node) => getComputedStyle(node).fontSize);
+      // The welcome caption is a label cut into the return wire, and the wire's run is the
+      // line the other screens set their bottom text on: half a summary row above the
+      // stage's floor. The loop hangs from the cards' floor, so its legs leave the cards.
+      const loop = await box(page, '.onboarding-return');
+      const stage = await box(page, '[data-setup-screen-root]:not([hidden]) .onboarding-stage');
+      const summaryHalf = await page.locator('.onboarding-shell').evaluate((node) =>
+        parseFloat(getComputedStyle(node).getPropertyValue('--ob-summary-h')) / 2);
+      expect(loop.y + loop.height).toBeCloseTo(stage.y + stage.height - summaryHalf, 0);
+      const cards = await boxes(page, '.onboarding-collaboration-card');
+      expect(loop.y).toBeCloseTo(cards[0].y + cards[0].height, 0);
       const welcome = await center('.onboarding-story-caption');
+      expect(welcome).toBeCloseTo(loop.y + loop.height, 0);
+      const welcomeSize = await fontSize('.onboarding-story-caption');
       await page.getByRole('button', { name: '立即开始' }).click();
       await page.clock.runFor(950);
       await expect(page.locator('.setup-provider-summary')).toContainText('已选');
       const providers = await center('.setup-provider-summary');
+      // On the same line even where the welcome is the tallest screen and this diagram
+      // is shorter than its stage (the 1920 tier): the summary rests on the stage floor.
+      const summary = await box(page, '.setup-provider-summary');
+      const providersStage = await box(page, '[data-setup-screen-root]:not([hidden]) .onboarding-stage');
+      expect(summary.y + summary.height).toBeCloseTo(providersStage.y + providersStage.height, 0);
+      expect(welcomeSize).toBe(await fontSize('.setup-provider-summary'));
       await page.locator('.onboarding-setup-hint button').click();
       await page.clock.runFor(950);
       const assistants = await center('.onboarding-setup-hint');
-      expect(welcome).toBeCloseTo(providers, 0);
       expect(assistants).toBeCloseTo(providers, 0);
+      // The rescan link is centred on the sentence it follows, in the same type.
+      expect(await center('.onboarding-setup-hint-line > button')).toBeCloseTo(await center('.onboarding-setup-hint-line > span'), 0);
+      expect(await fontSize('.onboarding-setup-hint-line > span')).toBe(welcomeSize);
+      expect(await fontSize('.onboarding-setup-hint-line > button')).toBe(welcomeSize);
     });
   }
 
@@ -1049,7 +1072,7 @@ test.describe('narrow identity alignment', () => {
         expect(smallest).toBeGreaterThanOrEqual(10);
 
         await settleEffects(page);
-        await page.locator('.onboarding-collaboration').screenshot({
+        await page.locator('.onboarding-story').screenshot({
           path: info.outputPath(`identity-${size(viewport)}-${lang}.png`),
         });
         expect(denied).toEqual([]);

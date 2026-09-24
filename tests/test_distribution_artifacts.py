@@ -148,15 +148,27 @@ print(json.dumps({"snapshot": snapshot, "files": files}, sort_keys=True))
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     observed = json.loads(result.stdout.strip())
+    expected = _expected_builtin_skills_snapshot()
+    assert observed["files"] == expected
+    assert len(observed["snapshot"]) == 64
+
+
+def _expected_builtin_skills_snapshot() -> dict[str, dict[str, int | str]]:
+    # The current working directory is the source checkout used to build the
+    # distributions; the test module may come from a different sparse checkout.
+    source_root = Path.cwd()
+    assert (source_root / "pyproject.toml").is_file(), source_root
+    skill_root = source_root / "skills"
+    assert skill_root.is_dir(), skill_root
     expected = {}
-    for path in (ROOT / "skills").rglob("*"):
+    for path in skill_root.rglob("*"):
         if path.is_file() and "__pycache__" not in path.parts:
-            expected[path.relative_to(ROOT / "skills").as_posix()] = {
+            expected[path.relative_to(skill_root).as_posix()] = {
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "mode": path.stat().st_mode & 0o777,
             }
-    assert observed["files"] == expected
-    assert len(observed["snapshot"]) == 64
+    assert expected, skill_root
+    return expected
 
 
 def test_installed_wheel_mirrors_complete_builtin_skills_snapshot(tmp_path):

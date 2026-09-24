@@ -267,11 +267,11 @@
 
 .model-hub-source-interface-pill {
   min-width: 0;
-  max-width: 52%;
+  max-width: 100%;
   flex: 0 1 auto;
-  border-color: var(--model-hub-cyan-4d);
-  background: var(--model-hub-cyan-1a);
-  color: var(--cyan-ink);
+  border-color: var(--model-hub-wash-14);
+  background: var(--model-hub-wash-0a);
+  color: var(--muted);
 }
 
 .model-hub-ink-mint { color: var(--mint-ink); }

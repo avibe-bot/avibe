@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { DependenciesResult, DependencyItem, DependencyReadOptions } from '@/context/ApiContext';
 import { isApiFetchDeadlineAbort } from '@/lib/apiFetch';
+import { dependenciesNeedAutomaticRefresh } from './SettingsDependenciesPage.logic';
 
 // Coupled rows use one inspection, including its failure evidence.
 export const DEPENDENCY_CHECK_GROUPS = [
@@ -16,6 +17,8 @@ export type DependencyCheck = {
   data: DependencyItem | null;
   checking: boolean;
   error: 'failed' | 'timeout' | null;
+  reconciling?: boolean;
+  reconcilingDependencies?: ReadonlySet<string>;
 };
 
 type ReadDependencies = (options?: DependencyReadOptions) => Promise<DependenciesResult>;
@@ -27,22 +30,28 @@ export function useDependencyChecks(read: ReadDependencies) {
     ])),
   ));
   const requests = useRef(new Map<string, AbortController>());
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
     const active = requests.current;
+    const scheduled = timers.current;
     return () => {
       for (const request of active.values()) request.abort();
       active.clear();
+      for (const timer of scheduled.values()) clearTimeout(timer);
+      scheduled.clear();
     };
   }, []);
 
-  const refresh = useCallback(async (dependencyId?: string) => {
+  const refresh = useCallback(async (dependencyId?: string, allowInitialRetry = true) => {
     const groups = DEPENDENCY_CHECK_GROUPS.filter((ids) => (
       dependencyId === undefined || ids.some((id) => id === dependencyId)
     ));
     await Promise.all(groups.map(async (ids) => {
       const key = ids[0];
       requests.current.get(key)?.abort();
+      clearTimeout(timers.current.get(key));
+      timers.current.delete(key);
       const controller = new AbortController();
       requests.current.set(key, controller);
       const update = (change: (previous: DependencyCheck, id: string) => DependencyCheck) => {
@@ -58,7 +67,16 @@ export function useDependencyChecks(read: ReadDependencies) {
           throw new Error('Incomplete dependency inspection');
         }
         const byId = new Map(result.deps.map((dep) => [dep.id, dep]));
-        update((_previous, id) => ({ data: byId.get(id)!, checking: false, error: null }));
+        update((_previous, id) => ({
+          data: byId.get(id)!, checking: false, error: null,
+          reconciling: result.reconciling,
+          reconcilingDependencies: result.reconciling_dependencies
+            ? new Set(result.reconciling_dependencies) : undefined,
+        }));
+        if (requests.current.get(key) === controller && !controller.signal.aborted
+          && dependenciesNeedAutomaticRefresh(result, allowInitialRetry)) {
+          timers.current.set(key, setTimeout(() => void refresh(key, false), 1_500));
+        }
       } catch (error) {
         update((previous) => ({
           ...previous,

@@ -1,4 +1,84 @@
 {
+  "desktopBootstrap": {
+    "retry": "重试",
+    "installationHelp": "安装帮助",
+    "notRunningTitle": "Avibe — 未运行",
+    "shellUnavailable": "Avibe 桌面端已停止响应，请退出后重新打开。",
+    "genericFailure": "Avibe 无法连接到 Runtime。",
+    "notices": {
+      "probing": "正在查找运行中的 Avibe Runtime…",
+      "adopted": "已连接到本机正在运行的 Avibe Runtime。",
+      "starting": "正在启动 Avibe Runtime…",
+      "ready": "Avibe Runtime 已就绪。",
+      "invalid_origin": "Avibe 已拒绝不安全的 Runtime 地址。",
+      "runtime_not_found": "本机尚未安装 Avibe Runtime。",
+      "runtime_install_failed": "Avibe 无法准备内置 Runtime。请重试或重新安装应用。",
+      "runtime_discovery_failed": "Avibe 无法确定本地 Runtime 地址。",
+      "runtime_spawn_failed": "Avibe 无法启动已安装的 Runtime。",
+      "runtime_stopped": "运行时已停止。准备就绪后，点击“重试”即可启动。",
+      "runtime_ownership_lost": "运行时已更换，此应用已无法停止它。点击“重试”以检查当前运行时。",
+      "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
+      "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
+      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+    },
+    "tray": {
+      "open": "打开应用",
+      "starting": "运行时：正在启动…",
+      "serving": "运行时：正在 {{address}} 提供服务",
+      "unreachable": "运行时：无法连接",
+      "stopped": "运行时：已停止",
+      "stopping": "运行时：正在停止…",
+      "stop": "停止运行时…",
+      "quit": "退出",
+      "login": "登录时启动",
+      "settings": "设置…",
+      "stopTitle": "停止运行时",
+      "stopMessage": "要停止由本应用启动的运行时吗？正在进行的工作会被中断。桌面应用将保持打开，你的数据会被保留。",
+      "stopAction": "停止运行时",
+      "quitTitle": "退出应用",
+      "quitMessage": "运行时由本应用启动。退出时要将其停止，还是让它继续运行以完成正在进行的工作？",
+      "quitStop": "退出并停止运行时",
+      "quitKeep": "保持运行时运行",
+      "cancel": "取消",
+      "busyTitle": "应用正忙",
+      "busyMessage": "运行时正在启动，或另一个生命周期操作正在进行。请等待完成后重试。",
+      "failureTitle": "无法完成操作",
+      "stopFailure": "无法安全停止运行时，应用将保持打开。请检查运行时后重试。",
+      "loginFailure": "无法读取或更改登录启动设置。请检查操作系统的登录设置后重试。"
+    },
+    "notifications": {
+      "toggle": "通知",
+      "approvalRequested": {
+        "title": "需要授权",
+        "body": "有一项密钥库请求正等待你的授权。"
+      },
+      "runSucceeded": {
+        "title": "运行已完成",
+        "body": "后台工作已成功完成。"
+      },
+      "runFailed": {
+        "title": "运行失败",
+        "body": "后台工作未能完成，请打开工作台查看详情。"
+      },
+      "runCanceled": {
+        "title": "运行已取消",
+        "body": "后台工作已取消。"
+      }
+    },
+    "uninstall": {
+      "menuLabel": "卸载 Avibe…",
+      "confirmTitle": "卸载 Avibe",
+      "confirmMessage": "此操作会移除 Avibe 的私有 Runtime 和私有安装的 Agent 后端，然后退出桌面应用。外部工具以及 ~/.avibe 下的项目、会话和设置将被保留。",
+      "confirmAction": "移除私有文件",
+      "cancelAction": "取消",
+      "busyTitle": "Avibe 正忙",
+      "busyMessage": "请等待 Avibe 完成启动，然后再次选择“卸载 Avibe”。",
+      "successTitle": "Avibe 私有文件已移除",
+      "successMessage": "私有 Runtime 和 Agent 后端已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
+      "failureTitle": "卸载失败",
+      "failureMessage": "Avibe 无法完整移除私有 Runtime 和后端文件。桌面应用仍保持安装状态，你的用户数据没有发生变化。"
+    }
+  },
   "installHint": {
     "cta": "装到主屏幕",
     "title": "把 Avibe 当 App 用",
@@ -1096,6 +1176,9 @@
         "retry": "重试",
         "addSubscription": "添加订阅",
         "addApiKey": "添加 API Key",
+        "showPrivateDetails": "显示账号和 API 连接信息",
+        "hidePrivateDetails": "隐藏账号和 API 连接信息",
+        "hiddenDetails": "已隐藏",
         "state": {
           "supplyingNative": "{{backend}} 正在使用（Agent 管理）",
           "supplying": "{{backends}} 正在使用",
@@ -3011,6 +3094,7 @@
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "readyHint": "当前已是最新版本。",
+    "desktopManagedHint": "由 Avibe 私有安装，不会修改系统工具。",
     "updateHint": "可升级：{{from}} → {{to}}",
     "errorHint": "{{name}} CLI 未安装，请在卡片上点击安装以启用该后端。",
     "disabledHint": "请在卡片顶部开关中启用该后端。",
@@ -3279,7 +3363,8 @@
     "updateHint": "从 {{from}} 更新到 {{to}}",
     "restarting": "正在重启...",
     "autoUpdate": "自动更新",
-    "autoUpdateHint": "空闲时自动安装"
+    "autoUpdateHint": "空闲时自动安装",
+    "desktopManagedUpdate": "更新将随 Avibe 桌面应用提供"
   },
   "doctor": {
     "title": "系统状态",

@@ -1,0 +1,791 @@
+#!/usr/bin/env python3
+"""Build one target-specific, offline Avibe desktop Runtime payload."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+import zipfile
+from pathlib import Path
+from typing import Any
+
+
+DESKTOP_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = DESKTOP_DIR.parent
+SOURCES_PATH = DESKTOP_DIR / "runtime-sources.json"
+DEFAULT_OUTPUT = DESKTOP_DIR / "src-tauri" / "resources" / "runtime"
+COPY_CHUNK = 1024 * 1024
+FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
+TREE_HASH_DOMAIN = b"avibe-runtime-tree-v1\0"
+
+# Everything the probe Runtime records about its own startup, relative to the
+# probe HOME. The process logs are the runtime directory's sink files; the
+# application log is the service's own structured output.
+PROBE_DIAGNOSTIC_FILES = (
+    "runtime/service_stderr.log",
+    "runtime/service_stdout.log",
+    "runtime/ui_stderr.log",
+    "runtime/ui_stdout.log",
+    "runtime/status.json",
+    "logs/vibe_remote.log",
+)
+PROBE_PID_FILES = (
+    "runtime/vibe.pid",
+    "runtime/vibe-ui.pid",
+    "runtime/remote-access-cloudflared.pid",
+)
+PROBE_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(COPY_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run(command: list[str], *, cwd: Path = REPO_ROOT, env: dict[str, str] | None = None) -> None:
+    subprocess.run(command, cwd=cwd, env=env, check=True)
+
+
+def download(source: dict[str, str], cache_dir: Path) -> Path:
+    url = source["url"]
+    expected = source["sha256"]
+    name = Path(urllib.parse.urlparse(url).path).name
+    destination = cache_dir / name
+    if destination.is_file() and sha256(destination) == expected:
+        return destination
+
+    partial = destination.with_suffix(destination.suffix + ".partial")
+    partial.unlink(missing_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "Avibe-Desktop-Builder/1"})
+    with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
+        shutil.copyfileobj(response, output, COPY_CHUNK)
+    if sha256(partial) != expected:
+        partial.unlink(missing_ok=True)
+        raise SystemExit(f"Downloaded asset failed SHA-256 verification: {url}")
+    os.replace(partial, destination)
+    return destination
+
+
+def extract_source(archive: Path, destination: Path) -> Path:
+    before = set(destination.iterdir()) if destination.exists() else set()
+    destination.mkdir(parents=True, exist_ok=True)
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as source:
+            for member in source.infolist():
+                target = (destination / member.filename).resolve()
+                if destination.resolve() not in target.parents and target != destination.resolve():
+                    raise SystemExit(f"Unsafe source archive entry: {member.filename}")
+            source.extractall(destination)
+    else:
+        with tarfile.open(archive, "r:gz") as source:
+            source.extractall(destination, filter="data")
+    created = [path for path in destination.iterdir() if path not in before]
+    if len(created) != 1 or not created[0].is_dir():
+        raise SystemExit(f"Expected one top-level directory in {archive.name}")
+    return created[0]
+
+
+def ensure_show_runtime_manifest(sources: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]:
+    destination = REPO_ROOT / "vibe" / "show_runtime_manifest.json"
+    expected = sources["show_runtime_manifest"]["sha256"]
+    if destination.is_file():
+        if sha256(destination) != expected:
+            raise SystemExit(
+                "Existing vibe/show_runtime_manifest.json does not match "
+                "desktop/runtime-sources.json"
+            )
+        return destination, False
+    source = download(sources["show_runtime_manifest"], cache_dir)
+    destination.write_bytes(source.read_bytes())
+    return destination, True
+
+
+def build_wheel(work_dir: Path, private_python: Path, sources: dict[str, Any], cache_dir: Path) -> Path:
+    if not (REPO_ROOT / "ui" / "dist" / "index.html").is_file():
+        raise SystemExit("ui/dist is missing; build the Workbench before the private Runtime")
+
+    generated_manifest, remove_manifest = ensure_show_runtime_manifest(sources, cache_dir)
+    wheel_dir = work_dir / "wheel"
+    wheel_dir.mkdir()
+    try:
+        run(
+            [
+                "uv",
+                "build",
+                "--wheel",
+                "--out-dir",
+                str(wheel_dir),
+                "--no-create-gitignore",
+                "--python",
+                str(private_python),
+            ]
+        )
+    finally:
+        if remove_manifest:
+            generated_manifest.unlink(missing_ok=True)
+    wheels = list(wheel_dir.glob("*.whl"))
+    if len(wheels) != 1:
+        raise SystemExit(f"Expected one Avibe wheel, found {len(wheels)}")
+    return wheels[0]
+
+
+def install_python_environment(
+    private_python: Path,
+    wheel: Path,
+    work_dir: Path,
+    sdist_build_allowlist: list[str],
+) -> str:
+    requirements = work_dir / "requirements.txt"
+    run(
+        [
+            "uv",
+            "export",
+            "--frozen",
+            "--no-dev",
+            "--no-emit-project",
+            "--output-file",
+            str(requirements),
+            "--python",
+            str(private_python),
+            "--quiet",
+        ]
+    )
+    install_command = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(private_python),
+        "--require-hashes",
+        "--only-binary=:all:",
+        "--no-cache",
+        "--requirements",
+        str(requirements),
+    ]
+    for package in sdist_build_allowlist:
+        install_command.extend(["--no-binary", package])
+    run(install_command)
+    run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(private_python),
+            "--no-deps",
+            "--no-cache",
+            str(wheel),
+        ]
+    )
+    completed = subprocess.run(
+        [
+            str(private_python),
+            "-I",
+            "-c",
+            "from importlib.metadata import version; print(version('avibe-os'))",
+        ],
+        cwd=work_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def verify_python_runtime_excludes_agent_backends(private_python: Path, work_dir: Path) -> None:
+    """Reject Python dependencies that smuggle an Agent backend into the Runtime."""
+
+    probe = """
+from pathlib import Path
+import claude_agent_sdk
+
+bundled = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled"
+for name in ("claude", "claude.exe"):
+    candidate = bundled / name
+    if candidate.is_file() or candidate.is_symlink():
+        raise SystemExit(f"Runtime contains bundled Agent backend: {candidate}")
+""".strip()
+    subprocess.run(
+        [str(private_python), "-I", "-c", probe],
+        cwd=work_dir,
+        check=True,
+    )
+
+
+def install_node_toolchain(
+    target_config: dict[str, Any],
+    node_archive: Path,
+    payload: Path,
+    work_dir: Path,
+    expected_npm_version: str,
+) -> None:
+    node_root = extract_source(node_archive, work_dir / "node-source")
+    node_source = node_root / target_config["node_source"]
+    node_destination = payload / target_config["node_entrypoint"]
+    if not node_source.is_file():
+        raise SystemExit(f"Node distribution is missing {target_config['node_source']}")
+    node_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(node_source, node_destination)
+
+    npm_source = node_root / target_config["npm_source"]
+    npm_destination = payload / "tools" / "npm"
+    if not npm_source.is_dir():
+        raise SystemExit(f"Node distribution is missing npm at {target_config['npm_source']}")
+    _validate_npm_links(npm_source)
+    shutil.copytree(npm_source, npm_destination)
+    if any(path.is_symlink() for path in npm_destination.rglob("*")):
+        raise SystemExit("Private Runtime npm must not contain symlinks")
+
+    npm_entrypoint = payload / target_config["npm_entrypoint"]
+    npm_package = npm_destination / "package.json"
+    npm_license = npm_destination / "LICENSE"
+    if not npm_entrypoint.is_file() or not npm_package.is_file() or not npm_license.is_file():
+        raise SystemExit("Node distribution contains an incomplete npm package")
+    npm_metadata = json.loads(npm_package.read_text(encoding="utf-8"))
+    if npm_metadata.get("version") != expected_npm_version:
+        raise SystemExit(
+            f"Node distribution contains npm {npm_metadata.get('version')}, expected {expected_npm_version}"
+        )
+    tools_root = payload / "tools"
+    if {path.name for path in tools_root.iterdir()} != {"bin", "npm"}:
+        raise SystemExit("Private Runtime tools must contain only Node.js and npm")
+    if {path.name for path in node_destination.parent.iterdir()} != {node_destination.name}:
+        raise SystemExit("Private Runtime tools/bin must contain only the Node.js executable")
+
+    licenses = payload / "licenses"
+    licenses.mkdir()
+    for source, name in [
+        (node_root / "LICENSE", "node-LICENSE"),
+        (REPO_ROOT / "LICENSE", "avibe-LICENSE"),
+        (npm_license, "npm-LICENSE"),
+    ]:
+        if not source.is_file():
+            raise SystemExit(f"Required Runtime license is missing: {source}")
+        shutil.copy2(source, licenses / name)
+
+    if target_config["os"] != "windows":
+        node_destination.chmod(node_destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    completed = subprocess.run(
+        [str(node_destination), str(npm_entrypoint), "--version"],
+        cwd=work_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if completed.stdout.strip() != expected_npm_version:
+        raise SystemExit("Private npm entrypoint returned an unexpected version")
+
+
+def _validate_npm_links(npm_source: Path) -> None:
+    """Allow only npm's contained file links, which copytree dereferences."""
+
+    root = npm_source.resolve(strict=True)
+    for link in npm_source.rglob("*"):
+        if not link.is_symlink():
+            continue
+        try:
+            target = link.resolve(strict=True)
+            target.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Bundled npm link escapes its package: {link}") from exc
+        if not target.is_file():
+            raise SystemExit(f"Bundled npm link must target a regular file: {link}")
+
+
+def write_inventory(private_python: Path, payload: Path) -> None:
+    program = """
+import importlib.metadata
+import json
+items = sorted(
+    ({"name": item.metadata["Name"], "version": item.version} for item in importlib.metadata.distributions()),
+    key=lambda item: (item["name"].lower(), item["version"]),
+)
+print(json.dumps({"schema_version": 1, "python_packages": items}, indent=2, sort_keys=True))
+"""
+    completed = subprocess.run(
+        [str(private_python), "-I", "-c", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (payload / "runtime-packages.json").write_text(completed.stdout, encoding="utf-8")
+
+
+def create_runtime_zip(payload: Path, archive: Path) -> tuple[int, int, str]:
+    unpacked_size = 0
+    entry_count = 0
+    tree_hasher = hashlib.sha256(TREE_HASH_DOMAIN)
+    files = [
+        (path.relative_to(payload).as_posix(), path)
+        for path in payload.rglob("*")
+        if path.is_file()
+    ]
+    files.sort(key=lambda item: item[0])
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as output:
+        for relative, path in files:
+            relative_bytes = relative.encode("utf-8")
+            file_size = path.stat().st_size
+            tree_hasher.update(len(relative_bytes).to_bytes(8, "big"))
+            tree_hasher.update(relative_bytes)
+            tree_hasher.update(file_size.to_bytes(8, "big"))
+            mode = 0o755 if os.access(path, os.X_OK) else 0o644
+            info = zipfile.ZipInfo(relative, FIXED_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (stat.S_IFREG | mode) << 16
+            with path.open("rb") as source, output.open(info, "w", force_zip64=True) as destination:
+                for chunk in iter(lambda: source.read(COPY_CHUNK), b""):
+                    tree_hasher.update(chunk)
+                    destination.write(chunk)
+            unpacked_size += file_size
+            entry_count += 1
+    return unpacked_size, entry_count, tree_hasher.hexdigest()
+
+
+def reserve_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def collect_probe_diagnostics(
+    probe_home: Path,
+    *,
+    tail_bytes: int = PROBE_DIAGNOSTIC_TAIL_BYTES,
+) -> str:
+    """Render what the probe Runtime recorded about itself, for the job log.
+
+    The probe runs with its whole HOME inside a temporary directory, so the
+    service and UI logs that explain a startup failure are written and then
+    deleted without ever reaching the job output. Whoever reads the job is left
+    holding an exception about the probe rather than about the process that
+    died. Every file is optional: the point is to report whatever exists.
+    """
+    sections = [f"--- Private Runtime probe diagnostics: {probe_home} ---"]
+    for relative in PROBE_DIAGNOSTIC_FILES:
+        path = probe_home.joinpath(*relative.split("/"))
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            sections.append(f"--- {relative}: absent ---")
+            continue
+        except OSError as error:
+            sections.append(f"--- {relative}: unreadable: {error} ---")
+            continue
+        kept = f"last {tail_bytes} of {len(raw)} bytes" if len(raw) > tail_bytes else f"{len(raw)} bytes"
+        sections.append(f"--- {relative} ({kept}) ---")
+        sections.append(raw[-tail_bytes:].decode("utf-8", "replace").strip() or "(empty)")
+    return "\n".join(sections)
+
+
+def terminate_probe_processes(probe_home: Path) -> None:
+    """Take down whatever the probe's pid files still name.
+
+    `vibe stop` is the supported path and has already run; this covers only what
+    it could not. A UI process that failed its health checks is still recorded
+    and left running, and the log handles it holds make the temporary
+    directory's removal fail on Windows, so a cleanup error ends up replacing
+    the real one. A survivor would also still hold the reserved port.
+    """
+    for relative in PROBE_PID_FILES:
+        path = probe_home.joinpath(*relative.split("/"))
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        print(f"--- terminating leftover probe process {relative} pid={pid} ---", file=sys.stderr, flush=True)
+        if os.name == "nt":
+            # /T carries the inherited log sinks with it, and without /F a
+            # process already wedged enough to reach here will not go.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                check=False,
+                capture_output=True,
+                timeout=30,
+            )
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def verify_payload(
+    target_config: dict[str, Any],
+    payload: Path,
+    work_dir: Path,
+    expected_npm_version: str,
+) -> None:
+    # Keep AVIBE_HOME short on macOS: its absolute state path is embedded in the
+    # AF_UNIX dispatch address, whose platform limit is much smaller than a
+    # typical CI checkout path.
+    #
+    # Cleanup errors are ignored because a process that outlived the failure
+    # path holds handles here on Windows, and the resulting PermissionError
+    # would be the exception the job reports instead of the one that matters.
+    with tempfile.TemporaryDirectory(prefix="avibe-probe-", ignore_cleanup_errors=True) as probe_home:
+        home = Path(probe_home)
+        try:
+            _verify_payload_with_home(
+                target_config,
+                payload,
+                work_dir,
+                home,
+                expected_npm_version,
+            )
+        except BaseException:
+            # SystemExit is how this script reports verification failures, so
+            # this has to catch BaseException to see them at all. The probe HOME
+            # is about to be removed and takes the only account of the failure
+            # with it, so report it here, and leave nothing running.
+            terminate_probe_processes(home)
+            # The log sinks are separate processes that exit once the pipe they
+            # hold closes; give them a moment to drain before reading.
+            time.sleep(1.0)
+            sys.stdout.flush()
+            print(collect_probe_diagnostics(home), file=sys.stderr, flush=True)
+            raise
+
+
+def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> dict[str, str]:
+    inherited_path = os.environ.get("PATH", "")
+    retained_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name
+        in {
+            "COMSPEC",
+            "LANG",
+            "LC_ALL",
+            "PATHEXT",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "WINDIR",
+        }
+    }
+    return {
+        **retained_env,
+        "HOME": str(probe_home),
+        "USERPROFILE": str(probe_home),
+        "APPDATA": str(probe_home / "appdata"),
+        "LOCALAPPDATA": str(probe_home / "local-appdata"),
+        "XDG_CACHE_HOME": str(probe_home / "cache"),
+        "XDG_CONFIG_HOME": str(probe_home / "config"),
+        "XDG_DATA_HOME": str(probe_home / "data"),
+        "XDG_STATE_HOME": str(probe_home / "state"),
+        "CODEX_HOME": str(probe_home / "codex"),
+        "AVIBE_HOME": str(probe_home),
+        "PATH": os.pathsep.join(
+            part
+            for part in (
+                str(node.parent),
+                inherited_path,
+            )
+            if part
+        ),
+        "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
+        "AVIBE_DESKTOP_NPM_CLI": str(npm_cli),
+        "AVIBE_DESKTOP_BACKENDS_ROOT": str(probe_home / "backends"),
+        "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
+        "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
+        "VIBE_INSTALL_SKIP_ASKILL": "1",
+        "VIBE_ASKILL_AUTO_UPDATE": "0",
+        "VIBE_MODEL_HUB_ENABLED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def _decode_stop_stream(stream: Any) -> str | None:
+    """Normalize a captured stream that may have skipped `text=True` decoding.
+
+    `subprocess.run` decodes its streams on the completion path, which a timeout
+    never reaches: `TimeoutExpired` carries whatever was captured before the
+    deadline as raw bytes even when the call asked for text, and an unwritten
+    stream as `None`. Formatting those bytes would raise a `TypeError` out of
+    the `finally` that calls this, masking the probe failure this whole path
+    exists to report. Decode the way the probe diagnostics do, so an undecodable
+    byte is reported rather than raised.
+    """
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", "replace")
+    return stream
+
+
+def _stop_report(outcome: str, stdout: str | None, stderr: str | None) -> str:
+    lines = [f"--- vibe stop ({outcome}) ---"]
+    for name, stream in (("stdout", stdout), ("stderr", stderr)):
+        text = (stream or "").strip()
+        if text:
+            lines.append(f"--- vibe stop {name} ---")
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def stop_private_runtime(command: list[str], work_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    """Stop the probe Runtime, reporting the outcome instead of raising it.
+
+    This is called from a `finally`, where a timeout raised here would replace
+    the exception that explains why the probe failed; sending the streams to
+    DEVNULL would discard the stop's own account of what it found, which is the
+    other half of the same problem. Both are captured and handed back.
+    """
+    try:
+        result = subprocess.run(
+            [*command, "stop"],
+            cwd=work_dir,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        return False, _stop_report(
+            "timed out after 60s",
+            _decode_stop_stream(error.stdout),
+            _decode_stop_stream(error.stderr),
+        )
+    except OSError as error:
+        return False, _stop_report(f"could not run: {error}", None, None)
+    return result.returncode == 0, _stop_report(f"exit {result.returncode}", result.stdout, result.stderr)
+
+
+def _verify_payload_with_home(
+    target_config: dict[str, Any],
+    payload: Path,
+    work_dir: Path,
+    probe_home: Path,
+    expected_npm_version: str,
+) -> None:
+    python = payload / target_config["python_entrypoint"]
+    node = payload / target_config["node_entrypoint"]
+    npm_cli = payload / target_config["npm_entrypoint"]
+    config_dir = probe_home / "config"
+    config_dir.mkdir(parents=True)
+    port = reserve_loopback_port()
+    config_path = config_dir / "config.json"
+    env = private_probe_environment(probe_home, node, npm_cli)
+    command = [str(python), "-I", "-m", "vibe"]
+    endpoint = subprocess.run(
+        [*command, "desktop", "endpoint", "--json"],
+        cwd=work_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    descriptor = json.loads(endpoint.stdout)
+    seeded = json.loads(config_path.read_text(encoding="utf-8"))
+    if (
+        descriptor.get("schema_version") != 1
+        or seeded.get("setup_completed") is not False
+        or (seeded.get("platforms") or {}).get("enabled") != []
+        or (seeded.get("platforms") or {}).get("primary") != "avibe"
+    ):
+        raise SystemExit("Private Runtime did not seed a fresh Workbench onboarding config")
+
+    # Keep the seeded first-run shape intact; only move this isolated probe off
+    # the product's default port so a developer build cannot collide with an
+    # Avibe Runtime already running on the host.
+    seeded["ui"]["setup_host"] = "127.0.0.1"
+    seeded["ui"]["setup_port"] = port
+    seeded["ui"]["open_browser"] = False
+    config_path.write_text(json.dumps(seeded), encoding="utf-8")
+    endpoint = subprocess.run(
+        [*command, "desktop", "endpoint", "--json"],
+        cwd=work_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    descriptor = json.loads(endpoint.stdout)
+    if descriptor != {"schema_version": 1, "origin": f"http://127.0.0.1:{port}"}:
+        raise SystemExit("Private Runtime did not honor the isolated desktop endpoint")
+
+    run([str(node), "--version"], cwd=work_dir, env=env)
+    npm_version = subprocess.run(
+        [str(node), str(npm_cli), "--version"],
+        cwd=work_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if npm_version != expected_npm_version:
+        raise SystemExit("Private Runtime npm version does not match runtime-sources.json")
+
+    ready_url = f"http://127.0.0.1:{port}/ready"
+    try:
+        run([*command, "start", "--no-open-browser"], cwd=work_dir, env=env)
+        deadline = time.monotonic() + 90
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                request = urllib.request.Request(ready_url, headers={"Host": f"127.0.0.1:{port}"})
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    readiness = json.loads(response.read(4097))
+                if (
+                    readiness.get("schema_version") == 1
+                    and readiness.get("product") == "avibe"
+                    and readiness.get("ready") is True
+                ):
+                    break
+            except Exception as error:
+                last_error = error
+            time.sleep(0.25)
+        else:
+            raise SystemExit(f"Private Runtime did not become ready: {last_error}")
+    finally:
+        stopped, stop_report = stop_private_runtime(command, work_dir, env)
+        print(stop_report, file=sys.stderr, flush=True)
+    if not stopped:
+        raise SystemExit("Private Runtime failed to stop cleanly")
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen(ready_url, timeout=1).close()
+        except Exception:
+            break
+        time.sleep(0.25)
+    else:
+        raise SystemExit("Private Runtime remained reachable after stop")
+
+
+def prune_payload(payload: Path) -> None:
+    for directory in sorted(payload.rglob("__pycache__"), reverse=True):
+        shutil.rmtree(directory)
+    for file in payload.rglob("*.pyc"):
+        file.unlink()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--cache", type=Path, default=DESKTOP_DIR / "target" / "runtime-cache")
+    args = parser.parse_args()
+
+    sources = json.loads(SOURCES_PATH.read_text(encoding="utf-8"))
+    if sources.get("schema_version") != 2:
+        raise SystemExit("Unsupported runtime-sources.json schema")
+    try:
+        target_config = sources["targets"][args.target]
+    except KeyError:
+        raise SystemExit(f"Unsupported target: {args.target}") from None
+
+    args.cache.mkdir(parents=True, exist_ok=True)
+    python_archive = download(target_config["python"], args.cache)
+    node_archive = download(target_config["node"], args.cache)
+
+    work_parent = DESKTOP_DIR / "target"
+    work_parent.mkdir(exist_ok=True)
+    # Same reason as the probe HOME: a leftover Windows handle on the payload's
+    # own DLLs must not turn into the exception the job reports. The stale
+    # directory under desktop/target/ is the cheaper of the two outcomes.
+    with tempfile.TemporaryDirectory(
+        prefix=f"runtime-{args.target}-",
+        dir=work_parent,
+        ignore_cleanup_errors=True,
+    ) as temporary:
+        work_dir = Path(temporary)
+        payload = work_dir / "payload"
+        python_root = extract_source(python_archive, payload)
+        if python_root.name != "python":
+            raise SystemExit(f"Unexpected Python archive root: {python_root.name}")
+        private_python = payload / target_config["python_entrypoint"]
+        wheel = build_wheel(work_dir, private_python, sources, args.cache)
+        runtime_version = install_python_environment(
+            private_python,
+            wheel,
+            work_dir,
+            sources.get("sdist_build_allowlist", []),
+        )
+        verify_python_runtime_excludes_agent_backends(private_python, work_dir)
+        install_node_toolchain(
+            target_config,
+            node_archive,
+            payload,
+            work_dir,
+            sources["npm_version"],
+        )
+        write_inventory(private_python, payload)
+        verify_payload(target_config, payload, work_dir, sources["npm_version"])
+        prune_payload(payload)
+
+        output_parent = args.output.parent
+        output_parent.mkdir(parents=True, exist_ok=True)
+        staged_output = Path(tempfile.mkdtemp(prefix=".runtime-output-", dir=output_parent))
+        try:
+            archive = staged_output / "runtime.zip"
+            unpacked_size, entry_count, tree_sha256 = create_runtime_zip(payload, archive)
+            wheel_digest = sha256(wheel)
+            manifest = {
+                "schema_version": 2,
+                "runtime_version": runtime_version,
+                "os": target_config["os"],
+                "arch": target_config["arch"],
+                "archive": archive.name,
+                "archive_sha256": sha256(archive),
+                "archive_size": archive.stat().st_size,
+                "unpacked_size": unpacked_size,
+                "entry_count": entry_count,
+                "tree_sha256": tree_sha256,
+                "python_entrypoint": target_config["python_entrypoint"],
+                "node_entrypoint": target_config["node_entrypoint"],
+                "npm_entrypoint": target_config["npm_entrypoint"],
+                "python_distribution": target_config["python"],
+                "node_distribution": target_config["node"],
+                "npm_version": sources["npm_version"],
+                "avibe_wheel": {"name": wheel.name, "sha256": wheel_digest},
+            }
+            (staged_output / "runtime-manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            args.output.mkdir(parents=True, exist_ok=True)
+            for name in ["runtime.zip", "runtime-manifest.json"]:
+                os.replace(staged_output / name, args.output / name)
+        finally:
+            if staged_output.exists():
+                shutil.rmtree(staged_output)
+
+    print(json.dumps({"ok": True, "target": args.target, "output": str(args.output)}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

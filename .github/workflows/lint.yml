@@ -459,3 +459,54 @@ jobs:
           if (-not (Select-String -Path vibe-version.log -Pattern 'avibe-os ' -Quiet)) {
             throw "vibe version output missing expected marker"
           }
+
+  windows-control-ipc:
+    runs-on: windows-latest
+    needs: build-linux-artifacts
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+        with:
+          name: vibe-wheel-linux
+          path: dist
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install package and focused test dependency
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          if (-not $wheel) {
+            throw "Missing wheel artifact"
+          }
+          python -m pip install $wheel pytest
+
+      - name: Verify Windows Controller control IPC
+        run: python -m pytest tests/test_control_ipc.py -q
+
+      # Windows byte-range locks are mandatory and per-handle, so a lock taken
+      # over the bytes of a record makes that record unreadable to every other
+      # handle -- including this process's own. Nothing on Linux can observe
+      # that: POSIX file locks are advisory and never deny a read. This is the
+      # one place in CI where the service lock's readability can be tested at
+      # all, and it needs neither a packaged Runtime nor an installer.
+      - name: Verify the Windows service lock keeps its record readable
+        run: python -m pytest tests/test_service_lock_record.py -q
+
+      # `vibe stop` walks every process on the machine before it signals
+      # anything. On Linux a process whose command line psutil cannot read
+      # costs a /proc read; on Windows it cost a `powershell` launch, and a
+      # second `pwsh` when the first said nothing. Only a real Windows process
+      # table holds enough unreadable processes to turn that into a stop that
+      # produces no output and never returns, which is how gh-v3.1.1rc10 died
+      # -- and like the two steps above, showing it needs neither a packaged
+      # Runtime nor an installer, so it does not have to cost a release.
+      - name: Verify the process scan stays off the external shell
+        run: python -m pytest tests/test_runtime_process_scan.py -q

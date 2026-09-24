@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bootstrap-retry"
+description = "Enables the bootstrap_retry command without any pre-configured scope."
+commands.allow = ["bootstrap_retry"]
+
+[[permission]]
+identifier = "deny-bootstrap-retry"
+description = "Denies the bootstrap_retry command without any pre-configured scope."
+commands.deny = ["bootstrap_retry"]

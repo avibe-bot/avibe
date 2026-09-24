@@ -253,13 +253,16 @@ def test_archive_http_rpc_waits_for_accepted_durable_outcome(monkeypatch, tmp_pa
             }
             return await httpx.ASGITransport(app=internal_app).handle_async_request(request)
 
-    async def verified(_path):
-        return tmp_path / "test-only.sock"
+    async def resolved(_path):
+        return internal_client.control_ipc.ControlIpcClientEndpoint(
+            transport="unix",
+            socket_path=tmp_path / "test-only.sock",
+        )
 
     async def noop(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(internal_client, "_verified_socket_path_async", verified)
+    monkeypatch.setattr(internal_client, "_resolve_endpoint_async", resolved)
     monkeypatch.setattr(internal_client.httpx, "AsyncHTTPTransport", lambda **kwargs: ArchiveTransport())
     monkeypatch.setattr(ui_server, "_archive_cancel_turn", noop)
     client = app.test_client()
@@ -1437,6 +1440,37 @@ def test_normalize_response_supports_body_headers_tuple():
     assert response.body == b"ok"
 
 
+@pytest.mark.parametrize("started_at", [None, "2026-07-04T00:00:01+00:00"])
+@pytest.mark.parametrize("completed_at", [None, "2026-07-04T00:00:02+00:00"])
+def test_harness_run_detail_preserves_stored_duration_timestamps(started_at, completed_at):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-duration",
+                "run_type": "agent_run",
+                "status": "succeeded",
+                "created_at": "2026-07-04T00:00:00+00:00",
+                "updated_at": "2026-07-04T00:01:02+00:00",
+                "started_at": started_at,
+                "completed_at": completed_at,
+            }
+        )
+    finally:
+        store.close()
+
+    response = app.test_client().get("/api/harness/runs/run-duration")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["run"]["started_at"] == started_at
+    assert payload["run"]["completed_at"] == completed_at
+
+
 def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
@@ -2215,6 +2249,30 @@ def test_changed_agent_backend_runtimes_uses_backend_runtime_projection():
     ) == ["opencode", "claude", "codex"]
     assert ui_server._changed_agent_backend_runtimes(previous, current, {"show_duration": False}) == []
     assert ui_server._changed_agent_backend_runtimes(None, current, {"agents": changed_payload["agents"]}) == []
+
+
+def test_changed_agent_backend_runtimes_keeps_saved_selector_changes_visible(monkeypatch, tmp_path):
+    from config.v2_config import V2Config
+
+    resolved = tmp_path / ".local" / "bin" / "claude"
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text("#!/bin/sh\n", encoding="utf-8")
+    resolved.chmod(0o755)
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr("vibe.cli_paths.resolve_cli_path", lambda _selector: str(resolved))
+
+    payload = _full_config_payload()
+    payload["agents"]["claude"]["cli_path"] = "claude"
+    previous = V2Config.from_payload(payload)
+    changed_payload = json.loads(json.dumps(payload))
+    changed_payload["agents"]["claude"]["cli_path"] = str(resolved)
+    current = V2Config.from_payload(changed_payload)
+
+    assert ui_server._changed_agent_backend_runtimes(
+        previous,
+        current,
+        {"agents": changed_payload["agents"]},
+    ) == ["claude"]
 
 
 def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path):

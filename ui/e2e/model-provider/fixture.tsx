@@ -9,6 +9,8 @@ import '../../src/components/settings/models/modelHubSurface.css';
 import { Button } from '../../src/components/ui/button';
 import { AddApiKeyDialog } from '../../src/components/settings/models/AddApiKeyDialog';
 import { SourceDetailPanel } from '../../src/components/settings/models/SourceDetailPanel';
+import { SourcesCard } from '../../src/components/settings/models/SourcesCard';
+import { readyRegion } from '../../src/components/settings/models/regionRead';
 import { createSourceCollectionReadAuthority } from '../../src/components/settings/models/collectionReadAuthority';
 import { modelsApi } from '../../src/components/settings/models/modelsApi';
 import { readSurfaceLanding, type TrackSourceMutation } from '../../src/components/settings/models/mutationSettlement';
@@ -96,4 +98,34 @@ export function Fixture() {
     </main>
   </I18nextProvider>;
 }
-createRoot(document.getElementById('root')!).render(<Fixture />);
+const identitySources: Source[] = [
+  {
+    ...saved, id: 'src_identity001', display_name: 'OpenAI', vendor: 'openai', kind: 'subscription',
+    protocol: 'openai_responses', base_url: null, billing: 'monthly', account_label: 'first@example.com',
+    verification_pending: null, adopted_by: [{ backend: 'codex', menu_model: 'gpt-5.6-luna' }],
+  },
+  {
+    ...saved, id: 'src_identity002', display_name: 'OpenAI 2', vendor: 'openai', kind: 'subscription',
+    protocol: 'openai_responses', base_url: null, billing: 'monthly',
+    account_label: 'long-account-name-for-overflow-check@example.com', verification_pending: null,
+  },
+  { ...saved, masked_credential: 'sk-…1234' },
+];
+
+function IdentityFixture() {
+  const [selected, setSelected] = useState(identitySources[0]);
+  return <I18nextProvider i18n={language}>
+    <main className="mx-auto flex min-h-dvh max-w-[1100px] flex-col gap-5 bg-surface p-3 md:flex-row">
+      <section data-testid="identity-cards" className="w-full shrink-0 self-start md:w-[400px]">
+        <SourcesCard read={readyRegion(identitySources)} onOpenSource={setSelected}
+          onRetry={() => {}} onAddApiKey={() => {}} onAddSubscription={() => {}} />
+      </section>
+      <section className="min-w-0 flex-1" data-testid="identity-detail">
+        <SourceDetailPanel source={selected} trackMutation={async () => { throw new Error('Read-only fixture'); }}
+          onReauth={() => {}} onMutationCommitted={async () => {}} />
+      </section>
+    </main>
+  </I18nextProvider>;
+}
+
+createRoot(document.getElementById('root')!).render(params.has('identity') ? <IdentityFixture /> : <Fixture />);
