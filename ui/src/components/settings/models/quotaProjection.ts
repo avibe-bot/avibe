@@ -36,8 +36,11 @@ const instant = (value: string | null): number | null => {
 
 export const windowResetAt = (window: QuotaWindow): number | null => instant(window.resets_at);
 
-/** A Source whose windows are its current reading, not a retained one. */
-export const quotaIsLive = (source: SourceQuota): boolean => source.state === 'ok';
+/**
+ * A Source with a current reading, not a retained one. A report with no windows
+ * is not a reading: every summary figure and the card share this predicate.
+ */
+export const quotaIsLive = (source: SourceQuota): boolean => source.state === 'ok' && source.windows.length > 0;
 
 /** A Source whose windows are the last good reading, shown under a banner. */
 export const quotaIsRetained = (source: SourceQuota): boolean =>
@@ -98,7 +101,7 @@ export type QuotaStatus =
 
 export function sourceStatus(source: SourceQuota, now: number): QuotaStatus {
   if (source.state === 'auth_expired') return { kind: 'reauth' };
-  if (source.state !== 'ok') return { kind: 'paused' };
+  if (!quotaIsLive(source)) return { kind: 'paused' };
   const spent = source.windows.find((window) => windowIsExhausted(window, now));
   return spent ? { kind: 'exhausted', window: spent } : { kind: 'ok' };
 }

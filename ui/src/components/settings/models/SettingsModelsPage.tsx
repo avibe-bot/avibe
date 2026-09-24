@@ -404,6 +404,8 @@ export const SettingsModelsPage: React.FC = () => {
   // repair button (which only a blocked row shows). It asks the same question
   // here, then starts the same journey.
   const [quotaReauthSource, setQuotaReauthSource] = React.useState<Source | null>(null);
+  // A re-login started from a quota card has no detail heading to return to.
+  const quotaReauthOpenerRef = React.useRef<HTMLElement | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
@@ -1401,8 +1403,15 @@ export const SettingsModelsPage: React.FC = () => {
     setReauthSource(null);
     // Back to the detail heading rather than to the button that opened this: a
     // repair that worked unmounts that button (the row is no longer stopped), and
-    // Radix would restore focus to a node that is gone — i.e. to <body>.
-    window.setTimeout(() => sourceDetailHeadingRef.current?.focus(), 0);
+    // Radix would restore focus to a node that is gone — i.e. to <body>. From a
+    // quota card, back to its button, or to the quota tab once it is gone.
+    const opener = quotaReauthOpenerRef.current;
+    quotaReauthOpenerRef.current = null;
+    window.setTimeout(() => {
+      if (!opener) return sourceDetailHeadingRef.current?.focus();
+      const tab = document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+      (opener.isConnected ? opener : tab)?.focus();
+    }, 0);
   }, []);
   const closeSubscriptionPicker = React.useCallback(() => {
     subscriptionPickerHandoffRef.current = false;
@@ -1490,6 +1499,7 @@ export const SettingsModelsPage: React.FC = () => {
                       onRequestReauth={(sourceId) => {
                         const target = sources.find((source) => source.id === sourceId);
                         if (target && canReauth(target)) {
+                          quotaReauthOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
                           setQuotaReauthSource(target);
                           return;
                         }
@@ -1671,7 +1681,13 @@ export const SettingsModelsPage: React.FC = () => {
       {quotaReauthSource && (
         <ConfirmDialog
           open
-          onOpenChange={(open) => { if (!open) setQuotaReauthSource(null); }}
+          onOpenChange={(open) => {
+            if (open) return;
+            setQuotaReauthSource(null);
+            const opener = quotaReauthOpenerRef.current;
+            quotaReauthOpenerRef.current = null;
+            if (opener) window.setTimeout(() => opener.focus(), 0);
+          }}
           title={t('settings.models.repair.reauthTitle', { name: quotaReauthSource.display_name })}
           description={t(reauthBodyKey(quotaReauthSource))}
           confirmLabel={t('settings.models.repair.reauthConfirm') as string}

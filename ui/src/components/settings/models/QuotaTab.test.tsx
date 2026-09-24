@@ -188,6 +188,21 @@ describe('QuotaTab', () => {
     expect(screen.queryAllByRole('meter')).toHaveLength(0);
   });
 
+  it('names a known failure reason and never calls a windowless report usable', () => {
+    draw(readyRegion(summary([
+      claude({ state: 'ok', windows: [] }),
+      codex({ state: 'stale', error_key: 'models.quota.error.rate_limited', fetched_at: null, windows: [] }),
+    ])));
+
+    expect(within(screen.getByRole('article', { name: 'ChatGPT Pro' })).getByText('服务商暂时限制了额度查询')).toBeTruthy();
+    // An `ok` report with no windows reads as unavailable on its card, so the summary cannot call it usable.
+    const empty = screen.getByRole('article', { name: 'Claude Max' });
+    expect(within(empty).getByText('暂时读不到额度，稍后会自动重试')).toBeTruthy();
+    expect(within(empty).getByText('暂停更新')).toBeTruthy();
+    expect(screen.queryByText('所有账号都能正常使用')).toBeNull();
+    expect(screen.getByText('没有已用完的额度')).toBeTruthy();
+  });
+
   it('keeps the last page under the failure strip and offers the empty state honestly', async () => {
     const stale = draw(degradedRegion(summary([claude()]), 'read_failed', true));
     expect(screen.getByText('刷新失败，请重试')).toBeTruthy();

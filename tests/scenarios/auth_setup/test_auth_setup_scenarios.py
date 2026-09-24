@@ -1918,6 +1918,70 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent["sources"]["order"], [source.id])
         self.assertEqual(agent["supply_status"], "ok")
 
+    async def test_quota_card_reauth_reaches_a_fresh_quota_reading(self):
+        """Scenario: AUTH-SETUP-909.
+
+        The quota tab is a second entry into Hub re-auth. An expired grant reads
+        `auth_expired`; the same acknowledged re-auth as AUTH-SETUP-109 then
+        commits, and the next quota read reaches the new grant at once instead
+        of waiting out the old failure's refresh interval.
+        """
+        from core.handlers.model_hub.quota import SubscriptionQuotaError
+
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = HubOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig.from_payload(
+            {
+                "id": "src_hubquota01",
+                "created_at": "2026-07-25T00:00:00+00:00",
+                "last_discovered_at": "2026-07-25T00:00:00+00:00",
+                "kind": "subscription",
+                "vendor": "anthropic",
+                "display_name": "Claude Hub subscription",
+                "protocol": "anthropic",
+                "base_url": None,
+                "supply_channel": "hub",
+                "billing": "monthly",
+                "state": {
+                    "status": "needs_action",
+                    "retry_at": None,
+                    "detail_key": "models.source.needs_action.oauth_expired",
+                },
+                "models": [],
+                "credential_ref": "cred_hubold01",
+                "account_label": None,
+                "masked_credential": None,
+            }
+        )
+        harness.store.config.sources.append(source)
+        reads: list[str] = []
+
+        async def subscription_quota(source_id, vendor, credential_ref):
+            reads.append(credential_ref)
+            if credential_ref == "cred_hubold01":
+                raise SubscriptionQuotaError("auth_expired")
+            return {"plan": "max", "windows": [{
+                "id": "five_hour", "kind": "session", "label": "five_hour", "used_pct": 12.0,
+                "window_seconds": 18000, "resets_at": "2026-07-25T05:00:00Z",
+            }]}
+
+        harness.adapter.subscription_quota = subscription_quota
+        expired = (await harness.service.quota_summary())["sources"][0]
+        self.assertEqual(expired["state"], "auth_expired")
+
+        started = await harness.service.reauth_source(source.id, {"acknowledge_irreversible": True})
+        flow_id = started["flow"]["flow_id"]
+        harness.adapter.complete(flow_id)
+        terminal = await harness.service.oauth_status(flow_id)
+        self.assertEqual(terminal["flow"]["state"], "success")
+
+        # Inside the old failure's five-minute interval, an unforced read still reaches the new grant.
+        fresh = (await harness.service.quota_summary())["sources"][0]
+        self.assertEqual(reads, ["cred_hubold01", "cred_consent01"])
+        self.assertEqual(fresh["state"], "ok")
+        self.assertEqual(fresh["windows"][0]["used_pct"], 12.0)
+
     async def test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody(self):
         """Scenario: AUTH-SETUP-115, AUTH-SETUP-116.
 

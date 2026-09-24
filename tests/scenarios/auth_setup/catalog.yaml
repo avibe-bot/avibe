@@ -334,6 +334,13 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cloud_pairing_recovery_closed_loop
+  - id: AUTH-SETUP-909
+    name: Quota-card Hub re-auth commits the new grant and the next quota read reaches it at once
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_quota_card_reauth_reaches_a_fresh_quota_reading
   - id: AUTH-SETUP-119
     name: Runtime manual provider code reaches native persistence and controller-confirmed readiness
     status: covered

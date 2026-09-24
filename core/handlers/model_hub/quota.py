@@ -373,6 +373,9 @@ QUOTA_REFRESH_INTERVAL: Final = timedelta(minutes=5)
 # the snapshot it just produced instead of reaching the vendor again.
 QUOTA_FORCED_REFRESH_INTERVAL: Final = timedelta(seconds=30)
 QUOTA_READ_DEADLINE_SECONDS: Final = 12.0
+# Each fetch reads the engine's auth inventory and calls a vendor; many Sources
+# queue here instead of all reaching the engine at once.
+QUOTA_MAX_CONCURRENT_FETCHES: Final = 4
 QUOTA_FETCH_TIMEOUT_SECONDS: Final = 10.0
 _RATE_LIMIT_COOLDOWN_FLOOR: Final = timedelta(minutes=5)
 _RATE_LIMIT_COOLDOWN_CEILING: Final = timedelta(hours=1)
@@ -421,6 +424,7 @@ class SubscriptionQuotaCache:
         self._fetch = fetch
         self._now = now
         self._entries: dict[str, _QuotaEntry] = {}
+        self._fetch_slots = asyncio.Semaphore(QUOTA_MAX_CONCURRENT_FETCHES)
 
     async def summary(self, sources: Sequence[QuotaSourceRef], *, force: bool = False) -> dict[str, Any]:
         live = {source.source_id for source in sources}
@@ -479,7 +483,8 @@ class SubscriptionQuotaCache:
 
     async def _refresh(self, source: QuotaSourceRef, entry: _QuotaEntry) -> None:
         try:
-            parsed = await self._fetch(source.source_id, source.vendor, source.credential_ref)
+            async with self._fetch_slots:
+                parsed = await self._fetch(source.source_id, source.vendor, source.credential_ref)
             windows = parsed.get("windows")
             if not isinstance(windows, list):
                 raise SubscriptionQuotaError("malformed")

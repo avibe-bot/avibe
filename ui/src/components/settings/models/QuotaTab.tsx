@@ -145,6 +145,15 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
   );
 };
 
+/** The no-reading line: the known states have their own copy, a named failure its own reason. */
+const unreadKey = (source: SourceQuota) => {
+  if (source.state === 'auth_expired') return 'settings.models.quota.unread.auth_expired' as const;
+  if (source.state === 'unsupported') return 'settings.models.quota.unread.unsupported' as const;
+  if (source.error_key === 'models.quota.error.rate_limited') return 'models.quota.error.rate_limited' as const;
+  if (source.error_key === 'models.quota.error.malformed') return 'models.quota.error.malformed' as const;
+  return 'settings.models.quota.unread.error' as const;
+};
+
 const AccountCard: React.FC<{
   source: SourceQuota;
   now: number;
@@ -198,7 +207,7 @@ const AccountCard: React.FC<{
         ? (
             <div className="model-hub-quota-unread flex items-center gap-2">
               <span className="min-w-0 flex-1">
-                {t(`settings.models.quota.unread.${source.state === 'auth_expired' || source.state === 'unsupported' ? source.state : 'error'}`)}
+                {t(unreadKey(source))}
               </span>
               {expired && onRequestReauth && (
                 <Button variant="outline" size="sm" className="shrink-0" onClick={() => onRequestReauth(source.source_id)}>

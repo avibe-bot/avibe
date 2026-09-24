@@ -343,6 +343,30 @@ async def test_quota_cache_caps_a_huge_retry_after_at_the_ceiling():
     assert len(fetch.calls) == 3
 
 
+async def test_quota_cache_bounds_concurrent_vendor_fetches():
+    """MH-QUOTA-005: Many Sources queue behind a fixed number of in-flight fetches; each still gets its own read."""
+
+    active, peak, gate = 0, 0, asyncio.Event()
+
+    async def fetch(source_id, vendor, credential_ref):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await gate.wait()
+        active -= 1
+        return {"plan": None, "windows": [_WINDOW]}
+
+    cache = SubscriptionQuotaCache(fetch, now=_Clock())
+    sources = [QuotaSourceRef(f"src_{i}", "anthropic", f"cred_{i}", f"S{i}", None) for i in range(12)]
+    reading = asyncio.create_task(cache.summary(sources))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert peak == 4
+    gate.set()
+    summary = await reading
+    assert peak == 4 and [source["state"] for source in summary["sources"]] == ["ok"] * 12
+
+
 async def test_quota_cache_forgets_a_reauthenticated_grant():
     """MH-QUOTA-009: A Source bound to a new grant does not inherit the old grant's windows or failure."""
 

@@ -2426,11 +2426,18 @@ describe('SettingsModelsPage quota region', () => {
     const read = vi.mocked(modelsApi.getQuota);
     await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
-    await userEvent.click(await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ }));
+    const trigger = await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ });
+    await userEvent.click(trigger);
     expect(reauth).not.toHaveBeenCalled();
+    // Cancelling returns focus to the quota card's button, not to the document.
+    await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await userEvent.click(trigger);
     await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
     await waitFor(() => expect(reauth).toHaveBeenCalledWith(nativeSubscription.id));
     // The flow's first status poll lands after its 2 s cadence.
     await waitFor(() => expect(read.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 4000 });
-  }, 8000);
+    // The finished sign-in closes its dialog; focus returns to the quota card's button, not the document.
+    await waitFor(() => expect(document.activeElement).toBe(trigger), { timeout: 4000 });
+  }, 12000);
 });
