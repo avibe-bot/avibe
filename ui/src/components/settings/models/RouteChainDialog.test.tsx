@@ -1054,7 +1054,7 @@ describe("RouteChainDialog", () => {
 
     agentRead.resolve(observation([agent]));
     expect(
-      await screen.findByText("The current model surface could not be read"),
+      await screen.findByText("The route could not be read right now"),
     ).toBeTruthy();
     expect(readChain).toHaveBeenCalledTimes(2);
     expect(readSources).toHaveBeenCalledTimes(1);

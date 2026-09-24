@@ -15,8 +15,8 @@ import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
  * named `claude` must not take the card. The producer is
  * `is_builtin_default_agent`: metadata `builtin_default` or `lock_delete`.
  * Only an uncached full Agent read has those fields. A missing or failed read
- * is not a designated target; it is an explicit existing-name choice later,
- * not an inferred one now.
+ * is not a designated target in the permissive reader; the route editor asks
+ * for strict reads so an incomplete target list cannot be saved as complete.
  */
 const DEFAULT_AGENT_NAME = 'default';
 
@@ -72,6 +72,7 @@ const sameCurrentIdentity = (brief: VibeAgentBrief, full: VibeAgentFull): boolea
 export async function readSetupTargets(
   briefs: readonly VibeAgentBrief[],
   reader: SetupTargetReader,
+  options: { requireReadable?: boolean } = {},
 ): Promise<VibeAgentFull[]> {
   const seen = new Set<string>();
   const relevant = briefs.filter((agent) => {
@@ -84,11 +85,15 @@ export async function readSetupTargets(
   const records = await Promise.all(relevant.map(async (brief) => {
     try {
       const result = await reader.getVibeAgent(brief.name, { cache: false });
-      if (!result.ok || result.agent == null) return null;
+      if (!result.ok || result.agent == null) {
+        if (options.requireReadable) throw new Error('setup_target_read_failed');
+        return null;
+      }
       if (!sameCurrentIdentity(brief, result.agent)) return null;
       if (!result.agent.enabled || result.agent.archived) return null;
       return result.agent;
-    } catch {
+    } catch (error) {
+      if (options.requireReadable) throw error;
       return null;
     }
   }));

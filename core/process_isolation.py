@@ -157,9 +157,9 @@ def process_identity_matches(
     """Whether ``live`` is the recorded process, by its inherited marker.
 
     The marker is the authority, not the birth time: on macOS psutil's displayed
-    create time can shift while the same execution keeps running (see
-    ``docs/plans/memory-macos-identity-recovery-1990.md``), and a 256-bit marker only
-    the managed tree inherits cannot be carried by a stranger holding a recycled pid.
+    create time can shift while the same execution keeps running, and a 256-bit
+    marker only the managed tree inherits cannot be carried by a stranger holding
+    a recycled pid.
     """
 
     return expected.pid == live.pid and _marker_matches(expected, live)

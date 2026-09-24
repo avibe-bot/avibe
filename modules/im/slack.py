@@ -2403,7 +2403,6 @@ class SlackBot(BaseIMClient):
                 "clear",
                 "cwd",
                 "queue",
-                "memory",
             ]:
                 await self.send_slash_response(
                     response_url, f"⏳ {self._t('common.processing', channel_id, command=command)}"

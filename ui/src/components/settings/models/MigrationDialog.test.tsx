@@ -668,7 +668,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
     const dialog = await screen.findByRole('dialog');
     await within(dialog).findByText('OpenAI');
     expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
-    expect(within(dialog).queryByText(/complete API-key groups only/)).toBeNull();
+    expect(within(dialog).queryByText(/Only API keys can be migrated here/)).toBeNull();
   });
 
   it('still takes a key standing beside a subscription, because its scope is everything', async () => {
@@ -749,8 +749,8 @@ describe('MigrationDialog — the setup scope', () => {
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Migrate to Model Hub')).toBeTruthy();
-    expect(within(dialog).getByText('After migration, CLI authentication will be managed entirely by Model Hub.')).toBeTruthy();
-    expect(within(dialog).getByText(/complete API-key groups only/)).toBeTruthy();
+    expect(within(dialog).getByText(/After migration, these assistants connect through Model Hub/)).toBeTruthy();
+    expect(within(dialog).getByText(/Only API keys can be migrated here/)).toBeTruthy();
     expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeTruthy();
     expect(scan).not.toHaveBeenCalled();
   });

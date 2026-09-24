@@ -11431,14 +11431,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         status = str(dependency.get("status") or "missing")
         ready = bool(dependency.get("installed")) and status == "ready"
         version = dependency.get("version")
-        memory_details = (
-            {
-                "dependency_reason": dependency.get("reason"),
-                "dependency_required": bool(dependency.get("required")),
-            }
-            if False
-            else {}
-        )
         if ready:
             if dependency_id == "git-runtime" and dependency.get("source") == "system":
                 _add_doctor_item(
@@ -11459,7 +11451,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                     ),
                     code=f"dependencies.{dependency_id}.ready",
                     dependency_status=None,
-                    **memory_details,
                 )
             continue
 
@@ -11482,13 +11473,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 severity,
                 i18n_t("doctor.item.dependencyPlatformUnsupported", language, label=label),
                 i18n_t("doctor.action.dependencyPlatformUnsupported", language),
-                code=(
-                    f"dependencies.{dependency_id}.unsupported"
-                    if False
-                    else f"dependencies.{dependency_id}.platform_unsupported"
-                ),
+                code=f"dependencies.{dependency_id}.platform_unsupported",
                 dependency_status=None,
-                **memory_details,
             )
             continue
 

@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 STREAM_BUFFER_LIMIT = 128 * 1024 * 1024  # 128 MB
 
 
-# Avibe owns the user-facing surface, durable automation, memory, and agent
-# delegation. Keep Codex app-server focused on the execution capabilities that
+# Avibe owns the user-facing surface, durable automation, and agent delegation.
+# Keep Codex app-server focused on the execution capabilities that
 # Avibe deliberately exposes instead of inheriting Codex client features from a
 # user's global config. These overrides are appended last so backend extra args
 # cannot re-enable a competing host surface for this process.

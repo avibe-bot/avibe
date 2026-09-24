@@ -351,6 +351,30 @@ describe('pendingImportRows', () => {
     expect(rows.map((item) => item.id)).toEqual(['mig_1', 'mig_2']);
   });
 
+  it('MH-MIG-006: keeps a key whose display mask collides with a Hub source', () => {
+    const selection = {
+      scan: scanOf(row({ id: 'mig_1', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0001' })),
+      selectedBackends: ['codex' as const],
+    };
+
+    expect(pendingImportRows(selection).map((item) => item.id)).toEqual(['mig_1']);
+    expect(pendingImportRows(selection).map((item) => item.id)).toEqual(['mig_1']);
+  });
+
+  it('still submits a group the Hub only partly holds, whole', () => {
+    // The server migrates a backend whole and refuses a batch that omits a row, so one
+    // key the Hub does not have keeps the group — and its companion goes with it.
+    const rows = pendingImportRows({
+      scan: scanOf(
+        row({ id: 'mig_1', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0001' }),
+        row({ id: 'mig_2', backend: 'codex', vendor: 'openai', masked_credential: 'sk-…0002' }),
+      ),
+      selectedBackends: ['codex'],
+    });
+
+    expect(rows.map((item) => item.id)).toEqual(['mig_1', 'mig_2']);
+  });
+
   it('submits the carried rows and leaves the rest native', () => {
     // A row the server does not propose importing stays where it is; it neither
     // joins the batch nor keeps the rows beside it from moving.
@@ -823,6 +847,17 @@ describe('slotSelected', () => {
 describe('providerSummary', () => {
   it('says nothing when nothing is added or chosen', () => {
     expect(providerSummary({ scan: null, sources: [], selected: [], failed: false })).toEqual({ kind: 'none' });
+  });
+
+  it('withholds the verdict while the source read is still out', () => {
+    expect(providerSummary({ scan: null, sources: [], selected: [], failed: false, reading: true }))
+      .toEqual({ kind: 'pending' });
+  });
+
+  it('answers from a landed read even while another one is out', () => {
+    expect(providerSummary({
+      scan: null, sources: [source({ id: 'src_1', vendor: 'openai' })], selected: [], failed: false, reading: true,
+    })).toMatchObject({ kind: 'added', count: 1 });
   });
 
   it('counts every added provider, not just the two on the stage', () => {

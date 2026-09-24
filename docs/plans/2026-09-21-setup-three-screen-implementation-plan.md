@@ -1,6 +1,9 @@
 # Setup three-screen rebuild — implementation plan
 
-Status: **PR0 bounded repair; feature implementation not dispatched** (2026-09-21).
+Status: **Historical implementation plan (2026-09-21), superseded by the binding
+`docs/plans/setup-three-screen/contracts.md` and the current implementation.**
+The PR0 dispatch, lane ownership, capsule, shared route draft, and platform recovery
+instructions below record the original proposal; they are not current requirements.
 The owner's explicit merge authority covered #2065 only. Current orchestrator requests
 from `ses8dhcc2zq62` authorize PR0 repair, not #2082 merge or feature implementation.
 The owner reaffirmed on 2026-09-21 12:56 +08 that setup uses Model Hub and disabling it
@@ -48,7 +51,8 @@ The design is not a new surface bolted onto the old one: screen 1 already ships,
 is a restructure of what ships, and screen 2 is a new composition of Model Hub APIs that
 already ship. C6 defines explicit model-chain projection and controller/runtime ordering
 against those owners. Owner-ratified D10 adopts existing migration takeover; setup does not
-implement credential migration. Discovery cards/capsule/entry remain consumers of that feature.
+implement credential migration. The current screen uses its main action and the controlled
+MigrationDialog to consume that feature; the proposed capsule was removed.
 
 ## 2. Baseline and preconditions
 
@@ -84,7 +88,7 @@ implement credential migration. Discovery cards/capsule/entry remain consumers o
 | Six access entries | `onboarding/AccessTiles.tsx` | shipped; needs `hidden`/`inert` instead of unmount |
 | Assistant cards, install/detect/enable | `steps/AgentDetection.tsx` (606 lines), `onboarding/AssistantRow.tsx`, `settings/BackendLifecycleChip.tsx` | shipped; restructured by screen 3 |
 | Per-assistant connection dialog | `onboarding/BackendConnectionDialog.tsx` | leaves setup; existing Settings/backend Direct support remains unchanged |
-| Discovery capsule + dismissal memory | `onboarding/ImportKeysNotice.tsx`, `lib/modelHubMigrationDismiss.ts` | shipped; C6 identifies copy and scan-ownership gaps before moving it to screen 2 |
+| Discovery entry + dismissal memory (historical proposal) | `onboarding/ImportKeysNotice.tsx`, `lib/modelHubMigrationDismiss.ts` | The proposed capsule move was superseded; current screen 2 uses its main action and controlled MigrationDialog. |
 | Import batch dialog | `settings/models/MigrationDialog.tsx`, `migrationScan.ts` (`importableKeys`, `isImportableKey`, `scanMigrationWhenEnabled`) | owner-ratified D10 reuse; minimal controlled-state/copy adaptation, one migration confirmation/apply/recovery owner |
 | Add API key: vendor picker, observe → create | `settings/models/AddApiKeyDialog.tsx` (41 KB impl, 40 KB tests), `apiKeyVendors.ts`, `vendorMarks.ts`, `vendorGlyph.tsx` | shipped; needs its form extracted so a tabbed stable frame can host it (D2) |
 | Subscription sign-in | `modelsApi.startOAuth/getOAuthStatus/submitOAuth/cancelOAuth`, `settings/models/OAuthConnectDialog.tsx`, `settings/oauth/OAuthFlowParts.tsx` | shipped; subscription tab drives it |
@@ -126,7 +130,8 @@ leaving a screen destroys its state — the class of bug the handoff §5 already
   updates so asynchronous completions preserve other screens' edits;
 - moves focus to the screen's `h1` (`tabIndex={-1}`) on every screen change and scrolls
   to top on phones;
-- keeps platform recovery (`SetupPlatformRecovery`) and the final `setup_completed` write.
+- keeps the final `setup_completed` write. The proposed `SetupPlatformRecovery`
+  requirement was removed; saved invalid IM settings remain for repair in Settings.
   Hub model recovery follows C6; `SetupModelRecovery` remains its shipped Direct owner and
   is not repurposed to bypass Hub setup.
 
@@ -139,8 +144,10 @@ instead of unmounting; the three story cards become the handoff snapshot source.
 
 ### 4.3 Screen 2 — model providers (new, the bulk of the work)
 
-Composition, top to bottom: three provider cards → inbound wires → gateway card →
-outbound wires → three assistant destinations → summary line → reserved capsule slot.
+Historical composition proposal, top to bottom: three provider cards → inbound wires →
+gateway card → outbound wires → three assistant destinations → summary line. The
+reserved capsule slot was removed; use the current binding C6 and ProvidersScreen for
+the migration entry.
 
 - **Slots.** 1–2 are providers detected on this machine or already added; when fewer than
   two are known, fill with OpenAI then Anthropic. Slot 3 is always "Add more" (dashed
@@ -162,13 +169,12 @@ outbound wires → three assistant destinations → summary line → reserved ca
   connected treatment once a provider is ready.
 - **Summary line** (`aria-live`): pending selection / added / error / none, with the
   C1 selected takeover copy; counts/status follow the existing migration owner, with no copy-only guarantee.
-- **Capsule.** `ImportKeysNotice` moves here, keeping its persisted non-nagging
-  dismissal. Count only keys in complete unblocked key-only groups (C6), with blocked
-  detections still visible for explanation; give it a reserved slot so dismissing it
-  cannot move the primary action.
+- **Migration entry (superseded proposal).** The proposed `ImportKeysNotice` capsule
+  was removed. The current main action opens the controlled MigrationDialog; identity
+  dismissal and complete-backend consent follow binding C6.
 - **Import dialog.** Follow C6's full-scan, transitive backend consent grouping. Cards,
-  capsule and Detected tab share `providerSelection`; L2 must adapt/extract the existing
-  `MigrationDialog` owner because its shipped props keep local state. Preserve blockers and
+  the main action and Detected tab share selection through the existing controlled
+  `MigrationDialog` owner. Preserve blockers and
   linked rows outside the entry filter. API-key-only setup cannot submit mixed OAuth groups.
   Owner-ratified D10 delegates primary/Detected actions to that feature's review with the
   exact consequence and Not now / Start migration; only its explicit confirmation applies.
@@ -310,8 +316,9 @@ C1 (`docs/plans/setup-three-screen/copy-contract.json`) is the proposed copy tab
 source of key names; handoff §8 is where its strings came from. New namespaces:
 `onboarding.flow.*` (L1), `onboarding.providers.*` and `onboarding.import.*` (L2), and new
 `onboarding.setup.*` / `onboarding.route.*` leaves (L3). Six shipped strings change: the four
-welcome/access ones are L1's, the two setup headings are L3's. The capsule keeps
-`settings.models.importNotice.*` for the discovery sentence, help link and dismissal label,
+welcome/access ones are L1's, the two setup headings are L3's. The proposed capsule
+copy was superseded by the current main-action migration entry; legacy
+`settings.models.importNotice.*` remains historical context,
 and the import dialog keeps `settings.models.migration.{blocked,errors,notes,source}.*` for
 the explanations it renders, while setup chrome reads `onboarding.import.*`. `_migration_copy`
 records D10's owner-ratified takeover copy and the delegation boundary. D8 allocates setup
@@ -320,7 +327,7 @@ rendering and behavior. No display string is hardcoded in a component.
 
 ### 4.10 Accessibility
 
-Focus to `h1` on screen change; `aria-live` on summary, status pill, capsule and progress;
+Focus to `h1` on screen change; `aria-live` on summary, status pill and progress;
 `aria-pressed` on cards, tabs and provider buttons; labelled Switches and icon buttons;
 tooltip via `aria-describedby` + `aria-expanded`; dialog focus trap with focus restored to
 the trigger; Escape and outside click close menus, tooltips and dialogs (the import dialog
@@ -340,7 +347,7 @@ separate owner authorization and contracts on master; no lane may reinterpret th
   `setupFlow.test.ts` covering sequence, navigation and actual React consumption of shared
   state, including a late update after another screen changes the route draft.
 - **C3 Geometry and DOM hooks** → `contracts.md` §C3: the single shell-rendered anchor
-  pair, the reserved capsule slot, the class names the handoff snapshots read across
+  pair, the class names the handoff snapshots read across
   screens, and the tier rule (consume `--ob-*`, restate inside the existing bands, never
   invent a new one).
 - **C4 Entry gate** → `contracts.md` §C4: the correlated candidate predicate and its producers, what stays
@@ -356,7 +363,7 @@ separate owner authorization and contracts on master; no lane may reinterpret th
 | --- | --- | --- | --- |
 | L0 contracts | orchestrator; current repair delegated to this executor | `docs/plans/2026-09-21-setup-three-screen-*.md`, `onboarding/setupFlow.ts`, the C1 fixture | product behavior |
 | L1 shell + intro + motion | codex | `Wizard.tsx` (flow machine region), `steps/Welcome.tsx`, `onboarding/setupHandoff.ts`, `onboarding.css` shell/tier/CTA sections, `AccessTiles.tsx`, `ui/e2e/onboarding-fidelity/{fixture.tsx,support.ts,geometry.spec.ts,loop.spec.ts}`, i18n `onboarding.flow.*` and the four changed welcome/access strings | screen 2/3 internals |
-| L2 providers screen | claude | new `onboarding/providers/**`, new `onboarding-providers.css`, `ImportKeysNotice.tsx`, the `AddApiKeyDialog` form extraction, `MigrationDialog`'s minimal controlled-state/copy adaptation and shared grouping reuse, new `ui/e2e/onboarding-fidelity/{provider-support.ts,providers.spec.ts}` and `hub-ownership.spec.ts`, i18n `onboarding.providers.*` / `onboarding.import.*` | `Wizard.tsx` outside the screen registry entry it adds last, screen 3 files, migration backend/cleanup/custody/recovery semantics, `onboarding.css`, L1's `fixture.tsx` / `support.ts` / `geometry.spec.ts` |
+| L2 providers screen (historical assignment) | claude | new `onboarding/providers/**`, new `onboarding-providers.css`, the `AddApiKeyDialog` form extraction, `MigrationDialog`'s controlled-state/copy adaptation and shared grouping reuse, new `ui/e2e/onboarding-fidelity/{provider-support.ts,providers.spec.ts}` and `hub-ownership.spec.ts`, i18n `onboarding.providers.*` / `onboarding.import.*`; the proposed `ImportKeysNotice` move was removed | `Wizard.tsx` outside the screen registry entry it adds last, screen 3 files, migration backend/cleanup/custody/recovery semantics, `onboarding.css`, L1's `fixture.tsx` / `support.ts` / `geometry.spec.ts` |
 | L3 assistants + gate | codex | `AssistantRow.tsx`, `steps/AgentDetection.tsx`, new `onboarding/DefaultRouteDialog.tsx`, new `onboarding-assistants.css`, `Wizard.tsx` `complete()` region, `ui/e2e/onboarding-fidelity/connections.spec.ts`, i18n `onboarding.setup.*` / `onboarding.route.*` and the two changed setup headings | screen 2 files, `onboarding.css` shell sections |
 | L4 scenarios + acceptance | codex | `tests/scenarios/auth_setup/**`, acceptance evidence, owner checklist | UI implementation |
 
@@ -385,7 +392,7 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
   the anchor invariant. It ships without screen 2 and without changing readiness; the interim
   registry must not expose an empty providers step just because final C2 names one.
 - **PR2** (L2) starts in parallel with PR1, because everything it owns — the stage, the
-  dialogs, the capsule move, the shared API-key form extraction — is new files plus shared-owner
+  dialogs and the shared API-key form extraction — is new files plus shared-owner
   adaptations, and it builds against C2 with its own test harness. It declares
   `requires #PR1 merged first`, and its one `Wizard.tsx` registry line plus its fixture
   integration land as a final commit after PR1 is on `master`. D10 and C6 bootstrap/runtime
@@ -409,13 +416,13 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
 - Behavior: the onboarding fixture harness (`ui/e2e/onboarding-fidelity`) extended to mock
   `/api/models/sources`, `/api/models/runtime/status` and `/api/models/agents/*` beside the
   existing scan/apply routes, asserting rules rather than copied numbers — anchor equality
-  across three screens × two languages × six viewports, capsule dismissal leaving the action
+  across three screens × two languages × six viewports, migration dismissal leaving the action
   in place, stable-frame tab switching, handoff bail-out under reduced motion, phone
   scroll-to-top, no horizontal overflow.
 - Cross-boundary: at least one end-to-end case that pierces shell → screen 2 → screen 3 →
   `complete()` with real (non-ASCII) data, since two mocked halves prove nothing about the
   boundary.
-- Migration consumption: L2 tests cards/capsule/Detected → the existing complete-group
+- Migration consumption: L2 tests cards/main action/Detected → the existing complete-group
   confirmation → confirmed receipt → refreshed source/supply presentation. Verify no apply
   from selection/navigation/runtime start, Not now preserves native state, mixed OAuth groups
   remain blocked for setup, zero/error callbacks do not claim success, and Settings behavior
@@ -577,7 +584,7 @@ before feature implementation and explicit authority before #2082 merge remain o
 | D3 — runtime setup | Existing approved `model-hub-native-takeover.md` flow, adopted by orchestrator: automatically prepare runtime on active entry; active-provider config/bootstrap, C6 support preflight and admitted ensure/install/start/readback for all modes; unsupported recovery preserves the default Hub requirement and healthy running Hub. No enable/install-confirmation dialog and no automatic credential takeover |
 | D4 — shared model route | Orchestrator-ratified bounded technical interpretation (not owner feature approval): one designated builtin setup Agent per installed/enabled backend, explicit named target if no builtin, exact saved menu model, shared order projected through each target's reviewed exact-hop membership. Preserve other menu-model routes, default and Agent models. C6 specifies hydration, repair and partial-write retry |
 | D5 — setup prerequisite | Owner-ratified Hub-only setup; unsupported/error/disabled config never creates Direct completion. Disabling belongs to Settings afterward. C4 retains correlated Hub readiness and healthy Hub independent of installation; C2 preserves config, retry/guide/Back and drafts. Specific known-by-design resolution, no gate waiver |
-| D6 — handoff §13 | Concise recommendations: destinations logo/name, reference English wording, capsule restoration, dashed Add-more. No native Pencil inspection or design-source synchronization claimed |
+| D6 — handoff §13 | Historical recommendations: destinations logo/name, reference English wording, proposed capsule restoration (superseded), dashed Add-more. No native Pencil inspection or design-source synchronization claimed |
 | D7 — vendor list | Orchestrator decision: shipped catalog/order, no prototype Cohere; no backend catalog change |
 | D8 — copy scope | Orchestrator decision: setup copy scope separate from Settings, with takeover copy selected by owner D10. Minimal controlled-state/copy adaptation of the existing migration owner is future L2 work |
 | D9 — row identity | Orchestrator-ratified technical interpretation with D4. Model-ranked `(source_id, model_id)` remains required. Unapproved source-ranking substitution withdrawn. Exact menu model vs upstream model, membership projection and successful manual-override readback specified with D4; no arbitrary Agent-model changes |
@@ -603,7 +610,7 @@ for ratification. Merge #2082 and feature start remain separately gated.
 
 Desktop shell loading page; Model Hub service semantics and any backend routing redesign;
 production credential-scan behavior beyond reusing scan/apply; macOS menu bar and other
-OS-layer work; IM platform configuration in onboarding (already moved to Settings —
-`SetupPlatformRecovery` remains only as a recovery path); handoff §11's adjacent changes,
+OS-layer work; IM platform configuration in onboarding (already moved to Settings;
+the proposed `SetupPlatformRecovery` was removed); handoff §11's adjacent changes,
 which landed through #2033/#2047/#2050/#2051/#2058/#2067/#2068/#2069 and are re-verified
 here only where they touch setup.

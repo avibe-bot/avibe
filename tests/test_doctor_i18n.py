@@ -400,6 +400,31 @@ def test_doctor_dependency_status_stays_machine_data_and_out_of_sentence(
     assert all("尚未就绪" in item["message"] for item in items if item.get("code") in expected)
 
 
+def test_doctor_ready_and_unsupported_dependencies_keep_stable_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {"id": "askill", "required": True, "installed": True, "status": "ready", "version": "1.0"},
+                {"id": "avault", "required": False, "installed": False, "status": "unsupported"},
+            ]
+        },
+    )
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    ready = next(item for item in items if item.get("code") == "dependencies.askill.ready")
+    unsupported = next(item for item in items if item.get("code") == "dependencies.avault.platform_unsupported")
+    assert ready["status"] == "pass"
+    assert unsupported["status"] == "warn"
+    assert "dependency_reason" not in ready
+    assert "dependency_required" not in unsupported
+
+
 @pytest.mark.parametrize(
     ("probe_reason", "label_marker", "english_label"),
     [
