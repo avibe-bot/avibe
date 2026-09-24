@@ -788,8 +788,9 @@ _CODEX_PROVIDER_FIELDS: dict[str, str] = {
 }
 
 
-# The nested tables Codex deserializes strictly (unknown keys rejected, the
-# required ones present), from the same schema. A value is a kind name, a
+# The nested tables Codex deserializes (required keys present, known ones of
+# their declared type), from the same schema. Unknown keys are ignored: only
+# `--strict-config`, which launches never pass, rejects them. A value is a kind name, a
 # nested spec, or a tuple of alternative specs (a tagged enum).
 _CodexSpec = dict[str, object]
 _COMMAND_SPEC: _CodexSpec = {"command": "text", "args": "texts", "timeout_ms": "positive_count"}
@@ -853,8 +854,8 @@ def _codex_table_well_typed(spec: object, value: object) -> bool:
         fields, required = spec
         return (
             isinstance(value, dict)
-            and required <= value.keys() <= fields.keys()
-            and all(_codex_table_well_typed(fields[key], item) for key, item in value.items())
+            and required <= value.keys()
+            and all(_codex_table_well_typed(fields[key], item) for key, item in value.items() if key in fields)
         )
     # A literal-choice tuple, such as a variant tag.
     return value in spec

@@ -343,7 +343,6 @@ def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home
     '{ aws = { profile = 1 }, http_headers = { X = "y" } }',
     '{ aws = { credential_export = { args = ["x"] } } }',
     '{ auth = { command = "fixture", timeout_ms = 0 } }',
-    '{ auth = { command = "fixture", unknown = 1 } }',
     '{ gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", delivery = { kind = "query", name = "x" } } }',
 ])
 def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry):
@@ -364,7 +363,7 @@ def test_opencode_malformed_provider_entry_blocks_hub_mode(home, tmp_path, entry
 def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
     _write(home / ".codex/config.toml", 'model_providers = { relay = { http_headers = { X = "y" }, '
            'supports_websockets = true, wire_api = "responses", future_field = 1, '
-           'auth = { command = "fixture", args = ["x"], refresh_interval_ms = 0 }, '
+           'auth = { command = "fixture", args = ["x"], refresh_interval_ms = 0, extension = "y" }, '
            'aws = { profile = "p", credential_export = { command = "fixture" } }, '
            'gateway_oauth = { authorization_url = "a", client_id = "b", token_url = "c", '
            'delivery = { kind = "header", name = "X" } } } }\n')
