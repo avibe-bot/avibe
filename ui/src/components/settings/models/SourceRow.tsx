@@ -39,7 +39,6 @@ export const SourceRow: React.FC<{
     <button
       type="button"
       data-source-id={source.id}
-      aria-label={source.display_name}
       onClick={(event) => onOpen(source, event.currentTarget)}
       className={cn(
         'flex h-auto min-h-[96px] w-full items-center gap-2.5 rounded-[10px] border border-border bg-background px-3 py-2 text-left transition-colors hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',

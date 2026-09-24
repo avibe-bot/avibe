@@ -28,6 +28,8 @@
   Keep each source row as one full-card opener and graph endpoint, so desktop
   wires retain the card's right-edge midpoint. The global eye must not open
   a source or highlight one source's wires.
+  Let native button naming expose the rendered kind, protocol, state and
+  visible metadata; do not replace that content with a name-only ARIA label.
 - Order source-card badges as kind then protocol. API key is cyan, subscription
   retains its semantic accent, and protocol is neutral with no vendor/domain
   prefix. Endpoint details remain available separately.
@@ -36,6 +38,8 @@
 
 Use hermetic tests for allocation, OAuth replay, source-bound metadata reads,
 provider shapes, missing/unsafe metadata, account switching, and privacy.
+Run the config/contract suite, including byte-identical adapter-interface
+mirrors and live-file authority closure, whenever changing the adapter boundary.
 Exercise the React consumers and browser fixture in English and Chinese,
 desktop and mobile, light and dark. Run the UI build and changed-file lint.
 GitHub CI and the exact-head Codex review remain delivery gates.

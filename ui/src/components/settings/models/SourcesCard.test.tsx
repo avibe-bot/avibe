@@ -52,7 +52,7 @@ describe('SourcesCard footer', () => {
     const title = screen.getByText('Retained source');
     expect(title.className).toContain('block');
     expect(title.nextElementSibling?.className).toContain('flex');
-    expect(screen.getByRole('button', { name: 'Retained source' }).className).toContain('min-h-[96px]');
+    expect(screen.getByRole('button', { name: /^Retained source/ }).className).toContain('min-h-[96px]');
   });
 
   it.each(['en', 'zh'])('uses one header toggle for all account, URL and key details in %s', async (lng) => {
@@ -66,6 +66,8 @@ describe('SourcesCard footer', () => {
       <SourcesCard read={readyRegion(rows)} onRetry={vi.fn()} onOpenSource={onOpenSource} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
     </I18nextProvider>;
     const view = render(tree);
+    expect(screen.getByRole('button', { name: /private-relay\.example\/v1.*sk-…7890/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /owner@example\.com/ })).toBeTruthy();
     const toggle = screen.getByRole('button', { name: locale.t('settings.models.upstream.hidePrivateDetails') });
     expect(toggle.closest('[data-source-id]')).toBeNull();
     expect(view.container.querySelector('button button')).toBeNull();
@@ -75,6 +77,12 @@ describe('SourcesCard footer', () => {
     for (const value of ['private-relay.example', 'sk-…7890', 'owner@example.com']) {
       expect(view.container.innerHTML).not.toContain(value);
     }
+    expect(screen.queryByRole('button', { name: /private-relay\.example|sk-…7890|owner@example\.com/ })).toBeNull();
+    expect(screen.getByRole('button', { name: (name) => [
+      locale.t('settings.models.upstream.kind.apiKey'),
+      'Anthropic Messages',
+      locale.t('settings.models.upstream.hiddenDetails'),
+    ].every((part) => name.includes(part)) })).toBeTruthy();
     const placeholders = screen.getAllByText(lng === 'zh' ? '已隐藏' : 'Hidden', { exact: true });
     expect(placeholders).toHaveLength(2);
     for (const placeholder of placeholders) {

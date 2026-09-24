@@ -48,6 +48,21 @@ describe('SourceRow', () => {
     expect(screen.getByText(/Available · not currently supplying|可用 · 当前未使用/i)).toBeTruthy();
   });
 
+  it.each(['en', 'zh'])('includes all visible row metadata in the accessible name in %s', (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    render(<I18nextProvider i18n={locale}>
+      <SourceRow source={{ ...source, base_url: 'https://relay.example/v1' }} onOpen={vi.fn()} />
+    </I18nextProvider>);
+    expect(screen.getByRole('button', { name: (name) => [
+      'Production',
+      locale.t('settings.models.upstream.kind.apiKey'),
+      'Anthropic Messages',
+      'relay.example/v1',
+      'sk-ant-…1234',
+      locale.t('settings.models.upstream.state.standby'),
+    ].every((part) => name.includes(part)) })).toBeTruthy();
+  });
+
   it('puts the highlighted API key badge before the neutral protocol without a host prefix', () => {
     const { container } = render(
       <I18nextProvider i18n={i18n}>
@@ -96,7 +111,7 @@ describe('SourceRow', () => {
     await user.keyboard('{Enter}');
     expect(screen.getByText('账号@example.com')).toBeTruthy();
     expect(onOpen).not.toHaveBeenCalled();
-    const opener = screen.getByRole('button', { name: 'OpenAI 2' });
+    const opener = screen.getByRole('button', { name: /^OpenAI 2/ });
     await user.click(opener);
     expect(onOpen).toHaveBeenCalledWith(subscription, opener);
   });

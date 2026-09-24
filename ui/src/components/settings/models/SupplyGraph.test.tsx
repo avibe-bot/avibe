@@ -70,7 +70,7 @@ describe('SupplyGraph', () => {
       return element as SVGPathElement;
     });
     expect(path.getAttribute('d')).toBe('M 310 70 C 380 70, 380 90, 450 90');
-    const opener = view.getByRole('button', { name: 'OpenAI' });
+    const opener = view.getByRole('button', { name: /^OpenAI/ });
     fireEvent.focusIn(opener);
     await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(true));
     const eye = view.getByRole('button', { name: i18n.t('settings.models.upstream.hidePrivateDetails') });
