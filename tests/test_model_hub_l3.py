@@ -8633,73 +8633,6 @@ def test_top_level_authentication_rejection_is_classified_without_forging_protoc
         )
 
 
-def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:
-    module_path = Path(__file__).parents[1] / "vibe/model_hub_runtime/adapter.py"
-    module_source = module_path.read_text(encoding="utf-8")
-    tree = ast.parse(module_source)
-    assert _PROTOCOL_OBSERVATION_TAXONOMY.keys() == set(SOURCE_PROTOCOLS)
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["anthropic"].request_body == {
-        "max_tokens": 0,
-        "messages": [],
-    }
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_path != _PROTOCOL_OBSERVATION_TAXONOMY[
-        "openai_chat"
-    ].request_path
-    assert all(
-        "model" not in taxonomy.request_body
-        for taxonomy in _PROTOCOL_OBSERVATION_TAXONOMY.values()
-    )
-    consumers = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"_probe_protocol_response", "_probe_oauth_protocol_response"}
-    }
-
-    assert consumers.keys() == {
-        "_probe_protocol_response",
-        "_probe_oauth_protocol_response",
-    }
-    assert "json={}" not in module_source
-    assert '"data": "{}"' not in module_source
-    assert "_endpoint_for_protocol(" not in module_source
-    for consumer in consumers.values():
-        consumer_source = ast.get_source_segment(module_source, consumer)
-        assert consumer_source is not None
-        assert "_PROTOCOL_OBSERVATION_TAXONOMY" in consumer_source
-        calls = [node for node in ast.walk(consumer) if isinstance(node, ast.Call)]
-        assert any(
-            isinstance(call.func, ast.Name) and call.func.id == "_parse_protocol_authenticated_evidence"
-            for call in calls
-        )
-        compared_statuses = {
-            constant.value
-            for compare in ast.walk(consumer)
-            if isinstance(compare, ast.Compare)
-            for constant in ast.walk(compare)
-            if isinstance(constant, ast.Constant)
-            and isinstance(constant.value, int)
-            and not isinstance(constant.value, bool)
-        }
-        assert not compared_statuses
-
-    auth_branch_offenders = []
-    for function in (
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name not in {
-            "_parse_protocol_authenticated_evidence",
-        }
-    ):
-        for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):
-            condition = ast.unparse(branch.test)
-            branch_source = ast.unparse(branch)
-            if any(token in condition for token in ("status", "error")) and "_AuthenticationEvidence" in branch_source:
-                auth_branch_offenders.append((function.name, condition))
-    assert not auth_branch_offenders
-
-
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
     query = "api-version=2026-07-23"
 
@@ -8736,10 +8669,46 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
     assert len(paths) == len(SOURCE_PROTOCOLS)
     assert len(set(paths)) == len(paths)
     assert {request_query for _path, request_query, _body in requests} == {query}
-    assert [body for _path, _query, body in requests] == [
-        dict(_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_body)
-        for protocol in SOURCE_PROTOCOLS
-    ]
+    # Model-free bodies fail request validation before a relay schedules capacity.
+    assert dict(zip(SOURCE_PROTOCOLS, (body for _path, _query, body in requests))) == {
+        "anthropic": {"max_tokens": 0, "messages": []},
+        "openai_responses": {},
+        "openai_chat": {},
+    }
+
+
+@pytest.mark.parametrize("status", (200, 401))
+def test_protocol_observation_classifies_from_the_body_not_the_status(status) -> None:
+    """A status code alone neither proves an interface nor authenticates a key."""
+
+    async def scenario() -> list:
+        async def shapeless(_request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok"}, status=status)
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", shapeless)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            return [
+                await _probe_protocol_response(
+                    vendor="custom",
+                    protocol=protocol,
+                    base_url=f"http://127.0.0.1:{port}/v1",
+                    secret="test-observation-key",
+                )
+                for protocol in SOURCE_PROTOCOLS
+            ]
+        finally:
+            await runner.cleanup()
+
+    for evidence in asyncio.run(scenario()):
+        assert evidence.protocol is _ProtocolProof.UNPROVEN
+        assert evidence.authentication is not _AuthenticationEvidence.ACCEPTED
 
 
 def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:

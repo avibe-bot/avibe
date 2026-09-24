@@ -1300,28 +1300,6 @@ def test_chain_write_rejects_models_outside_the_current_menu(
     assert store.load().to_payload() == before
 
 
-def test_refresh_ignores_preexisting_unrelated_interruption(tmp_path):
-    menu_model = "claude-opus-4-6"
-    source = _source("src_refresh02", (menu_model,))
-    broken = _source("src_refresh03", ("other",), status="cooldown")
-    broken.state = ModelHubSourceStateConfig(
-        status="cooldown",
-        retry_at="2099-01-01T00:00:00Z",
-        detail_key="models.source.cooldown.rate_limited",
-    )
-    config = _config([source, broken], model=menu_model)
-    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(broken.id, "other"),)
-    )
-    adapter = FakeAdapter(discovered=(menu_model,))
-    service, _store, _ = _service(tmp_path, config, adapter)
-
-    result = asyncio.run(service.refresh_source(source.id))
-
-    assert result["removed_hops"] == []
-    assert result["interrupted"] == []
-
-
 def test_engine_binding_preserves_empty_inventory(tmp_path):
     source = _source("src_empty01", (), vendor="openai")
     config = _config([source], model="requested")
@@ -1409,48 +1387,6 @@ def test_set_agent_chain_reports_removed_hops_and_syncs_transport_targets(tmp_pa
     assert set(adapter.synced[0][1].route_model_ids) == {
         model.id for agent in config.agents.values() for model in agent.models if model.id != menu_model
     }
-
-
-def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
-    menu_model = "claude-opus-4-6"
-    first = _source("src_chain008", (menu_model,))
-    second = _source("src_chain009", (menu_model,))
-    broken = _source(
-        "src_chain010",
-        ("other",),
-        status="cooldown",
-    )
-    broken.state = ModelHubSourceStateConfig(
-        status="cooldown",
-        retry_at="2099-01-01T00:00:00Z",
-        detail_key="models.source.cooldown.rate_limited",
-    )
-    config = _config([first, second, broken], model=menu_model)
-    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(broken.id, "other"),)
-    )
-    service, store, adapter = _service(tmp_path, config)
-
-    result = asyncio.run(
-        service.set_agent_chain(
-            "claude",
-            menu_model,
-            {
-                "hops": [
-                    {"source_id": second.id, "model_id": menu_model},
-                    {"source_id": first.id, "model_id": menu_model},
-                ]
-            },
-        )
-    )
-
-    assert result["interrupted"] == []
-    assert len(adapter.synced) == 1
-    assert set(adapter.synced[0][-1].route_model_ids) == {
-        "other", *(model.id for agent in config.agents.values() for model in agent.models
-                   if model.id not in {menu_model, "claude-sonnet-4-6"})
-    }
-    assert [hop.source_id for hop in store.load().agents["claude"].routes[menu_model].hops] == [second.id, first.id]
 
 
 def test_source_creation_cancellation_revokes_unsaved_credential(tmp_path):
@@ -1802,44 +1738,58 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert adapter.revoked == ["cred_00000001"]
 
 
-def test_observation_terminal_legality_has_no_service_or_runtime_copy():
-    from ast import AsyncFunctionDef, Attribute, Call, FunctionDef, Name, parse, walk
-    from pathlib import Path
+@pytest.mark.parametrize(
+    "illegal_observation",
+    [
+        SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol=None,
+            discovery=ObservationDiscovery.SUCCEEDED,
+            models=(DiscoveredModel(id="claude-opus-4-6"),),
+        ),
+        SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol="anthropic",
+            discovery=ObservationDiscovery.FAILED,
+            models=(DiscoveredModel(id="claude-opus-4-6"),),
+        ),
+        SourceObservation(
+            outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+            reachable=True,
+            authenticated=True,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            models=(),
+        ),
+    ],
+    ids=["observed_without_protocol", "failed_discovery_with_models", "auth_failed_but_authenticated"],
+)
+def test_illegal_adapter_observation_is_never_previewed_and_revokes_the_credential(
+    tmp_path,
+    illegal_observation,
+):
+    adapter = FakeAdapter()
+    adapter.observation = illegal_observation
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
 
-    root = Path(__file__).parents[1]
-    service_tree = parse(
-        (root / "core/handlers/model_hub/service.py").read_text(encoding="utf-8")
-    )
-    runtime_tree = parse(
-        (root / "vibe/model_hub_runtime/adapter.py").read_text(encoding="utf-8")
-    )
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.observe_source(
+                {
+                    "vendor": "anthropic",
+                    "base_url": None,
+                    "key": "sk-test-illegal-observation",
+                }
+            )
+        )
 
-    def calls(function) -> set[str]:
-        return {
-            node.func.id if isinstance(node.func, Name) else node.func.attr
-            for node in walk(function)
-            if isinstance(node, Call) and isinstance(node.func, (Name, Attribute))
-        }
-
-    validator = next(
-        node
-        for node in walk(service_tree)
-        if isinstance(node, FunctionDef) and node.name == "_validate_observation"
-    )
-    producer = next(
-        node
-        for node in walk(runtime_tree)
-        if isinstance(node, AsyncFunctionDef) and node.name == "observe_source"
-    )
-    assert "validate_source_observation" in calls(validator)
-    assert "make_source_observation" in calls(producer)
-    assert "SourceObservation" not in calls(producer)
-    assert not any(
-        isinstance(node, Attribute)
-        and isinstance(node.value, Name)
-        and node.value.id == "ObservationOutcome"
-        for node in walk(validator)
-    )
+    assert exc.value.code == "discovery_failed"
+    assert store.load().sources == []
+    assert adapter.revoked == ["cred_00000001"]
 
 
 def test_unsaved_observation_cancellation_revokes_before_settling(tmp_path):
@@ -1927,142 +1877,94 @@ def test_unsaved_observation_revoke_failure_is_journaled_and_reconciled(tmp_path
     assert adapter.revoked == ["cred_00000001"]
 
 
-def test_unsaved_observation_fails_when_cleanup_is_not_durable(tmp_path):
+@pytest.mark.parametrize(
+    "operation",
+    ["observe", "create_source", "replace_credential", "retarget_base_url"],
+)
+def test_unsaved_observation_fails_when_cleanup_is_not_durable(tmp_path, operation):
+    source = _source("src_cleanup01", vendor="custom")
+    source.base_url = "https://old-relay.example/v1"
     adapter = FakeAdapter()
     adapter.revoke_error = True
-    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+        reachable=True,
+        authenticated=False,
+        protocol=None,
+        discovery=ObservationDiscovery.NOT_ATTEMPTED,
+        models=(),
+    )
+    service, store, _ = _service(tmp_path, _config([source]), adapter)
+    before = store.load().to_payload()
 
     def fail_journal_write(*_args, **_kwargs):
         raise OSError("journal is unavailable")
 
     service.revocations.add = fail_journal_write
+    mutation = {
+        "observe": lambda: service.observe_source(
+            {
+                "vendor": "anthropic",
+                "base_url": None,
+                "key": "sk-test-observation-cleanup-failure",
+            }
+        ),
+        "create_source": lambda: service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Key",
+                "key": "sk-test-create-cleanup-failure",
+            }
+        ),
+        "replace_credential": lambda: service.replace_credential(
+            source.id, {"key": "sk-test-replacement-cleanup-failure"}
+        ),
+        "retarget_base_url": lambda: service.patch_source(
+            source.id, {"base_url": "https://new-relay.example/v1"}
+        ),
+    }[operation]
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(mutation())
+
+    assert exc_info.value.code == "engine_down"
+    assert store.load().to_payload() == before
+    assert service.revocations.list() == []
+
+
+def test_created_source_commit_failure_fails_when_cleanup_is_not_durable(tmp_path):
+    adapter = FakeAdapter()
+    adapter.revoke_error = True
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+    journal_add = service.revocations.add
+
+    def journal_only_the_observation(source_id, credential_ref):
+        if source_id != "observation":
+            raise OSError("journal is unavailable")
+        return journal_add(source_id, credential_ref)
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    service.revocations.add = journal_only_the_observation
+    store.save = fail_save
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
-            service.observe_source(
+            service.create_source(
                 {
+                    "kind": "api_key",
                     "vendor": "anthropic",
-                    "base_url": None,
-                    "key": "sk-test-observation-cleanup-failure",
+                    "display_name": "Key",
+                    "key": "sk-test-create-commit-cleanup-failure",
                 }
             )
         )
 
     assert exc_info.value.code == "engine_down"
     assert store.load().sources == []
-    assert service.revocations.list() == []
-
-
-def test_credential_cleanup_settlement_has_one_durable_boundary():
-    from ast import AsyncFunctionDef, Attribute, Call, parse, walk
-    from pathlib import Path
-
-    tree = parse(
-        (Path(__file__).parents[1] / "core/handlers/model_hub/service.py").read_text(
-            encoding="utf-8"
-        )
-    )
-    raw_cleanup_callers = {
-        function.name
-        for function in walk(tree)
-        if isinstance(function, AsyncFunctionDef)
-        and any(
-            isinstance(node, Call)
-            and isinstance(node.func, Attribute)
-            and node.func.attr == "_rollback_credential"
-            for node in walk(function)
-        )
-    }
-
-    assert raw_cleanup_callers == {"_require_credential_cleanup"}
-
-
-def test_source_admission_uses_explicit_owners_and_keeps_verified_paths_proven():
-    from ast import AsyncFunctionDef, Attribute, Call, Name, parse, walk
-    from pathlib import Path
-
-    root = Path(__file__).parents[1]
-    production_trees = [
-        parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for directory in ("config", "core", "modules", "vibe")
-        for path in (root / directory).rglob("*.py")
-    ]
-    assert not any(
-        (
-            isinstance(node, Name)
-            and node.id == "_default_protocol"
-        )
-        or (
-            isinstance(node, Attribute)
-            and node.attr == "_default_protocol"
-        )
-        for tree in production_trees
-        for node in walk(tree)
-    )
-
-    def async_functions(path: Path) -> dict[str, AsyncFunctionDef]:
-        tree = parse(path.read_text(encoding="utf-8"), filename=str(path))
-        return {
-            node.name: node
-            for node in walk(tree)
-            if isinstance(node, AsyncFunctionDef)
-        }
-
-    def calls(function: AsyncFunctionDef) -> set[str]:
-        return {
-            (
-                node.func.id
-                if isinstance(node.func, Name)
-                else node.func.attr
-            )
-            for node in walk(function)
-            if isinstance(node, Call)
-            and isinstance(node.func, (Name, Attribute))
-        }
-
-    service_functions = async_functions(
-        root / "core/handlers/model_hub/service.py"
-    )
-    migration_functions = async_functions(
-        root / "core/handlers/model_hub/migration.py"
-    )
-
-    assert "_require_proven_source_payload" in calls(
-        service_functions["create_source"]
-    )
-    assert "_prepare_takeover" in calls(migration_functions["apply_native_migration"])
-    assert "_require_proven_source_payload" in calls(migration_functions["_prepare_takeover"])
-    oauth_calls = calls(service_functions["_create_oauth_source"])
-    assert "_observe_provisioned_credential" in oauth_calls
-    assert "_mark_source_unverified" in oauth_calls
-    assert "_mark_source_unverified" in calls(service_functions["create_source"])
-    assert "_mark_source_unverified" in calls(migration_functions["_prepare_takeover"])
-
-
-def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):
-    source = _source("src_manual001")
-    source.models.append(
-        ModelHubModelConfig(id="manual-model", provenance="manual")
-    )
-    broken = _source("src_manual002", ("other-model",), status="cooldown")
-    broken.state = ModelHubSourceStateConfig(
-        status="cooldown",
-        retry_at="2099-01-01T00:00:00Z",
-        detail_key="models.source.cooldown.rate_limited",
-    )
-    config = _config([source, broken])
-    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(broken.id, "other-model"),)
-    )
-    service, store, _ = _service(tmp_path, config)
-
-    result = asyncio.run(service.delete_custom_model(source.id, "manual-model"))
-
-    assert result["removed_hops"] == []
-    assert result["interrupted"] == []
-    assert [model.id for model in store.load().sources[0].models] == [
-        "claude-opus-4-6"
-    ]
+    assert {entry.source_id for entry in service.revocations.list()} == {"observation"}
 
 
 def test_manual_model_delete_preserves_explicit_route(tmp_path):
@@ -2079,58 +1981,6 @@ def test_manual_model_delete_preserves_explicit_route(tmp_path):
     assert result["removed_hops"] == []
     assert store.load().agents["claude"].routes[menu_model].hops == config.agents["claude"].routes[menu_model].hops
     assert service.agent_chain("claude", menu_model)["current"]["model_id"] == "manual-model"
-
-
-def test_delete_unused_source_ignores_preexisting_unrelated_gap(tmp_path):
-    menu_model = "claude-opus-4-6"
-    healthy = _source("src_delete02", (menu_model,))
-    unused = _source("src_delete03", ("unused-model",))
-    broken = _source("src_delete04", ("other-model",), status="cooldown")
-    broken.state = ModelHubSourceStateConfig(
-        status="cooldown",
-        retry_at="2099-01-01T00:00:00Z",
-        detail_key="models.source.cooldown.rate_limited",
-    )
-    config = _config([healthy], model=menu_model)
-    config.sources.extend((unused, broken))
-    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(broken.id, "other-model"),)
-    )
-    service, store, _ = _service(tmp_path, config)
-
-    result = asyncio.run(service.delete_source(unused.id))
-
-    assert result == {"removed_hops": [], "interrupted": []}
-    assert {source.id for source in store.load().sources} == {healthy.id, broken.id}
-
-
-def test_credential_replace_ignores_preexisting_unrelated_gap(tmp_path):
-    menu_model = "claude-opus-4-6"
-    healthy = _source("src_replace01", (menu_model,))
-    broken = _source("src_replace02", ("other-model",), status="cooldown")
-    broken.state = ModelHubSourceStateConfig(
-        status="cooldown",
-        retry_at="2099-01-01T00:00:00Z",
-        detail_key="models.source.cooldown.rate_limited",
-    )
-    config = _config([healthy], model=menu_model)
-    config.sources.append(broken)
-    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(broken.id, "other-model"),)
-    )
-    service, _store, adapter = _service(
-        tmp_path,
-        config,
-        FakeAdapter(discovered=(menu_model,)),
-    )
-
-    result = asyncio.run(
-        service.replace_credential(healthy.id, {"key": "replacement-key"})
-    )
-
-    assert result["removed_hops"] == []
-    assert result["interrupted"] == []
-    assert adapter.provisioned == ["replacement-key"]
 
 
 def test_delete_source_reports_and_then_prunes_exact_hops(tmp_path):
@@ -2250,65 +2100,82 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
     assert [model.id for model in persisted.models] == list(discovered)
 
 
-def test_all_interruption_guards_use_the_shared_baseline_comparator():
-    from ast import Attribute, AsyncFunctionDef, Name, parse, walk
-    from pathlib import Path
+_GAP_MENU_MODEL = "claude-opus-4-6"
 
-    tree = parse(
-        (Path(__file__).parents[1] / "core/handlers/model_hub/service.py").read_text(
-            encoding="utf-8"
-        )
+
+def _catalog_renaming(service, model_id):
+    baseline = next(
+        agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude"
     )
-    direct_baseline_guards = {
-        "delete_source",
-        "_write_agent_chain",
-        "set_agent_sources",
-        "delete_custom_model",
-    }
-    inventory_guards = {
-        "patch_source",
-        "replace_credential",
-        "refresh_source",
-    }
-    methods = {
-        node.name: node
-        for node in walk(tree)
-        if isinstance(node, AsyncFunctionDef)
-        and node.name in direct_baseline_guards | inventory_guards
-    }
+    return baseline, [
+        {**model, "display_name": "Renamed"} if model["id"] == model_id else model
+        for model in baseline
+    ]
 
-    def calls(method):
-        return [
-            (
-                node.func.id
-                if isinstance(node.func, Name)
-                else node.func.attr
-                if isinstance(node.func, Attribute)
-                else None
-            )
-            for node in walk(method)
-            if node.__class__.__name__ == "Call"
-        ]
 
-    inventory_finalizer = next(
-        node
-        for node in walk(tree)
-        if node.__class__.__name__ == "AsyncFunctionDef"
-        and node.name == "_finalize_successful_discovery"
+_PREEXISTING_GAP_MUTATIONS = {
+    "refresh_source": lambda service: service.refresh_source("src_gap00001"),
+    "retarget_base_url": lambda service: service.patch_source(
+        "src_gap00001", {"base_url": "https://new-relay.example/v1"}
+    ),
+    "replace_credential": lambda service: service.replace_credential(
+        "src_gap00001", {"key": "replacement-key"}
+    ),
+    "set_agent_chain": lambda service: service.set_agent_chain(
+        "claude",
+        _GAP_MENU_MODEL,
+        {
+            "hops": [
+                {"source_id": "src_gap00002", "model_id": _GAP_MENU_MODEL},
+                {"source_id": "src_gap00001", "model_id": _GAP_MENU_MODEL},
+            ]
+        },
+    ),
+    "set_agent_sources": lambda service: service.set_agent_sources(
+        "claude", {"order": ["src_gap00002", "src_gap00001"]}
+    ),
+    "set_agent_models": lambda service: service.set_agent_models(
+        "claude", *_catalog_renaming(service, "claude-haiku-4-5")
+    ),
+    "delete_custom_model": lambda service: service.delete_custom_model(
+        "src_gap00001", "manual-model"
+    ),
+    "delete_source": lambda service: service.delete_source("src_gap00003"),
+}
+
+
+@pytest.mark.parametrize("mutation", _PREEXISTING_GAP_MUTATIONS)
+def test_guards_ignore_a_preexisting_unrelated_interruption(tmp_path, mutation):
+    """Only interruptions a mutation introduces need confirmation."""
+    first = _source("src_gap00001", (_GAP_MENU_MODEL,), vendor="custom")
+    first.base_url = "https://old-relay.example/v1"
+    first.models.append(ModelHubModelConfig(id="manual-model", provenance="manual"))
+    second = _source("src_gap00002", (_GAP_MENU_MODEL,))
+    unused = _source("src_gap00003", ("unused-model",))
+    broken = _source("src_gap00004", ("other-model",), status="cooldown")
+    broken.state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2099-01-01T00:00:00Z",
+        detail_key="models.source.cooldown.rate_limited",
     )
-    assert "_guard_inventory_mutation" in calls(inventory_finalizer)
-    assert "_apply_discovered_models" in calls(inventory_finalizer)
-    assert "_commit_synced" in calls(inventory_finalizer)
+    config = _config([first, second], model=_GAP_MENU_MODEL)
+    config.sources.extend((unused, broken))
+    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(broken.id, "other-model"),)
+    )
+    service, store, _ = _service(
+        tmp_path, config, FakeAdapter(discovered=(_GAP_MENU_MODEL, "manual-model"))
+    )
+    before = store.load().to_payload()
 
-    for name in inventory_guards:
-        assert "_finalize_successful_discovery" in calls(methods[name])
-        assert "_guard_inventory_mutation" not in calls(methods[name])
-        assert "_apply_discovered_models" not in calls(methods[name])
-        assert "_introduced_interruptions" not in calls(methods[name])
+    result = asyncio.run(_PREEXISTING_GAP_MUTATIONS[mutation](service))
 
-    for name in direct_baseline_guards:
-        assert "_introduced_interruptions" in calls(methods[name])
-        assert "_would_interrupt" not in calls(methods[name])
+    assert result.get("interrupted", []) == []
+    assert result.get("removed_hops", []) == []
+    assert store.load().to_payload() != before
+    assert store.load().agents["claude"].routes["claude-sonnet-4-6"].hops == (
+        ModelHubRouteHopConfig(broken.id, "other-model"),
+    )
 
 
 def test_credential_target_and_refresh_capability_have_single_service_consumers():

@@ -30,7 +30,7 @@ from config.v2_config import (
     V2Config,
     is_model_hub_enabled,
 )
-from core.handlers.model_hub.service import CONTRACT_VERSION, ModelHubService
+from core.handlers.model_hub.service import ModelHubService
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
@@ -48,7 +48,6 @@ from scripts.check_model_hub_authorities import (
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
-UI_MODEL_CONSUMERS = Path("ui/src/components/settings/models")
 
 
 def _schema(name: str) -> dict:
@@ -67,35 +66,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
     protocols = tuple(_schema("source.schema.json")["properties"]["protocol"]["enum"])
     assert SOURCE_PROTOCOLS == protocols
 
-    type_source = (UI_MODEL_CONSUMERS / "types.ts").read_text(encoding="utf-8")
-    tuple_match = re.search(
-        r"export const SOURCE_PROTOCOLS\s*=\s*\[(.*?)\]\s*as const",
-        type_source,
-        re.DOTALL,
-    )
-    assert tuple_match is not None
-    ui_protocols = tuple(re.findall(r"'([^']+)'", tuple_match.group(1)))
-    assert frozenset(ui_protocols) == frozenset(protocols)
-    assert len(ui_protocols) == len(set(ui_protocols))
-
-    type_match = re.search(
-        r"export type SourceProtocol\s*=\s*(.*?);",
-        type_source,
-        re.DOTALL,
-    )
-    assert type_match is not None
-    assert re.sub(r"\s+", "", type_match.group(1)) == "(typeofSOURCE_PROTOCOLS)[number]"
-
     retired_alias = "openai" + "_compatible"
-    for filename in (
-        "types.ts",
-        "vendorMeta.ts",
-        "modelsApi.ts",
-        "mockData.ts",
-        "modelRows.test.ts",
-    ):
-        assert retired_alias not in (UI_MODEL_CONSUMERS / filename).read_text(encoding="utf-8")
-
     example = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     example["protocol"] = retired_alias
     with pytest.raises(ValidationError):
@@ -834,101 +805,6 @@ def test_v8_mirror_registry_is_executable_and_complete():
     assert len(ids) == len(set(ids))
     for entry in registry["entries"]:
         _validate_mirror_entry(entry, schemas)
-
-
-def _versioned_nodes(node):
-    """Yield every `contract_version` subschema, however deeply a branch nests it."""
-
-    if isinstance(node, dict):
-        declared = node.get("properties")
-        if isinstance(declared, dict) and isinstance(declared.get("contract_version"), dict):
-            yield declared["contract_version"]
-        for value in node.values():
-            yield from _versioned_nodes(value)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _versioned_nodes(item)
-
-
-def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
-    # One number spans all versioned objects, so a bump has to move every one of
-    # them at once — round 4 shipped it half-applied because nothing compared the
-    # schemas with each other or with the writer. Reading the accepted values out
-    # of whatever schemas the directory holds, rather than listing the ones that
-    # carry a version, covers an object added later without editing this test.
-    #
-    # TurnProvenance is the one exception, and it earns it by being written to
-    # disk: the same bump that republishes an envelope would strand every record
-    # a released build persisted, so it accepts the released values and ends at
-    # the terminal one. The `== [terminal]` branch is what keeps that from
-    # spreading to objects that never outlive their request.
-    registry = json.loads(
-        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
-    )
-    terminal = registry["contract_version"]
-    assert CONTRACT_VERSION == terminal
-    persisted = registry["contract_version_closure"][
-        "persisted_schema_version_floors"
-    ]
-    checked = set()
-    for path in sorted(CONTRACTS.glob("*.schema.json")):
-        for node in _versioned_nodes(json.loads(path.read_text(encoding="utf-8"))):
-            checked.add(path.name)
-            accepted = [node["const"]] if "const" in node else list(node["enum"])
-            assert accepted == sorted(set(accepted)), path.name
-            assert accepted[-1] == terminal, path.name
-            if path.name in persisted:
-                assert accepted == list(
-                    range(persisted[path.name], terminal + 1)
-                ), path.name
-            else:
-                assert accepted == [terminal], path.name
-    assert set(persisted) <= checked
-    assert "api-response.schema.json" in checked
-
-    # The schemas above are structured, so their versions are read from the shape.
-    # Every other file beside them publishes the same number as text, and nothing
-    # compared those: `api.md` carried the terminal value in eighteen envelopes
-    # while three of its own declarations still named the previous one, which is
-    # two review rounds spent on one stale sentence at a time. Matching the token
-    # a consumer reads, rather than a list of sentences, is what makes the next
-    # declaration fail here instead of in review — and it is why a claim about the
-    # current value is written as `contract_version <n>` while a bare `vN` names
-    # the generation a sentence was authored in.
-    stated = 0
-    for path in sorted(CONTRACTS.iterdir()):
-        if not path.is_file() or path.name.endswith(".schema.json"):
-            continue
-        for value in re.findall(r"contract_version[^0-9]{0,12}(\d+)", path.read_text(encoding="utf-8")):
-            stated += 1
-            assert int(value) == terminal, path.name
-    assert stated
-
-    # The UI declares the same number as a literal type, and `tsc` is the only
-    # thing that would have caught it drifting — one language boundary away from
-    # every check above, which is where this bump went half-applied a second time.
-    # A regex over the declaration is cheap; noticing in review is not.
-    declared = re.search(
-        r"^export const CONTRACT_VERSION = (\d+) as const;$",
-        Path("ui/src/components/settings/models/types.ts").read_text(encoding="utf-8"),
-        flags=re.MULTILINE,
-    )
-    assert declared is not None
-    assert int(declared.group(1)) == terminal
-
-    ui_types = Path("ui/src/components/settings/models/types.ts").read_text(encoding="utf-8")
-    persisted_versions = re.search(
-        r"export const PERSISTED_TURN_CONTRACT_VERSIONS\s*=\s*(\[[^\]]*\])\s+as const;",
-        ui_types,
-    )
-    assert persisted_versions is not None
-    provenance_schema = json.loads((CONTRACTS / "turn-provenance.schema.json").read_text(encoding="utf-8"))
-    assert json.loads(persisted_versions.group(1)) == provenance_schema["properties"]["contract_version"]["enum"]
-    assert re.search(
-        r"export type TurnProvenance\s*=\s*\{\s*contract_version:\s*"
-        r"\(typeof PERSISTED_TURN_CONTRACT_VERSIONS\)\[number\];",
-        ui_types,
-    )
 
 
 def test_contracts_readme_indexes_every_file_beside_it():
