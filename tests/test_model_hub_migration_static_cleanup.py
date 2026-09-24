@@ -314,3 +314,23 @@ def test_opencode_shell_key_keeps_the_endpoint_a_retained_oauth_entry_uses(home,
     assert json.loads(auth.read_text())["openrouter"] == oauth
     options = json.loads(config.read_text())["provider"]["openrouter"]["options"]
     assert options.get("baseURL") == "https://relay.example/api/v1"
+
+
+def test_opencode_shell_key_keeps_the_endpoint_a_retained_header_layer_uses(home, tmp_path):
+    config = home / ".config/opencode/opencode.json"
+    # Header auth is left native; the shell key is the importable row.
+    layer = {"baseURL": "https://relay.example/api/v1", "headers": {"Authorization": "Bearer fixture"}}
+    _write(config, json.dumps({"provider": {"openrouter": {"options": layer}}}))
+    _write(home / ".profile", f"export OPENROUTER_API_KEY='{KEY}'\\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, ()) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, _include_shell=False):
+        edit.apply()
+    assert json.loads(config.read_text())["provider"]["openrouter"]["options"] == layer
+
+
+def test_codex_malformed_provider_entry_blocks_hub_mode(home, tmp_path):
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))

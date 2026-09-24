@@ -16,9 +16,9 @@ import { useTranslation } from 'react-i18next';
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
-import { modelsApi } from '../settings/models/modelsApi';
-import type { Source, TurnProvenance } from '../settings/models/types';
+import type { TurnProvenance } from '../settings/models/types';
 import { CopyButton } from '../ui/copy-button';
+import { readNames, readRecord } from './failureDetailsReads';
 
 type Row = {
   key: string;
@@ -30,9 +30,6 @@ type Row = {
 };
 
 type Detail = { record: TurnProvenance; names: Record<string, string> };
-
-const sourceNames = (sources: Source[]): Record<string, string> =>
-  Object.fromEntries(sources.map((source) => [source.id, source.display_name]));
 
 // Drawn as the notice bubble's second line. The record is read up front, and
 // a turn with no readable record (direct mode, no gateway record, an ambiguous
@@ -54,10 +51,10 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
     setDetail(null);
     void (async () => {
       try {
-        const record = await modelsApi.getTurnProvenance(turnId);
+        const record = await readRecord(turnId);
         // Names are a courtesy: a role that cannot read Sources, or a source
         // deleted since, still gets the stable id.
-        const names = await modelsApi.listSources().then(sourceNames, () => ({}));
+        const names = await readNames();
         if (active) setDetail({ record, names });
       } catch {
         // Nothing to show is shown as nothing.

@@ -660,6 +660,12 @@ def _codex_items(
             continue
         for provider_id, provider in providers.items():
             if not isinstance(provider, dict):
+                # Codex deserializes the whole provider map before any Hub
+                # override applies, so one malformed entry fails every launch.
+                items.append(_blocked_item(
+                    "codex", f"{path}:{provider_id}", source_paths=(str(path),),
+                    config_blocker=True,
+                ))
                 continue
             key = _oauth_text(provider, "experimental_bearer_token")
             env_key = _oauth_text(provider, "env_key")

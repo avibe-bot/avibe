@@ -12,6 +12,7 @@ import zh from '../../i18n/zh.json';
 import { ApiCallError, modelsApi } from '../settings/models/modelsApi';
 import type { TurnProvenance } from '../settings/models/types';
 import { FailureDetails } from './FailureDetails';
+import { resetFailureDetailsCache } from './failureDetailsReads';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -46,17 +47,18 @@ const record = {
 beforeEach(() => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue([{ id: 'src_a', display_name: 'xAI 官方' }] as never);
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); resetFailureDetailsCache(); });
 
-function mount(message: WorkbenchMessage = notice, canManage = true) {
+function mount(message: WorkbenchMessage | WorkbenchMessage[] = notice, canManage = true) {
   const authorization = {
     remote: true, instanceKind: null, instanceRole: null,
     capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_chat: true, can_manage_instance: canManage },
   };
+  const messages = Array.isArray(message) ? message : [message];
   render(
     <I18nextProvider i18n={i18n}><ToastProvider>
       <InstanceAuthorizationContext.Provider value={authorization}>
-        <FailureDetails message={message} />
+        {messages.map((item) => <FailureDetails key={item.id} message={item} />)}
       </InstanceAuthorizationContext.Provider>
     </ToastProvider></I18nextProvider>,
   );
@@ -75,6 +77,14 @@ describe('failed-turn upstream details', () => {
     mount(notice, false);
     expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('shares one Sources read across the notices of a transcript', async () => {
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue(record);
+    const sources = vi.mocked(modelsApi.listSources);
+    mount([notice, { ...notice, id: 'second', metadata: { ...notice.metadata, turn_id: 'turn-2' } } as WorkbenchMessage]);
+    expect(await screen.findAllByRole('button', { name: '查看详情' })).toHaveLength(2);
+    expect(sources).toHaveBeenCalledTimes(1);
   });
 
   it('expands to the upstream status, error code and reason for every attempt', async () => {

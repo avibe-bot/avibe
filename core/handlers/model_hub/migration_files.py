@@ -413,8 +413,9 @@ def plan_native_cleanup(
                         if not reference:
                             continue
                     options.pop("apiKey", None)
-                    if vendor not in retained_auth:
-                        # A retained same-vendor credential keeps its endpoint.
+                    if vendor not in retained_auth and not options.get("headers"):
+                        # A retained same-vendor credential, in auth.json or as
+                        # this layer's header auth, keeps its endpoint.
                         options.pop("baseURL", None)
                     if not options:
                         provider.pop("options", None)
