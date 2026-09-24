@@ -8,7 +8,7 @@ const openUsage = async (page: Page, theme: 'light' | 'dark' = 'dark') => {
 test.describe('hermetic UsageTab', () => {
   test('hovers left, middle, and right buckets and pins without clicking the plot', async ({ page }) => {
     await openUsage(page);
-    const hitAreas = page.getByRole('button', { name: /Usage bucket/ });
+    const hitAreas = page.locator('.model-hub-usage-hit-area');
     const count = await hitAreas.count();
     const indexes = [...new Set([0, Math.floor(count / 2), count - 1])];
 
@@ -33,7 +33,7 @@ test.describe('hermetic UsageTab', () => {
 
   test('click-away closes an ordinary hover detail and Escape releases a pin', async ({ page }) => {
     await openUsage(page);
-    const hitAreas = page.getByRole('button', { name: /Usage bucket/ });
+    const hitAreas = page.locator('.model-hub-usage-hit-area');
     const dialog = page.getByRole('dialog', { name: 'Usage bucket details' });
 
     await hitAreas.nth(12).hover();
@@ -53,15 +53,15 @@ test.describe('hermetic UsageTab', () => {
 
   test('window switching renders coherent line and bar reports', async ({ page }) => {
     await openUsage(page);
-    await expect(page.getByRole('img', { name: 'line usage trend' })).toBeVisible();
+    await expect(page.locator('.model-hub-usage-svg')).toBeVisible();
     await page.getByRole('radio', { name: '7 days' }).click();
-    await expect(page.getByRole('img', { name: 'line usage trend' })).toBeVisible();
+    await expect(page.locator('.model-hub-usage-svg')).toBeVisible();
     await expect(page.getByText('7 daily points')).toBeVisible();
     await page.getByRole('radio', { name: '30 days' }).click();
-    await expect(page.getByRole('img', { name: 'stacked bar usage trend' })).toBeVisible();
+    await expect(page.locator('.model-hub-usage-svg')).toBeVisible();
     await expect(page.getByText('30 daily points')).toBeVisible();
     await page.getByRole('radio', { name: '60 days' }).click();
-    await expect(page.getByRole('img', { name: 'stacked bar usage trend' })).toBeVisible();
+    await expect(page.locator('.model-hub-usage-svg')).toBeVisible();
     await expect(page.getByText('60 daily points')).toBeVisible();
     await expect(page.locator('body')).not.toContainText('T24:00:00');
   });

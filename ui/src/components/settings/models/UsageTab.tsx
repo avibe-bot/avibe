@@ -407,11 +407,12 @@ function UsageChart({
     }, 100);
   };
 
-  const setHover = (index: number) => {
-    if (escapeDismissed || pinnedKey !== null || inspected !== null) return;
+  const setHover = (index: number, reopenAfterEscape = false) => {
+    if ((escapeDismissed && !reopenAfterEscape) || pinnedKey !== null || inspected !== null) return;
     cancelPendingHover();
     cancelHoverClear();
     const next = Math.max(0, Math.min(report.buckets.length - 1, index));
+    if (reopenAfterEscape) setEscapeDismissed(false);
     setDismissed(false);
     if (hovered === null || hovered === next) {
       setHovered(next);
@@ -419,12 +420,13 @@ function UsageChart({
     }
     pendingHoverTimer.current = window.setTimeout(() => {
       pendingHoverTimer.current = null;
-      if (escapeDismissed) return;
+      if (escapeDismissed && !reopenAfterEscape) return;
       setHovered(next);
     }, 100);
   };
   const openDetail = (index: number) => {
     if (pinnedKey !== null) return;
+    setEscapeDismissed(false);
     setDismissed(false);
     setInspected(index);
     setHovered(null);
@@ -545,8 +547,7 @@ function UsageChart({
               width={bars ? plotWidth / report.buckets.length : lineHitWidth}
               height={plotHeight}
               onPointerEnter={() => {
-                setEscapeDismissed(false);
-                setHover(index);
+                setHover(index, true);
               }}
               onClick={() => openDetail(index)}
             />
@@ -573,14 +574,16 @@ function UsageChart({
               type="button"
               key={`accessible-${currentBucket.key}`}
               aria-label={t('settings.models.usage.chart.bucket', {
-                bucket: formatBucketLabel(currentBucket, i18n.language),
+                bucket: formatBucketRange(currentBucket, i18n.language, true),
               }) as string}
               onPointerEnter={() => {
-                setEscapeDismissed(false);
-                setHover(index);
+                setHover(index, true);
               }}
-              onFocus={() => setHover(index)}
-              onClick={() => openDetail(index)}
+              onFocus={() => setHover(index, true)}
+              onClick={() => {
+                setEscapeDismissed(false);
+                openDetail(index);
+              }}
             >
               {formatBucketRange(currentBucket, i18n.language, true)}
             </button>

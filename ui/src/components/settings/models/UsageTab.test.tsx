@@ -174,9 +174,9 @@ describe('UsageTab', () => {
     const buckets = screen.getAllByRole('button', { name: /Usage bucket/ });
 
     expect(buckets.map((item) => item.getAttribute('aria-label'))).toEqual([
-      'Usage bucket Sep 24, 2026, 00:00',
-      'Usage bucket Sep 24, 2026, 01:00',
-      'Usage bucket Sep 24, 2026, 02:00',
+      'Usage bucket Sep 24, 2026, 00:00 UTC+08:00 – Sep 24, 2026, 01:00 UTC+08:00',
+      'Usage bucket Sep 24, 2026, 01:00 UTC+08:00 – Sep 24, 2026, 02:00 UTC+08:00',
+      'Usage bucket Sep 24, 2026, 02:00 UTC+08:00 – Sep 24, 2026, 03:00 UTC+08:00',
     ]);
   });
 
@@ -312,6 +312,19 @@ describe('UsageTab', () => {
     expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
   });
 
+  it('reopens a dismissed bucket when it regains keyboard focus', () => {
+    draw(report());
+    const bucketButton = screen.getAllByRole('button', { name: /Usage bucket/ })[0]!;
+
+    fireEvent.pointerEnter(bucketButton);
+    expect(screen.getByRole('dialog', { name: 'Usage bucket details' })).toBeTruthy();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+
+    fireEvent.focus(bucketButton);
+    expect(screen.getByRole('dialog', { name: 'Usage bucket details' })).toBeTruthy();
+  });
+
   it('clears a pinned bucket that disappears from a same-window refresh', async () => {
     const value = report();
     const rendered = draw(value);
@@ -381,7 +394,7 @@ describe('UsageTab', () => {
         bucket('01', [row()]),
       ],
     });
-    const csv = buildUsageCsv(value, { sourceIds: [], modelKeys: [] }, '00', {
+    const headers = {
       bucketKey: 'bucket_key',
       startAt: 'start_at',
       endAt: 'end_at',
@@ -397,7 +410,8 @@ describe('UsageTab', () => {
       cachedInputTokens: 'cached_input_tokens',
       outputTokens: 'output_tokens',
       totalTokens: 'total_tokens',
-    }, 'Unknown model');
+    };
+    const csv = buildUsageCsv(value, { sourceIds: [], modelKeys: [] }, '00', headers, 'Unknown model');
 
     expect(csv.split('\r\n')).toHaveLength(2);
     expect(csv).toContain('2026-09-24T00:00:00+08:00');
@@ -411,24 +425,13 @@ describe('UsageTab', () => {
 
     const unknownCsv = buildUsageCsv(report({
       buckets: [bucket('00', [row({ token_reports: 0 })])],
-    }), { sourceIds: [], modelKeys: [] }, '00', {
-      bucketKey: 'bucket_key',
-      startAt: 'start_at',
-      endAt: 'end_at',
-      historyComplete: 'history_complete',
-      sourceId: 'source_id',
-      modelId: 'model_id',
-      sourceLabel: 'source_label',
-      modelLabel: 'model_label',
-      requests: 'requests',
-      tokenReports: 'token_reports',
-      inputTokens: 'input_tokens',
-      nonCachedInputTokens: 'non_cached_input_tokens',
-      cachedInputTokens: 'cached_input_tokens',
-      outputTokens: 'output_tokens',
-      totalTokens: 'total_tokens',
-    }, 'Unknown model');
+    }), { sourceIds: [], modelKeys: [] }, '00', headers, 'Unknown model');
     expect(unknownCsv.split('\r\n')[0]).toContain('token_reports');
     expect(unknownCsv.split('\r\n')[1]?.split(',').slice(-7)).toEqual(['2', '0', '', '', '', '', '']);
+
+    const idleCsv = buildUsageCsv(report({
+      buckets: [bucket('00', [])],
+    }), { sourceIds: [], modelKeys: [] }, '00', headers, 'Unknown model');
+    expect(idleCsv.split('\r\n')[1]?.split(',').slice(-7)).toEqual(['0', '0', '0', '0', '0', '0', '0']);
   });
 });

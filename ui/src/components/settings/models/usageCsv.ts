@@ -1,6 +1,7 @@
 import type { UsageBucketRow, UsageReport } from './types';
 import {
   filterBucketRows,
+  emptyCounters,
   modelLabel,
   pairKey,
   sourceIdentityLabel,
@@ -53,7 +54,8 @@ export function buildUsageCsv(
     const rows = filterBucketRows(bucket, filter);
     const exportRows: Array<UsageBucketRow | null> = rows.length > 0 ? rows : [null];
     return exportRows.map((row) => {
-      const knownTokens = row !== null && usageTokensAreKnown(row);
+      const counters = row ?? (bucket.history_complete ? emptyCounters() : null);
+      const knownTokens = counters !== null && usageTokensAreKnown(counters);
       const identity = row === null ? null : {
         key: pairKey(row.source_id, row.model_id),
         sourceId: row.source_id,
@@ -72,11 +74,11 @@ export function buildUsageCsv(
         row === null ? '' : identity?.modelLabel || unknownModel,
         row?.requests ?? (bucket.history_complete ? 0 : ''),
         row?.token_reports ?? (bucket.history_complete ? 0 : ''),
-        knownTokens ? row.input_tokens : '',
-        knownTokens ? usageNonCachedInput(row) : '',
-        knownTokens ? row.cached_input_tokens : '',
-        knownTokens ? row.output_tokens : '',
-        knownTokens ? usageTotalTokens(row) : '',
+        knownTokens ? counters.input_tokens : '',
+        knownTokens ? usageNonCachedInput(counters) : '',
+        knownTokens ? counters.cached_input_tokens : '',
+        knownTokens ? counters.output_tokens : '',
+        knownTokens ? usageTotalTokens(counters) : '',
       ] as Array<string | number>;
     });
   });
