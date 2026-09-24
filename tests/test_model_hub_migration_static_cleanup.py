@@ -362,3 +362,52 @@ def test_well_typed_header_providers_do_not_block_hub_mode(home, tmp_path):
     _write(home / ".config/opencode/opencode.json", '{"provider": {"relay": {"options": {"headers": {"X": "y"}}}}}')
     service, _, _ = _service(tmp_path, migration_home=home)
     assert not any(item.config_blocker for item in _items(service, ()))
+
+
+def test_codex_count_beyond_signed_64_bits_blocks_hub_mode(home, tmp_path):
+    _write(home / ".codex/config.toml", "model_providers = { relay = { stream_max_retries = 9223372036854775808 } }\n")
+    service, _, _ = _service(tmp_path, migration_home=home)
+    assert any(item.backend == "codex" and item.config_blocker for item in _items(service, ()))
+
+
+def test_apply_rejects_a_backend_whose_native_config_blocks_hub_mode(home, tmp_path):
+    _seed(home, "codex-auth")
+    _write(home / ".codex/config.toml", 'model_providers = { relay = "bad" }\n')
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    importable = [row for row in service.migration_scan()["items"] if row["proposed_action"] == "import"]
+    assert len(importable) == 1
+    with pytest.raises(ModelHubError) as caught:
+        asyncio.run(service.migration_apply([importable[0]["id"]]))
+    assert caught.value.status == 409
+    assert not store.config.sources and not adapter.provisioned
+    assert KEY.encode() in (home / ".codex/auth.json").read_bytes()
+
+
+def test_opencode_header_auth_in_one_layer_keeps_another_layers_endpoint(home, tmp_path):
+    user = home / ".config/opencode/opencode.json"
+    project = home / "project/opencode.json"
+    _write(user, json.dumps({"provider": {"openrouter": {"options": {
+        "baseURL": "https://relay.example/api/v1", "apiKey": KEY}}}}))
+    _write(project, json.dumps({"provider": {"openrouter": {"options": {
+        "headers": {"Authorization": "Bearer fixture"}}}}}))
+    roots = (home / "project",)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    importable = [item for item in _items(service, roots) if item.proposed_action == "import"]
+    assert importable
+    for edit in plan_native_cleanup(importable, home=home, project_roots=roots, _include_shell=False):
+        edit.apply()
+    options = json.loads(user.read_text())["provider"]["openrouter"]["options"]
+    assert options == {"baseURL": "https://relay.example/api/v1"}
+
+
+def test_equal_secret_selected_for_another_backend_leaves_claude_oauth_token(home, tmp_path):
+    settings = home / ".claude/settings.json"
+    _write(settings, json.dumps({"env": {"CLAUDE_CODE_OAUTH_TOKEN": KEY}}))
+    _seed(home, "codex-auth", raw=KEY)
+    service, _, _ = _service(tmp_path, migration_home=home)
+    codex = [item for item in _items(service, ()) if item.backend == "codex" and item.proposed_action == "import"]
+    assert codex
+    claude = replace(codex[0], backend="claude", secret=None, kind="oauth_native", proposed_action="import")
+    for edit in plan_native_cleanup([*codex, claude], home=home):
+        edit.apply()
+    assert json.loads(settings.read_text())["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == KEY

@@ -257,13 +257,18 @@ def plan_native_cleanup(
     # Consent to inspect an opaque, verified-empty container does not transfer
     # any credential. It cannot authorize cleanup of another native store.
     backends = {item.backend for item in items if not item.native_store_placeholder}
-    selected_secrets = {item.secret for item in items if item.secret}
+    # Consent is per backend: equal bytes selected for another backend never
+    # authorize removing a credential this backend's scan kept native.
+    selected_by_backend: dict[str, set[str]] = {}
+    for item in items:
+        if item.secret:
+            selected_by_backend.setdefault(item.backend, set()).add(item.secret)
 
-    def selected_api_key(value: object) -> bool:
+    def selected_api_key(value: object, backend: str) -> bool:
         # Producers normalize static keys for proof/custody. Exact raw bytes
         # remain in the checked snapshots and journal before-images; this
         # comparison does not replace their consent or concurrency checks.
-        return isinstance(value, str) and value.strip() in selected_secrets
+        return isinstance(value, str) and value.strip() in selected_by_backend.get(backend, set())
 
     if "claude" in backends:
         def clear_settings(payload: dict) -> None:
@@ -277,9 +282,9 @@ def plan_native_cleanup(
                 for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
                     value = env.get(key)
                     selected = (
-                        selected_api_key(value)
+                        selected_api_key(value, "claude")
                         if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-                        else isinstance(value, str) and value in selected_secrets
+                        else isinstance(value, str) and value in selected_by_backend.get("claude", set())
                     )
                     if value and not selected:
                         retained = True
@@ -302,7 +307,7 @@ def plan_native_cleanup(
 
         def clear_auth(payload: dict) -> None:
             # Credentials outside the selection stay native (see Claude above).
-            if not payload.get("OPENAI_API_KEY") or selected_api_key(payload["OPENAI_API_KEY"]):
+            if not payload.get("OPENAI_API_KEY") or selected_api_key(payload["OPENAI_API_KEY"], "codex"):
                 payload.pop("OPENAI_API_KEY", None)
             if not payload.get("tokens") or any(
                 item.backend == "codex" and item.kind == "oauth_native"
@@ -339,7 +344,7 @@ def plan_native_cleanup(
                     )
                     if uncarried_headers or (
                         provider.get("experimental_bearer_token")
-                        and not selected_api_key(provider["experimental_bearer_token"])
+                        and not selected_api_key(provider["experimental_bearer_token"], "codex")
                     ):
                         # Authentication migration did not carry stays native as
                         # a whole provider, selectors included, or direct mode
@@ -380,11 +385,27 @@ def plan_native_cleanup(
             # An entry the Hub could not carry (OAuth, or a key outside the
             # selection) stays native, like every other unselected credential.
             return isinstance(entry, dict) and not (
-                "type" in entry and entry["type"] == "api" and selected_api_key(entry.get("key"))
+                "type" in entry and entry["type"] == "api" and selected_api_key(entry.get("key"), "opencode")
             )
 
         native_auth = read_native_config(opencode_auth_path(home)) or {}
         retained_auth = {vendor for vendor in vendors if auth_entry_retained(native_auth.get(vendor))}
+        # OpenCode merges its layers, so header auth kept in any one of them
+        # still sends to the endpoint another layer names.
+        for path in opencode_config_paths(home, project_roots):
+            staged = edits.get(path.absolute())
+            raw = staged.before if staged else _read_regular(path.absolute())
+            if raw is None:
+                continue
+            providers = _object(raw, jsonc=True).get("provider")
+            if not isinstance(providers, dict):
+                continue
+            retained_auth.update(
+                vendor for vendor in vendors
+                if isinstance(providers.get(vendor), dict)
+                and isinstance(providers[vendor].get("options"), dict)
+                and providers[vendor]["options"].get("headers")
+            )
 
         def clear_providers(payload: dict) -> None:
             providers = payload.get("provider")
@@ -399,7 +420,7 @@ def plan_native_cleanup(
                 options = provider.get("options")
                 if isinstance(options, dict):
                     value = options.get("apiKey")
-                    if value and not selected_api_key(value):
+                    if value and not selected_api_key(value, "opencode"):
                         # The inventory bound the saved assignment, or proved
                         # its absence before selecting the auth.json fallback.
                         reference = (
@@ -407,15 +428,15 @@ def plan_native_cleanup(
                             and value.startswith("{env:") and value.endswith("}")
                             and (
                                 not shell_values.get(value[5:-1])
-                                or shell_values[value[5:-1]].strip() in selected_secrets
+                                or shell_values[value[5:-1]].strip() in selected_by_backend.get("opencode", set())
                             )
                         )
                         if not reference:
                             continue
                     options.pop("apiKey", None)
-                    if vendor not in retained_auth and not options.get("headers"):
+                    if vendor not in retained_auth:
                         # A retained same-vendor credential, in auth.json or as
-                        # this layer's header auth, keeps its endpoint.
+                        # header auth in any layer, keeps its endpoint.
                         options.pop("baseURL", None)
                     if not options:
                         provider.pop("options", None)

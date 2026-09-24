@@ -797,7 +797,8 @@ def _codex_field_well_typed(kind: str, value: object) -> bool:
     if kind == "text_map":
         return _text_map(value)
     if kind == "count":
-        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        # TOML integers are signed 64-bit; Codex rejects anything wider.
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**63
     if kind == "flag":
         return isinstance(value, bool)
     if kind == "table":
@@ -2020,6 +2021,9 @@ async def apply_native_migration(
             item.backend in backends and item.proposed_action == "import" and item.id not in item_ids
             for item in available
         ):
+            raise MigrationConflictError
+        # Hub mode over a native config the CLI cannot parse fails every launch.
+        if any(item.backend in backends and item.config_blocker for item in available):
             raise MigrationConflictError
         retained_inventory_ids = (
             set(record.get("inventory_ids", [item["id"] for item in record["items"]]))
