@@ -460,7 +460,7 @@ uv_tool_install() {
     mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
     # Publish before the source snapshot. Collection in another activation
     # retains this installer's entire handoff while the shell is still alive.
-    # Unreceipted candidates themselves are never eligible for collection.
+    # The marker protects staging even after uv has finished its tool receipt.
     if ! printf '%s\n' "$$" > "$generation_root/.avibe-installing"; then
         warn "Could not protect the installer handoff"
         return 1
@@ -484,7 +484,8 @@ uv_tool_install() {
         fi
     fi
 
-    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@"; then
+    # Suppress package-manager progress only, not activation/retention diagnostics.
+    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" 2>/dev/null; then
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
         if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
             warn "uv completed but the candidate vibe launcher was not created"
@@ -567,9 +568,9 @@ install_package_candidate() {
     shift
 
     if [ "$package_spec" = "$PACKAGE_NAME" ]; then
-        uv_tool_install "$package_spec" --force --refresh "$@" 2>/dev/null
+        uv_tool_install "$package_spec" --force --refresh "$@"
     else
-        uv_tool_install "$package_spec" --force "$@" 2>/dev/null
+        uv_tool_install "$package_spec" --force "$@"
     fi
 }
 

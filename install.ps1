@@ -511,6 +511,11 @@ function Invoke-UvToolInstallAttempt {
                 Output = if ($activation.Output) { $activation.Output } else { "candidate Avibe environment could not be activated" }
             }
         }
+        if ($activation.Output) {
+            # Retention may defer safely while activation succeeds. Do not hide
+            # its ownership/visibility diagnostics in captured native output.
+            Write-Host $activation.Output
+        }
         return $result
     } finally {
         Remove-Item -LiteralPath $installerMarker -Force -ErrorAction SilentlyContinue

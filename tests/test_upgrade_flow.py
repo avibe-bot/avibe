@@ -198,7 +198,7 @@ def test_activate_upgrade_candidate_replaces_windows_hardlink_launcher(monkeypat
     assert launcher.resolve() == candidate.resolve()
 
 
-def test_activation_leaves_unowned_legacy_generations_untouched(monkeypatch, tmp_path):
+def test_activation_retains_unidentified_directories_without_uv_artifacts(monkeypatch, tmp_path):
     from vibe import upgrade
 
     root = tmp_path / "generations"
@@ -535,8 +535,10 @@ def test_copy_marker_validation_reads_fresh_bytes_after_same_stat_replacement(
 
     assert upgrade._launcher_generation(launcher, root) == generation.resolve()
     original_stat = launcher.stat()
-    launcher.write_text("replaced\n", encoding="utf-8")
+    launcher.write_text("altered\n", encoding="utf-8")
     os.utime(launcher, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert launcher.stat().st_size == original_stat.st_size
+    assert launcher.stat().st_mtime_ns == original_stat.st_mtime_ns
 
     assert upgrade._launcher_generation(launcher, root) is None
 
@@ -669,6 +671,7 @@ def test_deferred_upgrade_activation_uses_candidate_python(monkeypatch, tmp_path
     activation = AtomicActivation(launcher, candidate, tmp_path / "generation")
     calls = {}
 
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: tmp_path)
     monkeypatch.setattr(upgrade, "_candidate_python", lambda _candidate: candidate_python)
     monkeypatch.setattr(upgrade.runtime_mod, "process_create_time", lambda _pid: 123.0)
     monkeypatch.setattr(upgrade, "get_safe_cwd", lambda: str(tmp_path))
@@ -698,6 +701,7 @@ def test_deferred_upgrade_activation_uses_candidate_python(monkeypatch, tmp_path
     assert "--restart" in calls["command"]
     assert "--prepare-show-runtime" in calls["command"]
     assert calls["kwargs"]["env"] == {"PATH": "clean"}
+    assert (candidate.parent.parent / ".avibe-installing").read_text() == "456"
 
 
 def test_deferred_activation_rejects_missing_source_when_launcher_changed(monkeypatch, tmp_path):

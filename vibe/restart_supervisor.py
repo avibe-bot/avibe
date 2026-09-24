@@ -427,6 +427,11 @@ def _run_restart_job(
         _write_status(payload)
         write(f"restart job succeeded new_pid={new_pid}")
 
+        if restart_ui:
+            from vibe.install_generations import collect_install_generations
+
+            collect_install_generations(vibe_path)
+
         if prepare_show_runtime:
             env = get_restart_environment(vibe_path=vibe_path)
             prepare_command = [

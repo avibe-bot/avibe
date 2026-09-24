@@ -63,8 +63,16 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
         "from vibe import cli, upgrade, install_generations; "
         "upgrade.verify_upgrade_candidate = lambda activation: upgrade.IntegrityResult(True, 1); "
-        "install_generations._running_paths = lambda: set(); "
         "sys.exit(cli._dispatch_installer_activation(sys.argv[1:]))"
+    )
+    receipt_driver = (
+        "import json, sys; from pathlib import Path; "
+        "environment = Path(sys.argv[1]); environment.mkdir(parents=True, exist_ok=True); "
+        "(environment / 'pyvenv.cfg').write_text('include-system-site-packages = false\\n'); "
+        "(environment / 'uv-receipt.toml').write_text("
+        "'[tool]\\nrequirements = [{ name = \"avibe-os\" }]\\n'"
+        " + 'entrypoints = [{ name = \"vibe\", install-path = '"
+        " + json.dumps(sys.argv[2]) + ' }]\\n')"
     )
     _write_executable(
         path,
@@ -85,8 +93,10 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         fi
 
         bin_dir="${{UV_TOOL_BIN_DIR:-$HOME/.local/bin}}"
-        mkdir -p "$bin_dir"
-        cat > "$bin_dir/vibe-test-driver" <<'EOF'
+        tool_env="${{UV_TOOL_DIR:-$HOME/.local/share/uv/tools}}/avibe-os"
+        fixture_bin="$tool_env/bin"
+        mkdir -p "$bin_dir" "$fixture_bin"
+        cat > "$fixture_bin/vibe-test-driver" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
         if [ "${{VIBE_TEST_SHARED_ACTIVATION:-}}" = "1" ] && [ "${{1:-}}" = "__activate-install" ]; then
@@ -189,16 +199,18 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
             echo "started"
         fi
         EOF
-        mkdir -p "$bin_dir/test-module/vibe"
-        touch "$bin_dir/test-module/vibe/__init__.py"
-        cat > "$bin_dir/test-module/vibe/cli.py" <<'EOF'
+        mkdir -p "$fixture_bin/test-module/vibe"
+        touch "$fixture_bin/test-module/vibe/__init__.py"
+        cat > "$fixture_bin/test-module/vibe/cli.py" <<'EOF'
         import subprocess, sys
         from pathlib import Path
         def main():
             driver = Path(__file__).resolve().parents[2] / "vibe-test-driver"
+            if sys.argv[1:3] == ["__activate-install", "--protocol-version"] and (driver.parent / ".legacy-activation").exists():
+                return 2
             return subprocess.call(["bash", "-c", driver.read_text(), *sys.argv])
         EOF
-        cat > "$bin_dir/vibe" <<'EOF'
+        cat > "$fixture_bin/vibe" <<'EOF'
         #!{sys.executable}
         import sys
         from pathlib import Path
@@ -208,12 +220,14 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         EOF
         # Real uv console scripts contain their generation-specific interpreter.
         # Preserve that distinction in this fake using the test interpreter.
-        printf '\\n# generation: %s\\n' "$bin_dir" >> "$bin_dir/vibe"
-        chmod +x "$bin_dir/vibe"
+        printf '\\n# generation: %s\\n' "$bin_dir" >> "$fixture_bin/vibe"
+        chmod +x "$fixture_bin/vibe"
+        ln -s "$fixture_bin/vibe" "$bin_dir/vibe"
+        "{sys.executable}" -c {shlex.quote(receipt_driver)} "$tool_env" "$bin_dir/vibe"
         if [ "${{VIBE_TEST_LEGACY_ACTIVATION:-}}" = "1" ]; then
-            touch "$bin_dir/.legacy-activation"
+            touch "$fixture_bin/.legacy-activation"
         fi
-        cat > "$bin_dir/python3" <<'EOF'
+        cat > "$fixture_bin/python3" <<'EOF'
         #!/usr/bin/env bash
         if [ "${1:-}" = "-c" ]; then
             if [ "${{VIBE_TEST_CANDIDATE_PROBE_FAIL:-}}" = "1" ]; then
@@ -225,7 +239,7 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         fi
         exit 1
         EOF
-        chmod +x "$bin_dir/python3"
+        chmod +x "$fixture_bin/python3"
         if [ "${{VIBE_TEST_UV_FAIL:-}}" = "1" ]; then
             exit 17
         fi
@@ -430,13 +444,17 @@ def test_repeated_installer_runs_prune_old_generations(tmp_path):
         result = _install(env)
         assert result.returncode == 0, result.stdout + result.stderr
         generations = list(root.iterdir())
-        assert len(generations) == min(index + 1, 2)
-        assert all((path / ".avibe-install.json").is_file() for path in generations)
+        assert len(generations) == 1
+        assert all((path / "uv/tools/avibe-os/uv-receipt.toml").is_file() for path in generations)
+        assert not any((path / ".avibe-install.json").exists() for path in generations)
         assert not any((path / ".avibe-installing").exists() for path in generations)
+        assert "Install generation retention:" in result.stderr
+        if index >= 1:
+            assert "Collected 1 retired install generations" in result.stderr
         current = (path_dir / "vibe").resolve()
         assert current.is_file()
         if previous:
-            assert previous.is_file()
+            assert not previous.exists()
         previous = current
 
 
@@ -855,6 +873,7 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert '$env:Path = "$stableBin;$persistedPath"' in powershell
     assert "& $stableLauncher --help" in powershell
     assert 'Invoke-NativeCommand -FilePath $stableLauncher -Arguments @("runtime", "prepare", "--strict")' in powershell
+    assert "Write-Host $activation.Output" in powershell
 
 
 def test_install_script_candidate_probes_ignore_python_path_overrides():

@@ -2016,6 +2016,13 @@ def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypa
     """
 
     started = _ui_refuses_to_start(monkeypatch, reused=False, ui_outcome=5678)
+    from vibe import install_generations
+
+    collected = []
+    monkeypatch.setattr(
+        install_generations, "collect_install_generations",
+        lambda launcher: collected.append(launcher),
+    )
 
     assert cli.cmd_start() == 0
 
@@ -2026,6 +2033,7 @@ def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypa
         f"cmd_start stopped the UI of a start that had already succeeded: {started.calls}"
     )
     assert "@avibe-start-receipt:" in capsys.readouterr().out
+    assert len(collected) == 1
 
 
 def test_ui_pid_probe_accepts_only_a_verified_ui_process(monkeypatch, tmp_path):

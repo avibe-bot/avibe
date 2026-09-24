@@ -13519,6 +13519,10 @@ def cmd_start(*, open_browser: bool | None = None):
             # still leaves evidence; either way the start has failed.
             runtime.stop_service()
         raise
+    if service_ready:
+        from vibe.install_generations import collect_install_generations
+
+        collect_install_generations(cache_running_vibe_path())
     return 0
 
 
@@ -17996,6 +18000,20 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     return 0
 
 
+class _InstallerRetentionFormatter(logging.Formatter):
+    """Show an optional collection failure without an installation traceback."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Leave the original exception intact for service/file log handlers.
+        diagnostic = logging.makeLogRecord(record.__dict__)
+        if diagnostic.exc_info:
+            diagnostic.msg = f"{record.getMessage()}: {diagnostic.exc_info[1]}"
+            diagnostic.args = ()
+        diagnostic.exc_info = None
+        diagnostic.exc_text = None
+        return super().format(diagnostic)
+
+
 def _dispatch_installer_activation(argv: list[str]) -> int:
     """Activate a staged one-command install through the shared Python owner."""
 
@@ -18020,12 +18038,25 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
         candidate_launcher=Path(args.candidate),
         source_generation=Path(args.source_generation) if args.source_generation else None,
     )
+    # Bootstrap activation does not start the service logging infrastructure.
+    # Keep best-effort retention decisions visible even when activation succeeds.
+    from vibe.install_generations import logger as retention_logger
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_InstallerRetentionFormatter())
+    previous_level = retention_logger.level
+    retention_logger.addHandler(handler)
+    retention_logger.setLevel(logging.INFO)
     try:
         activate_installer_candidate(activation)
     except Exception as exc:
         discard_atomic_uv_install_generation(activation.candidate_launcher)
         print(f"installer activation failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        retention_logger.removeHandler(handler)
+        retention_logger.setLevel(previous_level)
+        handler.close()
     return 0
 
 

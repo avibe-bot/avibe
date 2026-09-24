@@ -133,6 +133,10 @@ def execute_upgrade_plan(
         if preflight.returncode != 0:
             return preflight
 
+    if plan.activation is not None:
+        from vibe.install_generations import mark_install_generation
+
+        mark_install_generation(plan.activation.candidate_launcher, os.getpid())
     return run(plan.command, env=plan.env, **run_kwargs)
 
 
@@ -196,11 +200,11 @@ def atomic_uv_install_root() -> Path:
 
 
 @contextlib.contextmanager
-def atomic_upgrade_lock():
+def atomic_upgrade_lock(*, timeout_seconds: float = UPGRADE_INSTALL_TIMEOUT_SECONDS):
     """Serialize staged installation, launcher activation, and pruning."""
 
     lock_path = atomic_uv_install_root().expanduser().parent / ".install.lock"
-    with MigrationFileLock(lock_path, timeout_seconds=UPGRADE_INSTALL_TIMEOUT_SECONDS):
+    with MigrationFileLock(lock_path, timeout_seconds=timeout_seconds):
         yield
 
 
@@ -355,7 +359,7 @@ def defer_upgrade_activation(
     log_path = config_paths.get_logs_dir() / f"upgrade-activation-{uuid4().hex}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
-        return subprocess.Popen(
+        process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -369,6 +373,20 @@ def defer_upgrade_activation(
             # hop on top of it, rather than changing what probes inherit.
             env=environment_without_caller_context(isolated_probe_environment()),
         )
+    # The parent still owns the install lock and is alive. Publish the helper's
+    # PID before releasing that lock, including the interval where the helper
+    # is waiting for this Windows CLI to release its executable.
+    from vibe.install_generations import mark_install_generation
+
+    try:
+        mark_install_generation(activation.candidate_launcher, process.pid)
+    except Exception:
+        # The helper cannot activate while its parent is alive. This is still
+        # pre-commit; the caller can safely discard the failed candidate.
+        with contextlib.suppress(OSError):
+            process.terminate()
+        raise
+    return process
 
 
 def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
@@ -451,7 +469,8 @@ def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
         try:
             candidate_stat = candidate.stat()
             if generation.is_dir() and (candidate_stat.st_dev, candidate_stat.st_ino) == identity:
-                return generation
+                # Directory aliases must use the collector's canonical identity.
+                return _generation_for_path(generation, root)
         except OSError:
             continue
     return None
@@ -598,20 +617,17 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
 
 def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
     from vibe.install_generations import (
-        collect_before_activation,
-        record_activation,
-        reserve_activation_reference,
+        collect_install_generations,
+        finish_install_generation,
     )
 
     result = verify_upgrade_candidate(activation)
     if not result.ok:
         raise RuntimeError(f"staged Avibe install failed integrity checks: {result.detail}")
-    collect_before_activation(activation)
     launcher = activation.launcher
     launcher.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
     root = atomic_uv_install_root().expanduser().resolve()
-    receipt_reserved = reserve_activation_reference(launcher, activation.candidate_launcher)
     try:
         _prepare_launcher_replacement(replacement, activation.candidate_launcher)
         os.replace(replacement, launcher)
@@ -620,11 +636,8 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
-    record_activation(
-        launcher,
-        activation.candidate_launcher,
-        receipt_reserved=receipt_reserved,
-    )
+    finish_install_generation(activation.candidate_launcher)
+    collect_install_generations(launcher)
 
 
 def activate_installer_candidate(activation: AtomicActivation) -> None:
@@ -647,15 +660,12 @@ def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.
 
 
 def _activate_launcher_target_locked(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
-    from vibe.install_generations import record_activation, reserve_activation_reference
-
     launcher_path = Path(launcher).expanduser()
     target_path = Path(target).expanduser()
     if not target_path.is_file() or not os.access(target_path, os.X_OK):
         raise RuntimeError(f"launcher target is not executable: {target_path}")
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher_path.parent / f".{launcher_path.name}.avibe-{uuid4().hex}.new"
-    receipt_reserved = reserve_activation_reference(launcher_path, target_path)
     try:
         _prepare_launcher_replacement(replacement, target_path)
         os.replace(replacement, launcher_path)
@@ -664,12 +674,6 @@ def _activate_launcher_target_locked(launcher: str | os.PathLike[str], target: s
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher_path, target_path, atomic_uv_install_root().expanduser().resolve())
-    record_activation(
-        launcher_path,
-        target_path,
-        receipt_reserved=receipt_reserved,
-        allow_new_receipt=False,
-    )
 
 
 def is_desktop_managed_runtime(base_env: Mapping[str, str] | None = None) -> bool:
