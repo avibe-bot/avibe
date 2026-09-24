@@ -182,6 +182,11 @@ jobs:
             scripts/build_retired_companion.py
             scripts/release_package_version.py
             tests/test_distribution_artifacts.py
+            tests/__init__.py
+            tests/e2e/test_retired_updater_bridge.py
+            tests/e2e/test_install_command.py
+            tests/e2e/retired_updater_probe.py
+            tests/e2e/github_release_fixture.py
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
@@ -324,27 +329,41 @@ jobs:
       - name: Run release install and upgrade regressions
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
-          export AVIBE_CORE_WHEEL="$VIBE_INSTALL_TEST_WHEEL"
-          export AVIBE_BRIDGE_WHEEL="$(ls dist/avibe_memory-*.whl)"
+          export AVIBE_CORE_WHEEL="$(realpath "$VIBE_INSTALL_TEST_WHEEL")"
+          export AVIBE_BRIDGE_WHEEL="$(realpath "$(ls dist/avibe_memory-*.whl)")"
           mkdir -p old-release
           for asset in avibe_os-3.1.0-py3-none-any.whl avibe_memory-3.1.0-py3-none-any.whl; do
             gh release download v3.1.0 --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir old-release
           done
           echo '7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924  old-release/avibe_os-3.1.0-py3-none-any.whl' | sha256sum -c -
           echo 'ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0  old-release/avibe_memory-3.1.0-py3-none-any.whl' | sha256sum -c -
-          export AVIBE_OLD_CORE_WHEEL=old-release/avibe_os-3.1.0-py3-none-any.whl
-          export AVIBE_OLD_COMPANION_WHEEL=old-release/avibe_memory-3.1.0-py3-none-any.whl
+          export AVIBE_OLD_CORE_WHEEL="$(realpath old-release/avibe_os-3.1.0-py3-none-any.whl)"
+          export AVIBE_OLD_COMPANION_WHEEL="$(realpath old-release/avibe_memory-3.1.0-py3-none-any.whl)"
           export AVIBE_RELEASE_GATE=1
           pytest \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
-            tests/e2e/test_retired_updater_bridge.py \
             -v
+          TARGET_VERSION="$(python release-automation/scripts/release_package_version.py "$RELEASE_TAG")"
+          export TARGET_VERSION
+          UPGRADE_DIRECTION="$(python - <<'PY'
+          import os
+          from packaging.version import Version
+
+          print("forward" if Version(os.environ["TARGET_VERSION"]) > Version("3.1.0") else "historical")
+          PY
+          )"
+          if [ "$UPGRADE_DIRECTION" = forward ]; then
+            (cd release-automation && pytest tests/e2e/test_retired_updater_bridge.py -v)
+          else
+            echo "No forward Memory retirement upgrade from v3.1.0 to $RELEASE_TAG"
+          fi
 
       - name: Upload GitHub release assets
         env:

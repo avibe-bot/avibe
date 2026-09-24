@@ -193,7 +193,10 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
     for name in files:
         target = remote / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("print('workflow-owned automation')\n")
+        if workflow_name == "publish.yml" and (name.startswith("tests/e2e/") or name == "tests/__init__.py"):
+            shutil.copy2(ROOT / name, target)
+        else:
+            target.write_text("print('workflow-owned automation')\n")
     _fixture_git(remote, "add", ".")
     _fixture_git(remote, "commit", "-m", "workflow automation")
     workflow = _fixture_git(remote, "rev-parse", "HEAD")
@@ -211,6 +214,14 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
         result = subprocess.run([sys.executable, str(tmp_path / script), "ensure-draft"],
                                 cwd=tmp_path, capture_output=True, text=True)
         assert result.returncode == 0 and "workflow-owned automation" in result.stdout
+        assert not (tmp_path / "tests/e2e/test_retired_updater_bridge.py").exists()
+        collected = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/e2e/test_retired_updater_bridge.py"],
+            cwd=destination, env={**os.environ, "PYTHONPATH": ""},
+            capture_output=True, text=True, timeout=15,
+        )
+        assert collected.returncode == 0, collected.stdout + collected.stderr
+        assert "1 test collected" in collected.stdout
 
 
 @pytest.mark.parametrize("workflow", ["publish.yml", "release_ai.yml"])
@@ -321,6 +332,19 @@ def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_p
     consumer = _step(job, "Run release install and upgrade regressions")
     upload = _step(job, "Upload GitHub release assets")
     assert job["steps"].index(bridge) < job["steps"].index(consumer) < job["steps"].index(upload)
+    checkout = _step(job, "Checkout release automation")
+    assert checkout["with"]["ref"] == "${{ needs.resolve-tag.outputs.workflow_sha }}"
+    assert _step(job, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.tag }}"
+    resolve = _step(_job("publish.yml", "resolve-tag"), "Resolve tag")["run"]
+    assert 'if [ "${{ github.event_name }}" = "push" ]; then' in resolve
+    assert 'WORKFLOW_SHA="$SOURCE_SHA"' in resolve
+    assert set((
+        "tests/__init__.py",
+        "tests/e2e/test_retired_updater_bridge.py",
+        "tests/e2e/test_install_command.py",
+        "tests/e2e/retired_updater_probe.py",
+        "tests/e2e/github_release_fixture.py",
+    )) <= set(checkout["with"]["sparse-checkout"].splitlines())
     assert "build" in _job("publish.yml", "publish-avibe-os")["needs"]
     assert "finalize-github-release" in _job("publish.yml", "publish-avibe-os")["needs"]
     assert consumer["env"]["GH_TOKEN"] == "${{ github.token }}"
@@ -340,6 +364,60 @@ def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_p
     ):
         assert contract in commands
     assert "dist/avibe_memory-*-py3-none-any.whl" in upload["run"]
+    assert "cd release-automation && pytest tests/e2e/test_retired_updater_bridge.py -v" in commands
+    assert "TARGET_VERSION=\"$(python release-automation/scripts/release_package_version.py \"$RELEASE_TAG\")\"" in commands
+    assert 'realpath "$VIBE_INSTALL_TEST_WHEEL"' in commands
+    assert "realpath old-release/avibe_memory-3.1.0-py3-none-any.whl" in commands
+
+
+@pytest.mark.parametrize(
+    ("tag", "forward"),
+    [
+        ("v3.0.14", False),
+        ("v3.1.0rc1", False),
+        ("v3.1.0", False),
+        ("v3.1.0.post1", True),
+        ("v3.1.1rc1", True),
+        ("v3.2.0", True),
+        ("v4.0.0", True),
+    ],
+)
+def test_muc_004_retirement_gate_replays_from_workflow_checkout(tmp_path, tag, forward):
+    """MUC-004: old tag has no gate; forward tag executes the complete workflow checkout."""
+    step = _step(_job("publish.yml", "build"), "Run release install and upgrade regressions")
+    gate = "TARGET_VERSION=" + step["run"].split("TARGET_VERSION=", 1)[1]
+    automation = tmp_path / "release-automation"
+    script = automation / "scripts/release_package_version.py"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/release_package_version.py", script)
+    test = automation / "tests/e2e/test_retired_updater_bridge.py"
+    test.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "tests/e2e/test_retired_updater_bridge.py", test)
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    (binaries / "python").write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+    (binaries / "python").chmod(0o755)
+    mock_pytest = binaries / "pytest"
+    mock_pytest.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys\n"
+        "assert pathlib.Path(sys.argv[1]).is_file()\n"
+        "pathlib.Path(os.environ['GATE_LOG']).write_text(str(pathlib.Path.cwd()))\n"
+    )
+    mock_pytest.chmod(0o755)
+    log = tmp_path / "gate.log"
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", gate], cwd=tmp_path,
+        env={**os.environ, "RELEASE_TAG": tag, "GATE_LOG": str(log),
+             "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert log.exists() is forward
+    if forward:
+        assert log.read_text() == str(automation)
+    else:
+        assert "No forward Memory retirement upgrade" in result.stdout
 
 
 def test_muc_004_release_gate_cannot_skip_missing_artifacts_or_docker(monkeypatch):

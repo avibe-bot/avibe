@@ -20,6 +20,9 @@ either one by themselves.
   released updater through real pip and uv in disposable Docker against the
   newly built core and inert bridge wheels. Missing inputs or Docker fail the
   release; the normal local opt-in test still skips without release inputs.
+  Package wheels come from the target tag; the gate and all of its helpers come
+  from the running workflow revision, including on older-tag dispatches. A
+  target at or before v3.1.0 has no forward retirement upgrade to exercise.
 - MUC-005: the historical Runtime backup guard selects only non-draft GitHub
   releases. Published prereleases with self-pinned manifests are included; the
   existing inert bridge policy and invalid-manifest exclusions still apply.
@@ -39,6 +42,13 @@ Memory data deletion, or regression-state reset is part of this change.
 - The compatibility bridge remains an inert GitHub Release wheel, not a Memory
   runtime or new PyPI companion. Legacy CLI argv and delivery metadata remain
   unchanged.
+- Every target version strictly newer than v3.1.0, including newer prereleases
+  and postreleases, must pass the real v3.1.0-to-target pip/uv upgrade gate.
+  Earlier or equal versions have no forward upgrade from v3.1.0 and cannot
+  exercise that scenario; their existing installer regressions still run.
+- Published historical GitHub release assets are byte-immutable. A dispatch
+  replay of an already published v3.1.0 cannot replace its real Memory wheel
+  with an inert bridge: the existing asset comparison must reject that attempt.
 - The release-only historical Runtime guard continues backing up published
   manifests; it does not install, upgrade, or roll back a Memory package.
 - The old user-owned Memory directories and their contents are left untouched.
