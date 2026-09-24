@@ -94,6 +94,90 @@ def test_every_recorded_stable_launcher_protects_its_target(installation, tmp_pa
     assert not first.exists()
 
 
+def test_unowned_generation_is_not_adopted_by_alias_activation(installation, tmp_path, monkeypatch):
+    root, launcher = installation
+    _activate(root, launcher, "first")
+    original_write = retention.write_atomic
+
+    def fail(*args, **kwargs):
+        raise PermissionError("test-owned receipt denial")
+
+    monkeypatch.setattr(retention, "write_atomic", fail)
+    unowned = _activate(root, launcher, "receipt-failed")
+    monkeypatch.setattr(retention, "write_atomic", original_write)
+
+    alias = tmp_path / "alternative" / "vibe"
+    upgrade.activate_launcher_target(alias, unowned)
+    assert not (unowned.parent.parent / retention.RECEIPT).exists()
+
+    for index in range(4):
+        _activate(root, launcher, f"next-{index}")
+    alias.unlink()
+    _activate(root, launcher, "after-alias")
+
+    assert unowned.exists()
+    assert not (unowned.parent.parent / retention.RECEIPT).exists()
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink", "copy"])
+def test_existing_alias_receipt_is_reserved_before_launcher_publication(
+    installation, tmp_path, monkeypatch, link,
+):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    alias = tmp_path / "alternative" / "vibe"
+    receipt = first.parent.parent / retention.RECEIPT
+    original_prepare = upgrade._prepare_launcher_replacement
+    observed = []
+
+    def prepare(replacement, target):
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        observed.append(str(alias) in payload["launchers"])
+        assert not alias.exists()
+        if link == "symlink":
+            original_prepare(replacement, target)
+        elif link == "hardlink":
+            os.link(target, replacement)
+        else:
+            shutil.copy2(target, replacement)
+
+    monkeypatch.setattr(upgrade, "_prepare_launcher_replacement", prepare)
+    upgrade.activate_launcher_target(alias, first)
+    assert observed == [True]
+    if link == "symlink":
+        assert alias.resolve() == first
+    else:
+        assert alias.read_bytes() == first.read_bytes()
+
+
+@pytest.mark.parametrize("entrypoint", ["upgrade", "launcher-target"])
+def test_existing_alias_receipt_failure_leaves_launcher_and_receipt_unchanged(
+    installation, tmp_path, monkeypatch, entrypoint,
+):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    alias = tmp_path / entrypoint / "vibe"
+    receipt = first.parent.parent / retention.RECEIPT
+    before = receipt.read_bytes()
+
+    def deny_receipt_write(*args, **kwargs):
+        raise PermissionError("read-only receipt and generation directory")
+
+    monkeypatch.setattr(retention, "write_atomic", deny_receipt_write)
+    with pytest.raises(PermissionError, match="read-only"):
+        if entrypoint == "upgrade":
+            upgrade.activate_upgrade_candidate(
+                upgrade.AtomicActivation(alias, first, first.parent.parent),
+            )
+        else:
+            upgrade.activate_launcher_target(alias, first)
+
+    assert not alias.exists()
+    assert receipt.read_bytes() == before
+    assert first.exists()
+    assert upgrade._launcher_generation(launcher, root) == first.parent.parent
+
+
 @pytest.mark.parametrize("marker", ["missing", "stale"])
 def test_copied_launcher_is_retained_even_when_generation_marker_is_wrong(installation, tmp_path, marker):
     root, launcher = installation
@@ -149,6 +233,148 @@ def test_process_scan_reads_real_logical_argv_and_handoff_arguments(tmp_path, mo
         process.communicate(timeout=10)
 
 
+def test_installation_owner_process_is_scanned_for_another_user_updater(
+    installation, tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+    from config import paths
+
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    python = first.parent.parent / "uv" / "tools" / "avibe-os" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    service_pid = 24679
+    worker_pid = 24680
+    service = SimpleNamespace(
+        pid=service_pid,
+        uids=lambda: SimpleNamespace(real=1001),
+        username=lambda: "installation-owner",
+        status=lambda: psutil.STATUS_RUNNING,
+        cmdline=lambda: [str(python), "-c", "pass"],
+        exe=lambda: sys.executable,
+        cwd=lambda: str(root),
+    )
+    worker = SimpleNamespace(
+        pid=worker_pid,
+        uids=lambda: SimpleNamespace(real=1001),
+        username=lambda: "installation-owner",
+        status=lambda: psutil.STATUS_RUNNING,
+        cmdline=lambda: [str(python), "-c", "pass"],
+        exe=lambda: sys.executable,
+        cwd=lambda: str(root),
+    )
+    pid_path = tmp_path / "service.pid"
+    pid_path.write_text(str(service_pid))
+    monkeypatch.setattr(paths, "get_runtime_pid_path", lambda: pid_path)
+    monkeypatch.setattr(paths, "get_runtime_ui_pid_path", lambda: tmp_path / "missing-ui.pid")
+    monkeypatch.setattr(retention, "_filesystem_owner", lambda _: retention._OwnerIdentity(uid=1000))
+    real_process = retention.psutil.Process
+    monkeypatch.setattr(
+        retention.psutil,
+        "Process",
+        lambda pid=None: service if pid == service_pid else real_process(pid),
+    )
+    monkeypatch.setattr(retention, "_running_paths", REAL_RUNNING_PATHS)
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([worker]))
+
+    for index in range(3):
+        _activate(root, launcher, f"next-{index}")
+
+    assert first.exists()
+
+
+def test_process_owner_visibility_denial_defers_collection(installation, monkeypatch):
+    from types import SimpleNamespace
+
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+
+    def denied():
+        raise psutil.AccessDenied(24681)
+
+    worker = SimpleNamespace(
+        pid=24681,
+        uids=denied,
+        status=lambda: psutil.STATUS_RUNNING,
+        cmdline=lambda: [str(first), "-c", "pass"],
+        exe=lambda: sys.executable,
+        cwd=lambda: str(root),
+    )
+    monkeypatch.setattr(retention, "_running_paths", REAL_RUNNING_PATHS)
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([worker]))
+
+    candidate = _activate(root, launcher, "next")
+
+    assert candidate.exists()
+    assert first.exists()
+
+
+def test_process_exit_during_owner_scan_is_ignored(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: tmp_path / "missing-root")
+
+    def exited():
+        raise psutil.NoSuchProcess(24682)
+
+    worker = SimpleNamespace(pid=24682, uids=exited)
+    idle = SimpleNamespace(pid=0, uids=lambda: (_ for _ in ()).throw(AssertionError("PID 0 inspected")))
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([idle, worker]))
+
+    assert retention._running_paths()
+
+
+@pytest.mark.parametrize(
+    ("value", "index", "previous"),
+    [("python", 0, None), ("old", 2, "--source-generation")],
+)
+def test_relative_interpreter_and_source_arguments_are_visible(tmp_path, value, index, previous):
+    assert retention._relative_path_argument(
+        value,
+        index=index,
+        previous=previous,
+        cwd=tmp_path,
+    ) == Path(value)
+
+
+def test_relative_process_path_with_changed_cwd_defers_collection(installation, tmp_path, monkeypatch):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    generation = first.parent.parent
+    python = generation / "bin" / "python"
+    python.symlink_to(sys.executable)
+    changed_cwd = tmp_path / "changed-cwd"
+    changed_cwd.mkdir()
+    child_env = os.environ.copy()
+    child_env["PATH"] = f"{generation / 'bin'}{os.pathsep}{child_env.get('PATH', '')}"
+    process = subprocess.Popen(
+        [
+            "python",
+            "-c",
+            "import os, sys; os.chdir(sys.argv[1]); print('ready', flush=True); sys.stdin.read()",
+            str(changed_cwd),
+        ],
+        cwd=generation,
+        env=child_env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    monkeypatch.setattr(retention, "_running_paths", REAL_RUNNING_PATHS)
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([psutil.Process(process.pid)]))
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        for index in range(3):
+            _activate(root, launcher, f"relative-{index}")
+        assert first.exists()
+    finally:
+        process.communicate(timeout=10)
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([]))
+    _activate(root, launcher, "after-relative")
+    assert not first.exists()
+
+
 def test_real_process_keeps_old_environment_until_it_exits(installation, monkeypatch):
     root, launcher = installation
     first = _activate(root, launcher, "first")
@@ -185,13 +411,28 @@ def test_process_scan_uses_existing_command_fallback_for_macos_denial(monkeypatc
         raise psutil.AccessDenied(123)
     fake = SimpleNamespace(
         pid=123, username=lambda: psutil.Process().username(),
-        status=lambda: psutil.STATUS_RUNNING, cmdline=denied, exe=denied,
+        uids=lambda: SimpleNamespace(real=os.getuid()),
+        status=lambda: psutil.STATUS_RUNNING, cmdline=denied, exe=lambda: sys.executable,
+        cwd=lambda: str(tmp_path),
     )
     monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([fake]))
     monkeypatch.setattr(runtime, "get_process_command", lambda _: f'"{python}" -c pass')
     assert python in retention._running_paths()
+    spaced_python = tmp_path / "generation with space" / "bin" / "python"
+    spaced_python.parent.mkdir(parents=True)
+    spaced_python.symlink_to(sys.executable)
+    monkeypatch.setattr(runtime, "get_process_command", lambda _: f"{spaced_python} -c pass")
+    with pytest.raises(retention._ProcessInspectionUnavailable):
+        retention._running_paths()
+    monkeypatch.setattr(runtime, "get_process_command", lambda _: '"bin/python" -c pass')
+    with pytest.raises(retention._ProcessInspectionUnavailable):
+        retention._running_paths()
     monkeypatch.setattr(runtime, "get_process_command", lambda _: None)
-    with pytest.raises(psutil.AccessDenied):
+    with pytest.raises(retention._ProcessInspectionUnavailable):
+        retention._running_paths()
+    fake.exe = denied
+    monkeypatch.setattr(runtime, "get_process_command", lambda _: f'"{python}" -c pass')
+    with pytest.raises(retention._ProcessInspectionUnavailable):
         retention._running_paths()
 
 
@@ -208,6 +449,7 @@ def test_recorded_service_and_ui_are_checked_even_for_a_different_user(monkeypat
         SimpleNamespace(
             pid=pid, username=lambda: "another-user", status=lambda: psutil.STATUS_RUNNING,
             cmdline=lambda: [str(live_python), "-c", "pass"], exe=lambda: sys.executable,
+            cwd=lambda: str(tmp_path),
         )
         for pid in (123, 124)
     ]

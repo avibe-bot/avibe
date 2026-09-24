@@ -23,9 +23,21 @@ generations with a successful-activation receipt, not arbitrary old directories.
   and incomplete process/receipt visibility defer collection. Both bootstrap
   scripts publish an installer PID marker before taking their source snapshot;
   another installer's live marker protects its entire handoff.
+- Process references are collected for the managed install owner's filesystem
+  identity, the updater itself, and recorded service/UI PIDs. Owner, command
+  line, executable, or cwd inspection that is denied or ambiguous defers
+  collection. Relative argv paths are resolved against the process cwd for
+  positive evidence, but a current cwd cannot prove the launch cwd after a
+  `chdir`, so collection retains all owned history for that operation.
 - Each successful activation attempts to record its stable launcher in its
   generation. All recorded launchers participate in collection, including symlink,
   hardlink, and copy fallback identities. Missing copy markers cannot authorize deletion.
+- When a second launcher targets an already receipted generation, its launcher
+  reference is written under the install lock before the launcher is published.
+  A failed reservation leaves the launcher and existing receipt unchanged. Fresh
+  candidates are still receipted only after activation.
+- An alias activation targeting an unreceipted generation never creates a receipt;
+  this preserves the permanent-unowned migration and failed-receipt contract.
 - Failed candidates keep the existing discard path. Cleanup and receipt failures
   are logged and cannot turn a committed activation into failure.
   A failed new ownership receipt leaves that generation permanently unowned and
@@ -57,16 +69,19 @@ normal PR CI and exact-head Codex review gates. No production cleanup or restart
 
 ## Local evidence
 
-- Upgrade, installer, retention, and restart suites after the review correction:
-  380 passed, including all 38 retention cases.
+- The focused retention suite after the safety-boundary correction: 50 passed.
+- The install/upgrade consumer suite (`test_upgrade_flow`, retention, installer
+  script, and install-command E2E): 282 passed, 1 skipped locally because Docker
+  is unavailable.
 - First-head retention, dependency repair, and integrity suites: 255 passed;
   the Docker install test is skipped locally because Docker is unavailable.
 - First-head CI pipeline contracts: 71 passed. Changed-file Ruff, shell syntax,
   and diff whitespace checks pass after the correction.
 - Real temporary Python processes prove logical interpreter/source-argument
   discovery and collection after process exit. A read-only macOS process probe
-  exposed `KERN_PROCARGS2` denial for `login`; the existing command-reader
-  fallback makes the complete inventory readable without omitting that process.
+  exposed `KERN_PROCARGS2` denial for `login`; command-reader fallback handles
+  recoverable argv access, while denied owner/cwd/cmdline/exe provenance defers
+  collection instead of guessing.
 - Packaged Linux and Windows repeated-install bounds passed in first-head CI;
   every new head still requires fresh exact-head CI and Codex review.
 
@@ -78,3 +93,25 @@ after a failed receipt write. Retention now fails closed for unknown/missing/nul
 restart state without changing shared restart admission. A follow-up activation
 test proves a failed-receipt generation stays unowned while subsequent successfully
 receipted generations return to the ordinary two-generation bound.
+
+## Safety-boundary correction
+
+The review of `7a1d186dc5` identified three manifestations of two root causes:
+
+| Finding | Root cause | Contract-preserving boundary |
+| --- | --- | --- |
+| A different-user worker was skipped | Process visibility was scoped to the updater's username | Match the managed root owner through platform/filesystem identity, while always including the updater and recorded service/UI PIDs; uncertainty defers collection |
+| A relative interpreter path was skipped | Logical argv was filtered before cwd/provenance handling | Normalize quoted fallback argv, resolve relative values against the observed cwd, and defer when the launch cwd cannot be proven |
+| An existing receipt lost a newly published alias | Receipt ownership was updated after launcher publication | Reserve the alias in the existing receipt under the same lock before publication; failed reservation aborts without changing the launcher |
+
+The exact-head CI UI failure is a separate test-harness issue: all 6,023 UI
+assertions passed, then a delayed `ToastProvider` timer accessed `window` after
+test teardown. It is intentionally outside this retention patch.
+
+The local pre-push review also required narrow hardening corrections:
+bare interpreter names and separator-free source arguments now fail closed as
+relative references, ambiguous unquoted fallback command lines defer collection,
+Windows owner probes declare pointer-sized API handles and skip PID 0, and
+processes that exit during owner inspection are skipped as a normal snapshot race
+rather than deferring the whole collection pass. An alias cannot adopt an
+unreceipted generation.

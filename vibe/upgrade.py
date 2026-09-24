@@ -594,7 +594,11 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
 
 
 def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
-    from vibe.install_generations import collect_before_activation, record_activation
+    from vibe.install_generations import (
+        collect_before_activation,
+        record_activation,
+        reserve_activation_reference,
+    )
 
     result = verify_upgrade_candidate(activation)
     if not result.ok:
@@ -604,6 +608,7 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
     launcher.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
     root = atomic_uv_install_root().expanduser().resolve()
+    receipt_reserved = reserve_activation_reference(launcher, activation.candidate_launcher)
     try:
         _prepare_launcher_replacement(replacement, activation.candidate_launcher)
         os.replace(replacement, launcher)
@@ -612,7 +617,11 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
-    record_activation(launcher, activation.candidate_launcher)
+    record_activation(
+        launcher,
+        activation.candidate_launcher,
+        receipt_reserved=receipt_reserved,
+    )
 
 
 def activate_installer_candidate(activation: AtomicActivation) -> None:
@@ -635,7 +644,7 @@ def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.
 
 
 def _activate_launcher_target_locked(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
-    from vibe.install_generations import record_activation
+    from vibe.install_generations import record_activation, reserve_activation_reference
 
     launcher_path = Path(launcher).expanduser()
     target_path = Path(target).expanduser()
@@ -643,6 +652,7 @@ def _activate_launcher_target_locked(launcher: str | os.PathLike[str], target: s
         raise RuntimeError(f"launcher target is not executable: {target_path}")
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher_path.parent / f".{launcher_path.name}.avibe-{uuid4().hex}.new"
+    receipt_reserved = reserve_activation_reference(launcher_path, target_path)
     try:
         _prepare_launcher_replacement(replacement, target_path)
         os.replace(replacement, launcher_path)
@@ -651,7 +661,12 @@ def _activate_launcher_target_locked(launcher: str | os.PathLike[str], target: s
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher_path, target_path, atomic_uv_install_root().expanduser().resolve())
-    record_activation(launcher_path, target_path)
+    record_activation(
+        launcher_path,
+        target_path,
+        receipt_reserved=receipt_reserved,
+        allow_new_receipt=False,
+    )
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
