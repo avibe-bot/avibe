@@ -42,6 +42,7 @@ import {
 } from '../lib/settingsOverlay';
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
+import { DesktopSettingsCommand } from './DesktopSettingsCommand';
 
 type ShellNavItem = {
   to?: string;
@@ -377,6 +378,7 @@ export const AppShell: React.FC = () => {
       <ShellSidebarContext.Provider value={shellDrawsSidebar}>
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
+          <DesktopSettingsCommand />
           <Outlet />
         </SettingsOverlayNavigationBoundary>
       </ShellSidebarContext.Provider>
@@ -432,6 +434,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
+    <DesktopSettingsCommand />
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
     <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>

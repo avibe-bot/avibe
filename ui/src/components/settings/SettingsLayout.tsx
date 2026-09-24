@@ -30,6 +30,7 @@ import { SETTINGS_LANDING_PATH } from '@/lib/adminNavigation';
 import { settingsResumePath, writeLastSettingsSection } from '@/lib/settingsSectionMemory';
 import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
+import { isDesktopShell } from '@/lib/desktopShell';
 import {
   closeSettingsOverlay,
   isChromelessShellPath,
@@ -235,6 +236,7 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  const desktopShell = isDesktopShell();
   // Specifically the setup wizard, and only for the mobile back affordance
   // below: coming from the wizard makes Back mean Back. That is a different
   // question from whether a sidebar is on screen, which the rail reads from the
@@ -361,6 +363,10 @@ export const SettingsLayout: React.FC = () => {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
+      {/* The desktop shell's title bar stands in for this one. Its window never
+          gets narrower than the rail breakpoint, so the rail's own Back to Avibe
+          row is always on screen to leave by. */}
+      {!desktopShell && (
       <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
           {/* Leaving Settings for the Workbench is the same action whichever
@@ -408,6 +414,7 @@ export const SettingsLayout: React.FC = () => {
           </ReturnToApp>
         </div>
       </header>
+      )}
 
       <div className="flex min-h-0 flex-1">
         {/* Standalone Settings replaces the app sidebar, so this rail has to be
