@@ -1852,9 +1852,19 @@ async def _prepare_takeover(
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
         # Copy-only keeps the Avibe-saved native key; Hub launches shadow it.
-        credential_backends = (
-            {item.backend for item in [*selected, *retained_keys]} if clean_api_keys else set()
-        )
+        # Cleanup clears the Avibe-saved key only when this batch carries it; an
+        # excluded key (e.g. an unimportable endpoint) keeps its Direct config.
+        carried = {
+            (item.backend, item.secret, item.base_url)
+            for item in [*selected, *retained_keys] if item.secret
+        }
+        credential_backends = {
+            backend for backend in {item.backend for item in [*selected, *retained_keys]}
+            if not native_before.get(backend, {}).get("api_key")
+            or (
+                backend, native_before[backend]["api_key"], native_before[backend].get("base_url"),
+            ) in carried
+        } if clean_api_keys else set()
         native_after = {
             backend: ({
                 name: ("oauth" if name == "auth_mode" else True if name == "auth_mode_set" else None)
@@ -2104,6 +2114,7 @@ async def _resume_takeover(
             # Persist the terminal decision before its config write. A crash
             # between either write and the receipt must finish custody, never
             # restore the original grant or repeat a rejected refresh.
+            await _record_retained_store_revisions(host, record)
             record["terminal"] = {
                 "invalid_source_ids": invalid_source_ids,
                 "config": terminal_config.to_payload(),

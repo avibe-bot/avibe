@@ -601,3 +601,72 @@ def test_kept_keychain_codex_key_is_not_offered_again(monkeypatch, tmp_path):
         agent["routes"] = {}
     store.config = ModelHubConfig.from_payload(payload)
     assert [row["backend"] for row in service.migration_scan()["items"]] == ["codex"]
+
+
+def test_rejected_oauth_completion_still_binds_a_kept_keychain_key(monkeypatch, tmp_path):
+    from core.handlers.model_hub.adapter import OAuthCredentialRejectedError
+    from tests.test_native_oauth_store import FakeKeychain
+    from vibe import native_oauth_store
+
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    keychain = FakeKeychain()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    _write(home / ".codex/config.toml", 'cli_auth_credentials_store = "keyring"\n')
+    account = "cli|" + hashlib.sha256(str((home / ".codex").resolve()).encode()).hexdigest()[:16]
+    locator = ("Codex Auth", account)
+    keychain.items[locator] = (json.dumps({
+        "OPENAI_API_KEY": "fixture-key-123456",
+        "tokens": {
+            "access_token": "fixture-access", "refresh_token": "fixture-refresh",
+            "account_id": "acct_fixture",
+        },
+    }), "fixture-original")
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    validate = adapter.validate_oauth_credential
+
+    async def reject(ref):
+        await validate(ref)
+        raise OAuthCredentialRejectedError()
+
+    adapter.validate_oauth_credential = reject
+    with pytest.raises(ModelHubError) as failure:
+        asyncio.run(service.migration_apply(ids))
+    assert failure.value.code == "migration_credentials_invalid"
+    assert json.loads(keychain.items[locator][0]) == {"OPENAI_API_KEY": "fixture-key-123456"}
+    assert service.migration_scan()["items"] == []
+    [copy] = service.migration_journal.completed()["retained_native_ids"].values()
+    payload = store.config.to_payload()
+    payload["sources"] = [source for source in payload["sources"] if source["id"] != copy["source_id"]]
+    for agent in payload["agents"].values():
+        agent["sources"]["order"] = [value for value in agent["sources"]["order"] if value != copy["source_id"]]
+        agent["routes"] = {}
+    store.config = ModelHubConfig.from_payload(payload)
+    assert [row["backend"] for row in service.migration_scan()["items"]] == ["codex"]
+
+
+def test_cleanup_keeps_an_unimported_avibe_saved_key(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    _write(home / ".claude/settings.json", json.dumps({
+        "env": {"ANTHROPIC_API_KEY": "fixture-native-key"},
+    }))
+    config_path = tmp_path / "avibe-config.json"
+    monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
+    service, memory, _adapter = _service(tmp_path, migration_home=home)
+    config = V2Config.default()
+    config.model_hub = memory.config
+    config.agents.claude.auth_mode = "api_key"
+    config.agents.claude.api_key = "fixture-saved-key"
+    config.agents.claude.base_url = "ftp://saved.example/v1"
+    config.save(config_path=config_path)
+    service.store = V2ModelHubConfigStore()
+    scan = service.migration_scan()["items"]
+    assert sorted(row["proposed_action"] for row in scan) == ["import", "reauth"]
+    ids = [row["id"] for row in scan if row["proposed_action"] == "import"]
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
+    loaded = V2Config.load(config_path=config_path)
+    assert loaded.agents.claude.api_key == "fixture-saved-key"
+    assert loaded.agents.claude.base_url == "ftp://saved.example/v1"
