@@ -1099,6 +1099,69 @@ def test_hourly_retention_expiry_does_not_poison_retained_hours(tmp_path: Path) 
     assert daily["totals"]["input_tokens"] == 48
 
 
+def test_partial_oldest_day_reconciles_expired_and_retained_hours(
+    tmp_path: Path,
+) -> None:
+    """A missing in-horizon slice cannot hide behind expired daily usage."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 23, 18, 30, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Asia/Kathmandu"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps(
+                [
+                    {
+                        "day": "2026-09-23",
+                        "source_id": "src_partial-oldest",
+                        "model_id": "model-partial-oldest",
+                        "requests": 3,
+                        "token_reports": 3,
+                        "input_tokens": 30,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 3,
+                        "last_metered_at": "2026-09-23T17:20:00+00:00",
+                        "hourly_history_complete": True,
+                        "hourly_expired_totals": {
+                            "requests": 1,
+                            "token_reports": 1,
+                            "input_tokens": 10,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 1,
+                        },
+                        "hours": [
+                            {
+                                "key": "2026-09-23T17:00:00+00:00",
+                                "requests": 1,
+                                "token_reports": 1,
+                                "input_tokens": 10,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 1,
+                                "last_metered_at": "2026-09-23T17:20:00+00:00",
+                            }
+                        ],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        report = ledger.report(window="24h", now=now)
+        daily = ledger.summary(days=2, now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 1
+    assert daily["totals"]["requests"] == 3
+    assert any(not bucket["history_complete"] for bucket in report["buckets"])
+
+
 def test_hourly_boundaries_match_across_lord_howe_dst_transition(tmp_path: Path) -> None:
     """Hourly identity stays UTC-stable while Lord Howe displays a 30-minute jump."""
 
@@ -1169,6 +1232,41 @@ def test_hourly_boundaries_display_non_dst_fractional_offset(tmp_path: Path) -> 
     assert populated[0]["end_at"] == "2026-09-24T17:45:00+05:45"
     assert hourly["totals"]["requests"] == 1
     assert all(bucket["history_complete"] for bucket in hourly["buckets"])
+
+
+def test_hourly_report_uses_utc_evidence_after_a_timezone_change(
+    tmp_path: Path,
+) -> None:
+    """A stored hour remains reportable when the host timezone changes."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.record(
+            source_id="src-timezone-change",
+            model_id="model-timezone-change",
+            usage=ProtocolUsageReport(input_tokens=7),
+            at=now - timedelta(hours=6),
+        )
+
+        os.environ["TZ"] = "Pacific/Honolulu"
+        time.tzset()
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 1
+    assert report["totals"]["input_tokens"] == 7
+    [populated] = [bucket for bucket in report["buckets"] if bucket["rows"]]
+    assert populated["rows"][0]["source_id"] == "src-timezone-change"
+    assert all(bucket["history_complete"] for bucket in report["buckets"])
 
 
 @pytest.mark.parametrize(

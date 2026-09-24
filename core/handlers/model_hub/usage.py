@@ -383,15 +383,27 @@ def _merge_hour_slices(target: dict, incoming: dict) -> None:
             )
         target["hours"] = sorted(by_key.values(), key=lambda item: item["key"])
 
+    target_expired = target.get("hourly_expired_totals")
+    incoming_expired = incoming.get("hourly_expired_totals")
+    if target_expired is None or incoming_expired is None:
+        target["hourly_expired_totals"] = None
+    else:
+        expired = dict(target_expired)
+        _accumulate(expired, incoming_expired)
+        target["hourly_expired_totals"] = expired
+
     target["hourly_history_complete"] = target_complete and incoming_complete
 
 
-def _normalize_hour_slice(item: object, *, day: date) -> Optional[dict]:
+def _normalize_hour_slice(item: object) -> Optional[dict]:
     """Normalize one nested hourly slice, or drop it as corrupt."""
 
     if not isinstance(item, dict):
         return None
-    parts = _hour_key_parts(item.get("key"), day=day)
+    # The UTC key is durable evidence. Re-checking it against the row's local
+    # calendar day would reinterpret old data after the host timezone changes and
+    # discard a slice that still belongs in the 24-hour projection.
+    parts = _hour_key_parts(item.get("key"))
     if parts is None:
         return None
     key, _start = parts
@@ -411,6 +423,25 @@ def _normalize_hour_slice(item: object, *, day: date) -> Optional[dict]:
         **counters,
         "last_metered_at": _timestamp(item.get("last_metered_at")),
     }
+
+
+def _normalize_hourly_totals(value: object) -> Optional[dict]:
+    """Normalize counters pruned from the retained hourly history."""
+
+    if not isinstance(value, dict):
+        return None
+    totals: dict[str, int] = {}
+    for key in _COUNTER_KEYS:
+        counter = value.get(key)
+        if not isinstance(counter, int) or isinstance(counter, bool) or counter < 0:
+            return None
+        if counter > USAGE_COUNTER_CEILING:
+            return None
+        totals[key] = counter
+    for subset, superset in _COUNTER_SUBSETS:
+        if totals[subset] > totals[superset]:
+            return None
+    return totals
 
 
 def _normalize_row(row: object) -> Optional[dict]:
@@ -459,7 +490,7 @@ def _normalize_row(row: object) -> Optional[dict]:
         duplicate_hour = False
         over_capacity = False
         for item in raw_hours:
-            normalized_hour = _normalize_hour_slice(item, day=calendar_day)
+            normalized_hour = _normalize_hour_slice(item)
             if normalized_hour is None:
                 invalid_hour = True
                 continue
@@ -497,11 +528,20 @@ def _normalize_row(row: object) -> Optional[dict]:
         normalized["hourly_history_complete"] = (
             row.get("hourly_history_complete") is True and not invalid_hour
         )
+        normalized["hourly_expired_totals"] = _normalize_hourly_totals(
+            row.get("hourly_expired_totals")
+        )
+        if (
+            row.get("hourly_expired_totals") is not None
+            and normalized["hourly_expired_totals"] is None
+        ):
+            normalized["hourly_history_complete"] = False
     else:
         # Released files have no hourly field. Their daily totals remain valid,
         # but no hour may be invented from the daily row's last timestamp.
         normalized["hours"] = None
         normalized["hourly_history_complete"] = False
+        normalized["hourly_expired_totals"] = None
     return normalized
 
 
@@ -656,9 +696,13 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
     current_start = _hour_start(measured).astimezone(timezone.utc)
     oldest_start = current_start - timedelta(hours=USAGE_HOURLY_RETENTION_HOURS - 1)
     retained: dict[str, dict] = {}
+    expired = row.get("hourly_expired_totals")
+    expired_known = isinstance(expired, dict)
+    if expired_known:
+        expired = dict(expired)
     incomplete = row.get("hourly_history_complete") is not True
     for item in hours:
-        parts = _hour_key_parts(item.get("key"), day=_calendar_day(row["day"]))
+        parts = _hour_key_parts(item.get("key"))
         if parts is None:
             incomplete = True
             continue
@@ -672,9 +716,11 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
             incomplete = True
             continue
         if instant < oldest_start:
-            # This is ordinary retention pruning, not missing evidence inside
-            # the requested recent-hour window. Do not poison newer retained
-            # slices merely because their daily owner also carried an older one.
+            # Keep the expired portion of the daily aggregate separate so a
+            # partial oldest local day can distinguish ordinary retention from a
+            # missing in-horizon slice.
+            if expired_known:
+                _accumulate(expired, item)
             continue
         retained[key] = {**item, "key": key}
     latest_metered = _instant(row.get("last_metered_at"))
@@ -695,17 +741,28 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
     if not incomplete and row_day is not None:
         try:
             day_start = _local_midnight(row_day).astimezone(timezone.utc)
+            day_end = _local_midnight(row_day + timedelta(days=1)).astimezone(timezone.utc)
         except (OverflowError, OSError, ValueError):
             day_start = None
-        if day_start is not None and oldest_start <= day_start <= measured:
+            day_end = None
+        if (
+            day_start is not None
+            and day_end is not None
+            and day_start <= measured
+            and day_end > oldest_start
+        ):
             nested_totals = _empty_totals()
             for item in retained.values():
                 _accumulate(nested_totals, item)
-            if any(nested_totals[key] != row[key] for key in _COUNTER_KEYS):
+            if expired_known:
+                _accumulate(nested_totals, expired)
+            if not expired_known or any(
+                nested_totals[key] != row[key] for key in _COUNTER_KEYS
+            ):
                 logger.warning(
-                    "Model Hub usage ledger row %s has hourly counters that do "
-                    "not cover its complete in-horizon day; publishing it as "
-                    "incomplete",
+                    "Model Hub usage ledger row %s cannot reconcile its complete "
+                    "in-horizon day with retained and expired hourly counters; "
+                    "publishing it as incomplete",
                     _row_key(row),
                 )
                 incomplete = True
@@ -720,6 +777,7 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
     return {
         **row,
         "hours": sorted(retained.values(), key=lambda item: item["key"]),
+        "hourly_expired_totals": expired if expired_known else None,
         "hourly_history_complete": not incomplete,
     }
 
@@ -949,6 +1007,7 @@ class BoundedUsageLedger:
                                     "last_metered_at": metered_at.isoformat(),
                                 }
                             ],
+                            "hourly_expired_totals": _empty_totals(),
                             "hourly_history_complete": True,
                         }
                     )
@@ -1040,6 +1099,57 @@ class BoundedUsageLedger:
                 "capacity of %d; dropped the least recently metered",
                 self.path,
                 len(placed) - len(held),
+                self.max_rows,
+            )
+        return sorted(held, key=_row_key)
+
+    def _hourly_rows(
+        self,
+        *,
+        starts: Sequence[datetime],
+        now: datetime,
+    ) -> list[dict]:
+        """Select hourly owners by durable UTC evidence before local projection."""
+
+        report_instant = _aware(now)
+        horizon_start = starts[0].astimezone(timezone.utc)
+        current_start = starts[-1].astimezone(timezone.utc)
+        with self._lock:
+            rows = self._read()
+
+        candidates: list[dict] = []
+        for row in rows:
+            row_day = _calendar_day(row["day"])
+            if row_day is not None and _overlaps_local_day(
+                horizon_start,
+                report_instant,
+                row_day,
+            ):
+                candidates.append(row)
+                continue
+
+            latest = _instant(row.get("last_metered_at"))
+            if latest is not None and horizon_start <= latest <= report_instant:
+                candidates.append(row)
+                continue
+
+            for item in row.get("hours") or ():
+                parts = _hour_key_parts(item.get("key"))
+                if parts is None:
+                    continue
+                _key, start = parts
+                start = start.astimezone(timezone.utc)
+                if horizon_start <= start <= current_start:
+                    candidates.append(row)
+                    break
+
+        held = self._within_capacity(candidates, measured=report_instant)
+        if len(held) < len(candidates):
+            logger.warning(
+                "Model Hub usage ledger %s held %d hourly report row(s) over "
+                "its capacity of %d; dropped the least recently metered",
+                self.path,
+                len(candidates) - len(held),
                 self.max_rows,
             )
         return sorted(held, key=_row_key)
@@ -1238,11 +1348,11 @@ class BoundedUsageLedger:
         }
         first_start = starts[0]
         report_local = _local(now)
-        first_day = first_start.astimezone().date()
         last_day = report_local.date()
         # DST plus a fractional offset can make these 24 actual intervals touch
-        # three local dates. Read every daily owner that intersects the horizon.
-        rows = self.window(days=(last_day - first_day).days + 1, now=now)
+        # three local dates. Select rows from their durable UTC-hour evidence
+        # before applying the current host timezone to their local presentation.
+        rows = self._hourly_rows(starts=starts, now=report_instant)
         measured_by_bucket: list[dict[tuple[str, str], dict]] = [
             {} for _ in starts
         ]
@@ -1267,7 +1377,7 @@ class BoundedUsageLedger:
                     if _overlaps_local_day(start, end, row_day):
                         incomplete.add(index)
             for item in row.get("hours") or ():
-                parts = _hour_key_parts(item.get("key"), day=row_day)
+                parts = _hour_key_parts(item.get("key"))
                 if parts is None:
                     continue
                 _key, start = parts

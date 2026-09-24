@@ -111,7 +111,9 @@ one atomic write captures each call in both granularities. Older files load
 without fabricated hourly history. Daily totals remain authoritative for
 daily reports and include pre-upgrade usage; hourly slices are never added to
 those totals a second time. Retain only the hourly slices needed for the
-24-hour view, with explicit capacity and corruption handling. Existing
+24-hour view, with explicit capacity and corruption handling. Persist the
+aggregate counters pruned outside that horizon so a partial oldest local day can
+distinguish ordinary retention expiry from a missing in-horizon slice. Existing
 batching must not combine calls from different hours before the ledger sees
 their temporal identity. It must also retain distinct local-day owners when a
 UTC hour spans midnight; a fold is valid only within both temporal boundaries.
