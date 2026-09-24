@@ -187,6 +187,23 @@ describe('BackendModelCatalogDialog', () => {
     expect(write.mock.calls[0][1].models.map((entry: BackendModel) => entry.id)).toEqual(['alpha']);
   });
 
+  it('does not ask a focused removal twice about the route its one confirmation covered', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
+      ))
+      .mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(write.mock.calls[1][1]).toMatchObject({ force: true, would_remove_hops: hops, would_interrupt: [] });
+  });
+
   it('cancels a focused removal without writing', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));

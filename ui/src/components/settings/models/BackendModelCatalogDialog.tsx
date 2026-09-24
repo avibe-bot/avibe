@@ -822,7 +822,13 @@ export const BackendModelCatalogDialog: React.FC<{
           // server plan that names an interruption is by construction not
           // covered by what the user has already accepted, and the question is
           // re-asked with the server's own words.
-          const agreed = samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops))
+          //
+          // A focused removal is the exception for its hops. Its one
+          // confirmation already said the row's route goes with it, and the
+          // picture cannot see an automatic route at all — so re-asking over
+          // hops would be the same question twice. Only an interruption, which
+          // no picture ever claims, is a consequence worth asking about again.
+          const agreed = (direct || samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops)))
             && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps ?? []));
           refusalRef.current = {
             hops: refusal.wouldRemoveHops,
@@ -1246,7 +1252,6 @@ export const BackendModelCatalogDialog: React.FC<{
             destructive
             onOpenChange={(next) => { if (!next && !busy) onClose(); }}
             title={t('settings.models.gateway.catalog.removeTitle', { model: row ? displayLabel(row) : asked.modelId })}
-            description={t('settings.models.gateway.catalog.removeDescription')}
             confirmLabel={t('settings.models.gateway.catalog.removeConfirm') as string}
             cancelLabel={t('settings.models.gateway.catalog.cancel') as string}
             confirmDisabled={busy}

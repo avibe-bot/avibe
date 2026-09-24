@@ -942,7 +942,6 @@
           "reorder": "Reorder {{model}}",
           "removeConfirm": "Remove",
           "removeTitle": "Remove {{model}}?",
-          "removeDescription": "The model leaves this backend's list, and any route it has goes with it.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
@@ -1821,7 +1820,6 @@
           "position": "Order #{{n}}"
         },
         "hint": {
-          "safe": "These models still have another source available.",
           "interrupt": "Some models will be left with no usable source."
         },
         "gap": {
@@ -1833,7 +1831,6 @@
           "label": "Removed hops",
           "gapLabel": "Models left with no source",
           "hint": {
-            "safe": "These models still have another source available.",
             "interrupt": "Some models now have no usable source."
           }
         },
