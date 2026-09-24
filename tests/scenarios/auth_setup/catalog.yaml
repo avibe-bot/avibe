@@ -403,4 +403,25 @@ scenarios:
       - tests/test_model_hub_source_identity.py
       - ui/src/components/settings/models/SourceRow.test.tsx
       - ui/e2e/model-provider/provider.spec.ts
+  - id: AUTH-SETUP-125
+    name: Settings opened over an unfinished setup keeps the wizard and its step
+    status: partial
+    kind: happy_path
+    layer: scenario
+    missing_layer: ui-e2e
+    backend: web
+    reason: >-
+      the rule is a browser routing rule with no server boundary: while setup is
+      required, General Settings (and Model Hub) opened over /setup stay the same
+      setup visit, so the guard neither re-validates nor remounts the wizard, and
+      the Settings menu opened there offers only those sections. The desktop shell
+      depends on it because its setup screens leave the language control to General
+      Settings. A pytest node would drive no browser and assert nothing about it;
+      the browser tests below drive the real guard, overlay boundary and Settings
+      menu against controlled responses.
+    owning_layer: L4 integrated acceptance (packaged desktop shell against a live instance)
+    supporting_tests:
+      - ui/src/App.remoteAuth.test.tsx
+      - ui/src/components/settings/SettingsLayout.test.tsx
+      - ui/src/components/DesktopSettingsCommand.test.tsx
 next_priority: []

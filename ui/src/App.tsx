@@ -92,7 +92,7 @@ const SettingsModelsPage = lazy(() =>
 );
 import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
-import { settingsOverlayOriginFromState } from './lib/settingsOverlay';
+import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
@@ -304,11 +304,12 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // off /setup; that pathname flip re-runs the effect so the stale
     // `needs-setup` status refreshes to `ready` instead of bouncing the
     // user straight back to /setup.
-    // Model Hub opened over the wizard is still the same setup visit. Keep the
-    // wizard mounted so closing Settings returns to its current step.
-    const isSetupRoute = location.pathname === '/setup'
-        || (location.pathname === MODEL_HUB_SETTINGS_PATH
-            && settingsOverlayOriginFromState(location.state)?.location.pathname === '/setup');
+    // A setup-visit Settings section opened over the wizard is still the same
+    // setup visit. Keep the wizard mounted so closing Settings returns to its
+    // current step.
+    const settingsOverSetup = SETUP_VISIT_SETTINGS_PATHS.has(location.pathname)
+        && settingsOverlayOriginFromState(location.state)?.location.pathname === '/setup';
+    const isSetupRoute = location.pathname === '/setup' || settingsOverSetup;
     const previousIsSetupRouteRef = useRef(isSetupRoute);
 
     useEffect(() => {
@@ -512,7 +513,9 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         return <AccessBlocked code={blockedCode} />;
     }
     if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
+        // Model Hub keeps its own grant; General needs only the wizard beneath it.
         if (authorizationSession && (location.pathname === '/setup'
+            || (settingsOverSetup && location.pathname !== MODEL_HUB_SETTINGS_PATH)
             || (location.pathname === MODEL_HUB_SETTINGS_PATH && setupModelHubAllowed))) {
             return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
         }
