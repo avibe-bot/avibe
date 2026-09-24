@@ -469,6 +469,71 @@ def test_process_exit_during_executable_scan_is_ignored(monkeypatch, tmp_path):
     assert retention._running_paths()
 
 
+def test_verifiable_linux_kernel_thread_is_ignored(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    collector_pid = 99997
+    kernel_pid = 24686
+    collector = SimpleNamespace(
+        pid=collector_pid,
+        uids=lambda: SimpleNamespace(real=os.getuid()),
+        status=lambda: psutil.STATUS_RUNNING,
+        cmdline=lambda: [str(sys.executable), "-c", "pass"],
+        exe=lambda: sys.executable,
+        cwd=lambda: str(tmp_path),
+    )
+    kernel_thread = SimpleNamespace(
+        pid=kernel_pid,
+        uids=lambda: SimpleNamespace(real=os.getuid()),
+        status=lambda: psutil.STATUS_RUNNING,
+        cmdline=lambda: [],
+        exe=lambda: (_ for _ in ()).throw(
+            AssertionError("kernel thread executable must not be inspected")
+        ),
+        cwd=lambda: (_ for _ in ()).throw(
+            AssertionError("kernel thread cwd must not be inspected")
+        ),
+    )
+    real_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc") / str(kernel_pid) / "status":
+            return "Name:\tkworker\nKthread:\t1\n"
+        return real_read_text(path, *args, **kwargs)
+
+    real_process = retention.psutil.Process
+    monkeypatch.setattr(retention.os, "getpid", lambda: collector_pid)
+    monkeypatch.setattr(retention.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(
+        retention.psutil,
+        "Process",
+        lambda pid=None: collector if pid == collector_pid else real_process(pid),
+    )
+    monkeypatch.setattr(
+        retention,
+        "_filesystem_owner",
+        lambda _: retention._OwnerIdentity(uid=os.getuid()),
+    )
+    monkeypatch.setattr(
+        retention.psutil,
+        "process_iter",
+        lambda: iter([collector, kernel_thread]),
+    )
+
+    assert retention._running_paths()
+
+
+def test_empty_userspace_command_line_still_defers_collection(monkeypatch):
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(pid=24687, cmdline=lambda: [])
+    monkeypatch.setattr(retention, "_is_verifiable_kernel_thread", lambda _: False)
+
+    with pytest.raises(retention._ProcessInspectionUnavailable):
+        retention._process_arguments(process)
+
+
 @pytest.mark.parametrize(
     ("value", "index", "previous"),
     [("python", 0, None), ("old", 2, "--source-generation")],

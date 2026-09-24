@@ -111,6 +111,11 @@ The exact-head CI UI failure is a separate test-harness issue: all 6,023 UI
 assertions passed, then a delayed `ToastProvider` timer accessed `window` after
 test teardown. It is intentionally outside this retention patch.
 
+The current process-scan correction skips only Linux tasks positively marked
+`Kthread: 1` in `/proc/<pid>/status`. Empty or unreadable command lines from
+ordinary userspace processes still defer collection; no process is ignored
+based only on a name, status, or missing argv.
+
 The local pre-push review also required narrow hardening corrections:
 bare interpreter names from other processes and separator-free source arguments
 fail closed as relative references; only the current collector's own bare

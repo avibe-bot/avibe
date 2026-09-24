@@ -584,6 +584,31 @@ def _process_cwd(process: psutil.Process) -> Path:
     return path
 
 
+def _is_verifiable_kernel_thread(process: psutil.Process) -> bool:
+    """Return true only for Linux tasks positively marked as kernel threads.
+
+    An empty command line is not sufficient evidence: ordinary userspace
+    processes can be unreadable or can race their own exit. Linux exposes the
+    kernel-owned ``Kthread: 1`` marker in each task's proc status record; all
+    other platforms and unreadable records remain in the normal fail-closed
+    path.
+    """
+
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        status = (Path("/proc") / str(process.pid) / "status").read_text(
+            encoding="utf-8",
+        )
+    except (OSError, UnicodeError):
+        return False
+    return any(
+        line.partition(":")[0] == "Kthread"
+        and line.partition(":")[2].strip() == "1"
+        for line in status.splitlines()
+    )
+
+
 def _running_paths() -> set[Path]:
     """Keep logical argv, cwd, and image for every relevant process.
 
@@ -636,6 +661,8 @@ def _running_paths() -> set[Path]:
             ):
                 continue
             if process.status() == psutil.STATUS_ZOMBIE:
+                continue
+            if _is_verifiable_kernel_thread(process):
                 continue
             arguments = _process_arguments(process)
             cwd = _process_cwd(process)
