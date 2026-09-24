@@ -1834,3 +1834,38 @@ def test_mh_mig_007_managed_provider_keeps_an_excluded_key_beside_the_login(
     oauth = [item["id"] for item in scan if item["kind"] == "oauth_native"]
     assert asyncio.run(service.migration_apply(oauth))["applied"] == 1
     assert config_path.read_text(encoding="utf-8") == config
+
+
+def test_mh_mig_007_cleanup_keeps_an_excluded_key_in_the_withdrawn_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """MH-MIG-007: cleanup removes only keys the batch carried from a withdrawn store."""
+    native_home = tmp_path / "native-home"
+    auth_path = native_home / ".codex" / "auth.json"
+    _write(
+        auth_path,
+        json.dumps({
+            "OPENAI_API_KEY": "sk-openai-test-123456",
+            "tokens": {
+                "access_token": "codex-access-123456",
+                "refresh_token": "codex-refresh-123456",
+                "account_id": "acct_codex_test",
+            },
+        }),
+    )
+    _write(
+        native_home / ".codex" / "config.toml",
+        'cli_auth_credentials_store = "file"\nmodel_provider = "Relay"\n\n[model_providers.Relay]\n'
+        'base_url = "ftp://relay.example/v1"\nwire_api = "responses"\n'
+        '\n[model_providers.Other]\nbase_url = "https://other.example/v1"\nwire_api = "responses"\n'
+        'experimental_bearer_token = "sk-openai-other-654321"\n',
+    )
+    _isolate_native_home(monkeypatch, native_home)
+    service, _store, _adapter = _service(tmp_path)
+    scan = service.migration_scan()["items"]
+    ids = [item["id"] for item in scan if item["proposed_action"] == "import"]
+    assert any(item["proposed_action"] == "reauth" for item in scan)
+    assert any(item["kind"] == "oauth_native" and item["id"] in ids for item in scan)
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == len(ids)
+    auth = json.loads(auth_path.read_text(encoding="utf-8"))
+    assert auth["OPENAI_API_KEY"] == "sk-openai-test-123456" and "tokens" not in auth

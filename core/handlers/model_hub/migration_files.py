@@ -202,14 +202,19 @@ def native_store_items(
 ) -> list[NativeMigrationItem]:
     """Items with the native credential-store edit (file or Keychain) to apply.
 
-    A subscription login is always withdrawn. Without key cleanup a Codex
-    store keeps its static key, and a key-only store becomes a compare-only
-    guard so a change during the migration is still detected.
+    A subscription login is always withdrawn. A Codex store keeps its static
+    key unless cleanup was requested and this batch carries that key, and a
+    store left unchanged becomes a compare-only guard so a change during the
+    migration is still detected.
     """
-    if clean_api_keys:
-        return items
+    withdrawn = frozenset(
+        item.secret.strip() for item in items
+        if clean_api_keys and item.backend == "codex" and item.kind != "oauth_native" and item.secret
+    )
     return [
-        replace(item, native_store_edit=codex_edit_keeping_api_key(item.native_store_edit))
+        replace(item, native_store_edit=codex_edit_keeping_api_key(
+            item.native_store_edit, withdrawn_keys=withdrawn,
+        ))
         if item.backend == "codex" and item.native_store_edit else item
         for item in items
     ]

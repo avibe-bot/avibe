@@ -381,8 +381,11 @@ def _remove_codex_oauth(payload: Mapping[str, Any], *, keep_api_key: bool = Fals
     return result
 
 
-def codex_edit_keeping_api_key(edit: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """Withdraw only the login from a Codex store edit; its static key stays.
+def codex_edit_keeping_api_key(
+    edit: Mapping[str, Any] | None, *, withdrawn_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
+    """Withdraw only the login from a Codex store edit; its static key stays
+    unless it is one of ``withdrawn_keys``.
 
     A store with nothing to withdraw becomes a compare-only guard, so a change
     made while the migration is in flight is still detected.
@@ -403,7 +406,10 @@ def codex_edit_keeping_api_key(edit: Mapping[str, Any] | None) -> dict[str, Any]
         if not exists or not isinstance(payload, dict):
             operations.append(operation)
             continue
-        after_payload = _remove_codex_oauth(payload, keep_api_key=True)
+        key = payload.get("OPENAI_API_KEY")
+        after_payload = _remove_codex_oauth(
+            payload, keep_api_key=not (isinstance(key, str) and key.strip() in withdrawn_keys),
+        )
         if after_payload == payload:
             after: dict[str, Any] = dict(before)
         elif operation.get("kind") == "file":
