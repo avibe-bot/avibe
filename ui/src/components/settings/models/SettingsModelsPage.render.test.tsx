@@ -2390,4 +2390,47 @@ describe('SettingsModelsPage quota region', () => {
     await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
     expect(clear).toHaveBeenCalled();
   });
+
+  // A quota read can be the first to see a refused grant, while the Source row
+  // itself is still healthy and so offers no repair button. The card's re-login
+  // must therefore reach the confirmed journey on its own, and the tab must
+  // re-read once the new grant lands instead of showing the expired one.
+  it('MH-QUOTA-017: signs an expired grant in again from the quota card and re-reads quota after', async () => {
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: { ...started, state: 'success' as const }, created: null, repaired: null });
+    renderPage([nativeSubscription]);
+    vi.mocked(modelsApi.getQuota).mockResolvedValue({
+      refresh_interval_seconds: 300,
+      sources: [{
+        source_id: nativeSubscription.id,
+        vendor: 'anthropic',
+        display_name: nativeSubscription.display_name,
+        account_label: null,
+        plan: null,
+        fetched_at: null,
+        state: 'auth_expired',
+        error_key: 'models.quota.error.auth_expired',
+        windows: [],
+      }],
+    });
+    await screen.findByText('Claude native login');
+    await openQuota();
+    const read = vi.mocked(modelsApi.getQuota);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ }));
+    expect(reauth).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+    await waitFor(() => expect(reauth).toHaveBeenCalledWith(nativeSubscription.id));
+    // The flow's first status poll lands after its 2 s cadence.
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 4000 });
+  }, 8000);
 });

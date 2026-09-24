@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -1188,12 +1190,19 @@ def _retry_after_seconds(headers: object) -> float | None:
     for key, value in headers.items():
         if not isinstance(key, str) or key.lower() != "retry-after":
             continue
-        raw = value[0] if isinstance(value, list) and value else value
+        raw = str(value[0] if isinstance(value, list) and value else value).strip()
         try:
-            seconds = float(str(raw).strip())
+            seconds = float(raw)
         except ValueError:
-            return None
-        return seconds if seconds > 0 else None
+            # RFC 9110 also allows an HTTP-date.
+            try:
+                moment = email.utils.parsedate_to_datetime(raw)
+            except (TypeError, ValueError, IndexError):
+                return None
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+        return seconds if math.isfinite(seconds) and seconds > 0 else None
     return None
 
 

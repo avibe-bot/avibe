@@ -74,10 +74,10 @@ const codex = (over: Partial<SourceQuota> = {}): SourceQuota => ({
 
 const summary = (sources: SourceQuota[]): QuotaSummary => ({ refresh_interval_seconds: 300, sources });
 
-const draw = (quota: RegionRead<QuotaSummary>, over: { onRefresh?: () => void; onOpenSource?: (id: string) => void } = {}) =>
+const draw = (quota: RegionRead<QuotaSummary>, over: { onRefresh?: () => void; onRequestReauth?: (id: string) => void } = {}) =>
   render(
     <I18nextProvider i18n={i18n}>
-      <QuotaTab quota={quota} now={NOW} onRefresh={over.onRefresh} onOpenSource={over.onOpenSource} />
+      <QuotaTab quota={quota} now={NOW} onRefresh={over.onRefresh} onRequestReauth={over.onRequestReauth} />
     </I18nextProvider>,
   );
 
@@ -155,29 +155,31 @@ describe('QuotaTab', () => {
   });
 
   it('MH-QUOTA-014: keeps an expired grant\'s last reading under a banner that offers re-login', async () => {
-    const onOpenSource = vi.fn();
+    const onRequestReauth = vi.fn();
     draw(readyRegion(summary([
       claude(),
       codex({ state: 'auth_expired', error_key: 'models.quota.error.auth_expired', fetched_at: iso(NOW - 3 * HOUR - 12 * 60_000) }),
-    ])), { onOpenSource });
+    ])), { onRequestReauth });
 
     const card = screen.getByRole('article', { name: 'ChatGPT Pro' });
     expect(within(card).getByText('需重新登录')).toBeTruthy();
     expect(within(card).getByRole('status').textContent).toBe('登录已过期，下面是 3 小时 12 分前的数据重新登录');
     expect(within(card).getAllByText('暂停更新').length).toBeGreaterThan(0);
     expect(card.classList.contains('model-hub-quota-card--retained')).toBe(true);
-    // A retained reading is not current, so it cannot fill the page summary.
-    expect(screen.getByText('所有账号都能正常使用')).toBeTruthy();
+    // A retained reading is not current, so it cannot fill the page summary,
+    // and an account that must sign in again is not called usable.
+    expect(screen.getByText('没有已用完的额度')).toBeTruthy();
+    expect(screen.queryByText('所有账号都能正常使用')).toBeNull();
 
     await userEvent.click(within(card).getByRole('button', { name: '重新登录' }));
-    expect(onOpenSource).toHaveBeenCalledWith('src_codex');
+    expect(onRequestReauth).toHaveBeenCalledWith('src_codex');
   });
 
   it('states an unread Source in words instead of an empty bar', () => {
     draw(readyRegion(summary([
       claude({ state: 'error', error_key: 'models.quota.error.unavailable', fetched_at: null, windows: [] }),
       codex({ state: 'auth_expired', error_key: 'models.quota.error.auth_expired', fetched_at: null, windows: [] }),
-    ])), { onOpenSource: () => {} });
+    ])), { onRequestReauth: () => {} });
 
     expect(screen.getByText('暂时读不到额度，稍后会自动重试')).toBeTruthy();
     const expired = screen.getByRole('article', { name: 'ChatGPT Pro' });

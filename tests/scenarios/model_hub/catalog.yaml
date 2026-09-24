@@ -776,6 +776,12 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-016
+  - id: MH-QUOTA-017
+    name: An expired grant is signed in again from its quota card through the confirmed re-login journey, and quota re-reads after
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-017
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

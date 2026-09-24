@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -66,6 +67,7 @@ import {
 import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, runtimeCanAttemptInstall, runtimeIsRunning } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { handOffProviderTab } from './providerTab';
+import { canReauth, reauthBodyKey, reauthCost } from './repair';
 import { resumeGatewayAdoption } from './gatewayAdoption';
 import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
@@ -397,6 +399,11 @@ export const SettingsModelsPage: React.FC = () => {
   // which replaces the overview that holds 添加订阅 — and only the create path
   // owns the success-landing timer and reconcile flag below.
   const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
+  // A quota read can be the first to see a refused grant while the Source row
+  // is still healthy, so its re-login cannot route through the detail panel's
+  // repair button (which only a blocked row shows). It asks the same question
+  // here, then starts the same journey.
+  const [quotaReauthSource, setQuotaReauthSource] = React.useState<Source | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
@@ -1384,7 +1391,12 @@ export const SettingsModelsPage: React.FC = () => {
    * one: `_materialize_reauth` can leave other agents without a source, so
    * `/agents` and the chains behind it are stale too, not just this row.
    */
-  const sourceReauthed = React.useCallback(() => { void refresh(); }, [refresh]);
+  const sourceReauthed = React.useCallback(() => {
+    void refresh();
+    // The Source now holds a new grant; the open quota tab re-reads for it
+    // instead of showing the expired one until the next tick.
+    if (tab === 'quota') void readQuota(false);
+  }, [readQuota, refresh, tab]);
   const closeReauth = React.useCallback(() => {
     setReauthSource(null);
     // Back to the detail heading rather than to the button that opened this: a
@@ -1475,9 +1487,13 @@ export const SettingsModelsPage: React.FC = () => {
                       refreshing={refreshingQuota}
                       onRefresh={refreshQuotaNow}
                       onRetry={retryQuota}
-                      // Re-authentication lives on the Source, behind its own
-                      // confirmation; the quota card only opens it.
-                      onOpenSource={(sourceId) => {
+                      onRequestReauth={(sourceId) => {
+                        const target = sources.find((source) => source.id === sourceId);
+                        if (target && canReauth(target)) {
+                          setQuotaReauthSource(target);
+                          return;
+                        }
+                        // Not a Source this page can sign in again: show it instead.
                         const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
@@ -1650,6 +1666,24 @@ export const SettingsModelsPage: React.FC = () => {
           sources={sources}
           onClose={closeSubscription}
           onConnected={subscriptionAdded}
+        />
+      )}
+      {quotaReauthSource && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => { if (!open) setQuotaReauthSource(null); }}
+          title={t('settings.models.repair.reauthTitle', { name: quotaReauthSource.display_name })}
+          description={t(reauthBodyKey(quotaReauthSource))}
+          confirmLabel={t('settings.models.repair.reauthConfirm') as string}
+          destructive={reauthCost(quotaReauthSource) === 'immediate'}
+          onConfirm={() => {
+            // The journey's only user gesture, as in the detail panel: allocate
+            // the provider tab here so the dialog's POST is not popup-blocked.
+            handOffProviderTab();
+            const target = quotaReauthSource;
+            setQuotaReauthSource(null);
+            setReauthSource(target);
+          }}
         />
       )}
       {reauthSource && (

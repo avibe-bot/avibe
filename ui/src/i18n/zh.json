@@ -1398,10 +1398,12 @@
         },
         "stat": {
           "tightest": "余量最少的额度",
-          "tightestNone": "所有额度都还没开始用",
+          "tightestAllSpent": "所有额度都已用完",
+          "tightestUnread": "暂时没有可读的额度",
           "exhausted": "已用完",
           "exhaustedUnit": "项额度",
           "exhaustedNone": "所有账号都能正常使用",
+          "exhaustedNoneObserved": "没有已用完的额度",
           "exhaustedNote": "{{name}} · {{time}} 恢复",
           "resetsIn": "{{duration}}后重置"
         },

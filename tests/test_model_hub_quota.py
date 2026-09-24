@@ -157,6 +157,18 @@ def test_quota_parsers_reject_a_malformed_body_as_one_source_failure(parser, bod
     assert "nope" not in str(caught.value) and "authentication_error" not in str(caught.value)
 
 
+def test_quota_parsers_stop_reading_a_runaway_row_list():
+    """MH-QUOTA-004: A body with a huge row list costs a bounded read, not one row per upstream entry."""
+
+    row = {"kind": "weekly_scoped", "percent": 5, "scope": {"model": {"display_name": "M"}}}
+    parsed = parse_claude_quota(json.dumps({"limits": [row] * 100_000}))
+    assert len(parsed["windows"]) == 1  # dedup by id; the slice is what bounds the work
+    additional = [{"limit_name": f"m{i}", "rate_limit": {"primary_window": {"used_percent": 1, "limit_window_seconds": 3600}}}
+                  for i in range(10_000)]
+    parsed = parse_codex_quota(json.dumps({"additional_rate_limits": additional}))
+    assert len(parsed["windows"]) == 16
+
+
 def test_quota_parsers_bound_values_from_a_hostile_body():
     """MH-QUOTA-004: Percentages clamp to 0–100, non-finite values drop, and labels are bounded."""
 
@@ -407,6 +419,8 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
         ({"status_code": 401, "body": "{}"}, "auth_expired", None),
         ({"status_code": 403, "body": "{}"}, "auth_expired", None),
         ({"status_code": 429, "header": {"Retry-After": ["120"]}, "body": "{}"}, "rate_limited", 120.0),
+        ({"status_code": 429, "header": {"retry-after": ["Wed, 21 Oct 2015 07:28:00 GMT"]}, "body": "{}"}, "rate_limited", None),
+        ({"status_code": 429, "header": {"Retry-After": "soon"}, "body": "{}"}, "rate_limited", None),
         ({"status_code": 500, "body": "{}"}, "unavailable", None),
         ({"status_code": 200, "body": "<html>"}, "malformed", None),
     ],
@@ -419,6 +433,20 @@ async def test_adapter_maps_vendor_statuses_to_sanitized_quota_failures(response
         await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
     assert caught.value.reason == reason
     assert caught.value.retry_after_seconds == retry_after
+
+
+async def test_adapter_honours_a_future_http_date_retry_after():
+    """MH-QUOTA-011: A 429 whose Retry-After is an HTTP-date carries the delay until that date."""
+
+    from email.utils import format_datetime
+
+    later = datetime.now(timezone.utc) + timedelta(minutes=40)
+    adapter, _client = _adapter(
+        {"status_code": 429, "header": {"Retry-After": [format_datetime(later, usegmt=True)]}, "body": "{}"}, _METADATA
+    )
+    with pytest.raises(SubscriptionQuotaError) as caught:
+        await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+    assert 38 * 60 < caught.value.retry_after_seconds <= 40 * 60
 
 
 async def test_adapter_quota_read_never_starts_the_engine():

@@ -149,8 +149,8 @@ const AccountCard: React.FC<{
   source: SourceQuota;
   now: number;
   text: QuotaText;
-  onOpenSource?: (sourceId: string) => void;
-}> = ({ source, now, text, onOpenSource }) => {
+  onRequestReauth?: (sourceId: string) => void;
+}> = ({ source, now, text, onRequestReauth }) => {
   const { t } = useTranslation();
   const retained = quotaIsRetained(source);
   const status = sourceStatus(source, now);
@@ -187,8 +187,8 @@ const AccountCard: React.FC<{
           <span className="min-w-0 flex-1">
             {t(expired ? 'settings.models.quota.stale.authExpired' : 'settings.models.quota.stale.retained', { ago: text.ago(fetchedAt) })}
           </span>
-          {expired && onOpenSource && (
-            <Button variant="outline" size="sm" className="shrink-0" onClick={() => onOpenSource(source.source_id)}>
+          {expired && onRequestReauth && (
+            <Button variant="outline" size="sm" className="shrink-0" onClick={() => onRequestReauth(source.source_id)}>
               {t('settings.models.quota.stale.reauth')}
             </Button>
           )}
@@ -200,8 +200,8 @@ const AccountCard: React.FC<{
               <span className="min-w-0 flex-1">
                 {t(`settings.models.quota.unread.${source.state === 'auth_expired' || source.state === 'unsupported' ? source.state : 'error'}`)}
               </span>
-              {expired && onOpenSource && (
-                <Button variant="outline" size="sm" className="shrink-0" onClick={() => onOpenSource(source.source_id)}>
+              {expired && onRequestReauth && (
+                <Button variant="outline" size="sm" className="shrink-0" onClick={() => onRequestReauth(source.source_id)}>
                   {t('settings.models.quota.stale.reauth')}
                 </Button>
               )}
@@ -250,11 +250,11 @@ export const QuotaTab: React.FC<{
   refreshing?: boolean;
   onRefresh?: () => void | Promise<void>;
   onRetry?: () => void | Promise<void>;
-  /** Opens the Source whose grant expired; re-authentication starts there, behind its own confirmation. */
-  onOpenSource?: (sourceId: string) => void;
+  /** Asks to sign the expired grant in again; the page confirms before the journey starts. */
+  onRequestReauth?: (sourceId: string) => void;
   /** Fixes the clock the projection reads; the tab ticks its own when absent. */
   now?: number;
-}> = ({ quota: quotaRead, refreshing = false, onRefresh, onRetry, onOpenSource, now: fixedNow }) => {
+}> = ({ quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow }) => {
   const { t } = useTranslation();
   const now = useNow(fixedNow);
   const text = useQuotaText(now);
@@ -314,7 +314,7 @@ export const QuotaTab: React.FC<{
                           resetAt !== null && resetAt > now ? t('settings.models.quota.stat.resetsIn', { duration: text.duration(resetAt - now) }) : null,
                         ].filter(Boolean).join(' · ');
                       })()
-                    : t('settings.models.quota.stat.tightestNone')}
+                    : t(exhausted.length ? 'settings.models.quota.stat.tightestAllSpent' : 'settings.models.quota.stat.tightestUnread')}
                 />
                 <StatCard
                   label={t('settings.models.quota.stat.exhausted')}
@@ -327,7 +327,9 @@ export const QuotaTab: React.FC<{
                           ? t('settings.models.quota.stat.exhaustedNote', { name: exhausted[0].source.display_name, time: text.clock(resetAt) })
                           : exhausted[0].source.display_name;
                       })()
-                    : t('settings.models.quota.stat.exhaustedNone')}
+                    // 「every account is usable」 is a claim about accounts; make it only
+                    // when every account has a current reading to back it.
+                    : t(sources.every(quotaIsLive) ? 'settings.models.quota.stat.exhaustedNone' : 'settings.models.quota.stat.exhaustedNoneObserved')}
                 />
               </div>
               {upcoming.length > 0 && (
@@ -342,7 +344,7 @@ export const QuotaTab: React.FC<{
                 </div>
               )}
               <div className="model-hub-quota-grid grid gap-4">
-                {sources.map((source) => <AccountCard key={source.source_id} source={source} now={now} text={text} onOpenSource={onOpenSource} />)}
+                {sources.map((source) => <AccountCard key={source.source_id} source={source} now={now} text={text} onRequestReauth={onRequestReauth} />)}
               </div>
               <p className="model-hub-quota-foot flex items-start gap-2">
                 <Clock3 className="mt-px size-[13px] shrink-0" aria-hidden />

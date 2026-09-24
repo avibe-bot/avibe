@@ -1398,10 +1398,12 @@
         },
         "stat": {
           "tightest": "Lowest remaining limit",
-          "tightestNone": "No limit has been used yet",
+          "tightestAllSpent": "Every limit is used up",
+          "tightestUnread": "No current reading yet",
           "exhausted": "Used up",
           "exhaustedUnit": "limits",
           "exhaustedNone": "Every account is usable",
+          "exhaustedNoneObserved": "No limit is used up",
           "exhaustedNote": "{{name}} · back {{time}}",
           "resetsIn": "resets in {{duration}}"
         },

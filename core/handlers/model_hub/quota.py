@@ -16,6 +16,7 @@ a page failure. Only the parsed fields leave this module; the body does not.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import math
@@ -33,6 +34,9 @@ WEEKLY_WINDOW_SECONDS: Final = 7 * 86400
 # Upstream labels are user-visible; bound them so a hostile body cannot flood the page.
 _MAX_LABEL_CHARS: Final = 64
 _MAX_WINDOWS: Final = 16
+# Rows read from any one upstream array or object. A report carries a handful;
+# a hostile or runaway body stops costing work here, before anything is built.
+_MAX_UPSTREAM_ROWS: Final = 64
 
 QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex"})
 
@@ -147,7 +151,7 @@ def _load_object(body: object) -> dict[str, Any]:
 
 def _claude_limit_rows(rows: list[object]) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
+    for index, row in enumerate(rows[:_MAX_UPSTREAM_ROWS]):
         if not isinstance(row, dict):
             continue
         used = _percent(row.get("percent"))
@@ -191,7 +195,7 @@ def _claude_limit_rows(rows: list[object]) -> list[dict[str, Any]]:
 
 def _claude_top_level(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
-    for key, value in payload.items():
+    for key, value in itertools.islice(payload.items(), _MAX_UPSTREAM_ROWS):
         if key in _CLAUDE_SKIPPED_TOP_LEVEL or not isinstance(value, dict) or "utilization" not in value:
             continue
         used = _percent(value.get("utilization"))
@@ -291,7 +295,7 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
                 )
             )
     if isinstance(additional, list):
-        for index, item in enumerate(additional):
+        for index, item in enumerate(additional[:_MAX_UPSTREAM_ROWS]):
             if not isinstance(item, dict) or not isinstance(item.get("rate_limit"), dict):
                 continue
             feature = item.get("metered_feature")
