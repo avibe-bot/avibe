@@ -288,6 +288,22 @@ def _local_midnight(day: date) -> datetime:
     return datetime.combine(day, time.min).astimezone()
 
 
+def _overlaps_local_day(start: datetime, end: datetime, day: date) -> bool:
+    """Whether an instant interval intersects a local calendar day.
+
+    A UTC hour can straddle local midnight in a fractional-offset zone. Its
+    contributions then belong to two daily owners, not just the start's date.
+    Unrepresentable persisted dates are invalid evidence, never a read failure.
+    """
+
+    try:
+        day_start = _local_midnight(day)
+        day_end = _local_midnight(day + timedelta(days=1))
+        return start < end and start < day_end and end > day_start
+    except (OverflowError, OSError, ValueError):
+        return False
+
+
 def _hour_start(moment: datetime) -> datetime:
     """Return the UTC boundary of the actual hour containing ``moment``."""
 
@@ -323,12 +339,13 @@ def _hour_key_parts(value: object, *, day: Optional[date] = None) -> Optional[tu
         return None
     if carried.minute or carried.second or carried.microsecond:
         return None
-    try:
-        local = carried.astimezone()
-    except (OverflowError, OSError, ValueError):
-        return None
-    if day is not None and local.date() != day:
-        return None
+    if day is not None:
+        try:
+            end = carried + timedelta(hours=1)
+        except OverflowError:
+            return None
+        if not _overlaps_local_day(carried, end, day):
+            return None
     return carried.isoformat(timespec="seconds"), carried
 
 
@@ -1187,7 +1204,12 @@ class BoundedUsageLedger:
         }
         first_start = starts[0]
         last_start = starts[-1]
-        rows = self.window(days=2, now=now)
+        report_local = _local(now)
+        first_day = first_start.astimezone().date()
+        last_day = report_local.date()
+        # DST plus a fractional offset can make these 24 actual intervals touch
+        # three local dates. Read every daily owner that intersects the horizon.
+        rows = self.window(days=(last_day - first_day).days + 1, now=now)
         measured_by_bucket: list[dict[tuple[str, str], dict]] = [
             {} for _ in starts
         ]
@@ -1206,11 +1228,7 @@ class BoundedUsageLedger:
                         if index + 1 < len(starts)
                         else report_instant
                     )
-                    if (
-                        start.astimezone().date() == row_day
-                        and start < end
-                        and end > first_start
-                    ):
+                    if _overlaps_local_day(start, end, row_day):
                         incomplete.add(index)
             for item in row.get("hours") or ():
                 parts = _hour_key_parts(item.get("key"), day=row_day)
@@ -1244,7 +1262,6 @@ class BoundedUsageLedger:
                     item.get("last_metered_at"),
                 )
 
-        report_local = _local(now)
         bucket_rows = []
         summary_rows = []
         for index, start in enumerate(starts):
@@ -1273,7 +1290,10 @@ class BoundedUsageLedger:
             )
             summary_rows.extend(measured_by_bucket[index].values())
 
-        days = sorted({start.astimezone().date().isoformat() for start in starts})
+        days = sorted({
+            *(start.astimezone().date().isoformat() for start in starts),
+            last_day.isoformat(),
+        })
         summary = self._summary_from_rows(
             summary_rows,
             window_days=len(days),

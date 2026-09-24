@@ -96,6 +96,11 @@ Hourly persistence, queue coalescing, and interval identity use UTC hour boundar
 The returned `key`, `start_at`, and `end_at` render those boundaries in the server-local
 offset, so fractional-offset zones may show `:30` or `:45`, and a DST transition may
 change the displayed wall-clock span while each interval remains one actual hour.
+An hourly interval can overlap two local-day storage owners; both contributions
+are joined into the same source/model row. Hourly `days` totals follow the bucket
+start date, while daily reports retain local-calendar accounting. `from_day`,
+`to_day`, and `window_days` cover every local date touched, including the report's
+current date; around a DST transition the 24-hour view can touch three dates.
 
 Each bucket carries `history_complete` independently of `token_reports`. A legacy
 daily-only ledger can therefore contribute to daily reports while leaving affected
@@ -1389,7 +1394,8 @@ so one model is one row rather than one row per spelling.
 
 Days are local-calendar days on the Avibe host. `from_day` and `to_day` bound the
 requested window even when no turn fell inside it; `days[]` contains only days that
-carry a metered turn. `label` is joined from current Source config, so it is `null`
+carry a metered turn (grouped by bucket start date for hourly reports, as described
+under usage report windows). `label` is joined from current Source config, so it is `null`
 for a Source that has since been removed and follows a rename immediately.
 
 ## Runtime installation and host support

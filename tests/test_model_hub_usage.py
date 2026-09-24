@@ -949,6 +949,119 @@ def test_hourly_boundaries_display_non_dst_fractional_offset(tmp_path: Path) -> 
     assert all(bucket["history_complete"] for bucket in hourly["buckets"])
 
 
+@pytest.mark.parametrize(
+    ("zone", "now", "calls", "from_day", "to_day", "window_days"),
+    [
+        (
+            "Asia/Kathmandu",
+            datetime(2026, 9, 23, 18, 30, tzinfo=timezone.utc),
+            (
+                datetime(2026, 9, 23, 18, 14, tzinfo=timezone.utc),
+                datetime(2026, 9, 23, 18, 20, tzinfo=timezone.utc),
+            ),
+            "2026-09-23", "2026-09-24", 2,
+        ),
+        (
+            "Pacific/Chatham",
+            datetime(2026, 9, 27, 10, 30, tzinfo=timezone.utc),
+            (
+                datetime(2026, 9, 26, 11, 5, tzinfo=timezone.utc),
+                datetime(2026, 9, 26, 11, 20, tzinfo=timezone.utc),
+            ),
+            "2026-09-26", "2026-09-28", 3,
+        ),
+    ],
+)
+def test_hourly_report_joins_every_local_day_owner_across_midnight(
+    tmp_path: Path,
+    zone: str,
+    now: datetime,
+    calls: tuple[datetime, datetime],
+    from_day: str,
+    to_day: str,
+    window_days: int,
+) -> None:
+    """One real hour can join two daily owners and a horizon can touch three dates."""
+
+    previous_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = zone
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        for at in calls:
+            ledger.record(
+                source_id="src_midnight",
+                model_id="model-midnight",
+                usage=ProtocolUsageReport(input_tokens=10, cached_input_tokens=3, output_tokens=2),
+                at=at,
+            )
+        # A fresh reader exercises the persisted keys, not an in-memory projection.
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+        daily = ledger.summary(days=7, now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"] == daily["totals"]
+    assert report["totals"]["requests"] == 2
+    assert report["totals"]["input_tokens"] == 20
+    assert report["from_day"] == from_day
+    assert report["to_day"] == to_day
+    assert report["window_days"] == window_days
+    assert len(report["buckets"]) == 24
+    assert all(bucket["history_complete"] for bucket in report["buckets"])
+    [populated] = [bucket for bucket in report["buckets"] if bucket["rows"]]
+    assert len(populated["rows"]) == 1
+    assert populated["rows"][0]["requests"] == 2
+    assert sum(day["requests"] for day in report["days"]) == 2
+    for before, after in zip(report["buckets"], report["buckets"][1:]):
+        assert before["end_at"] == after["start_at"]
+
+
+def test_legacy_usage_after_local_midnight_marks_the_overlapping_hour_incomplete(
+    tmp_path: Path,
+) -> None:
+    """Missing history belongs to every overlapping hour, not just its start date."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 23, 18, 30, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "Asia/Kathmandu"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(json.dumps([{
+            "day": "2026-09-24",
+            "source_id": "src_legacy",
+            "model_id": "model-legacy",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 10,
+            "cached_input_tokens": 0,
+            "output_tokens": 2,
+            "last_metered_at": now.isoformat(),
+        }]), encoding="utf-8")
+        report = ledger.report(window="24h", now=now)
+        daily = ledger.summary(days=1, now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 0
+    assert daily["totals"]["requests"] == 1
+    [incomplete] = [
+        bucket for bucket in report["buckets"] if not bucket["history_complete"]
+    ]
+    assert incomplete["start_at"] == "2026-09-23T23:45:00+05:45"
+    assert incomplete["end_at"] == "2026-09-24T00:15:00+05:45"
+
+
 def test_a_window_excludes_days_outside_it(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
 

@@ -37,7 +37,7 @@
   "additionalProperties": false,
   "properties": {
     "window_days": {
-      "description": "Requested window after clamping to the retained range.",
+      "description": "Daily window after clamping to the retained range, or the number of local dates touched by an hourly report, including its current report date.",
       "type": "integer",
       "minimum": 1,
       "maximum": 62
@@ -61,7 +61,7 @@
       }
     },
     "days": {
-      "description": "One entry per local day carrying a metered turn, oldest first.",
+      "description": "One entry per local day carrying a metered turn, oldest first. Hourly reports group the published bucket rows by bucket start date; daily reports retain local-calendar accounting.",
       "type": "array",
       "items": {
         "$ref": "#/definitions/DayUsage"

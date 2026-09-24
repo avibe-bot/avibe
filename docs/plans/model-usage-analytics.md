@@ -83,6 +83,9 @@ their existing joined display identities. `totals`, `sources`, and `days`
 aggregate these exact same rows, including for hourly reports. For hourly
 reports `window_days` names the number of local calendar dates touched by the
 reported buckets; it must not pretend that 24 hours means today's calendar day.
+An hourly interval can intersect two daily storage owners; the report joins
+both contributions into one source/model row. Its `days` rollup follows bucket
+start dates, while daily reports retain the original local-calendar accounting.
 Daily reports preserve the legacy aggregate's bounds and survivor set.
 
 `history_complete` means the time granularity is available for that bucket;
