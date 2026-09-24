@@ -195,6 +195,7 @@ CodexConnectionProbeRuntimeMismatchError = (
     _MODULE.CodexConnectionProbeRuntimeMismatchError
 )
 CodexPromptRefreshUnavailableError = _MODULE.CodexPromptRefreshUnavailableError
+CodexForkBoundaryUnavailableError = _MODULE.CodexForkBoundaryUnavailableError
 CodexResumeUnavailableError = _MODULE.CodexResumeUnavailableError
 
 for name, module in _saved_modules.items():
@@ -1614,6 +1615,66 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
             "❌ Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
         )
 
+    async def test_handle_message_localizes_fork_boundary_failure(self):
+        messages = {
+            "en": (
+                "❌ Codex could not determine a safe history boundary for this fork. "
+                "Wait for the source turn to finish, then retry. "
+                "If the problem persists, check or update Codex."
+            ),
+            "zh": (
+                "❌ Codex 无法确定此次分叉的安全历史边界。"
+                "请等待源会话当前回合结束后重试；如果问题持续，请检查或升级 Codex。"
+            ),
+        }
+        for language, expected in messages.items():
+            with self.subTest(language=language):
+                agent = object.__new__(CodexAgent)
+                context = SimpleNamespace(platform_specific={})
+                request = SimpleNamespace(
+                    base_session_id="session-1",
+                    working_path="/tmp/work",
+                    context=context,
+                    session_key="settings-1",
+                    ack_message_id=None,
+                )
+                transport = SimpleNamespace(stop=AsyncMock())
+                agent.controller = SimpleNamespace(
+                    config=SimpleNamespace(language=language),
+                    emit_agent_message=AsyncMock(),
+                )
+                agent.sessions = SimpleNamespace()
+                agent._session_locks = {}
+                agent._turn_registry = _HandleMessageTurnRegistry(active_turn=None)
+                agent._session_mgr = SimpleNamespace(
+                    set_session_key=Mock(), set_cwd=Mock(), get_thread_id=Mock(return_value=None),
+                )
+                agent._get_or_create_transport = AsyncMock(return_value=transport)
+                agent._touch_transport_activity = Mock()
+                agent._delete_ack = AsyncMock()
+                agent._remove_ack_reaction = AsyncMock()
+                agent._event_handler = SimpleNamespace(_release_stream_turn=Mock())
+                agent._build_thread_developer_instructions = AsyncMock(return_value="prompt")
+                diagnostic = "Cannot fork Codex thread while the source turn boundary is unknown"
+                agent._start_or_resume_thread = AsyncMock(
+                    side_effect=CodexForkBoundaryUnavailableError(diagnostic),
+                )
+                agent._start_turn = AsyncMock()
+                agent._drop_transport_after_failure = AsyncMock()
+
+                await agent.handle_message(request)
+
+                calls = agent.controller.emit_agent_message.await_args_list
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0].args, (context, "notify", expected))
+                self.assertNotIn(diagnostic, calls[0].args[2])
+                self.assertIn(diagnostic, calls[1].kwargs["terminal_error"])
+                agent._start_or_resume_thread.assert_awaited_once()
+                agent._start_turn.assert_not_awaited()
+                agent._drop_transport_after_failure.assert_not_awaited()
+                transport.stop.assert_not_awaited()
+                agent._event_handler._release_stream_turn.assert_called_once_with(context)
+
     async def test_handle_message_does_not_hide_turn_before_interrupt_succeeds(self):
         agent = object.__new__(CodexAgent)
         request = SimpleNamespace(
@@ -2928,7 +2989,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "source turn boundary is unknown"):
+            with self.assertRaisesRegex(
+                CodexForkBoundaryUnavailableError, "source turn boundary is unknown"
+            ):
                 await agent._fork_thread(
                     transport,
                     request,

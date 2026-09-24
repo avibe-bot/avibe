@@ -133,6 +133,10 @@ class CodexPromptRefreshUnavailableError(RuntimeError):
     """The current app-server cannot safely refresh a persisted thread prompt."""
 
 
+class CodexForkBoundaryUnavailableError(RuntimeError):
+    """The source history cannot prove a safe inclusive fork boundary."""
+
+
 class CodexResumeUnavailableError(RuntimeError):
     """The Codex thread associated with this session can no longer be resumed.
 
@@ -1477,6 +1481,12 @@ class CodexAgent(BaseAgent):
                 or "en"
             )
             message = i18n_t("error.codexPromptRefreshUnavailable", language)
+        elif isinstance(error, CodexForkBoundaryUnavailableError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            message = i18n_t("error.codexForkBoundaryUnavailable", language)
         else:
             message = f"Codex error: {error}"
 
@@ -2628,7 +2638,7 @@ class CodexAgent(BaseAgent):
                     await self._fork_source_last_completed_turn_id(transport, fork)
                 )
                 if not last_completed_turn_id:
-                    raise RuntimeError(
+                    raise CodexForkBoundaryUnavailableError(
                         "Cannot fork Codex thread while the source turn boundary "
                         "is unknown"
                     )
