@@ -428,6 +428,9 @@ _PROJECT_ENTRY_POINTS = {
     "archive_project": lambda conn, project_id, context: projects_service.archive_project(
         conn, project_id, authorization_context=context
     ),
+    "reorder_projects": lambda conn, project_id, context: projects_service.reorder_projects(
+        conn, [project_id], expected_order=[project_id], authorization_context=context
+    ),
 }
 
 
@@ -454,7 +457,8 @@ def test_restricted_project_is_unreachable_through_every_entry_point(engine, tmp
         _restrict_project_to(conn, project["id"], "insider@example.com")
         if entry_point in {"list_projects", "get_project", "get_project_workdir"}:
             call(conn, project["id"], included)
-        with pytest.raises((LookupError, InstanceAuthorizationError)):
+        # A reorder naming a hidden id is a stale view to the caller, not a hit.
+        with pytest.raises((LookupError, InstanceAuthorizationError, projects_service.ProjectOrderConflict)):
             call(conn, project["id"], excluded)
         payload = projects_service.get_project(conn, project["id"])
         assert payload["display_name"] == "Restricted"

@@ -9222,13 +9222,19 @@ def test_show_runtime_startup_health_probe_turns_transport_failure_into_health_t
 
     async def refuse(_client, url, **_kwargs):
         health_urls.append(url)
+        if len(health_urls) == 2:
+            # Jump the loop clock past the startup deadline on the second refusal,
+            # so the retry count does not depend on how fast a CI worker runs.
+            loop = asyncio.get_running_loop()
+            real_time = loop.time
+            loop.time = lambda: real_time() + 3600
         raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
 
     def fake_stop():
         manager._process = None
         manager._base_url = None
 
-    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 600.0)
     monkeypatch.setattr("core.show_runtime._STARTUP_POLL_INTERVAL_SECONDS", 0.001)
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
     monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
@@ -9244,8 +9250,7 @@ def test_show_runtime_startup_health_probe_turns_transport_failure_into_health_t
 
     assert result.available is False
     assert result.reason == "runtime_start_health_timeout"
-    assert len(health_urls) > 1
-    assert set(health_urls) == {"http://127.0.0.1:12345/health"}
+    assert health_urls == ["http://127.0.0.1:12345/health"] * 2
 
 
 def test_show_runtime_capability_probe_treats_transport_failure_as_unknown(monkeypatch, tmp_path):
