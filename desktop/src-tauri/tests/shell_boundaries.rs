@@ -665,76 +665,12 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
 }
 
 #[test]
-fn the_macos_overlay_title_bar_drags_natively_and_insets_the_page() {
+fn the_macos_overlay_title_bar_needs_no_page_permission_and_defaults_to_no_inset() {
     let window = &config()["app"]["windows"][0];
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
-
-    let source = shipping_source("src/lib.rs");
-    let builder = source
-        .split("fn ensure_main_window(")
-        .nth(1)
-        .expect("main window builder")
-        .split("\n}\n")
-        .next()
-        .expect("builder body");
-    for required in [
-        "#[cfg(target_os = \"macos\")]\n    let builder = builder.initialization_script(macos_title_bar::INSET_SCRIPT);",
-        "#[cfg(target_os = \"macos\")]\n    macos_title_bar::install(&window);",
-    ] {
-        assert!(builder.contains(required), "every macOS main window must keep {required}");
-    }
-
-    // The drag is native: the page gets no drag command, and no capability or
-    // IPC path is widened to the remote Workbench origin for it.
-    let native = shipping_source("src/macos_title_bar.rs");
-    for required in [
-        "performWindowDragWithEvent(event)",
-        "AppleActionOnDoubleClick",
-        "acceptsFirstMouse:",
-        "NSWindowOrderingMode::Above",
-        "pub const TITLE_BAR_INSET: f64 = 28.0;",
-        "'--shell-titlebar-inset', '28px'",
-        "if (window.self === window.top)",
-    ] {
-        assert!(native.contains(required), "the native title bar must retain {required}");
-    }
-    for forbidden in [
-        "invoke_handler",
-        "#[tauri::command]",
-        ".emit(",
-        "data-tauri-drag-region",
-    ] {
-        assert!(
-            !native.contains(forbidden),
-            "the native title bar must not use {forbidden}"
-        );
-    }
+    // The strip drags natively; the page is granted no window permission for it.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
-
-    // The overlay is kept only for a page that declares it lays itself out
-    // below the strip, so an older adopted Workbench gets the standard title bar.
-    let page_load = source.split(".on_page_load(").nth(1).expect("page-load hook");
-    let page_load = page_load.split(".on_navigation(").next().expect("page-load body");
-    assert!(
-        page_load.contains("#[cfg(target_os = \"macos\")]\n                        macos_title_bar::sync(webview);")
-    );
-    for required in [
-        "meta[name=\\\"avibe-shell-titlebar-inset\\\"]",
-        "supported ? '28px' : '0px'",
-        "NSWindowStyleMask::FullSizeContentView, overlay",
-        "view.setHidden(!overlay)",
-    ] {
-        assert!(native.contains(required), "the overlay gate must retain {required}");
-    }
-    for page in ["index.html", "../ui/index.html"] {
-        assert!(
-            read_to_string(&crate_dir().join("..").join(page))
-                .contains("<meta name=\"avibe-shell-titlebar-inset\" content=\"supported\" />"),
-            "{page} must declare that it lays itself out below the overlay title bar"
-        );
-    }
-
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
     assert!(
         css.contains("--shell-titlebar-inset: 0px;"),

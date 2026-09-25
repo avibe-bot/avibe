@@ -18,7 +18,7 @@
 //! Both only hold for a page that knows the inset. The shell can adopt a
 //! Runtime it did not ship, whose older Workbench still puts controls in the top
 //! 28 points, so every loaded page is asked, natively and without IPC, whether
-//! it declares `<meta name="avibe-shell-titlebar-inset">`. A page that does keeps the overlay; any other
+//! it declares [`SUPPORT_META`]. A page that does keeps the overlay; any other
 //! page, or a page that cannot answer, gets the standard title bar back with the
 //! strip hidden and the inset reset to zero.
 
@@ -47,15 +47,21 @@ pub const TITLE_BAR_INSET: f64 = 28.0;
 pub const INSET_SCRIPT: &str = "if (window.self === window.top) \
      document.documentElement.style.setProperty('--shell-titlebar-inset', '28px');";
 
-/// Answers whether the loaded top-level page declares
-/// `<meta name="avibe-shell-titlebar-inset">`, and makes the published inset
-/// agree with that answer. The Workbench (`ui/index.html`) and the bootstrap
-/// page (`index.html`) both declare it; a Workbench from before the overlay
-/// title bar does not.
-const SUPPORT_PROBE: &str = "(function () { \
-     var supported = document.querySelector('meta[name=\"avibe-shell-titlebar-inset\"]') !== null; \
-     document.documentElement.style.setProperty('--shell-titlebar-inset', supported ? '28px' : '0px'); \
-     return supported ? 'supported' : 'unsupported'; })()";
+/// The `<meta name>` a page carries when it lays itself out below the strip.
+/// The Workbench (`ui/index.html`) and the bootstrap page (`index.html`) both
+/// declare it; a Workbench from before the overlay title bar does not.
+const SUPPORT_META: &str = "avibe-shell-titlebar-inset";
+
+/// Answers whether the loaded top-level page declares [`SUPPORT_META`], and
+/// makes the published inset agree with that answer.
+fn support_probe() -> String {
+    format!(
+        "(function () {{ \
+         var supported = document.querySelector('meta[name=\"{SUPPORT_META}\"]') !== null; \
+         document.documentElement.style.setProperty('--shell-titlebar-inset', supported ? '{TITLE_BAR_INSET}px' : '0px'); \
+         return supported ? 'supported' : 'unsupported'; }})()"
+    )
+}
 
 define_class!(
     #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -142,8 +148,8 @@ pub fn install(window: &WebviewWindow) {
     });
 }
 
-/// Keeps the overlay title bar only while the loaded page declares support
-/// (see [`SUPPORT_PROBE`]). Called for every finished main-window page load; a later
+/// Keeps the overlay title bar only while the loaded page declares
+/// [`SUPPORT_META`]. Called for every finished main-window page load; a later
 /// load re-decides, so a stale answer never outlives the page that gave it.
 pub fn sync(webview: &Webview) {
     let _ = webview.with_webview(|platform| {
@@ -168,7 +174,7 @@ pub fn sync(webview: &Webview) {
         });
         // SAFETY: called on the main thread with a live WKWebView; WebKit calls
         // the handler once, on the main thread.
-        unsafe { web_view.evaluateJavaScript_completionHandler(&NSString::from_str(SUPPORT_PROBE), Some(&handler)) };
+        unsafe { web_view.evaluateJavaScript_completionHandler(&NSString::from_str(&support_probe()), Some(&handler)) };
     });
 }
 
@@ -204,9 +210,19 @@ mod tests {
         assert!(INSET_SCRIPT.starts_with("if (window.self === window.top)"));
     }
 
+    /// A page that lays itself out below the strip must say so, or the shell
+    /// falls back to the standard title bar for it. Both pages the shell can
+    /// show at the current release declare the name the shell asks for.
     #[test]
-    fn the_support_probe_reads_the_declared_meta_and_resets_the_inset() {
-        assert!(SUPPORT_PROBE.contains("meta[name=\"avibe-shell-titlebar-inset\"]"));
-        assert!(SUPPORT_PROBE.contains(&format!("'{}px' : '0px'", TITLE_BAR_INSET)));
+    fn every_page_this_release_serves_declares_overlay_support() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for page in ["../index.html", "../../ui/index.html"] {
+            let html = std::fs::read_to_string(crate_dir.join(page)).expect("page is readable");
+            assert!(
+                html.contains(&format!("<meta name=\"{SUPPORT_META}\"")),
+                "{page} must declare {SUPPORT_META}"
+            );
+        }
+        assert!(support_probe().contains(&format!("meta[name=\"{SUPPORT_META}\"]")));
     }
 }
