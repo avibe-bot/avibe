@@ -315,6 +315,44 @@ def test_claude_exact_filename_rewrite_rejects_identity_change(tmp_path):
     assert stored["oauth_identity"]["organization_uuid"] == "organization-a"
 
 
+@pytest.mark.parametrize("renamed", [False, True], ids=["exact-name", "renamed"])
+def test_claude_reconciliation_rejects_dropped_identity(tmp_path, renamed):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    new_name = "claude-00f765af-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    identity = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    store.write_oauth_auth_file(old_name, identity)
+    store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
+
+    current_name = new_name if renamed else old_name
+    if renamed:
+        (store.auth_dir / old_name).rename(store.auth_dir / new_name)
+    store.write_oauth_auth_file(
+        current_name,
+        {
+            "type": "claude",
+            "prefix": prefix,
+            "access_token": "private-access-fixture",
+        },
+    )
+
+    with pytest.raises(EngineStateError, match="identity conflicts"):
+        store.reconcile_oauth_auth_file(current_name, auth_provider="claude")
+
+    stored = store.credential_metadata(ref)
+    assert stored["auth_name"] == old_name
+    assert stored["oauth_identity"]["organization_uuid"] == "organization-a"
+
+
 @pytest.mark.parametrize("replacement_prefix", ["foreign-prefix", None])
 def test_claude_exact_filename_rewrite_rejects_prefix_change(tmp_path, replacement_prefix):
     store = EngineStateStore(tmp_path / "engine")

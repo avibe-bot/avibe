@@ -1517,6 +1517,86 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
     asyncio.run(run())
 
 
+def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.inventory_calls = 0
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            assert (method, path) == ("GET", "/auth-files")
+            self.inventory_calls += 1
+            return {
+                "files": [
+                    {
+                        "id": "claude-00f765af-user@example.com.json",
+                        "name": "claude-00f765af-user@example.com.json",
+                        "provider": "claude",
+                    }
+                ]
+            }
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self.client = client
+            self.start_calls = 0
+
+        def status(self):
+            return {
+                "host_platform": "fixture",
+                "status": {
+                    "health": "ok",
+                    "installed_version": "v7.3.16",
+                    "verified": True,
+                    "listening": {"host": "127.0.0.1", "port": 15220},
+                    "last_check": None,
+                    "error_key": None,
+                },
+            }
+
+        def ensure_running(self) -> None:
+            self.start_calls += 1
+
+        def client_if_running(self) -> Client:
+            return self.client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        old_name = "claude-user@example.com.json"
+        new_name = "claude-00f765af-user@example.com.json"
+        ref = store.bind_oauth_credential("src_fixture123", "anthropic", old_name)
+        prefix = store.credential_metadata(ref)["prefix"]
+        store.write_oauth_auth_file(
+            old_name,
+            {
+                "type": "claude",
+                "prefix": prefix,
+                "email": "user@example.com",
+                "account_uuid": "account-a",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-fixture",
+            },
+        )
+        store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
+        (store.auth_dir / old_name).rename(store.auth_dir / new_name)
+
+        client = Client()
+        supervisor = Supervisor(store, client)
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+
+        started = await adapter.start()
+        assert started.health is EngineHealth.OK
+        assert supervisor.start_calls == 1
+        assert client.inventory_calls == 1
+        assert store.credential_metadata(ref)["auth_name"] == new_name
+
+        await adapter.start()
+        assert client.inventory_calls == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
     [

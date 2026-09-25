@@ -1372,6 +1372,7 @@ class CLIProxyEngineAdapter:
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
+        self._oauth_startup_reconciled = False
 
     async def install(self) -> EngineStatus:
         await self.recover_installation()
@@ -1493,7 +1494,7 @@ class CLIProxyEngineAdapter:
                 EngineHealth.NOT_INSTALLED,
             }:
                 return
-            await asyncio.to_thread(self.supervisor.ensure_running)
+            await self._start_and_reconcile_oauth_inventory()
 
     async def _run_installation(
         self,
@@ -1716,8 +1717,34 @@ class CLIProxyEngineAdapter:
                         self._start_after_install_task = start_task
                         start_task.add_done_callback(self._start_after_install_done)
                 return status
-            await asyncio.to_thread(self.supervisor.ensure_running)
+            await self._start_and_reconcile_oauth_inventory()
             return await self.status()
+
+    async def _start_and_reconcile_oauth_inventory(self) -> None:
+        await asyncio.to_thread(self.supervisor.ensure_running)
+        if self._oauth_startup_reconciled:
+            return
+
+        oauth_credentials = await asyncio.to_thread(self.state_store._oauth_credentials)
+        if not any(
+            str(metadata.get("vendor") or "").strip().lower() == "anthropic"
+            for _credential_ref, metadata in oauth_credentials
+        ):
+            self._oauth_startup_reconciled = True
+            return
+
+        client_getter = getattr(self.supervisor, "client_if_running", None)
+        if not callable(client_getter):
+            raise EngineStateError("OAuth startup reconciliation is unavailable")
+        client = await asyncio.to_thread(client_getter)
+        if client is None:
+            raise EngineStateError("OAuth startup reconciliation is unavailable")
+        try:
+            inventory = await run_owned_in_thread(_auth_inventory, client)
+        except EngineClientError as exc:
+            raise EngineStateError("OAuth startup reconciliation failed") from exc
+        await self._reconcile_oauth_inventory(inventory)
+        self._oauth_startup_reconciled = True
 
     async def stop_runtime(self) -> EngineStatus:
         async with self._installation_lock:
@@ -1728,6 +1755,7 @@ class CLIProxyEngineAdapter:
             if start_after_install_task is not None and not start_after_install_task.done():
                 start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
+            self._oauth_startup_reconciled = False
             return await self.status()
 
     async def stop(self) -> None:
@@ -1752,6 +1780,7 @@ class CLIProxyEngineAdapter:
             except Exception:  # noqa: BLE001
                 pass
         await asyncio.to_thread(self.supervisor.stop)
+        self._oauth_startup_reconciled = False
 
     async def status(self) -> EngineStatus:
         raw = await asyncio.to_thread(self.supervisor.status)

@@ -1069,8 +1069,10 @@ class EngineStateStore:
                 stored_identity = _oauth_identity_from_metadata(metadata)
                 if (
                     stored_identity
-                    and identity
-                    and not _oauth_identity_matches(stored_identity, identity)
+                    and (
+                        not identity
+                        or not _oauth_identity_matches(stored_identity, identity)
+                    )
                 ):
                     raise EngineStateError("OAuth auth record identity conflicts")
                 updated = {
@@ -1103,8 +1105,10 @@ class EngineStateStore:
                     stored_identity = _oauth_identity_from_metadata(metadata)
                     if (
                         stored_identity
-                        and identity
-                        and not _oauth_identity_matches(stored_identity, identity)
+                        and (
+                            not identity
+                            or not _oauth_identity_matches(stored_identity, identity)
+                        )
                     ):
                         raise EngineStateError("OAuth auth record identity conflicts")
                     updated = {
