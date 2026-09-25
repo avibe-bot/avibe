@@ -287,6 +287,8 @@ describe('QuotaTab', () => {
     expect(badge('anthropic', 'max-5x')).toBe('Max 5x');
     // An id another vendor's table names is not borrowed; an unknown id reads as words.
     expect(badge('anthropic', 'prolite')).toBe('Prolite');
+    expect(badge('anthropic', 'chatgpt_pro')).toBe('Chatgpt Pro');
+    expect(badge('openai', 'claude_pro')).toBe('Claude Pro');
     expect(badge('openai', 'team_plus-annual')).toBe('Team Plus Annual');
     expect(badge('xai', 'supergrok')).toBe('Supergrok');
     // An unknown id still drops the vendor prefix the badge never repeats.

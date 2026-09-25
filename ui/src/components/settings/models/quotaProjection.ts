@@ -30,6 +30,8 @@ export function quotaDuration(ms: number): QuotaDuration {
 
 /** Vendor families whose plan ids have a display name. */
 const PLAN_FAMILIES: Record<string, 'openai' | 'anthropic'> = { openai: 'openai', codex: 'openai', anthropic: 'anthropic' };
+/** Each family's own plan-id prefix; another vendor's prefix is kept, so it cannot borrow a name. */
+const PLAN_PREFIX: Record<'openai' | 'anthropic', string> = { openai: 'chatgpt_', anthropic: 'claude_' };
 
 /**
  * A reported plan id, read for its display name: the family whose names apply
@@ -38,7 +40,9 @@ const PLAN_FAMILIES: Record<string, 'openai' | 'anthropic'> = { openai: 'openai'
  */
 export function quotaPlanId(vendor: string, plan: string): { family: 'openai' | 'anthropic' | null; id: string } {
   const family = PLAN_FAMILIES[vendor.trim().toLowerCase()] ?? null;
-  const id = plan.trim().toLowerCase().replace(/[\s-]+/g, '_').replace(/^(?:claude|chatgpt)_/, '');
+  const folded = plan.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const prefix = family ? PLAN_PREFIX[family] : null;
+  const id = prefix && folded.startsWith(prefix) ? folded.slice(prefix.length) : folded;
   return { family, id };
 }
 
