@@ -88,7 +88,20 @@ const CANDIDATE: Required<ModelCandidate> = {
   origin: 'provider',
   group_if_removed: 'providers',
   native_protocol: 'openai_responses',
+  models_dev_id: 'zhipuai/glm-5.2',
+  context_window: 128_000,
+  max_output_tokens: null,
+  input_modalities: ['text', 'image'],
+  output_modalities: ['text'],
+  supports_tools: true,
+  supports_reasoning: null,
 };
+
+/** The fields an exact models.dev match adds to a provider candidate. */
+const MODELS_DEV_FIELDS = [
+  'models_dev_id', 'context_window', 'max_output_tokens', 'input_modalities',
+  'output_modalities', 'supports_tools', 'supports_reasoning',
+];
 
 const MATCH: ModelsDevMatch = {
   provider_id: 'zhipuai',
@@ -173,7 +186,7 @@ describe('backend model catalog contract', () => {
     // `required`, rather than a second opinion about the same field.
     expect(new Set(candidate.required))
       .toEqual(new Set(Object.keys(CANDIDATE).filter(
-        (field) => !['group_if_removed', 'native_protocol'].includes(field),
+        (field) => !['group_if_removed', 'native_protocol', ...MODELS_DEV_FIELDS].includes(field),
       )));
 
     // The re-entry vocabulary, and the reason it is a separate field: the schema

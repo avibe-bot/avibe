@@ -25,6 +25,7 @@ import type {
   MigrationApplyResult,
   MigrationScan,
   ModelCandidate,
+  ModelCandidateModelsDev,
   ModelCandidateSupplier,
   ModelsDevMatch,
   NativeProtocol,
@@ -45,7 +46,7 @@ import type {
   UsageWindowKey,
   QuotaSummary,
 } from './types';
-import { USAGE_DEFAULT_WINDOW } from './types';
+import { BACKEND_MODEL_INPUT_MODALITIES, BACKEND_MODEL_OUTPUT_MODALITIES, USAGE_DEFAULT_WINDOW } from './types';
 
 /** Add-time Route placement returned by both source-creation paths. */
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
@@ -323,6 +324,27 @@ const reentryGroup = (raw: Record<string, unknown>): Pick<ModelCandidate, 'group
     : {};
 };
 
+const positiveInt = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+const flag = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
+const members = <T extends string>(value: unknown, allowed: readonly T[]): T[] =>
+  Array.isArray(value) ? value.filter((item): item is T => allowed.includes(item as T)) : [];
+
+/** A candidate's models.dev description, kept whole or not at all: the server
+ *  states the seven fields together, keyed by `models_dev_id`. */
+const candidateModelsDev = (row: Record<string, unknown>): ModelCandidateModelsDev | Record<string, never> =>
+  typeof row.models_dev_id === 'string' && row.models_dev_id
+    ? {
+        models_dev_id: row.models_dev_id,
+        context_window: positiveInt(row.context_window),
+        max_output_tokens: positiveInt(row.max_output_tokens),
+        input_modalities: members(row.input_modalities, BACKEND_MODEL_INPUT_MODALITIES),
+        output_modalities: members(row.output_modalities, BACKEND_MODEL_OUTPUT_MODALITIES),
+        supports_tools: flag(row.supports_tools),
+        supports_reasoning: flag(row.supports_reasoning),
+      }
+    : {};
+
 /**
  * One candidate group, read defensively.
  *
@@ -350,6 +372,7 @@ const modelCandidates = (raw: unknown, fallbackOrigin: CandidateOrigin): ModelCa
             ? { native_protocol: row.native_protocol as NativeProtocol }
             : {}),
           ...reentryGroup(row),
+          ...candidateModelsDev(row),
         }];
       })
     : [];

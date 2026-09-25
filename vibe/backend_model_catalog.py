@@ -72,6 +72,16 @@ PROTOCOL_REASONING_EFFORT_DEFAULTS: Final[dict[str, tuple[str, ...]]] = {
     "openai_chat": ("minimal", "low", "medium", "high", "xhigh"),
     "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
+# The ladder a picked model gets when neither its suppliers nor models.dev state
+# one and nothing says it cannot reason: current families share these tiers, and
+# a menu that offers them beats one that silently omits the effort parameter.
+UNSTATED_REASONING_EFFORT_DEFAULTS: Final[tuple[str, ...]] = (
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
 _CODEX_BUILT_IN_MODELS = [
     "gpt-5.5",
     "gpt-5.4",

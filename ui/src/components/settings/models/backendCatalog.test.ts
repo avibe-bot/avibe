@@ -363,6 +363,32 @@ describe('candidateBackendModel', () => {
     expect(Object.keys(drafted)).not.toContain('suppliers');
   });
 
+  it('copies an exact models.dev description whole when the server states one', () => {
+    const described: ModelCandidate = {
+      ...candidate,
+      models_dev_id: 'zhipuai/glm-5.2',
+      context_window: 128_000,
+      max_output_tokens: null,
+      input_modalities: ['text', 'image'],
+      output_modalities: ['text'],
+      supports_tools: true,
+      supports_reasoning: true,
+    };
+
+    // Stated by the server, so a pick carries it into the draft rather than
+    // leaving the user to look it up in the editor.
+    expect(candidateBackendModel(described)).toMatchObject({
+      models_dev_id: 'zhipuai/glm-5.2',
+      context_window: 128_000,
+      max_output_tokens: null,
+      input_modalities: ['text', 'image'],
+      output_modalities: ['text'],
+      supports_tools: true,
+      supports_reasoning: true,
+      origin: 'provider',
+    });
+  });
+
   it('copies the proposed efforts instead of aliasing them', () => {
     candidateBackendModel(candidate).reasoning_efforts.push('mutated');
 

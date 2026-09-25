@@ -333,3 +333,35 @@ def test_models_dev_caps_matches_at_eight(monkeypatch):
 
     assert len(matches) == models_dev_catalog.MODELS_DEV_MAX_MATCHES == 8
     assert [item["model_id"] for item in matches] == sorted(item["model_id"] for item in matches)
+
+
+def test_exact_models_dev_matches_never_borrow_a_neighbour():
+    catalog = {
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {
+                "gpt-target": {"name": "Proxy"},
+                "claude-3-5-target": {"name": "Claude 3.5 proxy"},
+            },
+        },
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "gpt-target": {"name": "GPT target"},
+                "gpt-target-mini": {"name": "GPT target mini"},
+            },
+        },
+    }
+
+    matches = models_dev_catalog.exact_models_dev_matches(
+        ["gpt-target", "openrouter/gpt-target", "claude-3.5-target", "gpt", "gpt-target-max"],
+        catalog,
+    )
+
+    # A bare id prefers the first-party copy; a full identity names its own.
+    assert matches["gpt-target"]["models_dev_id"] == "openai/gpt-target"
+    assert matches["openrouter/gpt-target"]["models_dev_id"] == "openrouter/gpt-target"
+    # Punctuation folds; substrings and prefixes never match.
+    assert matches["claude-3.5-target"]["models_dev_id"] == "openrouter/claude-3-5-target"
+    assert set(matches) == {"gpt-target", "openrouter/gpt-target", "claude-3.5-target"}
+    assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}

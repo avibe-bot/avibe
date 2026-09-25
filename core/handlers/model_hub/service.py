@@ -42,7 +42,10 @@ from core.agent_auth_service import BackendLoginInProgressError
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
-from vibe.backend_model_catalog import bundled_catalog_reasoning_efforts_by_model
+from vibe.backend_model_catalog import (
+    UNSTATED_REASONING_EFFORT_DEFAULTS,
+    bundled_catalog_reasoning_efforts_by_model,
+)
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
@@ -189,6 +192,23 @@ def _storable_backend_model_metadata(
             if proposed is not None and proposed not in proposed_efforts:
                 proposed_efforts.append(proposed)
     return proposed_display_name, proposed_efforts
+
+
+def _cached_models_dev_catalog() -> Mapping[str, Any]:
+    from vibe.models_dev_catalog import load_models_dev_catalog_with_date
+
+    return load_models_dev_catalog_with_date()[0]
+
+
+_MODELS_DEV_CANDIDATE_FIELDS = (
+    "models_dev_id",
+    "context_window",
+    "max_output_tokens",
+    "input_modalities",
+    "output_modalities",
+    "supports_tools",
+    "supports_reasoning",
+)
 
 
 AGENT_CHAIN_CONTRACT_VERSION = 10
@@ -901,6 +921,7 @@ class ModelHubService:
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
         price_table: Callable[[], PriceTable] | None = None,
+        models_dev_catalog: Callable[[], Mapping[str, Any]] | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -966,6 +987,10 @@ class ModelHubService:
         # Read per report: the override file is hand-edited and the catalog refreshes itself.
         self.price_table: Callable[[], PriceTable] = price_table or (
             lambda: load_price_table(paths.get_state_dir())
+        )
+        # A cached copy only: the picker read must not wait on the network.
+        self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
+            lambda: _cached_models_dev_catalog()
         )
 
     @staticmethod
@@ -4479,6 +4504,23 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
+    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
+        """Exact models.dev matches for provider candidates; empty when unknown.
+
+        The description is optional: an unreadable catalog leaves every
+        candidate as its suppliers describe it rather than failing the picker.
+        """
+
+        if not model_ids:
+            return {}
+        from vibe.models_dev_catalog import exact_models_dev_matches
+
+        try:
+            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
+        except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
+            logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
+            return {}
+
     def agent_model_candidates(self, backend: str) -> dict:
         agent_backend = cast(BackendName, backend)
         config = self.store.load()
@@ -4557,12 +4599,27 @@ class ModelHubService:
                 provider_ids.append(candidate_id)
 
         providers = []
+        described = self._models_dev_descriptions(provider_ids)
         for model_id in provider_ids:
             suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
                 config,
                 agent_backend,
                 model_id,
             )
+            # Suppliers speak first, models.dev fills what they left unsaid, and
+            # an unstated ladder falls back to the shared tiers unless either
+            # side says the model cannot reason at all.
+            match = described.get(model_id)
+            enrichment = (
+                {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
+                if match is not None
+                else {}
+            )
+            display_name = display_name or (match or {}).get("display_name")
+            if not reasoning_efforts and match is not None:
+                reasoning_efforts = list(match["reasoning_efforts"])
+            if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
+                reasoning_efforts = list(UNSTATED_REASONING_EFFORT_DEFAULTS)
             admitted = admissible_backend_model(
                 agent_backend,
                 model_id,
@@ -4570,6 +4627,7 @@ class ModelHubService:
                     "origin": "provider",
                     "display_name": display_name,
                     "reasoning_efforts": reasoning_efforts,
+                    **enrichment,
                     **protocol_payload(model_id),
                 },
                 claude_builtin_ids=_builtin_model_ids("claude"),
@@ -4583,6 +4641,10 @@ class ModelHubService:
                     "reasoning_efforts": admitted.reasoning_efforts,
                     "suppliers": suppliers,
                     "origin": "provider",
+                    **{
+                        field: getattr(admitted, field)
+                        for field in enrichment
+                    },
                     **protocol_payload(admitted.id),
                 }
             )
