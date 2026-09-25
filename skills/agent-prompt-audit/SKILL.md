@@ -77,7 +77,7 @@ Verify against the current machine; these are starting points.
 | Project rules | nearest `AGENTS.md` / `CLAUDE.md` chain | The repository's own delivery process |
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
 | Skills | user skill dirs (follow symlinks), Avibe `skills/`, project `.agents/skills/` | The directory's owner |
-| Task and Watch messages (re-sent every fire) | `vibe task list`, `vibe watch list` | `vibe task update`, `vibe watch update` |
+| Task and Watch messages (re-sent every fire) | `vibe task list` / `vibe watch list` for ids, then `vibe task show <id>` / `vibe watch show <id>` for the full text | `vibe task update`, `vibe watch update` |
 | Delegation briefs and callbacks | `agent_runs.message` / `result_text` | The prompt or Skill that writes them |
 
 Only Skill descriptions on the injected catalog page (`vibe skill list`,
@@ -91,32 +91,43 @@ record, not the Agent's current definition, which may have changed since.
 `vibe runs show <id>` gives one run's prompt, result, and callback state;
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
 `messages` (sample a row with `select * from <table> limit 1` to see columns;
-`PRAGMA` is not allowed). Scope queries to the sessions in question.
-Agent-bearing run types are `agent_run`, `scheduled`, `watch`, `webhook`,
-`hook`, and `task_escalation`; the rest are command executions, and an empty
-result means silence only on a finished run. Starting points:
+`PRAGMA` is not allowed). Start from the run or session the user reported and
+widen only within its `scope_id`, so other users' and projects' conversations
+never enter the evidence. Agent-bearing run types are `agent_run`,
+`scheduled`, `watch`, `webhook`, and `task_escalation`; an empty result means
+silence only on a finished run. `hook_send` rows are deliveries into a
+session, so read that session's messages for the turn they caused;
+`task_run` and `watch_runtime` are command executions. Queries return 20 rows
+per page, so bound them by time and order newest first. Starting points:
 
 ```sql
--- Sessions in scope, with the backend and model that actually ran
-select id, agent_backend, model, reasoning_effort, title, last_active_at
-from agent_sessions where agent_name = '<agent>'
-order by last_active_at desc limit 20;
+-- The reported session, with the backend and model that actually ran
+select id, scope_id, agent_name, agent_backend, model, reasoning_effort, status
+from agent_sessions where id = '<session>';
+
+-- Other sessions of the same Agent in the same scope
+select id, agent_backend, model, title, last_active_at
+from agent_sessions where agent_name = '<agent>' and scope_id = '<scope>'
+order by last_active_at desc;
 
 -- Failed, cancelled, or silent Agent runs in those sessions
 select id, run_type, status, model, created_at
 from agent_runs
 where session_id in ('<session>', ...)
-  and run_type in ('agent_run','scheduled','watch','webhook','hook','task_escalation')
+  and run_type in ('agent_run','scheduled','watch','webhook','task_escalation')
   and created_at > datetime('now','-14 days')
   and (status in ('failed','canceled')
-       or (status in ('succeeded','completed') and coalesce(trim(result_text),'') = ''));
+       or (status in ('succeeded','completed') and coalesce(trim(result_text),'') = ''))
+order by created_at desc;
 
 -- User corrections (adjust keywords to the user's language)
 select id, session_id, created_at, substr(content_text,1,200) text
 from messages
 where author = 'user' and session_id in ('<session>', ...)
+  and created_at > datetime('now','-14 days')
   and (content_text like '%why did%' or content_text like '%为什么%'
-       or content_text like '%卡住%' or content_text like '%不要%');
+       or content_text like '%卡住%' or content_text like '%不要%')
+order by created_at desc;
 
 -- The relevant span of a long message
 select substr(content_text, max(1, instr(content_text,'<phrase>') - 300), 1200)
@@ -124,9 +135,15 @@ from messages where id = '<message>';
 ```
 
 Quote the minimum excerpt and redact secrets and unrelated private content.
-For a before/after probe on the historical target, fork the affected session
-and pin its model:
+
+A before/after probe runs a real backend on the user's account and writes
+session state, so run one only when the user asked for verification or
+approves it; otherwise put the proposed probe in the report. To reproduce the
+historical target, fork the affected session and pin its model:
 `vibe agent run --fork-session <session> --model <model> --reasoning-effort <effort> --sync --message ...`.
+Archived sessions and disabled Agents cannot be forked; then replay the
+minimal triggering message on an enabled Agent with the recorded backend,
+model, and effort, and note that the reproduction is approximate.
 
 ## From symptom to likely cause
 
