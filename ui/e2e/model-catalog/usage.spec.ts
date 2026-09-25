@@ -92,6 +92,73 @@ test.describe('hermetic UsageTab', () => {
     await expect(nextWindow).toBeFocused();
   });
 
+  test('the detail follows a pointer that never stops and changes bucket at once', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === 'mobile', 'Pointer hover is a desktop contract');
+    await openUsage(page);
+    const svg = page.locator('.model-hub-usage-svg');
+    const dialog = page.getByRole('dialog', { name: 'Usage bucket details' });
+    const heading = dialog.locator('.model-hub-usage-tooltip-range');
+    const hitAreas = page.locator('.model-hub-usage-hit-area');
+    const first = (await hitAreas.nth(2).boundingBox())!;
+    const last = (await hitAreas.nth(20).boundingBox())!;
+    const midY = first.y + first.height * 0.75;
+    await page.mouse.move(first.x + first.width / 2, midY);
+    await expect(dialog).toBeVisible();
+    const seen = new Set([await heading.textContent()]);
+    // Record every heading the detail shows while the pointer sweeps without
+    // pausing: under a settle-delay the heading would hold still until the
+    // pointer stops, so it would show at most the first and last bucket.
+    await heading.evaluate((node) => {
+      const log: string[] = [];
+      (window as unknown as { usageHeadings: string[] }).usageHeadings = log;
+      new MutationObserver(() => log.push(node.textContent ?? '')).observe(node, { subtree: true, characterData: true, childList: true });
+    });
+    const steps = 18;
+    for (let step = 1; step <= steps; step += 1) {
+      await page.mouse.move(first.x + first.width / 2 + ((last.x - first.x) * step) / steps, midY);
+    }
+    const headings = await page.evaluate(() => (window as unknown as { usageHeadings: string[] }).usageHeadings);
+    for (const text of headings) seen.add(text);
+    expect(seen.size).toBeGreaterThanOrEqual(10);
+    await expect(svg).toBeVisible();
+  });
+
+  test('the detail sits beside the crosshair, right of it by default and left of it at the right edge', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === 'mobile', 'The narrow chart docks the detail full-width');
+    await openUsage(page);
+    const hitAreas = page.locator('.model-hub-usage-hit-area');
+    const dialog = page.getByRole('dialog', { name: 'Usage bucket details' });
+    const wrap = page.locator('.model-hub-usage-chart-wrap');
+    const count = await hitAreas.count();
+    const placement = async (index: number) => {
+      await hitAreas.nth(index).hover();
+      await expect(dialog).toBeVisible();
+      // Wait out the short follow transition before measuring.
+      await expect.poll(async () => dialog.evaluate((node) => node.getAnimations().length)).toBe(0);
+      const box = (await dialog.boundingBox())!;
+      const chart = (await wrap.boundingBox())!;
+      const crosshair = (await page.locator('.model-hub-usage-crosshair').boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(chart.x - 0.5);
+      expect(box.x + box.width).toBeLessThanOrEqual(chart.x + chart.width + 0.5);
+      return { box, crosshairX: crosshair.x + crosshair.width / 2 };
+    };
+
+    const leftmost = await placement(0);
+    expect(leftmost.box.x).toBeGreaterThan(leftmost.crosshairX);
+    await expect(dialog).toHaveAttribute('data-side', 'right');
+
+    const rightmost = await placement(count - 1);
+    expect(rightmost.box.x + rightmost.box.width).toBeLessThan(rightmost.crosshairX);
+    await expect(dialog).toHaveAttribute('data-side', 'left');
+
+    // A pinned detail stays where it was pinned while the pointer moves on.
+    await dialog.getByRole('button', { name: 'Pin this bucket' }).click();
+    const pinnedAt = (await dialog.boundingBox())!;
+    await hitAreas.nth(3).hover();
+    await expect(dialog).toHaveAttribute('data-pinned', 'true');
+    expect((await dialog.boundingBox())!.x).toBeCloseTo(pinnedAt.x, 0);
+  });
+
   test('window switching renders coherent line and bar reports', async ({ page }) => {
     await openUsage(page);
     await expect(page.locator('.model-hub-usage-svg')).toBeVisible();
@@ -126,6 +193,14 @@ test.describe('hermetic UsageTab', () => {
     const fitsViewport = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
     expect(fitsViewport).toBe(true);
     expect(await page.locator('.model-hub-usage-svg').textContent()).not.toContain('2026');
+    // Touch keeps the full-width detail docked across the top of the chart.
+    await page.locator('.model-hub-usage-hit-area').nth(12).click();
+    const dialog = page.getByRole('dialog', { name: 'Usage bucket details' });
+    await expect(dialog).toHaveAttribute('data-side', 'docked');
+    const docked = (await dialog.boundingBox())!;
+    const chart = (await page.locator('.model-hub-usage-chart-wrap').boundingBox())!;
+    expect(docked.width).toBeGreaterThan(chart.width - 12);
+    await page.mouse.click(4, 4);
     const scrollOwner = page.locator('main');
     const scrollMetrics = await scrollOwner.evaluate((node) => ({
       clientHeight: node.clientHeight,

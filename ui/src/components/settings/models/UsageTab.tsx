@@ -30,6 +30,7 @@ import {
   filteredRows,
   formatBucketAxisLabel,
   formatBucketLabel,
+  formatBucketHeading,
   formatBucketRange,
   identityDisplayLabel,
   modelLabel,
@@ -235,6 +236,9 @@ function MultiFilter({
   );
 }
 
+/** A legend item's border and padding before its swatch. */
+const LEGEND_SWATCH_OFFSET = 7;
+
 const ChartLegend: React.FC<{
   series: UsageSeries[];
   hidden: readonly string[];
@@ -243,8 +247,10 @@ const ChartLegend: React.FC<{
   count: (value: number) => string;
   blank: string;
   ariaLabel: string;
-}> = ({ series, hidden, onToggle, labels, count, blank, ariaLabel }) => (
-  <div className="model-hub-usage-legend" aria-label={ariaLabel}>
+  /** The plot's left edge, which the first swatch lines up with. */
+  inset: number;
+}> = ({ series, hidden, onToggle, labels, count, blank, ariaLabel, inset }) => (
+  <div className="model-hub-usage-legend" aria-label={ariaLabel} style={{ marginLeft: Math.max(0, inset - LEGEND_SWATCH_OFFSET) }}>
     {series.map((item) => {
       const values = item.values.filter((value): value is number => value !== null);
       const total = values.reduce((sum, value) => sum + value, 0);
@@ -266,6 +272,32 @@ const ChartLegend: React.FC<{
     })}
   </div>
 );
+
+const TOOLTIP_WIDTH = 264;
+const TOOLTIP_INSET = 8;
+const TOOLTIP_GAP = 6;
+/** Below this chart width the detail docks full-width across the top, for touch. */
+const TOOLTIP_DOCK_BELOW = 560;
+const HOUR_TICK_STEPS = [1, 2, 3, 4, 6, 12];
+const DAY_TICK_STEPS = [1, 2, 3, 5, 7, 10, 14, 15, 30];
+
+/**
+ * The buckets that carry an x-axis label: the finest step whose labels stay a
+ * readable distance apart. Hours align to the clock (every 3h lands on 00, 03,
+ * 06 …); days count back from the newest, so today always has its label.
+ */
+function axisTickIndexes(report: UsageReport, bucketSpan: number, narrow: boolean): number[] {
+  const count = report.buckets.length;
+  if (count === 0) return [];
+  const minGap = narrow ? 52 : 68;
+  const hourly = report.granularity === 'hour';
+  const steps = hourly ? HOUR_TICK_STEPS : DAY_TICK_STEPS;
+  const step = steps.find((candidate) => candidate * bucketSpan >= minGap) ?? steps[steps.length - 1];
+  const hourOf = (index: number) => Number(report.buckets[index].start_at.slice(11, 13));
+  return report.buckets.map((_, index) => index).filter((index) => (hourly
+    ? Number.isFinite(hourOf(index)) && hourOf(index) % step === 0
+    : (count - 1 - index) % step === 0));
+}
 
 function UsageChart({
   report,
@@ -301,7 +333,6 @@ function UsageChart({
   const focusPinAfterOpenRef = React.useRef(false);
   const previousUsageInputRef = React.useRef({ report, scopeKey, group, metric });
   const hoverClearTimer = React.useRef<number | null>(null);
-  const pendingHoverTimer = React.useRef<number | null>(null);
   const [escapeDismissed, setEscapeDismissed] = React.useState(false);
   const pinnedIndex = pinnedKey === null ? -1 : report.buckets.findIndex((bucket) => bucket.key === pinnedKey);
   const requestedIndex = dismissed || escapeDismissed
@@ -331,7 +362,7 @@ function UsageChart({
                 ? metricLabel('cost', t)
                 : item.label,
   ])), [metric, series, t]);
-  const visibleSeries = series.filter((item) => !hidden.includes(item.key));
+  const visibleSeries = React.useMemo(() => series.filter((item) => !hidden.includes(item.key)), [hidden, series]);
   const narrow = width < 560;
   const height = narrow ? 236 : 292;
   const left = narrow ? 40 : 54;
@@ -340,7 +371,10 @@ function UsageChart({
   const bottom = 38;
   const plotWidth = Math.max(1, width - left - right);
   const plotHeight = Math.max(1, height - top - bottom);
-  const lineHitWidth = Math.min(28, Math.max(8, plotWidth / Math.max(1, report.buckets.length - 1) * 0.82));
+  const bucketCount = report.buckets.length;
+  // One bucket's share of the plot: a bar's column, or the span a line point
+  // owns between its neighbours' midpoints.
+  const bucketSpan = bars ? plotWidth / Math.max(1, bucketCount) : plotWidth / Math.max(1, bucketCount - 1);
   const values = report.buckets.map((_, index) => bars
     ? visibleSeries.reduce((sum, item) => sum + (item.values[index] ?? 0), 0)
     : Math.max(0, ...visibleSeries.map((item) => item.values[index] ?? 0)));
@@ -348,8 +382,8 @@ function UsageChart({
   const scale = 10 ** Math.floor(Math.log10(rawMax));
   const max = Math.ceil(rawMax / scale / 0.5) * scale * 0.5;
   const x = (index: number) => left + (bars
-    ? (index + 0.5) / report.buckets.length
-    : index / Math.max(1, report.buckets.length - 1)) * plotWidth;
+    ? (index + 0.5) / bucketCount
+    : index / Math.max(1, bucketCount - 1)) * plotWidth;
   const y = (value: number) => top + plotHeight * (1 - value / max);
   const bucket = activeIndex === null || activeIndex < 0 ? null : report.buckets[activeIndex];
   const bucketRows = bucket === null ? [] : filterBucketRows(bucket, filter);
@@ -361,16 +395,149 @@ function UsageChart({
     && report.window_key === '24h'
     && activeIndex === report.buckets.length - 1
     && Date.parse(bucket.end_at) - Date.parse(bucket.start_at) < 60 * 60 * 1000;
-  const tickIndexes = report.buckets.length <= 7
-    ? report.buckets.map((_, index) => index)
-    : [...new Set([0, Math.floor((report.buckets.length - 1) / 2), report.buckets.length - 1])];
+  const tickIndexes = axisTickIndexes(report, bucketSpan, narrow);
+  const heading = bucket === null ? null : formatBucketHeading(bucket, i18n.language);
+  const gradientId = React.useId().replace(/[^a-zA-Z0-9_-]/g, '');
 
-  const cancelPendingHover = () => {
-    if (pendingHoverTimer.current !== null) {
-      window.clearTimeout(pendingHoverTimer.current);
-      pendingHoverTimer.current = null;
+  // Everything that does not depend on the hovered bucket. A hover change
+  // re-renders only the highlight, crosshair, active dots, and tooltip.
+  const seriesLayer = React.useMemo(() => {
+    const xAt = (index: number) => left + (bars
+      ? (index + 0.5) / bucketCount
+      : index / Math.max(1, bucketCount - 1)) * plotWidth;
+    const yAt = (value: number) => top + plotHeight * (1 - value / max);
+    const colorOf = (item: UsageSeries) => SERIES_COLORS[item.colorIndex % SERIES_COLORS.length];
+    const columnWidth = plotWidth / Math.max(1, bucketCount);
+    if (bars) {
+      return report.buckets.map((currentBucket, index) => {
+        let offset = 0;
+        return (
+          <g key={currentBucket.key}>
+            {visibleSeries.map((item) => {
+              const value = item.values[index];
+              const start = offset;
+              offset += value ?? 0;
+              return (
+                <rect
+                  key={item.key}
+                  x={xAt(index) - columnWidth * 0.32}
+                  y={yAt(offset)}
+                  width={columnWidth * 0.64}
+                  height={value === null ? 4 : Math.max(0, yAt(start) - yAt(offset))}
+                  fill={value === null ? 'url(#usage-unknown-pattern)' : colorOf(item)}
+                  opacity={0.88}
+                  rx="2"
+                />
+              );
+            })}
+          </g>
+        );
+      });
     }
-  };
+    const baseline = yAt(0);
+    return visibleSeries.map((item, seriesIndex) => {
+      // Contiguous known runs; an unknown bucket breaks the line.
+      const runs: number[][] = [];
+      item.values.forEach((value, index) => {
+        if (value === null) return;
+        const previous = item.values[index - 1];
+        if (previous === null || previous === undefined) runs.push([index]);
+        else runs[runs.length - 1].push(index);
+      });
+      const line = runs.map((run) => run
+        .map((index, position) => `${position === 0 ? 'M' : 'L'}${xAt(index)},${yAt(item.values[index] as number)}`)
+        .join(' ')).join(' ');
+      const area = runs.filter((run) => run.length > 1).map((run) => [
+        ...run.map((index, position) => `${position === 0 ? 'M' : 'L'}${xAt(index)},${yAt(item.values[index] as number)}`),
+        `L${xAt(run[run.length - 1])},${baseline}`,
+        `L${xAt(run[0])},${baseline}`,
+        'Z',
+      ].join(' ')).join(' ');
+      const color = colorOf(item);
+      return (
+        <g key={item.key}>
+          <defs>
+            <linearGradient id={`${gradientId}-area-${seriesIndex}`} x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" style={{ stopColor: color, stopOpacity: 0.16 }} />
+              <stop offset="100%" style={{ stopColor: color, stopOpacity: 0 }} />
+            </linearGradient>
+          </defs>
+          {area && <path d={area} fill={`url(#${gradientId}-area-${seriesIndex})`} stroke="none" className="model-hub-usage-area" />}
+          <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          {/* A point with no known neighbour draws no segment, so it needs a dot to be seen at all. */}
+          {runs.filter((run) => run.length === 1).map(([index]) => (
+            <circle key={`solo-${index}`} cx={xAt(index)} cy={yAt(item.values[index] as number)} r="2.5" fill={color} stroke="var(--background)" strokeWidth="1.5" />
+          ))}
+          {item.values.map((value, index) => (value === null
+            ? <circle key={`unknown-${index}`} cx={xAt(index)} cy={baseline} r="3" className="model-hub-usage-unknown-point" />
+            : null))}
+        </g>
+      );
+    });
+  }, [bars, bucketCount, gradientId, left, max, plotHeight, plotWidth, report.buckets, visibleSeries]);
+
+  const gridLayer = React.useMemo(() => [0, 1, 2, 3, 4].map((step) => {
+    const value = max * step / 4;
+    const lineY = top + plotHeight * (1 - step / 4);
+    return (
+      <g key={step}>
+        <line x1={left} x2={width - right} y1={lineY} y2={lineY} className="model-hub-usage-grid" />
+        <text x={left - 10} y={lineY + 4} textAnchor="end" className="model-hub-usage-tick model-hub-usage-tick--y">{format(value)}</text>
+      </g>
+    );
+  }), [format, left, max, plotHeight, width]);
+
+  // The hovered bucket's own stack, redrawn over the dimmed columns at full strength.
+  const activeColumn = bars && activeIndex !== null
+    ? (() => {
+      let offset = 0;
+      const columnWidth = plotWidth / Math.max(1, bucketCount);
+      return (
+        <g className="model-hub-usage-active-column">
+          {visibleSeries.map((item) => {
+            const value = item.values[activeIndex];
+            const start = offset;
+            offset += value ?? 0;
+            return (
+              <rect
+                key={item.key}
+                x={x(activeIndex) - columnWidth * 0.32}
+                y={y(offset)}
+                width={columnWidth * 0.64}
+                height={value === null ? 4 : Math.max(0, y(start) - y(offset))}
+                fill={value === null ? 'url(#usage-unknown-pattern)' : SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]}
+                opacity={0.88}
+                rx="2"
+              />
+            );
+          })}
+        </g>
+      );
+    })()
+    : null;
+
+  // Beside the crosshair, right by default, flipped left where it would pass
+  // the chart's right edge, and kept inside the chart either way. A narrow
+  // chart docks it full-width across the top instead, for touch.
+  const docked = width < TOOLTIP_DOCK_BELOW;
+  const tooltipWidth = Math.min(TOOLTIP_WIDTH, width - 2 * TOOLTIP_INSET);
+  // The detail starts past the active bucket's own edge: a pointer moving
+  // across the plot enters the next bucket (and the detail moves on) before it
+  // could land on the detail, while a deliberate jump onto it still holds it.
+  const tooltipGap = bucketSpan / 2 + TOOLTIP_GAP;
+  let tooltipLeft = 0;
+  let tooltipSide: 'left' | 'right' = 'right';
+  if (activeIndex !== null && !docked) {
+    const anchor = x(activeIndex);
+    const roomRight = width - TOOLTIP_INSET - (anchor + tooltipGap);
+    const roomLeft = anchor - tooltipGap - TOOLTIP_INSET;
+    // Flip only when the right side is short and the left side has more room;
+    // the clamp below covers a chart too narrow for either.
+    if (roomRight < tooltipWidth && roomLeft > roomRight) tooltipSide = 'left';
+    tooltipLeft = tooltipSide === 'right' ? anchor + tooltipGap : anchor - tooltipGap - tooltipWidth;
+    tooltipLeft = Math.max(TOOLTIP_INSET, Math.min(width - TOOLTIP_INSET - tooltipWidth, tooltipLeft));
+  }
+
   const cancelHoverClear = () => {
     if (hoverClearTimer.current !== null) {
       window.clearTimeout(hoverClearTimer.current);
@@ -378,10 +545,6 @@ function UsageChart({
     }
   };
   const handleEscape = React.useCallback(() => {
-    if (pendingHoverTimer.current !== null) {
-      window.clearTimeout(pendingHoverTimer.current);
-      pendingHoverTimer.current = null;
-    }
     if (hoverClearTimer.current !== null) {
       window.clearTimeout(hoverClearTimer.current);
       hoverClearTimer.current = null;
@@ -467,12 +630,10 @@ function UsageChart({
 
   React.useEffect(() => () => {
     if (hoverClearTimer.current !== null) window.clearTimeout(hoverClearTimer.current);
-    if (pendingHoverTimer.current !== null) window.clearTimeout(pendingHoverTimer.current);
   }, []);
 
   const scheduleHoverClear = () => {
     if (pinnedKey !== null || inspected !== null) return;
-    cancelPendingHover();
     cancelHoverClear();
     hoverClearTimer.current = window.setTimeout(() => {
       hoverClearTimer.current = null;
@@ -480,22 +641,15 @@ function UsageChart({
     }, 100);
   };
 
+  // Entering a bucket shows it at once; only leaving the plot waits (see
+  // scheduleHoverClear), so the pointer can cross into the detail.
   const setHover = (index: number, reopenAfterEscape = false) => {
     if ((escapeDismissed && !reopenAfterEscape) || pinnedKey !== null || inspected !== null) return;
-    cancelPendingHover();
     cancelHoverClear();
     const next = Math.max(0, Math.min(report.buckets.length - 1, index));
     if (reopenAfterEscape) setEscapeDismissed(false);
     setDismissed(false);
-    if (hovered === null || hovered === next) {
-      setHovered(next);
-      return;
-    }
-    pendingHoverTimer.current = window.setTimeout(() => {
-      pendingHoverTimer.current = null;
-      if (escapeDismissed && !reopenAfterEscape) return;
-      setHovered(next);
-    }, 100);
+    setHovered(next);
   };
   const openDetail = (index: number) => {
     if (pinnedKey !== null) return;
@@ -552,6 +706,7 @@ function UsageChart({
         count={format}
         blank={t('settings.models.usage.blank') as string}
         ariaLabel={t('settings.models.usage.chart.legend') as string}
+        inset={left}
       />
       <div className="model-hub-usage-chart-wrap" ref={hostRef}>
         <svg
@@ -568,80 +723,45 @@ function UsageChart({
               <path d="M-1,1 l2,-2 M0,6 L6,0 M5,7 l2,-2" stroke="var(--model-hub-usage-unknown)" strokeWidth="1" />
             </pattern>
           </defs>
-          {[0, 1, 2, 3, 4].map((step) => (
-            <g key={step}>
-              <line x1={left} x2={width - right} y1={y(max * step / 4)} y2={y(max * step / 4)} className="model-hub-usage-grid" strokeDasharray={step === 0 ? undefined : '3 5'} />
-              <text x={left - 10} y={y(max * step / 4) + 4} textAnchor="end" className="model-hub-usage-tick">{format(max * step / 4)}</text>
-            </g>
-          ))}
-          {activeIndex !== null && activeIndex >= 0 && (
+          {gridLayer}
+          {activeIndex !== null && (
             <rect
-              x={x(activeIndex) - (bars ? plotWidth / report.buckets.length / 2 : 18)}
+              x={x(activeIndex) - (bars ? bucketSpan / 2 : Math.min(18, bucketSpan / 2))}
               y={top}
-              width={bars ? plotWidth / report.buckets.length : 36}
+              width={bars ? bucketSpan : Math.min(36, bucketSpan)}
               height={plotHeight}
               className="model-hub-usage-highlight"
-              rx="4"
+              rx="3"
             />
           )}
-          {bars
-            ? report.buckets.map((currentBucket, index) => {
-              let offset = 0;
-              return (
-                <g key={currentBucket.key}>
-                  {visibleSeries.map((item) => {
-                    const value = item.values[index];
-                    const start = offset;
-                    offset += value ?? 0;
-                    return (
-                      <rect
-                        key={item.key}
-                        x={x(index) - plotWidth / report.buckets.length * 0.32}
-                        y={y(offset)}
-                        width={plotWidth / report.buckets.length * 0.64}
-                        height={value === null ? 4 : Math.max(0, y(start) - y(offset))}
-                        fill={value === null ? 'url(#usage-unknown-pattern)' : SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]}
-                        opacity={activeIndex !== null && activeIndex !== index ? 0.48 : 0.88}
-                        rx="2"
-                      />
-                    );
-                  })}
-                </g>
-              );
-            })
-            : visibleSeries.map((item) => {
-              const path = item.values.reduce<string[]>((segments, value, index) => {
-                if (value === null) return segments;
-                const previous = item.values[index - 1];
-                const command = previous === null || previous === undefined ? 'M' : 'L';
-                segments.push(`${command}${x(index)},${y(value)}`);
-                return segments;
-              }, []).join(' ');
-              return (
-                <g key={item.key}>
-                  <path d={path} fill="none" stroke={SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                  {item.values.map((value, index) => value === null
-                    ? <circle key={index} cx={x(index)} cy={y(0)} r="3" className="model-hub-usage-unknown-point" />
-                    : <circle key={index} cx={x(index)} cy={y(value)} r={activeIndex === index ? 4.5 : 2.5} fill={SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]} stroke="var(--background)" strokeWidth="1.5" />)}
-                </g>
-              );
-            })}
-          {activeIndex !== null && activeIndex >= 0 && (
+          <g className={cn('model-hub-usage-series', bars && activeIndex !== null && 'is-dimmed')}>{seriesLayer}</g>
+          {activeColumn}
+          {activeIndex !== null && (
             <line x1={x(activeIndex)} x2={x(activeIndex)} y1={top} y2={top + plotHeight} className="model-hub-usage-crosshair" />
           )}
+          {!bars && activeIndex !== null && visibleSeries.map((item) => {
+            const value = item.values[activeIndex];
+            if (value === null || value === undefined) return null;
+            return (
+              <circle
+                key={`active-${item.key}`}
+                cx={x(activeIndex)}
+                cy={y(value)}
+                r="4"
+                fill={SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]}
+                stroke="var(--background)"
+                strokeWidth="2"
+              />
+            );
+          })}
           {report.buckets.map((currentBucket, index) => (
             <rect
               key={`hit-${currentBucket.key}`}
               className="model-hub-usage-hit-area"
-              x={bars ? x(index) - plotWidth / report.buckets.length / 2 : x(index) - lineHitWidth / 2}
+              x={x(index) - bucketSpan / 2}
               y={top}
-              width={bars ? plotWidth / report.buckets.length : lineHitWidth}
+              width={bucketSpan}
               height={plotHeight}
-              onPointerEnter={() => {
-                // Removing a dismissed tooltip can expose a stationary pointer.
-                // Only a real move, focus, or activation should reopen it.
-                setHover(index);
-              }}
               onClick={() => openDetail(index)}
             />
           ))}
@@ -650,7 +770,7 @@ function UsageChart({
               key={`tick-${report.buckets[index].key}`}
               x={x(index)}
               y={height - 12}
-              textAnchor={index === 0 ? 'start' : index === report.buckets.length - 1 ? 'end' : 'middle'}
+              textAnchor={x(index) - left < 20 ? 'start' : width - right - x(index) < 20 ? 'end' : 'middle'}
               className="model-hub-usage-tick"
             >
               {formatBucketAxisLabel(report.buckets[index], i18n.language)}
@@ -685,14 +805,13 @@ function UsageChart({
         </div>
         {bucket && (
           <div
-            className={cn('model-hub-usage-tooltip', pinnedKey !== null && 'is-pinned')}
+            className={cn('model-hub-usage-tooltip', pinnedKey !== null && 'is-pinned', docked && 'is-docked')}
             role="dialog"
             aria-label={t('settings.models.usage.chart.detail') as string}
             data-pinned={pinnedKey !== null ? 'true' : 'false'}
-            onPointerEnter={() => {
-              cancelPendingHover();
-              cancelHoverClear();
-            }}
+            data-side={docked ? 'docked' : tooltipSide}
+            style={docked ? undefined : { width: tooltipWidth, transform: `translateX(${tooltipLeft}px)` }}
+            onPointerEnter={cancelHoverClear}
             onPointerLeave={scheduleHoverClear}
             onKeyDownCapture={(event) => {
               if (event.key !== 'Escape') return;
@@ -701,7 +820,10 @@ function UsageChart({
             }}
           >
             <div className="model-hub-usage-tooltip-head">
-              <span>{formatBucketRange(bucket, i18n.language, true)}</span>
+              <span className="model-hub-usage-tooltip-range" aria-label={formatBucketRange(bucket, i18n.language, true)}>
+                {heading?.range}
+                {heading?.zone && <small>{heading.zone}</small>}
+              </span>
               <div className="model-hub-usage-tooltip-actions">
                 {pinnedKey !== null && <span>{t('settings.models.usage.chart.pinned')}</span>}
                 <button

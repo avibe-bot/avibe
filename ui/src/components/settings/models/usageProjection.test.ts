@@ -4,6 +4,7 @@ import type { UsageBucket, UsageBucketRow, UsageCounters, UsageReport } from './
 import {
   aggregateCounters,
   formatBucketAxisLabel,
+  formatBucketHeading,
   formatBucketRange,
   identityLabel,
   pairKey,
@@ -200,6 +201,23 @@ describe('usageProjection', () => {
       start_at: '2026-11-01T01:00:00-04:00',
       end_at: '2026-11-01T01:00:00-05:00',
     }, 'en-US', true)).toContain('UTC-05:00');
+  });
+
+  // The tooltip heading is compact; the full, zone-qualified range stays in
+  // the accessible label (formatBucketRange above).
+  it('shortens a bucket heading to one date and names the zone only where it matters', () => {
+    const at = (start_at: string, end_at: string, key = start_at): UsageBucket => ({ ...bucket('00', []), key, start_at, end_at });
+    const hostOffset = (value: string) => -new Date(value).getTimezoneOffset();
+    const hour = at('2026-09-23T22:00:00+08:00', '2026-09-23T23:00:00+08:00');
+    const expectedZone = hostOffset(hour.start_at) === 8 * 60 ? null : 'UTC+08:00';
+    expect(formatBucketHeading(hour, 'zh')).toEqual({ range: '9月23日 22:00–23:00', zone: expectedZone });
+    expect(formatBucketHeading(hour, 'en-US').range).toBe('Sep 23, 22:00–23:00');
+    // The last hour of a day ends at the next midnight, still one date.
+    expect(formatBucketHeading(at('2026-09-23T23:00:00+08:00', '2026-09-24T00:00:00+08:00'), 'zh').range).toBe('9月23日 23:00–24:00');
+    // A whole day reads as its date.
+    expect(formatBucketHeading(at('2026-09-23T00:00:00+08:00', '2026-09-24T00:00:00+08:00', '2026-09-23'), 'zh').range).toBe('9月23日');
+    // Two ends in different offsets always name both.
+    expect(formatBucketHeading(at('2026-11-01T01:00:00-04:00', '2026-11-01T01:00:00-05:00'), 'en-US').zone).toBe('UTC-04:00 – UTC-05:00');
   });
 
   it('keeps axis labels compact while detail labels remain full', () => {
