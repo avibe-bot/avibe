@@ -84,13 +84,73 @@ Only Skill descriptions on the injected catalog page (`vibe skill list`,
 page 1) are loaded every turn; later pages, `disable-model-invocation` Skills,
 Skill bodies, and references load on demand.
 
-Resolve the actual target from the run or session record, not the Agent's
-current definition, which may have changed since. For evidence, `vibe runs`
-and read-only `vibe data query` over `agent_sessions`, `agent_runs`, and
-`messages`, scoped to the sessions in question. Agent-bearing run types are
-`agent_run`, `scheduled`, `watch`, `webhook`, `hook`, and `task_escalation`;
-the rest are command executions, and an empty result means silence only on a
-finished run. Quote the minimum excerpt and redact secrets and unrelated
-private content. For a before/after probe on the historical target, fork the
-affected session and pin its model:
+## Finding evidence
+
+Resolve the actual target (backend, model, effort) from the run or session
+record, not the Agent's current definition, which may have changed since.
+`vibe runs show <id>` gives one run's prompt, result, and callback state;
+`vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
+`messages` (sample a row with `select * from <table> limit 1` to see columns;
+`PRAGMA` is not allowed). Scope queries to the sessions in question.
+Agent-bearing run types are `agent_run`, `scheduled`, `watch`, `webhook`,
+`hook`, and `task_escalation`; the rest are command executions, and an empty
+result means silence only on a finished run. Starting points:
+
+```sql
+-- Sessions in scope, with the backend and model that actually ran
+select id, agent_backend, model, reasoning_effort, title, last_active_at
+from agent_sessions where agent_name = '<agent>'
+order by last_active_at desc limit 20;
+
+-- Failed, cancelled, or silent Agent runs in those sessions
+select id, run_type, status, model, created_at
+from agent_runs
+where session_id in ('<session>', ...)
+  and run_type in ('agent_run','scheduled','watch','webhook','hook','task_escalation')
+  and created_at > datetime('now','-14 days')
+  and (status in ('failed','canceled')
+       or (status in ('succeeded','completed') and coalesce(trim(result_text),'') = ''));
+
+-- User corrections (adjust keywords to the user's language)
+select id, session_id, created_at, substr(content_text,1,200) text
+from messages
+where author = 'user' and session_id in ('<session>', ...)
+  and (content_text like '%why did%' or content_text like '%为什么%'
+       or content_text like '%卡住%' or content_text like '%不要%');
+
+-- The relevant span of a long message
+select substr(content_text, max(1, instr(content_text,'<phrase>') - 300), 1200)
+from messages where id = '<message>';
+```
+
+Quote the minimum excerpt and redact secrets and unrelated private content.
+For a before/after probe on the historical target, fork the affected session
+and pin its model:
 `vibe agent run --fork-session <session> --model <model> --reasoning-effort <effort> --sync --message ...`.
+
+## From symptom to likely cause
+
+User complaints map to recurring prompt defects. Treat these as leads to
+check against the transcript, not verdicts.
+
+| What the user sees | Where to look first |
+| --- | --- |
+| Agent stopped or went quiet mid-task | A "stop / wait / do not proceed" with no stated exit; "don't narrate" or "report only at the end"; a wait with no durable Watch or expiry meaning |
+| Keeps asking for permission | "Ask before…" with no threshold separating reversible in-scope steps from irreversible or outward-facing ones |
+| Did far more than asked | Autonomy with no scope bound or definition of done, most often on strong Claude models |
+| Followed a rule where it made no sense | A bare prohibition with no reason or scope, most often on GPT/Codex; pressure language (caps, `MUST/NEVER`) |
+| Behaves differently across Agents or backends | The same rule at different strengths in different layers; backend-specific tool names in shared text |
+| Delegated work came back unusable | A brief missing goal, acceptance evidence, or report target; a callback that says "done" without the result |
+| Recurring Task or Watch runs drift or repeat themselves | The fire message restates loaded rules, names finished work, or asks for output the recipient cannot act on |
+| Stale commands, paths, or answers | Facts that no longer match the CLI or code; fossils like named-model workarounds or "now / no longer" phrasing |
+
+## Report
+
+Open with counts and the two or three findings that matter most. For each
+finding: location, the evidence excerpt, which idea above it violates and why
+on which target, confidence (high: reproduced in transcripts or documented;
+medium: consistent known behavior; low: heuristic, flag only), and the
+proposed change — a file hunk, or a before/after payload plus the update
+command for text stored in Avibe state. Rewrite rather than delete when the
+concern is still live, and complete each removal across duplicates, tests, and
+mirrors.
