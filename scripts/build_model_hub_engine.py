@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -32,6 +33,15 @@ ARCHIVE_MEMBERS = ("cli-proxy-api", "LICENSE", "README.md", "README_CN.md", "con
 
 class BuildError(RuntimeError):
     """Raised when a pinned Model Hub source build cannot be trusted."""
+
+
+def _go_toolchain_version(output: str) -> str:
+    fields = output.split()
+    if len(fields) < 3 or fields[:2] != ["go", "version"] or not fields[2].startswith("go"):
+        raise BuildError("Go toolchain identity is unreadable")
+    if re.fullmatch(r"go[0-9]+(?:\.[0-9]+){1,2}", fields[2]) is None:
+        raise BuildError("Go toolchain version is not stable")
+    return fields[2]
 
 
 def _sha256(path: Path) -> str:
@@ -193,9 +203,7 @@ def build_source_release(
             patch_path=patch_path.resolve(),
             source_dir=source_dir.resolve() if source_dir is not None else None,
         )
-        go_version = _run([go_binary, "version"], cwd=checkout).strip()
-        if not go_version.startswith("go version "):
-            raise BuildError("Go toolchain identity is unreadable")
+        go_version = _go_toolchain_version(_run([go_binary, "version"], cwd=checkout))
 
         generated_assets: list[dict[str, Any]] = []
         for platform in sorted(TARGETS):
@@ -276,7 +284,12 @@ def build_source_release(
 
     # Import lazily so the builder can be unit-tested without importing the
     # network-facing release guard during source preparation.
-    from scripts.model_hub_engine_release_guard import verify_release_assets
+    try:
+        from scripts.model_hub_engine_release_guard import verify_release_assets
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        from model_hub_engine_release_guard import verify_release_assets
 
     verify_release_assets(generated_manifest, output_dir)
     return generated_manifest

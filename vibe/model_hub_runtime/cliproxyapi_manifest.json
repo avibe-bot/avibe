@@ -44,7 +44,7 @@
   ],
   "build": {
     "builder": "scripts/build_model_hub_engine.py",
-    "go_version": "go version go1.26.0 darwin/arm64",
+    "go_version": "go1.26.0",
     "cgo_enabled": false,
     "trimpath": true,
     "buildvcs": false,

@@ -84,6 +84,7 @@ def test_build_source_release_applies_patch_and_materializes_four_targets(
     assert len(list(output.glob("*.tar.gz"))) == 4
     generated = json.loads(generated_manifest.read_text(encoding="utf-8"))
     assert generated["build"]["cgo_enabled"] is False
+    assert generated["build"]["go_version"] == "go1.26.4"
     assert generated["build"]["patch_sha256"] == builder._sha256(patch)
     assert any(command[:3] == ["git", "apply", "--whitespace=error"] for command, _ in commands)
     build_envs = [env for command, env in commands if command[:2] == ["go", "build"]]

@@ -320,7 +320,12 @@ def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
 
 
 def fetch_upstream_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
-    from scripts.build_model_hub_engine import build_source_release
+    try:
+        from scripts.build_model_hub_engine import build_source_release
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        from build_model_hub_engine import build_source_release
 
     generated_manifest = build_source_release(manifest_path, output_dir)
     return load_release_spec(generated_manifest)

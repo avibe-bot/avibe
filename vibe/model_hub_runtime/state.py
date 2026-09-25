@@ -1062,6 +1062,13 @@ class EngineStateStore:
                 raise EngineStateError("OAuth auth record binding is ambiguous")
             if exact:
                 credential_ref, metadata = exact[0]
+                stored_identity = _oauth_identity_from_metadata(metadata)
+                if (
+                    stored_identity
+                    and identity
+                    and not _oauth_identity_matches(stored_identity, identity)
+                ):
+                    raise EngineStateError("OAuth auth record identity conflicts")
                 updated = {
                     **metadata,
                     **({"oauth_identity": identity} if identity else {}),
