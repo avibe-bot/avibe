@@ -295,7 +295,7 @@ class EngineStateStore:
             raise EngineStateError("OAuth credential binding is incomplete")
         normalized_vendor = vendor.strip().lower()
         normalized_auth_name = auth_name.strip()
-        normalized_identity = _normalized_oauth_identity(identity)
+        normalized_identity = _oauth_owning_identity(identity)
         with self._lock:
             exact_matches = [
                 (credential_ref, payload)
@@ -1272,7 +1272,7 @@ class EngineStateStore:
         identity: Mapping[str, Any],
     ) -> str | None:
         normalized_vendor = vendor.strip().lower()
-        normalized_identity = _normalized_oauth_identity(identity)
+        normalized_identity = _oauth_owning_identity(identity)
         if not normalized_identity:
             return None
         with self._lock:
@@ -1720,12 +1720,21 @@ def _oauth_identity_from_payload(
 ) -> dict[str, str]:
     if provider != "claude":
         return {}
-    return _normalized_oauth_identity(payload)
+    return _oauth_owning_identity(payload)
 
 
 def _oauth_identity_from_metadata(payload: Mapping[str, Any]) -> dict[str, str]:
     value = payload.get("oauth_identity")
-    return _normalized_oauth_identity(value if isinstance(value, Mapping) else None)
+    return _oauth_owning_identity(value if isinstance(value, Mapping) else None)
+
+
+def _oauth_owning_identity(
+    identity: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    normalized = _normalized_oauth_identity(identity)
+    if not normalized.keys() & {"email", "account_uuid"}:
+        return {}
+    return normalized
 
 
 def _oauth_identity_matches(
@@ -1734,9 +1743,11 @@ def _oauth_identity_matches(
 ) -> bool:
     """Match the same Claude account without merging organizations."""
 
-    stored_identity = _normalized_oauth_identity(stored)
-    target_identity = _normalized_oauth_identity(target)
+    stored_identity = _oauth_owning_identity(stored)
+    target_identity = _oauth_owning_identity(target)
     if not stored_identity or not target_identity:
+        return False
+    if not stored_identity.keys() <= target_identity.keys():
         return False
     shared_account_fields = (
         stored_identity.keys()

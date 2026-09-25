@@ -219,6 +219,9 @@ def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
     assert "--latest=false" in workflow
     assert "missing_assets" in workflow
     assert "--clobber" not in workflow
+    assert "--json isDraft" in workflow
+    assert 'gh release edit "$release_tag"' in workflow
+    assert "--draft=false" in workflow
     assert "publish-patched-source:" in workflow
     assert "needs: build-patched-source" in workflow
     assert "needs: [publish-patched-source]" in workflow

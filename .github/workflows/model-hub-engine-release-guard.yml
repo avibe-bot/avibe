@@ -84,6 +84,12 @@ jobs:
           assets=("$asset_dir"/*)
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json isDraft \
+                --jq '.isDraft'
+            )"
             declare -A existing_assets=()
             while IFS= read -r asset_name; do
               existing_assets["$asset_name"]=1
@@ -107,6 +113,11 @@ jobs:
                 "${missing_assets[@]}"
             else
               echo "All expected release asset names already exist; preserving their bytes."
+            fi
+            if [ "$is_draft" = "true" ]; then
+              gh release edit "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --draft=false
             fi
           else
             gh release create "$release_tag" \
@@ -196,6 +207,12 @@ jobs:
           assets=("$RESTORE_DIR"/*)
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json isDraft \
+                --jq '.isDraft'
+            )"
             declare -A existing_assets=()
             while IFS= read -r asset_name; do
               existing_assets["$asset_name"]=1
@@ -214,12 +231,21 @@ jobs:
               fi
             done
             if [ "${#missing_assets[@]}" -eq 0 ]; then
-              echo "::error::Every expected asset name exists but verification failed; refusing to overwrite pinned bytes."
-              exit 1
+              if [ "$is_draft" != "true" ]; then
+                echo "::error::Every expected asset name exists but verification failed; refusing to overwrite pinned bytes."
+                exit 1
+              fi
+              echo "All expected assets exist on the interrupted draft; publishing it for verification."
+            else
+              gh release upload "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                "${missing_assets[@]}"
             fi
-            gh release upload "$release_tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              "${missing_assets[@]}"
+            if [ "$is_draft" = "true" ]; then
+              gh release edit "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --draft=false
+            fi
           else
             gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \

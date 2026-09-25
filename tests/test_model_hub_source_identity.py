@@ -176,6 +176,27 @@ def test_claude_filename_migration_backfills_released_legacy_metadata_from_prefi
     assert migrated["oauth_identity"]["organization_uuid"] == "organization-a"
 
 
+def test_claude_organization_only_identity_is_not_persisted(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    auth_name = "claude-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", auth_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    store.write_oauth_auth_file(
+        auth_name,
+        {
+            "type": "claude",
+            "prefix": prefix,
+            "organization_uuid": "organization-a",
+            "access_token": "private-access-fixture",
+        },
+    )
+
+    assert store.reconcile_oauth_auth_file(auth_name, auth_provider="claude") == ref
+    assert "oauth_identity" not in store.credential_metadata(ref)
+    assert store.reconcile_oauth_auth_file(auth_name, auth_provider="claude") == ref
+    assert "oauth_identity" not in store.credential_metadata(ref)
+
+
 def test_claude_filename_migration_rejects_cross_source_rebind(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     old_name = "claude-user@example.com.json"
@@ -269,6 +290,7 @@ def test_claude_identity_requires_account_level_evidence(tmp_path):
     )
 
     assert store.oauth_credential_ref_for_identity("anthropic", organization_only) is None
+    assert "oauth_identity" not in store.credential_metadata(first_ref)
 
     second_ref = store.bind_oauth_credential(
         "src_identity002",
@@ -316,7 +338,11 @@ def test_claude_exact_filename_rewrite_rejects_identity_change(tmp_path):
 
 
 @pytest.mark.parametrize("renamed", [False, True], ids=["exact-name", "renamed"])
-def test_claude_reconciliation_rejects_dropped_identity(tmp_path, renamed):
+@pytest.mark.parametrize(
+    "missing_field",
+    ["email", "account_uuid", "organization_uuid"],
+)
+def test_claude_reconciliation_rejects_dropped_identity(tmp_path, renamed, missing_field):
     store = EngineStateStore(tmp_path / "engine")
     old_name = "claude-user@example.com.json"
     new_name = "claude-00f765af-user@example.com.json"
@@ -336,14 +362,16 @@ def test_claude_reconciliation_rejects_dropped_identity(tmp_path, renamed):
     current_name = new_name if renamed else old_name
     if renamed:
         (store.auth_dir / old_name).rename(store.auth_dir / new_name)
-    store.write_oauth_auth_file(
-        current_name,
-        {
-            "type": "claude",
-            "prefix": prefix,
-            "access_token": "private-access-fixture",
-        },
-    )
+    replacement = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    replacement.pop(missing_field)
+    store.write_oauth_auth_file(current_name, replacement)
 
     with pytest.raises(EngineStateError, match="identity conflicts"):
         store.reconcile_oauth_auth_file(current_name, auth_provider="claude")
