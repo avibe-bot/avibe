@@ -88,67 +88,39 @@ Skill bodies, and references load on demand.
 
 Resolve the actual target (backend, model, effort) from the run or session
 record, not the Agent's current definition, which may have changed since.
-Attribute a symptom only to prompt text that existed when it ran: recover
-file-owned text at that time with `git log` / `git show`; Avibe does not keep
-history for state-owned text (Agent prompts, Task and Watch messages), so if
-it changed after the run, say the attribution is unconfirmed.
+Attribute a symptom only to prompt text that existed when it ran: `git log`
+recovers file-owned text, but Agent prompts and Task and Watch messages live in
+Avibe state without history, so say when attribution is unconfirmed.
+
 `vibe runs show <id>` gives one run's prompt, result, and callback state;
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
-`messages` (sample a row with `select * from <table> limit 1` to see columns;
-`PRAGMA` is not allowed). Start from the run or session the user reported and
-widen only within its `scope_id`, so other users' and projects' conversations
-never enter the evidence. Agent-bearing run types are `agent_run`,
-`scheduled`, `watch`, `webhook`, and `task_escalation`; an empty result means
-silence only on a finished run. `hook_send` rows are deliveries into a
-session, so read that session's messages for the turn they caused;
-`task_run` and `watch_runtime` are command executions. Queries return 20 rows
-per page, so bound them by time and order newest first. Starting points:
+`messages`. Start from what the user reported and widen only within its
+`scope_id`, so other users' and projects' conversations stay out; the user's
+own corrections in `messages` are usually the sharpest evidence. Two starting
+points:
 
 ```sql
 -- The reported session, with the backend and model that actually ran
 select id, scope_id, agent_name, agent_backend, model, reasoning_effort, status
 from agent_sessions where id = '<session>';
 
--- Other sessions of the same Agent in the same scope
-select id, agent_backend, model, title, last_active_at
-from agent_sessions where agent_name = '<agent>' and scope_id = '<scope>'
-order by last_active_at desc;
-
--- Failed, cancelled, or silent Agent runs in those sessions
+-- Recent failed, cancelled, or silent Agent runs in that session
 select id, run_type, status, model, created_at
 from agent_runs
-where session_id in ('<session>', ...)
+where session_id = '<session>'
   and run_type in ('agent_run','scheduled','watch','webhook','task_escalation')
-  and created_at > datetime('now','-14 days')
   and (status in ('failed','canceled')
        or (status in ('succeeded','completed') and coalesce(trim(result_text),'') = ''))
 order by created_at desc;
-
--- User corrections (adjust keywords to the user's language)
-select id, session_id, created_at, substr(content_text,1,200) text
-from messages
-where author = 'user' and session_id in ('<session>', ...)
-  and created_at > datetime('now','-14 days')
-  and (content_text like '%why did%' or content_text like '%为什么%'
-       or content_text like '%卡住%' or content_text like '%不要%')
-order by created_at desc;
-
--- The relevant span of a long message
-select substr(content_text, max(1, instr(content_text,'<phrase>') - 300), 1200)
-from messages where id = '<message>';
 ```
 
 Quote the minimum excerpt and redact secrets and unrelated private content.
 
-A before/after probe runs a real backend on the user's account and writes
-session state, so run one only when the user asked for verification or
-approves it; otherwise put the proposed probe in the report. Do not fork the
-affected session: it already holds the failure and any correction, so a fork
-tests recovery rather than the original turn. Instead start a fresh run on an
-enabled Agent whose backend, model, and effort match the record (create a
-temporary one if none does), seeded with only the context before the failing
-turn — `vibe agent run --agent <agent> --sync --message-file <file>` — and mark
-the probe approximate when that context cannot be rebuilt.
+A before/after probe spends the user's account and writes session state, so
+propose it in the report unless the user asked for verification. A useful probe
+reproduces the original conditions — same backend, model, and effort, and only
+the context before the failing turn — rather than forking a session that
+already holds the failure and its correction.
 
 ## From symptom to likely cause
 
