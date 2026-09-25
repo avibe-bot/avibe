@@ -1194,7 +1194,7 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .on_new_window(|url, _features| handle_new_window_request(url));
     // macOS draws the page under an overlay title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
-    let builder = builder.initialization_script(macos_title_bar::INSET_SCRIPT);
+    let builder = builder.initialization_script(macos_title_bar::inset_script());
     let window = builder.build().ok()?;
     #[cfg(target_os = "macos")]
     macos_title_bar::install(&window);

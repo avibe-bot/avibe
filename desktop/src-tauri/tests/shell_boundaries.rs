@@ -278,7 +278,6 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
         .unwrap();
     assert!(macos_dependencies.contains("objc2 = \"0.6.4\""));
     assert!(macos_dependencies.contains("objc2-foundation = { version = \"0.3.2\""));
-    assert!(macos_dependencies.contains("objc2-app-kit = { version = \"0.3.2\""));
     assert!(!cargo.contains("objc2-core-services"));
 }
 

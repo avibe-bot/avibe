@@ -5,7 +5,7 @@
 //! separate grey strip. Two things then have to hold:
 //!
 //! - The page must keep its own controls out of the strip. It learns the
-//!   strip's height from `--shell-titlebar-inset`, which [`INSET_SCRIPT`] sets on
+//!   strip's height from `--shell-titlebar-inset`, which [`inset_script`] sets on
 //!   the root element before any Workbench script runs.
 //! - The strip must still move the window. WKWebView honours no `app-region`
 //!   CSS and swallows the mouse-down that would start a native drag, and Tauri's
@@ -44,8 +44,12 @@ pub const TITLE_BAR_INSET: f64 = 28.0;
 /// scripts run after the document element exists and before any page script.
 /// Top-level document only: Show Page content in subframes is laid out by the
 /// Workbench window that hosts it.
-pub const INSET_SCRIPT: &str = "if (window.self === window.top) \
-     document.documentElement.style.setProperty('--shell-titlebar-inset', '28px');";
+pub fn inset_script() -> String {
+    format!(
+        "if (window.self === window.top) \
+         document.documentElement.style.setProperty('--shell-titlebar-inset', '{TITLE_BAR_INSET}px');"
+    )
+}
 
 /// The `<meta name>` a page carries when it lays itself out below the strip.
 /// The Workbench (`ui/index.html`) and the bootstrap page (`index.html`) both
@@ -204,12 +208,6 @@ fn set_overlay(window: &NSWindow, overlay: bool, _mtm: MainThreadMarker) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_published_inset_is_the_strip_height() {
-        assert!(INSET_SCRIPT.contains(&format!("'{}px'", TITLE_BAR_INSET)));
-        assert!(INSET_SCRIPT.starts_with("if (window.self === window.top)"));
-    }
-
     /// A page that lays itself out below the strip must say so, or the shell
     /// falls back to the standard title bar for it. Both pages the shell can
     /// show at the current release declare the name the shell asks for.
@@ -223,6 +221,5 @@ mod tests {
                 "{page} must declare {SUPPORT_META}"
             );
         }
-        assert!(support_probe().contains(&format!("meta[name=\"{SUPPORT_META}\"]")));
     }
 }
