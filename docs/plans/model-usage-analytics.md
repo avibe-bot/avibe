@@ -162,6 +162,51 @@ ledger, migration, or time-zone subsystem. Tests passing on earlier heads did no
 close these gaps: verification must exercise the queue and read/write boundaries,
 not only direct ledger recording.
 
+## September 25 delivery-loop diagnosis
+
+The orchestrator re-read all 33 GitHub review threads, including resolved and
+outdated threads, and their originating review commits. Nine heads have findings:
+`03a839f423` (5), `ee6fe9c902` (4), `5f0a695f62` (5), `57653ae5ff` (3),
+`acc11668c2` (3), `3e71916d82` (4), `53d8204785` (2), `8354e502ed` (3),
+and `d6d6db179` (4). There is no clean pass. Comment positions can migrate to a
+new head; these counts use the review's commit, not a comment's current position.
+The repeated classes are temporal evidence/completeness, display identity
+allocation, and detail interaction/accessibility. The circuit breaker therefore
+requires a scope decision, not indefinite waiting for another review event.
+
+The previous UTC read-path repair and its consuming timezone test were checked
+directly. That test never recorded another call after changing timezone, leaving
+the local-day write-retention gate untested. The expired aggregate reconciles
+counts but lacks a temporal boundary. The missing-history projection assumes an
+old local owner can locate uncertainty in the current zone. All three are failures
+to carry UTC evidence through the entire read/write/report lifecycle.
+
+Decision: keep the existing bounded daily ledger, wire contract, and approved
+pending queue. Complete the UTC evidence policy at its existing owner:
+
+- Thread `PRRT_kwDOPbFPYs6lwkc0`: preserve real, UTC-recent evidence across a
+  subsequent write even when the old local owner day is outside today's grid.
+  Keep the original daily ownership; do not invent a new daily allocation.
+- Thread `PRRT_kwDOPbFPYs6lwkdB`: carry an exclusive UTC expiry boundary with
+  pruned hourly counters. A horizon behind already-pruned evidence is incomplete;
+  an old nonzero expired aggregate without a boundary is not proof of completeness.
+- Thread `PRRT_kwDOPbFPYs6lwkdF`: a mismatched local owner cannot bound unknown
+  hours after a timezone change. Include the authoritative latest UTC hour and
+  conservatively retain uncertainty where its allocation cannot be recovered.
+- Thread `PRRT_kwDOPbFPYs6lwkc8`: keyboard activation moves focus into the detail;
+  dismissal returns focus without reopening it. Hover must not steal focus.
+- CI: consume the already-merged SQLAlchemy constraint from master. Separately
+  fix the ToastProvider-owned timer lifecycle exposed by the actual UI CI log;
+  do not classify that uncaught exception as a dependency installation failure.
+
+Verification must first fail on the pre-fix owner boundary, then cover timezone
+changes plus subsequent writes/reopened ledgers, backward and ordinary forward
+retention, partial/no local-day overlap, and keyboard activation/dismissal. Use
+focused tests, a production UI build, real fixture browser/HTTP+IPC acceptance,
+and current-head CI. Do not redesign storage, alter public docs, manually trigger
+Codex, or merge/deploy/restart the live service. Preserve the existing durable
+Watch and report the final gated head to the coordinating session.
+
 ## Known by design
 
 - This is metered gateway usage, not native subscription quota or monetary cost.
