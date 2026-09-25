@@ -75,9 +75,16 @@ for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]]
     await (touch ? countdown.tap() : countdown.click());
     const hint = page.getByRole('dialog');
     await expect(hint).toContainText(/\d{1,2}:\d{2}/);
+    // Measure where it settles, not mid slide-in.
+    await hint.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
     const hintBox = await box(hint);
     expect(hintBox.x).toBeGreaterThanOrEqual(0);
     expect(hintBox.x + hintBox.width).toBeLessThanOrEqual(width);
+    // It opens below the line, clear of the row's remaining-percentage figure.
+    const figure = await box(page.locator('[data-quota-window="seven_day"] .model-hub-quota-left'));
+    const line = await box(countdown);
+    expect(hintBox.y).toBeGreaterThanOrEqual(line.y + line.height);
+    expect(hintBox.y).toBeGreaterThanOrEqual(figure.y + figure.height);
     await page.screenshot({ path: testInfo.outputPath('quota-reset-hint.png') });
     await page.keyboard.press('Escape');
     await expect(hint).toBeHidden();

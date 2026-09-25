@@ -44,7 +44,10 @@ export const TimeHint: React.FC<{
         </button>
       </PopoverAnchor>
       <PopoverContent
-        side="top"
+        // Below and end-aligned, so it never covers the figure above the line;
+        // Radix flips it when there is no room below.
+        side="bottom"
+        align="end"
         sideOffset={6}
         onOpenAutoFocus={(event) => event.preventDefault()}
         // The anchor is not a Radix trigger, so its own tap would read as outside.
