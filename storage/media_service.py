@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
+import core.media_types  # noqa: F401 — registers audio/video types before guess_type
 from storage.models import media_object_references, media_objects
 
 logger = logging.getLogger(__name__)

@@ -40,7 +40,7 @@ export type PreviewSource = {
   /** Server-supplied extension (e.g. chat /meta `ext`) — used to classify when the name is just a
    *  descriptive label whose suffix doesn't match the real file type. */
   ext?: string | null;
-  /** Same-origin, apiFetch-able content URL. Required for image / pdf / office; default fetch for text. */
+  /** Same-origin, apiFetch-able content URL. Required for image / media / pdf / office; default fetch for text. */
   url?: string;
   /** In-memory text (the editor's live buffer). Used for text-derived kinds instead of fetching `url`. */
   text?: string;
@@ -68,6 +68,8 @@ export const FilePreview: React.FC<{ source: PreviewSource; className?: string; 
   if (!kind) return <Centered className={className}>{t('preview.unsupported')}</Centered>;
   if (kind === 'image')
     return source.url ? <ImageBody src={source.url} name={source.name} className={className} onDownload={onDownload} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
+  if (kind === 'audio' || kind === 'video')
+    return source.url ? <MediaView key={source.url} kind={kind} src={source.url} className={className} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
   if (kind === 'pdf')
     return source.url ? <PdfView url={source.url} className={className} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
   if (kind === 'docx' || kind === 'xlsx' || kind === 'pptx') {
@@ -309,6 +311,28 @@ const ImageBody: React.FC<{ src: string; name?: string; className?: string; onDo
 const PdfView: React.FC<{ url: string; className?: string }> = ({ url, className }) => {
   const { t } = useTranslation();
   return <iframe title={t('preview.title')} src={url} className={clsx('h-full w-full border-0 bg-white', className)} />;
+};
+
+// ── Audio / Video ────────────────────────────────────────────────────────────
+// Native players pointed straight at the same-origin content URL (like <img> and the PDF iframe), so
+// the session cookie authenticates and the browser streams with Range requests instead of buffering
+// the whole file into a blob. A decode/load failure falls back to the shared failure message (keyed by
+// `src` at the call site, so a new file starts unfailed).
+const MediaView: React.FC<{ kind: 'audio' | 'video'; src: string; className?: string }> = ({ kind, src, className }) => {
+  const { t } = useTranslation();
+  const [failed, setFailed] = React.useState(false);
+  if (failed) return <Centered className={className}>{t('preview.failed')}</Centered>;
+  if (kind === 'audio')
+    return (
+      <Centered className={className}>
+        <audio controls preload="metadata" src={src} onError={() => setFailed(true)} className="w-full max-w-md" />
+      </Centered>
+    );
+  return (
+    <div className={clsx('grid h-full min-h-0 place-items-center bg-black', className)}>
+      <video controls playsInline preload="metadata" src={src} onError={() => setFailed(true)} className="max-h-full max-w-full" />
+    </div>
+  );
 };
 
 // ── HTML ──────────────────────────────────────────────────────────────────────

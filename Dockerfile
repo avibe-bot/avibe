@@ -14,6 +14,7 @@ RUN npm ci --ignore-scripts
 # expects, or ``npm run build`` fails to resolve it.
 COPY vibe/message_types.json /app/vibe/message_types.json
 COPY vibe/data/api_key_vendors.json /app/vibe/data/api_key_vendors.json
+COPY vibe/data/media_types.json /app/vibe/data/media_types.json
 COPY ui/ .
 RUN npm run build
 

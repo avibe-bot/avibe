@@ -3,6 +3,8 @@
 // language in the FileViewer. Keep the language ids here in sync with the
 // grammar loaders in ``highlighter.ts``.
 
+import mediaCatalog from '../../../vibe/data/media_types.json';
+
 export type PreviewKind = 'markdown' | 'text' | 'json' | 'csv' | 'code' | 'source';
 
 // Refuse to preview files larger than this (fetch the bytes into the page) —
@@ -167,15 +169,46 @@ export function docPreviewKind(name: string, mime?: string | null, serverExt?: s
   return OFFICE_MIME[m] ?? null;
 }
 
+// Audio / video a native <audio> / <video> element can play. Deliberately an allowlist rather than
+// `audio/*`: formats browsers can't decode (AIFF, WeChat SILK, AMR) must fall back to download instead
+// of opening a broken player. An unambiguous media ext decides; Ogg and WebM containers hold either
+// audio or video, so for those an explicit content type wins and the ext only supplies the default.
+// Otherwise the content type (including the aliases Python's ``mimetypes`` emits, e.g. ``audio/x-wav``)
+// classifies a label-only chat link. The playable extensions come from ``vibe/data/media_types.json``,
+// the same catalog ``core/media_types.py`` registers server-side, so every ext offered here is guessed as
+// audio/* or video/* and served inline there (Vite inlines the JSON at build time).
+export type MediaKind = 'audio' | 'video';
+const CONTAINER_EXTS = new Set(['ogg', 'webm']);
+const MEDIA_EXT: Record<string, MediaKind> = Object.fromEntries(
+  Object.entries(mediaCatalog as Record<string, string>).map(([ext, mime]) => [ext, mime.startsWith('video/') ? 'video' : 'audio']),
+);
+const AUDIO_MIME = new Set([
+  'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave',
+  'audio/mp4', 'audio/x-m4a', 'audio/mp4a-latm', 'audio/aac', 'audio/x-aac',
+  'audio/ogg', 'audio/opus', 'audio/flac', 'audio/x-flac', 'audio/webm',
+]);
+const VIDEO_MIME = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/ogg', 'video/x-m4v']);
+
+export function mediaKind(name: string, mime?: string | null, serverExt?: string | null): MediaKind | null {
+  const ext = effectiveExt(name, serverExt);
+  if (MEDIA_EXT[ext] && !CONTAINER_EXTS.has(ext)) return MEDIA_EXT[ext];
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  if (AUDIO_MIME.has(m)) return 'audio';
+  if (VIDEO_MIME.has(m)) return 'video';
+  return CONTAINER_EXTS.has(ext) ? (MEDIA_EXT[ext] ?? null) : null;
+}
+
 // ── Unified preview dispatch ────────────────────────────────────────────────
 // HOW a file renders in the shared <FilePreview> kernel (one classifier for the File Browser, the
-// editor preview, and the chat viewer). Combines imageKind (raster/svg) + html + docPreviewKind
+// editor preview, and the chat viewer). Combines imageKind (raster/svg) + mediaKind (audio/video) + html + docPreviewKind
 // (office/pdf) + previewKind (text). 'code' is the catch-all for highlightable text — including
 // non-HTML markup (xml/vue/svelte) and plain text (highlights to nothing). Order matters: images and
 // HTML are decided before the text classifier so an .svg renders as an image, not edited source.
 export type PreviewRenderKind =
   | 'image'
   | 'svg'
+  | 'audio'
+  | 'video'
   | 'html'
   | 'pdf'
   | 'docx'
@@ -192,6 +225,8 @@ export function previewRenderKind(name: string, mime?: string | null, serverExt?
   const img = imageKind(name, mime, serverExt);
   if (img === 'raster') return 'image';
   if (img === 'svg') return 'svg';
+  const media = mediaKind(name, mime, serverExt);
+  if (media) return media;
   const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (HTML_EXT.has(ext) || m === 'text/html') return 'html';
@@ -216,14 +251,15 @@ export function editorPreviewKind(name: string): EditorPreviewKind | null {
   return null;
 }
 
-// Non-editable rich files that use a read-only preview tab inside Editor. Keep editable formats out
-// of this set so "Open in Editor" always lands on a source tab.
-export type PreviewOverlayKind = 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
+// Non-editable rich files that use a read-only preview tab inside Editor (and open in the Files
+// Preview / chat local-file viewer). Keep editable formats out of this set so "Open in Editor" always
+// lands on a source tab. Media shares the 25 MB cap: `/api/files/content` refuses larger files.
+export type PreviewOverlayKind = 'image' | 'audio' | 'video' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
 export function previewOverlayKind(entry: { kind: string; name: string; size: number | null }): PreviewOverlayKind | null {
   if (entry.kind !== 'file') return null;
   if (entry.size != null && entry.size > DOC_PREVIEW_MAX_BYTES) return null;
   const rk = previewRenderKind(entry.name);
-  return rk === 'image' || rk === 'pdf' || rk === 'docx' || rk === 'xlsx' || rk === 'pptx' ? rk : null;
+  return rk === 'image' || rk === 'audio' || rk === 'video' || rk === 'pdf' || rk === 'docx' || rk === 'xlsx' || rk === 'pptx' ? rk : null;
 }
 
 // What the Files app opens in Preview: a standalone window on desktop and its in-page overlay on

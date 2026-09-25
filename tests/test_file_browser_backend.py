@@ -2178,6 +2178,41 @@ def test_symlink_mutations_operate_on_link_not_target(tmp_path):
     assert target.read_text(encoding="utf-8") == "target"
 
 
+@pytest.mark.parametrize(
+    ("range_header", "status", "body", "content_range"),
+    [
+        (None, 200, bytes(range(256)), None),
+        ("bytes=16-31", 206, bytes(range(16, 32)), "bytes 16-31/256"),
+        ("bytes=250-", 206, bytes(range(250, 256)), "bytes 250-255/256"),
+        ("bytes=-4", 206, bytes(range(252, 256)), "bytes 252-255/256"),
+        ("bytes=240-999", 206, bytes(range(240, 256)), "bytes 240-255/256"),
+        ("bytes=256-", 416, b"", "bytes */256"),
+        ("bytes=0-1,4-5", 200, bytes(range(256)), None),
+        ("bytes=31-16", 200, bytes(range(256)), None),
+        ("bytes=" + "9" * 5000 + "-", 200, bytes(range(256)), None),
+        ("items=0-15", 200, bytes(range(256)), None),
+    ],
+)
+def test_file_content_serves_media_inline_with_byte_ranges(tmp_path, range_header, status, body, content_range):
+    """The Files preview's native <audio>/<video> loads and seeks through byte-range requests
+    (Safari refuses media without them), and a ``mimetypes`` alias like audio/x-wav stays inline."""
+    file_path = tmp_path / "voice.wav"
+    file_path.write_bytes(bytes(range(256)))
+    client = app.test_client()
+
+    response = client.get(
+        f"/api/files/content?path={file_path}", headers={"Range": range_header} if range_header else {}
+    )
+
+    assert response.status_code == status
+    assert response.content == body
+    assert response.headers.get("Content-Range") == content_range
+    assert response.headers["Accept-Ranges"] == "bytes"
+    if status != 416:
+        assert response.headers["Content-Type"].startswith("audio/")
+        assert response.headers["Content-Disposition"].startswith("inline;")
+
+
 def test_http_routes_return_contract_and_headers(tmp_path):
     file_path = tmp_path / "note.txt"
     file_path.write_text("hello", encoding="utf-8")
