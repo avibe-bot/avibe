@@ -2029,7 +2029,8 @@ describe('SettingsModelsPage surface branches', () => {
     ], [agent]);
     const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
     await userEvent.click(opener);
-    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$|^编辑模型$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Model actions$|^模型操作$/i }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: /^Edit model$|^编辑模型$/i }));
     await waitFor(() => expect(document.querySelector('.model-hub-route-head')).toBeNull());
     // Edit opens the model editor over the catalog; leave both by keyboard.
     for (let open = 0; open < 3 && screen.queryAllByRole('dialog').length; open += 1) {

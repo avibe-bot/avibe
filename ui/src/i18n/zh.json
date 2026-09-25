@@ -1248,22 +1248,16 @@
           "passthrough": "透传",
           "unconfigured": "未配置"
         },
-        "originNow": "当前",
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
           "passthrough": "未在供应商列表中匹配到此模型。\n按默认顺序向符合条件的 API Key 供应商透传原模型名，由上游处理。",
           "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
         },
-        "frozen": "此模型使用已保存的固定路由",
-        "follows": "跟随 {{backend}} 的默认路由",
+        "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
         "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
-        "editHint": "编辑并保存后，此模型将使用手动路由。",
-        "restoreAutomatic": "恢复自动",
-        "undoRestore": "撤销恢复",
         "undoDone": "已恢复之前的手动草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
-        "afterSave": "保存后的路由",
         "preview": {
           "automatic": "恢复后：自动匹配",
           "passthrough": "恢复后：原名透传",
@@ -1275,15 +1269,14 @@
         "noDefaults": "暂无可路由此模型的默认供应商。请加入匹配的供应商或符合条件的 API Key 供应商。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
-        "defaultRouting": "默认路由",
         "close": "关闭",
-        "pinRoute": "固定当前路由",
         "cancelChanges": "取消修改",
         "manualPending": "保存后，此模型将使用手动路由，不再跟随默认路由。",
         "exactModel": "准确模型 ID",
         "moveUp": "上移供应商",
         "moveDown": "下移供应商",
-        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由"
+        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由",
+        "errorShort": "错误"
       },
       "order": {
         "title": "{{backend}} · 默认路由",
@@ -1726,7 +1719,6 @@
         "open": "打开 {{model}} 的路由",
         "openWithMapping": "打开 {{model}} 的路由 · {{mapping}}",
         "label": "这个模型的路由",
-        "section": "这个模型的路由",
         "removeHop": "移除这个路由项",
         "editHop": "修改这个路由项",
         "addHop": "添加路由项",
@@ -1776,7 +1768,17 @@
           "refreshFail": "路由已保存，但暂时无法刷新显示。",
           "done": "完成"
         },
-        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。"
+        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。",
+        "mode": {
+          "label": "路由方式",
+          "follow": "跟随默认",
+          "custom": "自定义",
+          "undo": "撤销",
+          "viewDefaults": "查看默认路由",
+          "adjustDefaults": "调整默认路由"
+        },
+        "hopActions": "路由项操作",
+        "modelActions": "模型操作"
       },
       "recent": {
         "title": "最近切换",

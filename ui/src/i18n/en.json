@@ -1248,22 +1248,16 @@
           "passthrough": "Passthrough",
           "unconfigured": "Unconfigured"
         },
-        "originNow": "Current",
         "help": {
           "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
           "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the upstream to handle.",
           "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
         },
-        "frozen": "This model uses a saved, fixed route",
-        "follows": "Follows {{backend}} default routing",
+        "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
         "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
-        "editHint": "Editing and saving gives this model a manual route.",
-        "restoreAutomatic": "Restore automatic",
-        "undoRestore": "Undo restore",
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
-        "afterSave": "Route after saving",
         "preview": {
           "automatic": "After restore: automatic matching",
           "passthrough": "After restore: original-name passthrough",
@@ -1275,15 +1269,14 @@
         "noDefaults": "No default provider can route this model. Add a matching provider or an eligible API-key provider.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
-        "defaultRouting": "Default routing",
         "close": "Close",
-        "pinRoute": "Pin current route",
         "cancelChanges": "Cancel changes",
         "manualPending": "After saving, this model will use a manual route and no longer follow default routing.",
         "exactModel": "Exact model ID",
         "moveUp": "Move source up",
         "moveDown": "Move source down",
-        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes"
+        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
+        "errorShort": "Error"
       },
       "order": {
         "title": "{{backend}} · Default routing",
@@ -1726,7 +1719,6 @@
         "open": "Open {{model}} route chain",
         "openWithMapping": "Open {{model}} route chain · {{mapping}}",
         "label": "Route chain for this model",
-        "section": "Route chain for this model",
         "removeHop": "Remove hop",
         "editHop": "Edit hop",
         "addHop": "Add a hop",
@@ -1776,7 +1768,17 @@
           "refreshFail": "The route chain was saved, but the display could not be refreshed.",
           "done": "Done"
         },
-        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it."
+        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it.",
+        "mode": {
+          "label": "Routing mode",
+          "follow": "Follow defaults",
+          "custom": "Custom",
+          "undo": "Undo",
+          "viewDefaults": "View default routing",
+          "adjustDefaults": "Adjust default routing"
+        },
+        "hopActions": "Hop actions",
+        "modelActions": "Model actions"
       },
       "recent": {
         "title": "Recent switches",
