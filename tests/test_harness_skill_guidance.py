@@ -300,3 +300,26 @@ def test_pr_delivery_loop_keeps_one_optional_reference_out_of_routine_loading() 
     reference = (directory / references[0]).read_text()
     assert reference.startswith("# Delivery Rationale and Examples")
     assert reference not in rendered
+
+
+def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
+    """The audit Skill teaches live `vibe` calls.
+
+    Each backticked example that carries a flag or placeholder is parsed with
+    its `<placeholder>` and `...` slots filled, so a renamed command or flag
+    fails here instead of in an audit run.
+    """
+
+    body = _read("skills/agent-prompt-audit/SKILL.md")
+    examples = sorted(
+        {example for example in re.findall(r"`(vibe [^`]+)`", body) if "--" in example or "<" in example}
+    )
+    assert examples, "no embedded vibe examples found — did the regex drift?"
+
+    parser = cli.build_parser()
+    for example in examples:
+        argv = shlex.split(re.sub(r"<[^>]+>|\.\.\.", "x", example))[1:]
+        try:
+            parser.parse_args(argv)
+        except SystemExit as exc:
+            raise AssertionError(f"agent-prompt-audit teaches an unparseable command: {example!r}") from exc

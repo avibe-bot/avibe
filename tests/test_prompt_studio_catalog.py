@@ -85,6 +85,7 @@ def test_studio_catalog_contains_runtime_modules_and_builtin_skills() -> None:
         (document["name"] for document in skills), key=lambda name: (name.casefold(), name)
     )
     assert {document["name"] for document in skills} == {
+        "agent-prompt-audit",
         "background-watch-hook",
         "use-avibe",
         "use-avibe-harness",
