@@ -83,6 +83,7 @@ actually loads rather than assuming default paths.
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
 | Skills | user skill dirs (follow symlinks), Avibe `skills/`, project `.agents/skills/` | The directory's owner |
 | Task and Watch messages (re-sent every fire) | `vibe task list` / `vibe watch list` for ids, then `vibe task show <id>` / `vibe watch show <id>` for the full text | `vibe task update`, `vibe watch update` |
+| User preferences and Memory (read on demand) | `~/.avibe/state/user_preferences.md`, recalled Memory in the transcript; inspect only the reported user's part, and only when the transcript shows it was read | The user, or the Memory lifecycle |
 | Delegation briefs and callbacks | `agent_runs.message` / `result_text` | The prompt or Skill that writes them |
 
 Only Skill descriptions on the first catalog page are loaded every turn;
