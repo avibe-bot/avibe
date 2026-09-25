@@ -141,6 +141,45 @@ describe('UsageTab', () => {
     expect(container.textContent).toContain('All tokens');
   });
 
+  it('uses the translated historical-model label for filters, chart, table, and collisions', async () => {
+    const translated = createInstance();
+    await translated.use(initReactI18next).init({
+      lng: 'de',
+      fallbackLng: 'en',
+      resources: {
+        en: { translation: en },
+        de: { translation: { settings: { models: { usage: { unknownModel: 'Historisches Modell' } } } } },
+      },
+      interpolation: { escapeValue: false },
+    });
+    const value = report({
+      sources: [{
+        source_id: 'source-a',
+        label: 'Supplier',
+        last_metered_at: null,
+        ...counters(),
+        models: [{ model_id: 'model-a', label: 'Historisches Modell', ...counters() }],
+      }],
+      buckets: [bucket('00', [row({ model_id: 'removed-model' }), row()])],
+    });
+    const { container } = render(
+      <I18nextProvider i18n={translated}>
+        <UsageTab usage={readyRegion(value)} windowKey="24h" onWindowChange={vi.fn()} />
+      </I18nextProvider>,
+    );
+    const labels = [
+      'Supplier · Historisches Modell · source-a · removed-model',
+      'Supplier · Historisches Modell · source-a · model-a',
+    ];
+    for (const label of labels) expect(within(screen.getByRole('table')).getByText(label)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'All Model' }));
+    for (const label of labels) expect(screen.getByRole('option', { name: new RegExp(label) })).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+    await userEvent.click(screen.getByRole('button', { name: 'Model' }));
+    for (const label of labels) expect(container.querySelector('.model-hub-usage-legend')?.textContent).toContain(label);
+    expect(container.textContent).not.toContain('Unknown model');
+  });
+
   it('MH-USAGE-019: plots every bucket in the window, including the ones that carried nothing', () => {
     const { container } = draw(report({
       buckets: [bucket('00', []), bucket('01', []), bucket('02', [row()])],

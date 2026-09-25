@@ -172,15 +172,15 @@ export function usageIdentities(report: UsageReport, rows: readonly UsageBucketR
   });
 }
 
-export function identityLabel(identity: UsageIdentity, locale = 'en'): string {
-  const model = identity.modelLabel || (locale.startsWith('zh') ? '未知模型' : 'Unknown model');
+export function identityLabel(identity: UsageIdentity, unknownModelLabel: string): string {
+  const model = identity.modelLabel || unknownModelLabel;
   return `${identity.sourceLabel} · ${model}`;
 }
 
 export function usageLabelContext(
   report: UsageReport,
-  rows: readonly UsageBucketRow[] = report.buckets.flatMap((bucket) => bucket.rows),
-  locale = 'en',
+  rows: readonly UsageBucketRow[],
+  unknownModelLabel: string,
 ): UsageLabelContext {
   const sourceIds = [...new Set([
     ...report.sources.map((source) => source.source_id),
@@ -223,12 +223,12 @@ export function usageLabelContext(
   const identityLabelCounts = new Map<string, number>();
   const identities = usageIdentities(report, rows);
   for (const identity of identities) {
-    const label = identityLabel(identity, locale);
+    const label = identityLabel(identity, unknownModelLabel);
     identityLabelCounts.set(label, (identityLabelCounts.get(label) ?? 0) + 1);
   }
   const sourceQualifiedIdentityCounts = new Map<string, number>();
   for (const identity of identities) {
-    const label = identityLabel(identity, locale);
+    const label = identityLabel(identity, unknownModelLabel);
     if (identityLabelCounts.get(label) === 1) continue;
     const qualifiedLabel = `${label} · ${identity.sourceId}`;
     sourceQualifiedIdentityCounts.set(qualifiedLabel, (sourceQualifiedIdentityCounts.get(qualifiedLabel) ?? 0) + 1);
@@ -242,7 +242,7 @@ export function usageLabelContext(
   const identityByKey = new Map(identities.map((identity) => [identity.key, identity] as const));
   const identityCandidates = new Map(
     identities.map((identity) => {
-      const label = identityLabel(identity, locale);
+      const label = identityLabel(identity, unknownModelLabel);
       const modelSuffix = (
         (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1
       ) ? ` · ${identity.modelId}` : '';
@@ -273,7 +273,7 @@ export function usageLabelContext(
     identityModelCollisionKeys: new Set(
       identities
         .filter((identity) => {
-          const label = identityLabel(identity, locale);
+          const label = identityLabel(identity, unknownModelLabel);
           return identityCollisionLabels.has(label)
             && (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1;
         })
@@ -286,7 +286,7 @@ export function usageLabelContext(
 export function sourceIdentityLabel(
   report: UsageReport,
   sourceId: string,
-  context = usageLabelContext(report),
+  context: UsageLabelContext,
 ): string {
   const label = sourceLabel(report, sourceId);
   return context.sourceDisplayLabels.get(sourceId)
@@ -295,12 +295,12 @@ export function sourceIdentityLabel(
 
 export function identityDisplayLabel(
   identity: UsageIdentity,
-  locale = 'en',
+  unknownModelLabel: string,
   context?: UsageLabelContext,
 ): string {
   const displayLabel = context?.identityDisplayLabels.get(identity.key);
   if (displayLabel) return displayLabel;
-  const label = identityLabel(identity, locale);
+  const label = identityLabel(identity, unknownModelLabel);
   if (!context?.identityCollisionLabels.has(label)) return label;
   const modelSuffix = context.identityModelCollisionKeys.has(identity.key) ? ` · ${identity.modelId}` : '';
   return `${label} · ${identity.sourceId}${modelSuffix}`;
@@ -362,7 +362,7 @@ export function seriesFor(
   filter: UsageFilter,
   group: UsageGroup,
   metric: UsageMetric,
-  locale = 'en',
+  unknownModelLabel: string,
 ): UsageSeries[] {
   const rows = filteredRows(report, filter);
   if (group === 'type') {
@@ -400,7 +400,7 @@ export function seriesFor(
   }
 
   if (group === 'source') {
-    const labelContext = usageLabelContext(report, rows, locale);
+    const labelContext = usageLabelContext(report, rows, unknownModelLabel);
     const sourceIds = [...new Set(rows.map((row) => row.source_id))];
     return sourceIds.map((sourceId, index) => ({
       key: sourceId,
@@ -414,10 +414,10 @@ export function seriesFor(
   }
 
   const identities = usageIdentities(report, rows);
-  const labelContext = usageLabelContext(report, rows, locale);
+  const labelContext = usageLabelContext(report, rows, unknownModelLabel);
   return identities.map((identity, index) => ({
     key: identity.key,
-    label: identityDisplayLabel(identity, locale, labelContext),
+    label: identityDisplayLabel(identity, unknownModelLabel, labelContext),
     colorIndex: index,
     values: report.buckets.map((bucket) => {
       const rowsForIdentity = filterBucketRows(bucket, filter).filter((row) => (

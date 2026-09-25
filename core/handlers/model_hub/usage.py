@@ -418,17 +418,9 @@ def _normalize_hour_slice(item: object) -> Optional[dict]:
     if parts is None:
         return None
     key, _start = parts
-    counters: dict[str, int] = {}
-    for counter_key in _COUNTER_KEYS:
-        value = item.get(counter_key)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            return None
-        if value > USAGE_COUNTER_CEILING:
-            return None
-        counters[counter_key] = value
-    for subset, superset in _COUNTER_SUBSETS:
-        if counters[subset] > counters[superset]:
-            return None
+    counters = _normalize_hourly_totals(item)
+    if counters is None:
+        return None
     return {
         "key": key,
         **counters,
@@ -437,7 +429,7 @@ def _normalize_hour_slice(item: object) -> Optional[dict]:
 
 
 def _normalize_hourly_totals(value: object) -> Optional[dict]:
-    """Normalize counters pruned from the retained hourly history."""
+    """Read strict counters for either a retained slice or pruned history."""
 
     if not isinstance(value, dict):
         return None
@@ -452,6 +444,12 @@ def _normalize_hourly_totals(value: object) -> Optional[dict]:
     for subset, superset in _COUNTER_SUBSETS:
         if totals[subset] > totals[superset]:
             return None
+    if totals["token_reports"] == 0 and any(
+        totals[key] for key in ("input_tokens", "cached_input_tokens", "output_tokens")
+    ):
+        # Token magnitudes require a report, which in turn requires a request.
+        # Reject impossible hourly evidence without altering released daily totals.
+        return None
     return totals
 
 
@@ -1422,8 +1420,6 @@ class BoundedUsageLedger:
             # Read-only projection must apply the same temporal evidence policy
             # as persistence, including future slices in an otherwise valid day.
             row = _retain_hour_slices(row, report_instant)
-            if row["requests"] <= 0:
-                continue
             row_day = _calendar_day(row["day"])
             if row.get("hourly_history_complete") is not True:
                 overlapping = False
@@ -1448,6 +1444,9 @@ class BoundedUsageLedger:
                     # calls when durable UTC evidence disagrees with that day.
                     # No old-zone offset exists for reconstructing their hours.
                     incomplete.update(range(len(starts)))
+            # A damaged request counter cannot erase the incomplete witness.
+            if row["requests"] <= 0:
+                continue
             for item in row.get("hours") or ():
                 parts = _hour_key_parts(item.get("key"))
                 if parts is None:

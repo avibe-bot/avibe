@@ -239,6 +239,27 @@ window selectors. Scope analytics-specific stat styling to its own root because
 quota reuses the legacy stat classes. The quota browser case first reproduced
 the unintended type-scale override and now guards the original quota styling.
 
+Review of `a27e7346c7` added two findings (35 threads across ten findings-bearing
+heads). The completeness and identity-display classes have recurred, so the
+orchestrator inspected their owners before choosing another change:
+
+- Historical identity collision detection and display currently reconstruct a
+  localized fallback from the language name. The translator must instead supply
+  one fallback value to projection, chart, table, filter, and export. Require it
+  in the pure projection API so a caller cannot silently fall back to literals.
+  Exercise changed translation resources and collision handling, not just two
+  fixed locale names.
+- Strict hourly slice/expiry validation checks subset bounds but not whether
+  token evidence has a token report. Daily normalization remains the released,
+  permissive compatibility boundary. Reject impossible hourly/expired counters
+  at their shared strict reader and carry the incomplete witness through report
+  projection even when the daily request counter is zero. Verify retained,
+  expired, and daily-only shapes before and after a subsequent real write.
+
+These are bounded repairs to existing owners, not another storage redesign.
+Keep valid zero-token reports and unreported requests distinct, preserve daily
+counts, and do not change public API fields or the approved pending-queue policy.
+
 ## Known by design
 
 - This is metered gateway usage, not native subscription quota or monetary cost.

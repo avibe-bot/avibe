@@ -47,7 +47,7 @@ export function buildUsageCsv(
   headers: UsageCsvHeaders,
   unknownModel: string,
 ): string {
-  const labelContext = usageLabelContext(report);
+  const labelContext = usageLabelContext(report, report.buckets.flatMap((bucket) => bucket.rows), unknownModel);
   const buckets = pinnedKey === null
     ? report.buckets
     : report.buckets.filter((bucket) => bucket.key === pinnedKey);

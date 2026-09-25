@@ -78,7 +78,7 @@ describe('usageProjection', () => {
       ...counters(),
       models: [{ model_id: 'model-a', label: 'Model', ...counters() }],
     });
-    const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens');
+    const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', 'Unknown model');
     expect(series.map((item) => item.key)).toEqual([pairKey('source-a', 'model-a'), pairKey('source-b', 'model-a')]);
     expect(series.map((item) => item.label)).toEqual([
       'Supplier · Model · source-a',
@@ -88,14 +88,14 @@ describe('usageProjection', () => {
 
   it('localizes an unknown model in model-grouped series', () => {
     const value = reportWith([bucket('00', [row({ model_id: 'removed-model' })])]);
-    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', 'zh-CN')[0]?.label).toBe('Supplier · 未知模型');
+    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', '未知模型')[0]?.label).toBe('Supplier · 未知模型');
     expect(identityLabel({
       key: pairKey('source-a', 'removed-model'),
       sourceId: 'source-a',
       modelId: 'removed-model',
       sourceLabel: 'Supplier',
       modelLabel: null,
-    }, 'zh-CN')).toBe('Supplier · 未知模型');
+    }, '未知模型')).toBe('Supplier · 未知模型');
   });
 
   it('disambiguates localized unknown-model collisions', () => {
@@ -107,7 +107,7 @@ describe('usageProjection', () => {
       { model_id: 'model-a', label: '未知模型', ...counters() },
     ];
 
-    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', 'zh-CN').map((item) => item.label)).toEqual([
+    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', '未知模型').map((item) => item.label)).toEqual([
       'Supplier · 未知模型 · source-a · removed-model',
       'Supplier · 未知模型 · source-a · model-a',
     ]);
@@ -126,7 +126,7 @@ describe('usageProjection', () => {
       { source_id: 'source-b', label: 'Provider', last_metered_at: null, ...counters(), models: [] },
       { source_id: 'source-c', label: 'Provider · source-a', last_metered_at: null, ...counters(), models: [] },
     ];
-    const context = usageLabelContext(value);
+    const context = usageLabelContext(value, value.buckets.flatMap((bucket) => bucket.rows), 'Unknown model');
     const labels = ['source-a', 'source-b', 'source-c'].map((sourceId) => (
       sourceIdentityLabel(value, sourceId, context)
     ));
@@ -169,6 +169,7 @@ describe('usageProjection', () => {
       { sourceIds: [], modelKeys: [] },
       'model',
       'tokens',
+      'Unknown model',
     ).map((series) => series.label);
 
     expect(new Set(labels).size).toBe(labels.length);
@@ -177,7 +178,7 @@ describe('usageProjection', () => {
 
   it('renders incomplete empty buckets as unavailable gaps, not zero', () => {
     const value = reportWith([bucket('00', [], false), bucket('01', [], false)]);
-    const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'total', 'tokens');
+    const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'total', 'tokens', 'Unknown model');
     expect(series[0]?.values).toEqual([null, null]);
     expect(usageIsEmpty(value)).toBe(false);
     expect(reportHasPartialHistory(value, { sourceIds: [], modelKeys: [] })).toBe(true);

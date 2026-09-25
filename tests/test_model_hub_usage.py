@@ -833,6 +833,54 @@ def test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour(
     assert all(bucket["history_complete"] for bucket in daily["buckets"])
 
 
+@pytest.mark.parametrize("requests", [0, 2])
+@pytest.mark.parametrize("history_shape", ["retained", "expired", "legacy"])
+def test_tokens_without_reports_never_become_complete_empty_hourly_history(
+    tmp_path: Path, requests: int, history_shape: str,
+) -> None:
+    """Invalid counter relationships preserve daily counts but not hourly certainty."""
+
+    now = NOW + timedelta(minutes=15)
+    ledger = _ledger(tmp_path, now=_Clock(now))
+    ledger.path.parent.mkdir(parents=True)
+    counts = {
+        "requests": requests, "token_reports": 0,
+        "input_tokens": 7, "cached_input_tokens": 1, "output_tokens": 3,
+    }
+    start = now.replace(minute=0, second=0, microsecond=0)
+    damaged = {
+        "day": local_usage_day(now).isoformat(),
+        "source_id": "src_corrupt", "model_id": "model-corrupt",
+        **counts, "last_metered_at": now.isoformat(),
+    }
+    if history_shape != "legacy":
+        damaged.update({
+            "hours": (
+                [{"key": start.isoformat(), **counts, "last_metered_at": now.isoformat()}]
+                if history_shape == "retained" else []
+            ),
+            "hourly_expired_totals": counts if history_shape == "expired" else {key: 0 for key in counts},
+            "hourly_expired_before": (start - timedelta(hours=24)).isoformat(),
+            "hourly_history_complete": True,
+        })
+    ledger.path.write_text(json.dumps([damaged]), encoding="utf-8")
+
+    hourly = ledger.report(window="24h", now=now)
+    assert not hourly["buckets"][-1]["history_complete"]
+    assert hourly["totals"]["input_tokens"] == 0
+    assert ledger.summary(days=1, now=now)["totals"]["input_tokens"] == 7
+
+    ledger.record(
+        source_id="src_corrupt", model_id="model-corrupt",
+        usage=ProtocolUsageReport(input_tokens=2, output_tokens=1),
+        at=now,
+    )
+    reopened = _ledger(tmp_path).report(window="24h", now=now)
+    assert not reopened["buckets"][-1]["history_complete"]
+    assert reopened["totals"]["input_tokens"] == 2
+    assert ledger.summary(days=1, now=now)["totals"]["input_tokens"] == 9
+
+
 def test_corrupt_nested_hours_are_deduplicated_bounded_and_marked_unavailable(
     tmp_path: Path,
 ) -> None:

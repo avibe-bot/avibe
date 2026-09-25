@@ -289,7 +289,8 @@ function UsageChart({
     ? requestedIndex
     : null;
   const bars = report.window_key === '30d' || report.window_key === '60d';
-  const series = React.useMemo(() => seriesFor(report, filter, group, metric, i18n.language), [filter, group, metric, i18n.language, report]);
+  const unknownModelLabel = t('settings.models.usage.unknownModel');
+  const series = React.useMemo(() => seriesFor(report, filter, group, metric, unknownModelLabel), [filter, group, metric, unknownModelLabel, report]);
   const labels = React.useMemo(() => new Map(series.map((item) => [
     item.key,
     item.key === 'total'
@@ -734,12 +735,12 @@ function tableRows(
   filter: UsageFilter,
   group: 'model' | 'source',
   pinnedKey: string | null,
-  locale: string,
+  unknownModelLabel: string,
 ): TableRow[] {
   const buckets = pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey);
   const rows = buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
   const grouped = new Map<string, TableRow>();
-  const labelContext = usageLabelContext(report, filteredRows(report, filter), locale);
+  const labelContext = usageLabelContext(report, filteredRows(report, filter), unknownModelLabel);
   for (const row of rows) {
     const key = group === 'source' ? row.source_id : pairKey(row.source_id, row.model_id);
     const identity = group === 'source'
@@ -756,7 +757,7 @@ function tableRows(
       key,
       label: group === 'source'
         ? sourceIdentityLabel(report, row.source_id, labelContext)
-        : identityDisplayLabel(identity!, locale, labelContext),
+        : identityDisplayLabel(identity!, unknownModelLabel, labelContext),
       detail: group === 'source' ? '' : sourceIdentityLabel(report, row.source_id, labelContext),
       counters: aggregateCounters([...(previous ? [previous.counters] : []), row]),
     });
@@ -828,7 +829,8 @@ export const UsageTab: React.FC<{
   }
 
   const allRows = filteredRows(report, { sourceIds: [], modelKeys: [] });
-  const labelContext = usageLabelContext(report, allRows, i18n.language);
+  const unknownModelLabel = t('settings.models.usage.unknownModel');
+  const labelContext = usageLabelContext(report, allRows, unknownModelLabel);
   const sourceOptions: FilterOption[] = report.sources.map((source) => ({
     key: source.source_id,
     label: sourceIdentityLabel(report, source.source_id, labelContext),
@@ -845,8 +847,8 @@ export const UsageTab: React.FC<{
       } satisfies UsageIdentity;
       return [key, {
         key,
-        label: identityDisplayLabel(identity, i18n.language, labelContext),
-        detail: identity.modelLabel ? undefined : t('settings.models.usage.unknownModel'),
+        label: identityDisplayLabel(identity, unknownModelLabel, labelContext),
+        detail: identity.modelLabel ? undefined : unknownModelLabel,
       }];
     }),
   ).values()];
@@ -861,7 +863,7 @@ export const UsageTab: React.FC<{
     ? null
     : report.buckets.find((bucket) => bucket.key === pinnedKey) ?? null;
   const activePinnedKey = pinnedBucket?.key ?? null;
-  const rows = tableRows(report, filter, tableGroup, activePinnedKey, i18n.language);
+  const rows = tableRows(report, filter, tableGroup, activePinnedKey, unknownModelLabel);
   const sortValue = (row: TableRow): number => usageMetricValue(row.counters, metric) ?? -1;
   const sortedRows = [...rows].sort((left, right) => (sortValue(right) - sortValue(left)) * (sortAscending ? -1 : 1));
   const tableTotal = aggregateCounters(
