@@ -155,31 +155,26 @@ the publisher, feeds the rule directly.
   `--app-sidebar-w` offset and a border, so the two edges stay together while the
   sidebar is dragged. It publishes `data-settings-menu-placement` for tests.
 
-  It also decides what an interaction *outside* the surface means, and inline
-  turns out not to have an outside in the sense that handler assumes. Inline
-  covers everything right of the sidebar, so what stays reachable is the sidebar
-  column (z-10, left of the surface) and whatever the shell floats above the
-  z-30 surface: the Apps launcher and its Dock at z-40, menus and floating
-  details at z-50. Every one of those belongs to the live shell and already owns
-  what it does — there is no neutral background left to click at. So **inline
-  does not dismiss on outside interaction at all**, and is left by Escape, by the
-  Settings toggle, or by navigating.
+  It also decides what an interaction *outside* the surface means. Inline
+  dismisses when a non-owning shell control is clicked, while controls that own
+  their outside interaction declare `data-settings-interaction-owner` (or use
+  an anchor / the Settings toggle) so Radix does not perform a second exit. The
+  owner then performs the only navigation, handoff, or overlay action itself;
+  this keeps sidebar links, Dock tiles, and global feedback/toast controls from
+  racing `closeSettingsOverlay`'s history traversal.
+  A real outside dismissal records the control that caused it and returns focus
+  there instead of stealing focus back to the Settings opener.
 
-  That is deletion rather than exemption, and deliberately so. The resize edge
-  moves this surface's own left edge, so grabbing it must not close what the drag
-  is laying out; a sidebar link already navigates, and that navigation *is* the
-  way out — letting dismissal fire too would race two navigations
-  (`closeSettingsOverlay` traverses history asynchronously while the link pushes
-  synchronously) and could land on the retained origin instead of the route that
-  was clicked. Naming the exempt surfaces cannot express this, because
-  `AppsLauncher` portals itself to `document.body` to clear the route panel's
-  stacking context: it belongs to the sidebar without descending from it, and so
-  do the menus and details beside it. Any DOM-ancestry test covers only the
-  portals someone remembered.
-
-  Standalone keeps the dismissal that shipped, including its single
-  `data-settings-toggle` exemption — it does own the whole viewport, so "outside"
-  there means what it always did.
+  This is an ownership boundary rather than DOM ancestry. `AppsLauncher` portals
+  its Dock to `document.body` to clear the route panel's stacking context, so
+  the Dock publishes the ownership marker at its own root and all of its window
+  controls inherit it. Standalone Settings keeps the whole viewport live and
+  never dismisses from outside interaction; its Settings toggle remains an
+  explicit close path. When a non-owning outside action opens a modal, the
+  foreground modal keeps focus ahead of the dismissed panel's return target.
+  Project and session context-menu rows declare ownership before pointer-down,
+  as do their menu triggers, so opening a portal never depends on its content
+  already being mounted.
 - **`SettingsLayout`**'s rail is `var(--app-sidebar-w)` when standalone (so it
   tracks even a dragged sidebar) and stays 196px inline, where spending a second
   full-width column on a secondary nav would cost 496px of left chrome.
@@ -256,12 +251,14 @@ edited into `design.pen`.
 - `SettingsLayout.test.tsx` — rail width per placement, including standalone where
   the shell draws no sidebar while `inline` is stored.
 - `SettingsOverlayRouteSurface.test.tsx` — the surface's left edge and border per
-  placement, standalone where the shell draws no sidebar, and what an outside
-  interaction means: inline dismisses on none of them — the resize edge, the
-  sidebar's quiet space, a control *portaled* out of the sidebar, or the rest of
-  the shell — while Escape and a sidebar link each still leave, in exactly one
-  navigation. Standalone still dismisses on the same portaled control, which is
-  the shipped behaviour. The portal case is the one an ancestry test cannot pass.
+  placement, standalone where the shell draws no sidebar, inline dismissal of
+  non-owning outside controls with focus retention, and exactly-one navigation
+  for sidebar links and a portaled window owner. Feedback ownership, modal
+  focus precedence, and standalone remaining open for outside controls are
+  covered too; the portal case is the one an ancestry test cannot pass.
+- `e2e/workbench-general/settings-dismissal.spec.ts` — a real project-row
+  right-click keeps inline Settings open while its menu opens. Escape dismisses
+  that menu first, then Settings on a separate press.
 - `e2e/workbench-general/geometry.spec.ts` — measured in a browser: the 248 rail,
   the card's background matching a neighbouring page's card, and inline actually
   putting a live sidebar beside Settings at the sidebar's own width. It also
