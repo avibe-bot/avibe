@@ -1041,6 +1041,8 @@ class BoundedUsageLedger:
                 existing["last_metered_at"],
                 row["last_metered_at"],
             )
+            if row.get("history_degraded") is True:
+                existing["history_degraded"] = True
             _merge_hour_slices(existing, row)
         if dropped:
             logger.warning(
@@ -1172,6 +1174,14 @@ class BoundedUsageLedger:
             folded = False
             for call in calls:
                 metered_at = min(_aware(call.at), persisted_at)
+                # Ordinary delayed writes retain the date captured before queueing,
+                # even if the host zone changes. Future calls still clamp to the
+                # persistence clock, including its local date.
+                owner_day = (
+                    local_usage_day(persisted_at).isoformat()
+                    if _aware(call.at) > persisted_at
+                    else call.owner_day
+                )
                 usage = call.usage
                 # A live call carries identities, not keys, and this is the one place
                 # they become one: derive here and every row downstream — new,
@@ -1183,7 +1193,7 @@ class BoundedUsageLedger:
                 if source_key is not None and model_key is not None:
                     increment = _normalize_row(
                         {
-                            "day": local_usage_day(metered_at).isoformat(),
+                            "day": owner_day,
                             "source_id": source_key,
                             "model_id": model_key,
                             "requests": call.requests,
@@ -1772,6 +1782,13 @@ class UsageCall:
     usage: Optional[ProtocolUsageReport]
     at: datetime
     requests: int = 1
+    owner_day: str = ""
+
+    def __post_init__(self) -> None:
+        # An init field intentionally survives dataclasses.replace during a fold.
+        # Recomputing it from `at` later would use a possibly different host zone.
+        if not self.owner_day:
+            object.__setattr__(self, "owner_day", local_usage_day(self.at).isoformat())
 
     @property
     def fold_key(self) -> tuple[str, str, str, str, bool]:
@@ -1786,7 +1803,7 @@ class UsageCall:
         """
 
         return (
-            local_usage_day(self.at).isoformat(),
+            self.owner_day,
             _hour_key(self.at),
             self.source_id,
             self.model_id,

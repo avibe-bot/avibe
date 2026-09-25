@@ -281,7 +281,7 @@ closure round before further implementation:
 - Expose the active metric column's direction through `aria-sort` and a
   translated sort-state label; test the state against the actual row order.
 
-The owner also set a convergence rule: future P0/P1 findings and regressions of
+The owner initially set a convergence rule: future P0/P1 findings and regressions of
 existing fixes remain actionable. New P2/P3 findings outside temporal evidence,
 locale formatting, existing-control accessibility, or this PR's contract are
 recorded as known follow-ups and dispositioned without another implementation
@@ -316,6 +316,37 @@ explicit timezone selection and restoration; do not build another precision
 subsystem. The timestamp-less-legacy review thread is dispositioned by this
 contract after the implementation is pushed. Frontend locale/sort fixes ship in
 the same push. Review, CI, thread, and merge-authority gates remain unchanged.
+
+At 14:26 CST on September 25, review of `cb651cb8f4` prompted the final bounded
+round. The 14:28 owner override includes capture-time day ownership:
+
+- OR `history_degraded` across duplicate ledger rows. Test both read orders on
+  daily and hourly reports, then a write/reopen. No other merge-algebra change.
+- Freeze the local-day owner on the in-memory `UsageCall` when captured. Carry
+  it through replacement, queue folding, and persistence using the existing
+  persisted `day` field. Keep deliberate future-call clamping. Compare folded
+  and unfolded writes across host-zone changes and preserve midnight,
+  fractional-offset, and DST coverage. No queue compaction or schema change.
+- Accept the Source CSV identifier and more-than-six chart identities findings
+  as follow-ups; do not expand the CSV contract or redesign chart encoding here.
+
+This supersedes the earlier convergence rule: after this single push, only
+P0/P1 findings or a regression of the duplicate-degradation repair trigger code
+changes. Every other P2/P3, including temporal precision, is recorded under
+known residuals, replied to, and resolved without another implementation round.
+Readiness still requires completed exact-head Codex review with a clean pass or
+only dispositioned follow-ups, zero unresolved threads, full green CI, and
+`CLEAN`. The coordinating owner alone performs the merge.
+
+## Known residuals / follow-ups
+
+- CSV's Source ID column can contain the bounded internal ledger key when a
+  canonical Source ID exceeds the verbatim limit. Normal identifiers are
+  unchanged. A follow-up can explicitly name the ledger key or supply the
+  canonical Source ID through the identity join.
+- More than six simultaneously displayed model/source identities reuse palette
+  colors. Tooltip/table labels and filtering remain exact; secondary visual
+  encodings or series grouping are a follow-up.
 
 ## Known by design
 

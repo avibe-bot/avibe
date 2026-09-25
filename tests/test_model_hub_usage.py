@@ -23,6 +23,7 @@ import sys
 import textwrap
 import threading
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,6 +54,7 @@ from core.handlers.model_hub.usage import (
     USAGE_RETENTION_DAYS,
     BoundedUsageLedger,
     SourceIdentity,
+    UsageCall,
     UsageWriter,
     local_usage_day,
 )
@@ -715,6 +717,109 @@ def test_usage_writer_preserves_daily_owners_inside_one_utc_hour(
         os.environ["TZ"] = "Asia/Kathmandu"
         time.tzset()
         asyncio.run(exercise())
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
+@pytest.mark.parametrize(
+    ("capture_zone", "flush_zone", "switch_between_calls", "expected_days"),
+    [
+        ("UTC", "Asia/Kathmandu", False, {"2026-09-24": 18}),
+        ("Asia/Kathmandu", "UTC", False, {"2026-09-24": 7, "2026-09-25": 11}),
+        ("UTC", "Asia/Kathmandu", True, {"2026-09-24": 7, "2026-09-25": 11}),
+        ("Asia/Kathmandu", "UTC", True, {"2026-09-24": 18}),
+    ],
+)
+def test_queued_usage_keeps_capture_day_across_host_zone_change(
+    tmp_path: Path,
+    capture_zone: str,
+    flush_zone: str,
+    switch_between_calls: bool,
+    expected_days: dict[str, int],
+) -> None:
+    """Queued/folded calls must keep the same daily owners as immediate writes.
+
+    The existing midnight test keeps TZ fixed; it cannot catch recomputing the
+    captured owner in fold keys, dataclass replacement, or delayed persistence.
+    """
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
+
+    async def exercise() -> None:
+        immediate = _ledger(tmp_path / "immediate", now=_Clock(now))
+        unfolded = _ledger(tmp_path / "unfolded", now=_Clock(now))
+        queued = _ledger(tmp_path / "queued", now=_Clock(now))
+        writer = UsageWriter(queued)
+        calls = []
+        keys = []
+        for index, (minute, tokens) in enumerate(((14, 7), (45, 11))):
+            if index and switch_between_calls:
+                os.environ["TZ"] = flush_zone
+                time.tzset()
+            at = datetime(2026, 9, 24, 18, minute, tzinfo=timezone.utc)
+            usage = ProtocolUsageReport(input_tokens=tokens)
+            call = UsageCall(source_id="src_a", model_id="model-x", usage=usage, at=at)
+            calls.append(call)
+            keys.append(call.fold_key)
+            immediate.record(source_id="src_a", model_id="model-x", usage=usage, at=at)
+            writer.record(source_id="src_a", model_id="model-x", usage=usage, at=at)
+
+        os.environ["TZ"] = flush_zone
+        time.tzset()
+        assert [replace(call).fold_key for call in calls] == keys
+        assert len(writer._pending) == len(expected_days)
+        unfolded.record_many([replace(call) for call in calls])
+        assert await writer.drain(timeout=5) == 0
+
+        expected_rows = json.loads(immediate.path.read_text(encoding="utf-8"))
+        assert {row["day"]: row["input_tokens"] for row in expected_rows} == expected_days
+        for ledger in (unfolded, queued):
+            assert json.loads(ledger.path.read_text(encoding="utf-8")) == expected_rows
+            fresh = BoundedUsageLedger(ledger.path, now=_Clock(now))
+            for window in ("24h", "7d"):
+                assert fresh.report(window=window, now=now) == immediate.report(window=window, now=now)
+                assert fresh.report(window=window, now=now)["totals"]["input_tokens"] == 18
+
+    try:
+        os.environ["TZ"] = capture_zone
+        time.tzset()
+        asyncio.run(exercise())
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
+def test_queued_future_call_still_clamps_day_after_host_zone_change(tmp_path: Path) -> None:
+    """Freezing normal owners must not bypass the existing future-call ceiling."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 24, 23, 30, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        call = UsageCall(
+            source_id="src_a", model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=7), at=now + timedelta(days=2),
+        )
+        os.environ["TZ"] = "Asia/Kathmandu"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.record_many([call])
+
+        [row] = json.loads(ledger.path.read_text(encoding="utf-8"))
+        assert row["day"] == "2026-09-25"
+        assert row["last_metered_at"] == now.isoformat()
+        assert row["hours"][0]["key"] == "2026-09-24T23:00:00+00:00"
+        for window in ("24h", "7d"):
+            assert ledger.report(window=window, now=now)["totals"]["input_tokens"] == 7
     finally:
         if previous_tz is None:
             os.environ.pop("TZ", None)
@@ -2325,6 +2430,50 @@ def test_degraded_ledger_history_survives_a_followup_write(tmp_path: Path) -> No
     assert all(not bucket["history_complete"] for bucket in daily["buckets"])
     assert all(not bucket["history_complete"] for bucket in hourly["buckets"])
     assert all(row["history_degraded"] is True for row in persisted)
+
+
+@pytest.mark.parametrize("marked_first", [False, True])
+def test_duplicate_rows_preserve_degradation_in_both_orders_and_after_write(
+    tmp_path: Path, marked_first: bool,
+) -> None:
+    """Duplicate merge ORs the witness; single damaged-row tests miss its loss."""
+
+    previous_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(NOW))
+        ledger.record(
+            source_id="src_a", model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=7), at=NOW,
+        )
+        [plain] = json.loads(ledger.path.read_text(encoding="utf-8"))
+        marked = {**plain, "history_degraded": True}
+        rows = [marked, plain] if marked_first else [plain, marked]
+        ledger.path.write_text(json.dumps(rows), encoding="utf-8")
+
+        for window in ("24h", "7d"):
+            report = ledger.report(window=window, now=NOW)
+            assert report["totals"]["input_tokens"] == 14
+            assert all(not bucket["history_complete"] for bucket in report["buckets"])
+
+        ledger.record(
+            source_id="src_a", model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=3), at=NOW,
+        )
+        fresh = _ledger(tmp_path, now=_Clock(NOW))
+        for window in ("24h", "7d"):
+            report = fresh.report(window=window, now=NOW)
+            assert report["totals"]["input_tokens"] == 17
+            assert all(not bucket["history_complete"] for bucket in report["buckets"])
+        [persisted] = json.loads(fresh.path.read_text(encoding="utf-8"))
+        assert persisted["history_degraded"] is True
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
 
 
 def test_a_window_excludes_days_outside_it(tmp_path: Path) -> None:
