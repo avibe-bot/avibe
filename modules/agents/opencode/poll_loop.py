@@ -18,6 +18,7 @@ from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE
 from core.message_context import build_context_session_key
 from core.message_output import terminal_output_for, terminal_turn_output
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.reply_enhancer import strip_silent_blocks
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import bind_persisted_launch, launch_for_context
 from modules.im import MessageContext
@@ -495,6 +496,69 @@ class OpenCodePollLoop:
                 return text
         return None
 
+    async def _settle_final_text(
+        self,
+        context: MessageContext,
+        messages: list[Dict[str, Any]],
+        baseline_message_ids: set[str],
+        settlement_message: Dict[str, Any],
+        emitted_message_ids: set[str],
+    ) -> str:
+        """Final text for the settlement message, keeping superseded replies.
+
+        A steer injected while the model is finishing a text reply moves the
+        settlement to the reply that answers the steer. Earlier completed
+        replies in the Turn are not the result, but they must still reach the
+        user: the last visible reply is the result, earlier visible replies
+        are emitted as intermediate assistant messages, and a silent reply
+        never displaces a visible one.
+        """
+
+        settlement_id = _message_info(settlement_message).get("id")
+        replies: list[tuple[str, str]] = []
+        for message in messages:
+            info = _message_info(message)
+            message_id = info.get("id")
+            if message_id == settlement_id:
+                break
+            if (
+                not message_id
+                or message_id in baseline_message_ids
+                or message_id in emitted_message_ids
+                or info.get("role") != "assistant"
+                or not info.get("time", {}).get("completed")
+                or info.get("finish") == "tool-calls"
+                or info.get("error")
+                or info.get("summary")
+            ):
+                continue
+            text = self._agent._extract_response_text(message)
+            if text:
+                replies.append((message_id, text))
+
+        final_text = self._agent._extract_response_text(settlement_message)
+        visible = [
+            (message_id, text)
+            for message_id, text in replies
+            if strip_silent_blocks(text).strip()
+        ]
+        if not strip_silent_blocks(final_text or "").strip() and visible:
+            _, final_text = visible.pop()
+        for message_id, text in visible:
+            logger.info(
+                "Emitting superseded OpenCode reply %s before settling on %s",
+                message_id,
+                settlement_id,
+            )
+            await self._agent.controller.emit_agent_message(
+                context,
+                "assistant",
+                text,
+                parse_mode="markdown",
+            )
+            emitted_message_ids.add(message_id)
+        return final_text
+
     async def run_prompt_poll(
         self,
         request: AgentRequest,
@@ -783,7 +847,13 @@ class OpenCodePollLoop:
                     if last_info.get("finish") != "tool-calls":
                         if not msg_error:
                             error_retry_count = 0
-                        final_text = self._agent._extract_response_text(last_message)
+                        final_text = await self._settle_final_text(
+                            request.context,
+                            messages,
+                            baseline_message_ids,
+                            last_message,
+                            emitted_assistant_messages,
+                        )
                         if not final_text and not msg_error:
                             logger.warning(
                                 "Last message %s has no text parts (finish=%s); "
@@ -1057,7 +1127,13 @@ class OpenCodePollLoop:
                             if last_info.get("finish") != "tool-calls":
                                 if not msg_error:
                                     error_retry_count = 0
-                                final_text = self._agent._extract_response_text(last_message)
+                                final_text = await self._settle_final_text(
+                                    context,
+                                    messages,
+                                    baseline_message_ids,
+                                    last_message,
+                                    emitted_assistant_messages,
+                                )
                                 if not final_text and not msg_error:
                                     logger.warning(
                                         "Restored poll: last message %s has no text parts (finish=%s); "

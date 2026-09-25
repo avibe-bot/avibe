@@ -362,5 +362,11 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_harness_failure_retry.py::test_harness_restart_notice_retries_through_web_and_controller
+  - id: MESSAGE-DELIVERY-321
+    name: OpenCode steer keeps a superseded completed reply and a silent reply never displaces it
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_opencode_steer_superseded_reply.py::test_steer_keeps_superseded_completed_reply
 next_priority:
-  - MESSAGE-DELIVERY-321
+  - MESSAGE-DELIVERY-322
