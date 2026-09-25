@@ -260,8 +260,8 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   proposes `display_name` and `reasoning_efforts` for every candidate (C4): for a built-in
   from the built-in snapshot, for a provider model from its suppliers (display name from the
   first ordered supplier that has one; efforts = union in Source order). A provider model whose
-  id names a models.dev entry exactly — full `provider/model`, the id or its last segment, or
-  either with punctuation folded; case-sensitive, never a substring or search alias — also
+  id names a models.dev entry exactly — full `provider/model`, else the id or its last path
+  segment, spelled identically; no case, punctuation, or alias folding and never a substring — also
   proposes that entry's `models_dev_id`, limits, modalities and capabilities, and its display
   name and efforts fill only what suppliers left empty. When no side states efforts and
   models.dev does not say `supports_reasoning: false`, the proposal is the

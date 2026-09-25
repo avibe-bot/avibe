@@ -512,39 +512,25 @@ def exact_models_dev_matches(
 ) -> dict[str, dict[str, Any]]:
     """The preferred models.dev copy for each id that names one exactly.
 
-    Exact means the full ``provider/model`` identity, the bare model id, or the
-    bare id with punctuation folded (``claude-3.5-x`` == ``claude-3-5-x``), in
-    that order of preference; a relay's ``prefix/model`` also tries its last
-    segment. Case is kept, and substring hits and search aliases are never
-    returned: this answer is applied without the user choosing it, so a near
-    neighbour would silently describe a different model.
+    Exact means the full ``provider/model`` identity or, failing that, the bare
+    model id — the id as given or a relay's last path segment — spelled
+    identically. No case, punctuation, or alias folding and no substring hits:
+    this answer is applied without the user choosing it, so any looser rule
+    lets a near neighbour silently describe a different model.
     """
 
-    def keys(model_id: str) -> tuple[str, ...]:
-        # The id as given, and its last segment when a relay prefixes one. No
-        # search aliases and no case folding: either could name another model.
-        return tuple(dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])))
-
-    def fold(value: str) -> str:
-        # Punctuation only: Unicode letters and digits are part of the identity.
-        return "".join(char for char in value if char.isalnum())
-
-    literal: dict[str, list[str]] = {}
-    folded: dict[str, list[str]] = {}
+    wanted: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
-        for key in keys(model_id):
-            literal.setdefault(key, []).append(model_id)
-            if fold(key):
-                folded.setdefault(fold(key), []).append(model_id)
-    if not literal or not catalog:
+        for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
+            wanted.setdefault(key, []).append(model_id)
+    if not wanted or not catalog:
         return {}
     vendor_map = load_model_vendor_map()
     by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
 
     def admit(provider_id: str, model_id: str, _display_name: str):
-        hits = [(0, requested) for requested in literal.get(f"{provider_id}/{model_id}", ())]
-        hits += [(1, requested) for requested in literal.get(model_id, ())]
-        hits += [(2, requested) for requested in folded.get(fold(model_id) or "\0", ())]
+        hits = [(0, requested) for requested in wanted.get(f"{provider_id}/{model_id}", ())]
+        hits += [(1, requested) for requested in wanted.get(model_id, ())]
         return hits or None
 
     for copies in _catalog_rows(catalog, vendor_map, admit).values():
@@ -556,8 +542,10 @@ def exact_models_dev_matches(
     for requested, copies in by_request.items():
         best = min(rank for rank, _provider, _row in copies)
         closest = [copy for copy in copies if copy[0] == best]
+        # Every closest copy names one catalog model id, so the family that
+        # decides first-party ownership is read off the catalog row.
         matches[requested] = _preferred_copy(
-            requested.rsplit("/", 1)[-1],
+            closest[0][2]["model_id"],
             closest,
             vendor_map,
         )
