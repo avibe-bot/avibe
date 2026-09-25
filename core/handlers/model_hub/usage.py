@@ -349,8 +349,25 @@ def _unknown_time_owner_day_envelope(
     return _utc_owner_day_envelope(calendar_day) if calendar_day is not None else None
 
 
+def _has_unresolved_hourly_mass(row: dict) -> bool:
+    """Whether daily counters still contain usage no hourly field can locate."""
+
+    hours = row.get("hours")
+    expired = row.get("hourly_expired_totals")
+    if not isinstance(hours, list) or not isinstance(expired, dict):
+        return True
+    known = _empty_totals()
+    for item in hours:
+        if not isinstance(item, dict):
+            return True
+        _accumulate(known, item)
+    _accumulate(known, expired)
+    return any(known[key] != row[key] for key in _COUNTER_KEYS)
+
+
 def _hourly_owner_day_window(
     row: dict,
+    measured: datetime,
 ) -> Optional[tuple[datetime, datetime]]:
     """Use one owner-day window for hourly selection and uncertainty projection."""
 
@@ -363,6 +380,17 @@ def _hourly_owner_day_window(
     unknown_owner_envelope = _unknown_time_owner_day_envelope(row)
     if unknown_owner_envelope is not None:
         return unknown_owner_envelope
+    latest = _instant(row.get("last_metered_at"))
+    if (
+        latest is not None
+        and latest <= measured
+        and row.get("hourly_history_complete") is not True
+        and isinstance(row.get("hours"), list)
+        and _has_unresolved_hourly_mass(row)
+    ):
+        envelope = _utc_owner_day_envelope(calendar_day)
+        if envelope is not None:
+            return envelope
     return _local_owner_day_window(calendar_day)
 
 
@@ -872,7 +900,7 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
         incomplete = True
     row_day_overlaps = False
     if not incomplete:
-        owner_day_window = _hourly_owner_day_window(row)
+        owner_day_window = _hourly_owner_day_window(row, measured)
         if owner_day_window is not None:
             row_day_overlaps = _intervals_overlap(
                 oldest_start,
@@ -1287,7 +1315,7 @@ class BoundedUsageLedger:
             latest = _instant(row.get("last_metered_at"))
             if latest is not None and latest < horizon_start:
                 continue
-            owner_day_window = _hourly_owner_day_window(row)
+            owner_day_window = _hourly_owner_day_window(row, report_instant)
             if owner_day_window is not None and _intervals_overlap(
                 horizon_start,
                 report_instant,
@@ -1524,7 +1552,7 @@ class BoundedUsageLedger:
                     and first_start <= latest <= report_instant
                     and local_usage_day(latest) != row_day
                 )
-                owner_day_window = _hourly_owner_day_window(row)
+                owner_day_window = _hourly_owner_day_window(row, report_instant)
                 if owner_day_window is not None:
                     for index, start in enumerate(starts):
                         end = (

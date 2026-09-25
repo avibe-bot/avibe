@@ -1801,6 +1801,12 @@ def test_same_identity_merge_preserves_date_only_hourly_uncertainty(
         path.write_text(json.dumps([row]), encoding="utf-8")
 
         ledger = _ledger(tmp_path, now=_Clock(now))
+        before = ledger.report(window="24h", now=now)
+        before_incomplete = {
+            bucket["start_at"]
+            for bucket in before["buckets"]
+            if not bucket["history_complete"]
+        }
         ledger.record(
             source_id="src-merged",
             model_id="model-merged",
@@ -1817,8 +1823,73 @@ def test_same_identity_merge_preserves_date_only_hourly_uncertainty(
         time.tzset()
 
     assert report["totals"]["input_tokens"] == 3
-    assert any(not bucket["history_complete"] for bucket in report["buckets"])
+    after_incomplete = {
+        bucket["start_at"]
+        for bucket in report["buckets"]
+        if not bucket["history_complete"]
+    }
+    assert after_incomplete == before_incomplete
     assert daily["totals"]["input_tokens"] == 10
+
+
+@pytest.mark.parametrize("unknown_first", [False, True])
+def test_duplicate_known_and_date_only_rows_preserve_hourly_uncertainty(
+    tmp_path: Path, unknown_first: bool,
+) -> None:
+    """Duplicate-row coalescing cannot make unknown historical mass certain."""
+
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    owner_day = local_usage_day(now).isoformat()
+    unknown = {
+        "day": owner_day,
+        "source_id": "src-duplicate-uncertainty",
+        "model_id": "model-duplicate-uncertainty",
+        "requests": 1,
+        "token_reports": 1,
+        "input_tokens": 7,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+    }
+    known = {
+        **unknown,
+        "requests": 1,
+        "token_reports": 1,
+        "input_tokens": 3,
+        "last_metered_at": now.isoformat(),
+        "hours": [{
+            "key": now.replace(minute=0, second=0, microsecond=0).isoformat(),
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 3,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": now.isoformat(),
+        }],
+        "hourly_expired_totals": {
+            "requests": 0,
+            "token_reports": 0,
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+        },
+        "hourly_history_complete": True,
+    }
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    rows = [unknown, known] if unknown_first else [known, unknown]
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    ledger = _ledger(tmp_path, now=_Clock(now))
+    report = ledger.report(window="24h", now=now)
+    incomplete = {
+        bucket["start_at"]
+        for bucket in report["buckets"]
+        if not bucket["history_complete"]
+    }
+
+    assert len(incomplete) == 15
+    assert report["totals"]["input_tokens"] == 3
+    assert ledger.summary(days=1, now=now)["totals"]["input_tokens"] == 10
 
 
 @pytest.mark.parametrize("owner_day", [date.min, date.max])
