@@ -24,6 +24,7 @@ export const InstanceAuthorizationProvider = ({
         instanceKind: session.instance_kind,
         instanceRole: session.instance_role ?? 'owner',
         capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
+        readerPrincipal: session.author_id ?? null,
       };
     }
     if (!session.authenticated || session.authorization_state !== 'current') {
@@ -39,6 +40,7 @@ export const InstanceAuthorizationProvider = ({
       instanceKind: session.instance_kind,
       instanceRole: session.instance_role,
       capabilities: session.capabilities,
+      readerPrincipal: session.author_id ?? null,
     };
   }, [session]);
 

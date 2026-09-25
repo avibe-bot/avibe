@@ -88,8 +88,8 @@ def resolve_sender_labels(
 
     A subject can hold several authorization rows within an Instance (one per
     granted scope); they describe the same person, so the most recently written
-    one wins and ties break on ``id`` -- the same subject must not label
-    differently between two reads of the same transcript.
+    one that carries an email wins and ties break on ``id`` -- the same subject
+    must not label differently between two reads of the same transcript.
     """
     wanted = {subject for subject in subjects if subject}
     if not wanted:
@@ -114,16 +114,18 @@ def resolve_sender_labels(
 
     freshest: dict[str, Any] = {}
     for row in rows:
+        # Only a row that yields a label competes: a scope grant written
+        # without an email says nothing about who the person is, so it must
+        # not shadow an older row of the same subject that does.
+        label = sender_label_from_email(row["email"])
+        if not label:
+            continue
         subject = row["subject"]
         key = (row["updated_at"] or row["created_at"] or 0, row["id"] or "")
         current = freshest.get(subject)
         if current is None or key > current[0]:
-            freshest[subject] = (key, row["email"])
-    return {
-        subject: label
-        for subject, (_key, email) in freshest.items()
-        if (label := sender_label_from_email(email))
-    }
+            freshest[subject] = (key, label)
+    return {subject: label for subject, (_key, label) in freshest.items()}
 
 
 def attach_sender_labels(

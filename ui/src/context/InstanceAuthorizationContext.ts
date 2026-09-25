@@ -9,6 +9,11 @@ export interface InstanceAuthorizationValue {
   instanceKind: InstanceKind | null;
   instanceRole: InstanceRole | null;
   capabilities: InstanceCapabilities;
+  // The principal this reader's Chat rows are written as, straight from
+  // ``/api/session`` -- ``local`` for a direct loopback browser, ``remote:<sub>``
+  // for a Cloud session, absent for anything else (a LAN setup host, say).
+  // Compared against a row's ``author_id`` to recognise the reader's own rows.
+  readerPrincipal?: string | null;
 }
 
 export const InstanceAuthorizationContext = createContext<InstanceAuthorizationValue>({
