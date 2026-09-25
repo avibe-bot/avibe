@@ -455,7 +455,7 @@ def test_finalize_waits_for_release_and_latest_readback(
 @pytest.mark.parametrize("newer", [False, True])
 def test_auto_latest_uses_all_official_versions_instead_of_engine_latest(monkeypatch, newer):
     calls = []
-    selected_latest = "model-hub-engine-v7.3.16-2"
+    selected_latest = "model-hub-engine-v7.3.16-3"
     release_reads = iter([_release_payload(draft=True), _release_payload(draft=False)])
     releases = [
         {"tag_name": selected_latest, "draft": False, "prerelease": False},
@@ -500,7 +500,7 @@ def test_serialized_finalizers_keep_highest_version_for_every_admission_order(mo
         }
         for tag in order
     }
-    latest = "model-hub-engine-v7.3.16-2"
+    latest = "model-hub-engine-v7.3.16-3"
     writes = []
     inventories = []
 

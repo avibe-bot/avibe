@@ -7467,6 +7467,15 @@ def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
             payload=None,
             timeout=None,
         ):
+            if (method, path) == ("GET", "/auth-files"):
+                return {
+                    "files": [{
+                        "id": "claude-account",
+                        "auth_index": "claude-account",
+                        "name": auth_file.name,
+                        "provider": "claude",
+                    }]
+                }
             assert (method, path) == ("DELETE", "/auth-files")
             return {"status": "ok"}
 
@@ -7492,12 +7501,17 @@ def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
     state = EngineStateStore(tmp_path / "runtime-state")
     state.prepare_instance("install-1")
     auth_file = state.auth_dir / "claude-account.json"
-    auth_file.write_text("{}", encoding="utf-8")
-    auth_file.chmod(0o600)
     credential_ref = state.bind_oauth_credential(
         "src_pending01",
         "anthropic",
         auth_file.name,
+    )
+    state._secure_write_json(
+        auth_file,
+        {
+            "type": "claude",
+            "prefix": state.credential_metadata(credential_ref)["prefix"],
+        },
     )
     runtime_adapter = CLIProxyEngineAdapter(
         supervisor=Supervisor(Client()),  # type: ignore[arg-type]

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -118,16 +119,9 @@ def _prepare_source(
     repository: str,
     source_sha: str,
     patch_path: Path,
-    source_dir: Path | None,
 ) -> Path:
-    if source_dir is None:
-        checkout = source_root / "source"
-        _checkout_source(checkout, repository=repository, source_sha=source_sha)
-    else:
-        checkout = source_root / "source"
-        if not source_dir.is_dir() or source_dir.is_symlink():
-            raise BuildError("provided Model Hub source directory is unsafe")
-        shutil.copytree(source_dir, checkout, symlinks=True)
+    checkout = source_root / "source"
+    _checkout_source(checkout, repository=repository, source_sha=source_sha)
     if not patch_path.is_file() or patch_path.is_symlink():
         raise BuildError("Model Hub compatibility patch is missing or unsafe")
     _run(["git", "apply", "--whitespace=error", str(patch_path)], cwd=checkout)
@@ -164,21 +158,60 @@ def _asset_name(version: str, platform: str) -> str:
     return f"CLIProxyAPI_{version.removeprefix('v')}_{TARGETS[platform][2]}.tar.gz"
 
 
+def _native_target() -> str | None:
+    goos = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    goarch = {
+        "aarch64": "arm64",
+        "amd64": "amd64",
+        "arm64": "arm64",
+        "x86_64": "amd64",
+    }.get(platform.machine().lower())
+    if goos is None or goarch is None:
+        return None
+    return next(
+        (
+            target
+            for target, (target_goos, target_goarch, _asset_arch) in TARGETS.items()
+            if target_goos == goos and target_goarch == goarch
+        ),
+        None,
+    )
+
+
+def _verify_built_binary(
+    binary: Path,
+    *,
+    version: str,
+    target: str,
+    checkout: Path,
+) -> None:
+    try:
+        binary_bytes = binary.read_bytes()
+    except OSError as exc:
+        raise BuildError(f"cannot read built Model Hub binary: {exc}") from exc
+    if version.encode("ascii") not in binary_bytes:
+        raise BuildError(f"built Model Hub binary does not contain pinned version: {target}")
+
+    if target != _native_target():
+        return
+    output = _run([str(binary), "--help"], cwd=checkout)
+    match = re.search(r"CLIProxyAPI Version:\s*([^,\s]+)", output)
+    if match is None or match.group(1) != version:
+        reported = match.group(1) if match is not None else "unreadable"
+        raise BuildError(
+            f"built Model Hub binary reported {reported}, expected {version}: {target}"
+        )
+
+
 def build_source_release(
     manifest_path: Path,
     output_dir: Path,
     *,
     source_repository: str = DEFAULT_SOURCE_REPOSITORY,
     patch_path: Path = DEFAULT_PATCH,
-    source_dir: Path | None = None,
     go_binary: str = "go",
 ) -> Path:
-    """Build all pinned targets and return the generated manifest path.
-
-    ``source_dir`` is a test seam for an already isolated checkout. Production
-    callers leave it unset so this function always creates a fresh checkout at
-    the manifest's exact source SHA before applying the repository-owned patch.
-    """
+    """Build all pinned targets and return the checked-in manifest path."""
 
     payload = _load_manifest(manifest_path)
     output_dir = output_dir.resolve()
@@ -201,9 +234,13 @@ def build_source_release(
             repository=source_repository,
             source_sha=str(payload["source_sha"]),
             patch_path=patch_path.resolve(),
-            source_dir=source_dir.resolve() if source_dir is not None else None,
         )
         go_version = _go_toolchain_version(_run([go_binary, "version"], cwd=checkout))
+        pinned_go_version = build_metadata.get("go_version")
+        if isinstance(pinned_go_version, str) and pinned_go_version and go_version != pinned_go_version:
+            raise BuildError(
+                f"Go toolchain {go_version} differs from pinned manifest toolchain {pinned_go_version}"
+            )
 
         generated_assets: list[dict[str, Any]] = []
         for platform in sorted(TARGETS):
@@ -226,12 +263,20 @@ def build_source_release(
                     "-mod=readonly",
                     "-trimpath",
                     "-buildvcs=false",
+                    "-ldflags",
+                    f"-X main.Version={payload['version']}",
                     "-o",
                     str(binary),
                     "./cmd/server",
                 ],
                 cwd=checkout,
                 env=environment,
+            )
+            _verify_built_binary(
+                binary,
+                version=str(payload["version"]),
+                target=platform,
+                checkout=checkout,
             )
             for member_name in ARCHIVE_MEMBERS[1:]:
                 shutil.copy2(checkout / member_name, build_dir / member_name)
@@ -257,30 +302,8 @@ def build_source_release(
                 encoding="utf-8",
             )
 
-    try:
-        patch_identity = str(patch_path.resolve().relative_to(REPO_ROOT))
-    except ValueError:
-        patch_identity = patch_path.resolve().name
-    generated = {
-        **payload,
-        "assets": generated_assets,
-        "build": {
-            **build_metadata,
-            "builder": "scripts/build_model_hub_engine.py",
-            "go_version": go_version,
-            "cgo_enabled": False,
-            "trimpath": True,
-            "buildvcs": False,
-            "patch": patch_identity,
-            "patch_sha256": _sha256(patch_path),
-            "source_date_epoch": source_date_epoch,
-        },
-    }
     generated_manifest = output_dir / "model-hub-engine-manifest.json"
-    generated_manifest.write_text(
-        json.dumps(generated, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    generated_manifest.write_bytes(manifest_path.read_bytes())
 
     # Import lazily so the builder can be unit-tested without importing the
     # network-facing release guard during source preparation.

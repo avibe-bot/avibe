@@ -216,12 +216,14 @@ def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
     assert "MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}" in workflow
     assert "model-hub-engine-release-backup-${{ steps.manifest.outputs.sha256 }}" in workflow
     assert "retention-days: 90" in workflow
-    assert "--verify-tag" in workflow
     assert "--latest=false" in workflow
     assert "missing_assets" in workflow
     assert "--clobber" not in workflow
     assert "publish-patched-source:" in workflow
     assert "needs: build-patched-source" in workflow
+    assert "needs: [publish-patched-source]" in workflow
+    assert "needs.publish-patched-source.result == 'success'" in workflow
+    assert '--target "$GITHUB_SHA"' in workflow
     assert "actions/download-artifact@" in workflow
     assert "python3 scripts/model_hub_engine_release_guard.py verify" in workflow
     assert 'gh release create "$release_tag"' in workflow

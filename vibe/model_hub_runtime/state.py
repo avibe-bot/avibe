@@ -1173,18 +1173,31 @@ class EngineStateStore:
                 return auth_name
 
             self.audit_auth_permissions(enforce=True)
+            stored_prefix = str(metadata.get("prefix") or "").strip().strip("/")
             candidate_names = sorted(
                 path.name
                 for path in self.auth_dir.iterdir()
                 if path.name.lower().endswith(".json")
             )
+            matching_names: list[str] = []
             for candidate_name in candidate_names:
                 payload = self._decode_oauth_payload(self.auth_dir / candidate_name)
-                if str(payload.get("type") or "").strip().lower() == normalized_provider:
-                    self.reconcile_oauth_auth_file(
-                        candidate_name,
-                        auth_provider=normalized_provider,
-                    )
+                provider = str(payload.get("type") or "").strip().lower()
+                payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
+                if candidate_name == auth_name or (
+                    provider == normalized_provider
+                    and stored_prefix
+                    and payload_prefix == stored_prefix
+                ):
+                    matching_names.append(candidate_name)
+
+            if len(matching_names) > 1:
+                raise EngineStateError("OAuth auth record binding is ambiguous")
+            if matching_names:
+                self.reconcile_oauth_auth_file(
+                    matching_names[0],
+                    auth_provider=normalized_provider,
+                )
 
             refreshed = self.credential_metadata(credential_ref)
             return _validated_oauth_auth_name(str(refreshed.get("auth_name") or ""))

@@ -8,7 +8,7 @@ restarted in this change.
 
 Upgrade Model Hub from CLIProxyAPI v7.2.149 to v7.3.16 at source commit
 `c404af96ebacedf8168b3c2bdbf4449a21cd1c1e`. Publish the four-platform
-Avibe-owned assets as `model-hub-engine-v7.3.16-2` before adoption. Preserve
+Avibe-owned assets as `model-hub-engine-v7.3.16-3` before adoption. Preserve
 the existing platform matrix and the [dependency lifecycle](model-hub-cpa-dependency.md).
 
 The upgrade must preserve:

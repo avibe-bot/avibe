@@ -84,8 +84,30 @@ jobs:
           assets=("$asset_dir"/*)
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            python3 scripts/model_hub_engine_release_guard.py fetch \
-              --output-dir "$RUNNER_TEMP/model-hub-engine-existing"
+            declare -A existing_assets=()
+            while IFS= read -r asset_name; do
+              existing_assets["$asset_name"]=1
+            done < <(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json assets \
+                --jq '.assets[].name'
+            )
+
+            missing_assets=()
+            for asset in "${assets[@]}"; do
+              asset_name="${asset##*/}"
+              if [ -z "${existing_assets[$asset_name]:-}" ]; then
+                missing_assets+=("$asset")
+              fi
+            done
+            if [ "${#missing_assets[@]}" -gt 0 ]; then
+              gh release upload "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                "${missing_assets[@]}"
+            else
+              echo "All expected release asset names already exist; preserving their bytes."
+            fi
           else
             gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
@@ -94,12 +116,17 @@ jobs:
               --title "Avibe Model Hub engine $version" \
               --notes "Avibe-managed patched CPA assets." \
               "${assets[@]}"
-            python3 scripts/model_hub_engine_release_guard.py fetch \
-              --output-dir "$RUNNER_TEMP/model-hub-engine-published"
           fi
+          python3 scripts/model_hub_engine_release_guard.py fetch \
+            --output-dir "$RUNNER_TEMP/model-hub-engine-published"
 
   guard:
     name: Verify and recover pinned assets
+    if: >-
+      always() &&
+      (github.event_name != 'workflow_dispatch' ||
+      needs.publish-patched-source.result == 'success')
+    needs: [publish-patched-source]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -196,7 +223,7 @@ jobs:
           else
             gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
+              --target "$GITHUB_SHA" \
               --latest=false \
               --title "Avibe Model Hub engine $version" \
               --notes "Avibe-managed CPA assets recovered from a manifest-verified backup." \

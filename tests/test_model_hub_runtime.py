@@ -1007,27 +1007,27 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-2/CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz",
-                "size_bytes": 39534928,
-                "sha256": "adac6b6f1d66b695c63a7f6155e369af00970aad6cbcdc0f37b15730ee25be6a",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz",
+                "size_bytes": 39534924,
+                "sha256": "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-2/CLIProxyAPI_7.3.16_darwin_amd64.tar.gz",
-                "size_bytes": 41928301,
-                "sha256": "6fb3bd41bd60d805d3256059428edeeb09939f8a5626e5ab9f772f415c50666d",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_darwin_amd64.tar.gz",
+                "size_bytes": 41928346,
+                "sha256": "6cdc647a2bb0ccc8d179f290cb1f90da28ef3d02e7c2d6aa96f5903760a78328",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-2/CLIProxyAPI_7.3.16_linux_amd64.tar.gz",
-                "size_bytes": 39894086,
-                "sha256": "714492152393085a920413bc339399f960cc28506cc4937dd328c79f6788610a",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_linux_amd64.tar.gz",
+                "size_bytes": 39894112,
+                "sha256": "88e0843bb5eaecb2748ff7fc5c4d61d301927ccd0aec7b35b1e20efc551957e9",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-2/CLIProxyAPI_7.3.16_linux_aarch64.tar.gz",
-                "size_bytes": 36618364,
-                "sha256": "9bdf0993e7c26bf12118430d5fd2c7fc15dac9582777d1f93c0e24468bf20296",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_linux_aarch64.tar.gz",
+                "size_bytes": 36618378,
+                "sha256": "a289bbc2d409e5a54a2f65c9d331f7e968b0f18fba2f3b56477a30a2a3c08c3a",
             },
         ],
     }
@@ -1520,34 +1520,34 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
 @pytest.mark.parametrize(
     ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
     [
-        (
-            "darwin-arm64",
-            "darwin-arm64",
-            39534928,
-            "adac6b6f1d66b695c63a7f6155e369af00970aad6cbcdc0f37b15730ee25be6a",
-            "ce9cc685af41b751f4f5ce5e41cd2b3269b283bfb5bf84ec92f2d2ac5c67ee8d",
-        ),
-        (
-            "darwin-x64",
-            "darwin-x64",
-            41928301,
-            "6fb3bd41bd60d805d3256059428edeeb09939f8a5626e5ab9f772f415c50666d",
-            "b89372733430cad1b9a2ac67cfa877ae2acf1149c98697f2cbb186dfd64f490d",
-        ),
-        (
-            "linux-x64",
-            "linux-amd64",
-            39894086,
-            "714492152393085a920413bc339399f960cc28506cc4937dd328c79f6788610a",
-            "647e5183789ed03580bd8ff1bcb4839a07c02067af91fef2701627497362c0de",
-        ),
-        (
-            "linux-arm64",
-            "linux-arm64",
-            36618364,
-            "9bdf0993e7c26bf12118430d5fd2c7fc15dac9582777d1f93c0e24468bf20296",
-            "1756bbf5a8d54449414a017cb910b2a745dd177d78d47be89747cfe85b50de35",
-        ),
+            (
+                "darwin-arm64",
+                "darwin-arm64",
+                39534924,
+                "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754",
+                "bfd39d09fd0f5f922ba5cd1a6d86cb86b928e31bcf1746cb763f5632af13c068",
+            ),
+            (
+                "darwin-x64",
+                "darwin-x64",
+                41928346,
+                "6cdc647a2bb0ccc8d179f290cb1f90da28ef3d02e7c2d6aa96f5903760a78328",
+                "dc1339f5a5a50d7b8254c1b1662177beb9a597aab04ba647ee9b6f555de1b87d",
+            ),
+            (
+                "linux-x64",
+                "linux-amd64",
+                39894112,
+                "88e0843bb5eaecb2748ff7fc5c4d61d301927ccd0aec7b35b1e20efc551957e9",
+                "8c500c984e056a2b191c8a3a2780062ca447659244d7b62b9544c5a4af29b0de",
+            ),
+            (
+                "linux-arm64",
+                "linux-arm64",
+                36618378,
+                "a289bbc2d409e5a54a2f65c9d331f7e968b0f18fba2f3b56477a30a2a3c08c3a",
+                "9ddb102bbd6b80c2651e5eb2939840142efb8068e802521ae0c1eac3877a84b9",
+            ),
     ],
 )
 def test_engine_installer_selects_verified_packaged_asset(

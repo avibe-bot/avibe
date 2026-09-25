@@ -1,7 +1,7 @@
 # Avibe-owned CPA v7.3.16 compatibility patch
 
 This directory records the small source patch carried by Avibe's
-`model-hub-engine-v7.3.16-2` build.
+`model-hub-engine-v7.3.16-3` build.
 
 Base:
 

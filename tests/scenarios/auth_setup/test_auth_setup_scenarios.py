@@ -3746,6 +3746,8 @@ def test_hub_oauth_model_free_observation_closed_loop(
     async def complete_consent(h):
         flow = adapter.flows[h.flow_id]
         h.credential_ref = state_store.bind_oauth_credential(flow.source_id, vendor, auth_name)
+        grant["prefix"] = state_store.credential_metadata(h.credential_ref)["prefix"]
+        state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
         adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
 
     async def materialize_source(h):
