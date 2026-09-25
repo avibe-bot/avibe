@@ -1,0 +1,28 @@
+# Avibe-owned CPA v7.3.16 compatibility patch
+
+This directory records the small source patch carried by Avibe's
+`model-hub-engine-v7.3.16-1` build.
+
+Base:
+
+- Repository: `router-for-me/CLIProxyAPI`
+- Release: `v7.3.16`
+- Source commit: `c404af96ebacedf8168b3c2bdbf4449a21cd1c1e`
+
+## Contract
+
+Avibe owns the OpenAI-compatible Source boundary. When an incoming Chat
+request contains `max_completion_tokens`, or `max_tokens`, the engine must
+preserve that caller-selected field unless Avibe explicitly selects the
+`use-max-completion-tokens` compatibility mode for a model. The stock
+v7.3.16 default rewrites the former field to the latter, which breaks
+upstreams that accept only the native field.
+
+The patch therefore makes the stock `false` path a preservation path. The
+existing explicit `true` path still canonicalizes to
+`max_completion_tokens`. Avibe does not set the option today, so both
+buffered and streaming requests retain their native token-limit field.
+
+The patch is intentionally limited to the helper used by both OpenAI Chat
+execution paths. Claude filename migration is handled in Avibe's credential
+state layer and is not encoded in the CPA binary.

@@ -1988,6 +1988,11 @@ class CLIProxyEngineAdapter:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
                 raise EngineStateError("OAuth credential validation could not inspect the engine") from exc
+            await self._reconcile_oauth_inventory(inventory)
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
             auth_name = str(metadata.get("auth_name") or "")
             matches = [
                 auth
@@ -2223,6 +2228,12 @@ class CLIProxyEngineAdapter:
             if metadata.get("vendor") != normalized_vendor or base_url is not None:
                 raise EngineStateError("credential does not match discovery target")
             client = await asyncio.to_thread(self.supervisor.client)
+            inventory = await asyncio.to_thread(_auth_inventory, client)
+            await self._reconcile_oauth_inventory(inventory)
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
             payload = await asyncio.to_thread(
                 client.management_request,
                 "GET",
@@ -2313,6 +2324,11 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("credential does not match observation target")
             client = await asyncio.to_thread(self.supervisor.client)
             inventory = await asyncio.to_thread(_auth_inventory, client)
+            await self._reconcile_oauth_inventory(inventory)
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata,
+                credential_ref,
+            )
             auth_name = str(metadata.get("auth_name") or "")
             matches = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matches) != 1 or not matches[0].auth_index:
@@ -2580,6 +2596,13 @@ class CLIProxyEngineAdapter:
         try:
             client = await asyncio.to_thread(self.supervisor.client)
             before = await asyncio.to_thread(_auth_inventory, client)
+            try:
+                await self._reconcile_oauth_inventory(before)
+            except EngineStateError:
+                # A later completion pass will fail closed if persisted
+                # ownership is ambiguous; starting the OAuth flow must still
+                # retain its normal cleanup/retention contract.
+                pass
             payload = await asyncio.to_thread(
                 client.management_request,
                 "GET",
@@ -2620,6 +2643,19 @@ class CLIProxyEngineAdapter:
             self._oauth_flows[flow.flow_id] = flow
         return flow.snapshot()
 
+    async def _reconcile_oauth_inventory(
+        self,
+        inventory: Mapping[str, _AuthRecord],
+    ) -> None:
+        for auth in inventory.values():
+            if auth.provider != "claude":
+                continue
+            await asyncio.to_thread(
+                self.state_store.reconcile_oauth_auth_file,
+                auth.name,
+                auth_provider=auth.provider,
+            )
+
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         endpoint = _OAUTH_ENDPOINTS.get(vendor)
         if endpoint is None:
@@ -2654,6 +2690,8 @@ class CLIProxyEngineAdapter:
             inventory = await run_owned_in_thread(_auth_inventory, client)
         except (EngineClientError, OSError):
             raise SubscriptionQuotaError("unavailable") from None
+        await self._reconcile_oauth_inventory(inventory)
+        metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
         auth_name = str(metadata.get("auth_name") or "")
         matches = [
             auth
@@ -2838,6 +2876,12 @@ class CLIProxyEngineAdapter:
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True
         inventory = await asyncio.to_thread(_auth_inventory, client)
+        try:
+            await self._reconcile_oauth_inventory(inventory)
+        except EngineStateError:
+            self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            self._fail_flow(flow, "models.oauth.binding_failed")
+            return
         provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
         try:
             foreign = await asyncio.to_thread(self._foreign_bound_identities, provider_records, flow.source_id)
@@ -2873,6 +2917,14 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
+        try:
+            auth_identity = await asyncio.to_thread(
+                self.state_store.oauth_auth_identity,
+                auth.name,
+                auth_provider=auth.provider,
+            )
+        except EngineStateError:
+            auth_identity = {}
         foreign_accounts = {
             record.account_id for record in provider_records if record.identity in foreign and record.account_id
         }
@@ -2880,10 +2932,10 @@ class CLIProxyEngineAdapter:
             # The same account is already a Source. A new file for it is this
             # flow's own material and is removed; an existing one belongs to the
             # other Source and is never touched.
-            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
-                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
-            elif auth.identity in foreign:
+            if auth.identity in foreign:
                 self._set_retained_material(flow, RetainedMaterialDisposition.FOREIGN_SOURCE_REF)
+            elif auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
+                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
             else:
                 self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
             self._fail_flow(flow, "models.oauth.account_already_added")
@@ -2893,6 +2945,12 @@ class CLIProxyEngineAdapter:
                 self.state_store.oauth_credential_ref,
                 auth.name,
             )
+            if existing_credential_ref is None and auth_identity:
+                existing_credential_ref = await asyncio.to_thread(
+                    self.state_store.oauth_credential_ref_for_identity,
+                    flow.vendor,
+                    auth_identity,
+                )
         except EngineStateError:
             # The grant changed but duplicate persisted metadata means no single
             # ref can be named safely.
@@ -2920,6 +2978,7 @@ class CLIProxyEngineAdapter:
                 flow.source_id,
                 flow.vendor,
                 auth.name,
+                identity=auth_identity,
             )
         except EngineStateError:
             if existing_credential_ref is None or existing_source_id is None:

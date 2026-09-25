@@ -885,32 +885,32 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     assert manifest == {
         "name": "cliproxyapi",
         "resolution": "resolved",
-        "version": "v7.2.149",
-        "source_sha": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
+        "version": "v7.3.16",
+        "source_sha": "c404af96ebacedf8168b3c2bdbf4449a21cd1c1e",
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
-                "size_bytes": 19723285,
-                "sha256": "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-1/CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz",
+                "size_bytes": 21447749,
+                "sha256": "a98920b8708ad6dffa76252ed2088c7db2d755bc13a604d5f5dedbd80f1c7399",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
-                "size_bytes": 21334889,
-                "sha256": "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-1/CLIProxyAPI_7.3.16_darwin_amd64.tar.gz",
+                "size_bytes": 23133934,
+                "sha256": "0213691ede4a0e43defea8382330728efc7b5dad169c10944c10abce4384eca2",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
-                "size_bytes": 21385633,
-                "sha256": "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-1/CLIProxyAPI_7.3.16_linux_amd64.tar.gz",
+                "size_bytes": 22386550,
+                "sha256": "e5bee764e658ec5ed36849254ad28625217f10157b08686f1d5d1eb0363a0fab",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
-                "size_bytes": 19287559,
-                "sha256": "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-1/CLIProxyAPI_7.3.16_linux_aarch64.tar.gz",
+                "size_bytes": 20207123,
+                "sha256": "1f50774b5ffa831dcb8178f9b94d31e19a630a6f5b9ced4f3c67c996df7511da",
             },
         ],
     }
@@ -1406,30 +1406,30 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
         (
             "darwin-arm64",
             "darwin-arm64",
-            19723285,
-            "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
-            "048c0089aa53948af91249bb97f172b2392cce5968473a5a3dbb06f3d742c2e7",
+            21447749,
+            "a98920b8708ad6dffa76252ed2088c7db2d755bc13a604d5f5dedbd80f1c7399",
+            "4bc516515aa5607e7872b87d036dc8d0599099f3b628d6b7a0d369fd394668de",
         ),
         (
             "darwin-x64",
             "darwin-x64",
-            21334889,
-            "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
-            "05388e65f58493325aff1e2dfa33e727e7fa732b2d9eb651ec13315689e418e5",
+            23133934,
+            "0213691ede4a0e43defea8382330728efc7b5dad169c10944c10abce4384eca2",
+            "ac08cef9f40c3b8f523b7b66018742137d4a76e0169ec292f7edf4f1c20fbc88",
         ),
         (
             "linux-x64",
             "linux-amd64",
-            21385633,
-            "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
-            "b0f163bfd94e8cd64895000662f26f255d2a72b5c3f5009a97e8dc91ed9b8107",
+            22386550,
+            "e5bee764e658ec5ed36849254ad28625217f10157b08686f1d5d1eb0363a0fab",
+            "18e499e8cdb04c6995b712549421933d072c75f78e78023982d4ed40620e8b4c",
         ),
         (
             "linux-arm64",
             "linux-arm64",
-            19287559,
-            "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
-            "24799863d478579ec3eef5ccc83769f79df749a30282ce1e2063708a03826e5b",
+            20207123,
+            "1f50774b5ffa831dcb8178f9b94d31e19a630a6f5b9ced4f3c67c996df7511da",
+            "674f2c29c393312ce6faa92f2ce4ac1dd6ed0fa45e705f9ffd7f3385b7bed168",
         ),
     ],
 )
@@ -7844,6 +7844,16 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
     class Client:
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                return {
+                    "files": [
+                        {
+                            "id": "claude-account.json",
+                            "name": "claude-account.json",
+                            "provider": "claude",
+                        }
+                    ]
+                }
             assert (method, path) == ("GET", "/auth-files/models")
             assert query == {"name": "claude-account.json"}
             return {
@@ -7880,7 +7890,15 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
-        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        store.write_oauth_auth_file(
+            "claude-account.json",
+            {
+                "type": "claude",
+                "email": "user@example.com",
+                "organization_uuid": "organization-a",
+                "account_uuid": "account-a",
+            },
+        )
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
@@ -7916,6 +7934,7 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
         "new",
         "refresh",
         "conflict",
+        "renamed_conflict",
         "duplicate_binding",
         "metadata_failure",
         "patch_failure",
@@ -7934,6 +7953,7 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             self.auth_calls = 0
             self.patches: list[dict[str, object]] = []
             self.deletes: list[str] = []
+            self.rename_auth_file = None
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             if path == "/auth-files":
@@ -7960,6 +7980,19 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                                 "name": "claude-account.json",
                                 "provider": "claude",
                                 "modtime": "2026-07-23T04:00:00Z",
+                            }
+                        ]
+                    }
+                if oauth_record_case == "renamed_conflict":
+                    assert self.rename_auth_file is not None
+                    self.rename_auth_file()
+                    return {
+                        "files": [
+                            {
+                                "id": "claude-00f765af-account.json",
+                                "name": "claude-00f765af-account.json",
+                                "provider": "claude",
+                                "modtime": "2026-07-23T04:01:00Z",
                             }
                         ]
                     }
@@ -8011,8 +8044,17 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
-        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
-        (store.auth_dir / "claude-account.json").chmod(0o600)
+        store.write_oauth_auth_file(
+            "claude-account.json",
+            {
+                "type": "claude",
+                "prefix": "engine-prefix",
+                "email": "user@example.com",
+                "account_uuid": "account-a",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-fixture",
+            },
+        )
         existing_ref = None
         existing_prefix = None
         if oauth_record_case not in {
@@ -8024,11 +8066,26 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             "new_patch_revoke_failure",
         }:
             existing_ref = store.bind_oauth_credential(
-                "src_other1234" if oauth_record_case == "conflict" else "src_fixture123",
+                (
+                    "src_other1234"
+                    if oauth_record_case in {"conflict", "renamed_conflict"}
+                    else "src_fixture123"
+                ),
                 "anthropic",
                 "claude-account.json",
             )
             existing_prefix = store.credential_metadata(existing_ref)["prefix"]
+            store.write_oauth_auth_file(
+                "claude-account.json",
+                {
+                    "type": "claude",
+                    "prefix": existing_prefix,
+                    "email": "user@example.com",
+                    "account_uuid": "account-a",
+                    "organization_uuid": "organization-a",
+                    "access_token": "private-access-fixture",
+                },
+            )
             if oauth_record_case == "duplicate_binding":
                 duplicate_path = store._credential_path(f"cred_{'f' * 32}")
                 duplicate_path.write_bytes(store._credential_path(existing_ref).read_bytes())
@@ -8072,6 +8129,14 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         store.delete_oauth_auth_file = delete_oauth_auth_file  # type: ignore[method-assign]
         store.revoke_credential = revoke_credential  # type: ignore[method-assign]
         client = Client()
+        if oauth_record_case == "renamed_conflict":
+            def rename_auth_file() -> None:
+                old_path = store.auth_dir / "claude-account.json"
+                new_path = store.auth_dir / "claude-00f765af-account.json"
+                if old_path.exists():
+                    old_path.rename(new_path)
+
+            client.rename_auth_file = rename_auth_file
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store, client),  # type: ignore[arg-type]
             state_store=store,
@@ -8085,13 +8150,20 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             adapter.oauth_status(flow.flow_id),
         )
 
-        if oauth_record_case == "conflict":
+        if oauth_record_case in {"conflict", "renamed_conflict"}:
             # Signing in again to an account another Source already holds is a
             # duplicate add, reported as such, and that Source's file is kept.
             assert completed.state == "failed"
             assert completed.error_key == "models.oauth.account_already_added"
-            assert (store.auth_dir / "claude-account.json").exists()
+            retained_name = (
+                "claude-00f765af-account.json"
+                if oauth_record_case == "renamed_conflict"
+                else "claude-account.json"
+            )
+            assert (store.auth_dir / retained_name).exists()
             assert not client.deletes
+            if oauth_record_case == "renamed_conflict":
+                assert store.credential_metadata(existing_ref)["auth_name"] == retained_name
             assert completed.channel == "hub"
             assert completed.retained_material_disposition is RetainedMaterialDisposition.FOREIGN_SOURCE_REF
             assert completed.retained_credential_ref is None

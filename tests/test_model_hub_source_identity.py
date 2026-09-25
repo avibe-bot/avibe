@@ -10,7 +10,7 @@ from config.v2_config import ModelHubConfig
 from core.handlers.model_hub.service import seeded_source_name
 from tests.test_model_hub_api import _service
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter, _OAUTH_ENDPOINTS
-from vibe.model_hub_runtime.state import EngineStateStore
+from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 
 
 async def _completed_flow(service, adapter, vendor):
@@ -112,6 +112,100 @@ def test_account_metadata_is_read_without_starting_engine_or_mutating_credential
     assert adapter.subscription_account_label("src_other001", vendor, ref) is None
     other_vendor = "openai" if vendor != "openai" else "anthropic"
     assert adapter.subscription_account_label(source_id, other_vendor, ref) is None
+
+
+def test_claude_filename_migration_preserves_ref_source_and_prefix(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    new_name = "claude-00f765af-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    identity = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+        "refresh_token": "private-refresh-fixture",
+    }
+    store.write_oauth_auth_file(old_name, identity)
+
+    assert store.reconcile_oauth_auth_file(old_name, auth_provider="claude") == ref
+    stored = store.credential_metadata(ref)
+    assert stored["oauth_identity"]["organization_uuid"] == "organization-a"
+
+    store.write_oauth_auth_file(new_name, identity)
+    assert store.reconcile_oauth_auth_file(new_name, auth_provider="claude") == ref
+    migrated = store.credential_metadata(ref)
+    assert migrated["auth_name"] == new_name
+    assert migrated["source_id"] == "src_identity001"
+    assert migrated["prefix"] == prefix
+
+
+def test_claude_filename_migration_rejects_cross_source_rebind(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    new_name = "claude-00f765af-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    identity = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    store.write_oauth_auth_file(old_name, identity)
+    store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
+    store.write_oauth_auth_file(new_name, identity)
+
+    assert store.reconcile_oauth_auth_file(new_name, auth_provider="claude") == ref
+    with pytest.raises(EngineStateError, match="already bound"):
+        store.bind_oauth_credential(
+            "src_other001",
+            "anthropic",
+            new_name,
+            identity=identity,
+        )
+    assert store.credential_metadata(ref)["auth_name"] == new_name
+    assert len(store._oauth_credentials()) == 1
+
+
+def test_claude_filename_migration_does_not_merge_different_organizations(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    old_prefix = store.credential_metadata(ref)["prefix"]
+    old_identity = {
+        "type": "claude",
+        "prefix": old_prefix,
+        "email": "user@example.com",
+        "account_uuid": "shared-account",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    store.write_oauth_auth_file(old_name, old_identity)
+    store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
+
+    new_name = "claude-50d86b12-user@example.com.json"
+    new_identity = {
+        **old_identity,
+        "prefix": "foreign-prefix",
+        "organization_uuid": "organization-b",
+    }
+    store.write_oauth_auth_file(new_name, new_identity)
+    assert store.reconcile_oauth_auth_file(new_name, auth_provider="claude") is None
+
+    new_ref = store.bind_oauth_credential(
+        "src_other001",
+        "anthropic",
+        new_name,
+        identity=new_identity,
+    )
+    assert new_ref != ref
+    assert store.credential_metadata(ref)["auth_name"] == old_name
 
 
 def test_kimi_device_metadata_is_not_presented_as_an_account(tmp_path):
