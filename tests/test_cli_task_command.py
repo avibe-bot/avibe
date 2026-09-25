@@ -410,8 +410,7 @@ def test_task_add_help_includes_examples_and_threadless_guidance(capsys) -> None
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--deliver-key" not in captured.out
-    assert "Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid." in captured.out
-    assert "Prefer weekday names such as mon, tue, or sun when scheduling by day of week." in captured.out
+    assert "Write cron weekdays as names (mon, tue, ... sun)." in captured.out
 
 
 def test_hook_send_help_describes_runtime_effects(capsys) -> None:
@@ -457,8 +456,7 @@ def test_task_update_help_includes_partial_update_guidance(capsys) -> None:
     assert "keeping its task ID" in captured.out
     assert "--reset-delivery" in captured.out
     assert "Unspecified fields keep their existing values." in captured.out
-    assert "Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid." in captured.out
-    assert "Prefer weekday names such as mon, tue, or sun when scheduling by day of week." in captured.out
+    assert "Write cron weekdays as names (mon, tue, ... sun)." in captured.out
 
 
 def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> None:
@@ -734,6 +732,64 @@ def test_task_add_rejects_invalid_cron_with_example() -> None:
     assert result == 1
     assert payload["code"] == "invalid_cron"
     assert payload["example"] == "0 * * * *"
+
+
+@pytest.mark.parametrize(
+    ("cron", "readings"),
+    [
+        # Meant Saturday under crontab(5); the scheduler would fire on Sunday.
+        ("0 7 * * 6", "Avibe (APScheduler) reads it as sun; crontab(5) reads it as sat"),
+        # Meant weekdays; the scheduler would fire Tuesday through Saturday.
+        ("0 9 * * 1-5", "Avibe (APScheduler) reads it as tue-sat; crontab(5) reads it as mon-fri"),
+        ("30 20 * * 0,mon", "Avibe (APScheduler) reads it as mon,mon; crontab(5) reads it as sun,mon"),
+        # A step from ``*`` counts from day 0, which differs between the two.
+        ("0 9 * * */2", None),
+    ],
+)
+def test_task_add_rejects_numeric_weekday_naming_both_readings(cron: str, readings: str | None) -> None:
+    args = _parse_task_add(["--session-key", "slack::channel::C123", "--cron", cron, "--message", "hello"])
+
+    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert payload["code"] == "ambiguous_cron_weekday"
+    assert payload["details"]["day_of_week"] == cron.split()[4]
+    assert "mon, tue, wed, thu, fri, sat, sun" in payload["hint"]
+    if readings is not None:
+        assert readings in payload["hint"]
+
+
+@pytest.mark.parametrize("cron", ["0 7 * * sat", "0 9 * * mon-fri", "0 9 * * mon-sun/2", "0 9 1-7 * *", "*/5 * * * *"])
+def test_task_add_accepts_named_or_unrestricted_weekday(cron: str, capsys) -> None:
+    args = _parse_task_add(["--session-key", "slack::channel::C123", "--cron", cron, "--message", "hello"])
+
+    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
+        assert cli.cmd_task_add(args) == 0
+
+    assert json.loads(capsys.readouterr().out)["definition"]["cron"] == cron
+
+
+def test_task_update_rejects_numeric_weekday_and_keeps_stored_schedule(tmp_path: Path) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="hello",
+        schedule_type="cron",
+        cron="0 9 * * mon",
+        timezone_name="UTC",
+    )
+    args = cli.build_parser().parse_args(["task", "update", task.id, "--cron", "0 9 * * 6"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_update, args)
+
+    assert result == 1
+    assert payload["code"] == "ambiguous_cron_weekday"
+    assert store.get_task(task.id).cron == "0 9 * * mon"
 
 
 def test_task_add_rejects_invalid_timezone() -> None:
