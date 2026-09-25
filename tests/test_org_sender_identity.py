@@ -245,6 +245,31 @@ def test_another_instances_authorization_never_names_a_sender(tmp_path, monkeypa
     assert "former.example" not in repr(tail)
 
 
+def test_a_newer_row_without_an_email_does_not_hide_the_sender(tmp_path, monkeypatch):
+    engine, scope_id = _state(tmp_path, monkeypatch, instance_kind="organization")
+    ids = _seed_transcript(engine, scope_id)
+    # The same person granted a second scope later, with no email on that row.
+    remote_access_authorization_service.upsert_scoped(
+        reference=None,
+        instance_id=INSTANCE_ID,
+        subject="sub-amy",
+        email="",
+        scope_kind="show_page",
+        scope_ref="page_1",
+        authorization_state="current",
+        claims={},
+        last_checked_at=99,
+        updated_at=99,
+    )
+
+    with engine.connect() as conn:
+        tail = _window(conn, tail=True)
+
+    # Freshness picks among rows that can name the person; a newer row that
+    # cannot must not turn a known member back into "unknown".
+    assert tail[ids["amy"]]["sender_label"] == "amy.chen"
+
+
 def test_organization_transcript_survives_an_unreadable_identity_source(tmp_path, monkeypatch):
     engine, scope_id = _state(tmp_path, monkeypatch, instance_kind="organization")
     ids = _seed_transcript(engine, scope_id)

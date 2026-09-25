@@ -37,19 +37,22 @@ const HOVER_STAMP = 'group-hover/message:opacity-100';
 // and not only in the helper's return value.
 const TONE_FILL = `bg-${senderTone('remote:sub-amy')}`;
 
-const instance = (instanceKind: InstanceKind | null): InstanceAuthorizationValue => ({
-  remote: instanceKind !== null,
+const instance = (
+  instanceKind: InstanceKind | null,
+  remote = instanceKind !== null,
+): InstanceAuthorizationValue => ({
+  remote,
   instanceKind,
   instanceRole: 'owner',
   capabilities: DENIED_INSTANCE_CAPABILITIES,
 });
 
-const render = (ui: ReactElement, instanceKind: InstanceKind | null) =>
+const render = (ui: ReactElement, instanceKind: InstanceKind | null, remote?: boolean) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={i18n}>
       <ToastProvider>
         <MemoryRouter>
-          <InstanceAuthorizationContext.Provider value={instance(instanceKind)}>
+          <InstanceAuthorizationContext.Provider value={instance(instanceKind, remote)}>
             {ui}
           </InstanceAuthorizationContext.Provider>
         </MemoryRouter>
@@ -80,8 +83,12 @@ const humanMessage = (over: Partial<WorkbenchMessage> = {}): WorkbenchMessage =>
     ...over,
   }) as unknown as WorkbenchMessage;
 
-const row = (message: WorkbenchMessage, instanceKind: InstanceKind | null) =>
-  render(<MessageRow message={message} session={session} messageFontSize={13} />, instanceKind);
+const row = (message: WorkbenchMessage, instanceKind: InstanceKind | null, remote?: boolean) =>
+  render(
+    <MessageRow message={message} session={session} messageFontSize={13} />,
+    instanceKind,
+    remote,
+  );
 
 describe('organization sender identity', () => {
   it('names the sender on an organization instance', () => {
@@ -105,6 +112,26 @@ describe('organization sender identity', () => {
     expect(markup).toContain('>?<');
     // No tone fill: an unresolved row must not look like a confirmed identity.
     expect(markup).not.toContain(TONE_FILL);
+  });
+
+  it('calls a loopback row "You" for the loopback reader', () => {
+    const local = humanMessage({ author_id: 'local', sender_label: null });
+    const markup = row(local, 'organization', false);
+
+    expect(markup).toContain(`>${en.chat.senderYou}<`);
+    expect(markup).not.toContain(en.chat.senderUnknown);
+    // The default avatar: a person glyph on the neutral chip, no initial, no tone.
+    expect(markup).toContain('lucide-user-round');
+    expect(markup).not.toContain('>?<');
+    expect(markup).not.toContain(TONE_FILL);
+  });
+
+  it('never tells a Cloud reader that a loopback row is theirs', () => {
+    const local = humanMessage({ author_id: 'local', sender_label: null });
+    const markup = row(local, 'organization', true);
+
+    expect(markup).not.toContain(`>${en.chat.senderYou}<`);
+    expect(markup).toContain(en.chat.senderUnknown);
   });
 
   it('ignores a label the server should not have sent on a personal instance', () => {
