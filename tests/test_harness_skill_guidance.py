@@ -295,7 +295,7 @@ def test_pr_delivery_loop_keeps_one_optional_reference_out_of_routine_loading() 
     skill = parse_skill_file(directory / "SKILL.md", priority=(1, 0, 1))
     assert skill is not None
     rendered = render_skill_content(skill)
-    assert "## 4. Deliver, then close out" in rendered
+    assert "## 4. Complete delivery" in rendered
     assert "### Authorized local regression updates" in rendered
     reference = (directory / references[0]).read_text()
     assert reference.startswith("# Delivery Rationale and Examples")
