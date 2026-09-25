@@ -371,7 +371,8 @@ function UsageChart({
     setDismissed(true);
     focusPinAfterOpenRef.current = false;
     invokingBucketKeyRef.current = null;
-    if (activeIndex !== null && invokingButton !== null) {
+    if (activeIndex !== null && invokingButton !== null
+      && hostRef.current?.contains(document.activeElement)) {
       suppressNextBucketFocusRef.current = true;
       invokingButton.focus();
     }
@@ -531,7 +532,7 @@ function UsageChart({
           viewBox={`0 0 ${width} ${height}`}
           aria-hidden="true"
           onPointerMove={(event) => {
-            if (event.pointerType !== 'touch') setHover(svgIndexFromPointer(event));
+            if (event.pointerType !== 'touch') setHover(svgIndexFromPointer(event), true);
           }}
           onPointerLeave={scheduleHoverClear}
         >
@@ -610,7 +611,9 @@ function UsageChart({
               width={bars ? plotWidth / report.buckets.length : lineHitWidth}
               height={plotHeight}
               onPointerEnter={() => {
-                setHover(index, true);
+                // Removing a dismissed tooltip can expose a stationary pointer.
+                // Only a real move, focus, or activation should reopen it.
+                setHover(index);
               }}
               onClick={() => openDetail(index)}
             />
@@ -644,7 +647,7 @@ function UsageChart({
                 bucket: formatBucketRange(currentBucket, i18n.language, true),
               }) as string}
               onPointerEnter={() => {
-                setHover(index, true);
+                setHover(index);
               }}
               onFocus={() => handleBucketFocus(index)}
               onClick={() => openKeyboardDetail(index)}

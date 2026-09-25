@@ -221,6 +221,16 @@ existing day-first policy for daily report capacity. Ordinary same-zone ordering
 is unchanged. Verify both timezone directions with and without hourly history,
 both with room for the old row and with capacity for only the newest call.
 
+Integrated browser acceptance exposed a second dismissal path: removing the
+mobile tooltip reveals the SVG underneath a stationary pointer, generating
+pointer-enter without pointer movement. Pointer-enter may show ordinary details
+but must not clear an Escape dismissal; deliberate movement, focus, or activation
+can reopen them. Focus restoration is limited to users still inside the chart,
+so Escape does not reclaim focus after Tab has moved outside this non-modal
+detail. The existing desktop/mobile dismissal case covers both stationary
+closure and subsequent deliberate hover; the keyboard unit case also covers
+Tab-away dismissal.
+
 ## Known by design
 
 - This is metered gateway usage, not native subscription quota or monetary cost.

@@ -55,6 +55,12 @@ test.describe('hermetic UsageTab', () => {
     await dialog.getByRole('button', { name: 'Unpin this bucket' }).focus();
     await page.locator('body').press('Escape');
     await expect(dialog).toHaveCount(0);
+
+    // Closing an overlay beneath a stationary pointer must not reopen it;
+    // a subsequent deliberate pointer move can inspect another bucket.
+    await hitAreas.nth(0).hover();
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute('data-pinned', 'false');
   });
 
   test('keyboard activation owns detail focus, preserves it through hover, and clears pin on scope change', async ({ page }) => {

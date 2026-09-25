@@ -370,6 +370,15 @@ describe('UsageTab', () => {
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
     expect(document.activeElement).toBe(bucketButton);
+
+    // A non-modal detail must not reclaim focus after the user tabs elsewhere.
+    await user.keyboard('{Enter}');
+    await user.tab();
+    const tableGrouping = screen.getByRole('button', { name: 'By model' });
+    expect(document.activeElement).toBe(tableGrouping);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+    expect(document.activeElement).toBe(tableGrouping);
   });
 
   it('dismisses pinned details on the first Escape', async () => {
