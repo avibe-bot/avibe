@@ -347,6 +347,12 @@ only dispositioned follow-ups, zero unresolved threads, full green CI, and
 - More than six simultaneously displayed model/source identities reuse palette
   colors. Tooltip/table labels and filtering remain exact; secondary visual
   encodings or series grouping are a follow-up.
+- An internal caller supplying a naive `UsageCall.at` can still have its absolute
+  hour reinterpreted if the host zone changes before persistence, while the
+  captured owner date remains fixed. Current production metering clocks supply
+  aware UTC instants. Local review reproduced the naive-input case; normalizing
+  the instant at capture or explicitly rejecting naive input is a follow-up
+  under the final P2/P3 disposition rule, not another precision repair here.
 
 ## Known by design
 
