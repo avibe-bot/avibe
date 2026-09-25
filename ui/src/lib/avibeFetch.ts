@@ -15,9 +15,22 @@
 import { apiFetch } from './apiFetch';
 import { onPageReactivated } from './pageActivity';
 
-export type CloudToken = { token: string; baseUrl: string; expiresAt: number };
+export type CloudToken = {
+  token: string;
+  baseUrl: string;
+  expiresAt: number;
+  /** Optional cloud features avibe.bot declared when it minted this token. */
+  capabilities: readonly string[];
+};
 
 export type AvibeWebSocket = WebSocket;
+
+export type AvibeWebSocketConnection = {
+  socket: AvibeWebSocket;
+  /** Capabilities of the token this socket authenticated with, so a caller
+   *  gates optional protocol fields on the backend that will parse them. */
+  capabilities: readonly string[];
+};
 
 export type AvibeFetchAttemptEvent =
   | { phase: 'started'; attempt: number }
@@ -102,7 +115,7 @@ const mint = (): Promise<CloudToken | null> => {
         return null;
       }
       const data = (await res.json().catch(() => null)) as
-        | { token?: unknown; base_url?: unknown; expires_at?: unknown }
+        | { token?: unknown; base_url?: unknown; expires_at?: unknown; capabilities?: unknown }
         | null;
       if (
         !data ||
@@ -113,7 +126,15 @@ const mint = (): Promise<CloudToken | null> => {
         current = null;
         return null;
       }
-      current = { token: data.token, baseUrl: data.base_url, expiresAt: data.expires_at };
+      current = {
+        token: data.token,
+        baseUrl: data.base_url,
+        expiresAt: data.expires_at,
+        // Older local servers omit the field: no optional cloud features.
+        capabilities: Array.isArray(data.capabilities)
+          ? data.capabilities.filter((value): value is string => typeof value === 'string')
+          : [],
+      };
       scheduleRefresh(current);
       bindActivityListeners();
       return current;
@@ -132,7 +153,7 @@ export const openAvibeWebSocket = async (
   path: string,
   subprotocol: string,
   signal?: AbortSignal,
-): Promise<AvibeWebSocket> => {
+): Promise<AvibeWebSocketConnection> => {
   let token: CloudToken | null;
   try {
     token = await waitForSignal(ensureToken(), signal);
@@ -153,7 +174,7 @@ export const openAvibeWebSocket = async (
     else signal.addEventListener('abort', abort, { once: true });
     socket.addEventListener('close', () => signal.removeEventListener('abort', abort), { once: true });
   }
-  return socket;
+  return { socket, capabilities: token.capabilities };
 };
 
 const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {

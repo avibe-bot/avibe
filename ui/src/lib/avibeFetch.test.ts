@@ -153,4 +153,30 @@ describe('avibeFetch', () => {
       { phase: 'response', attempt: 2, status: 200, elapsedMs: expect.any(Number) },
     ]);
   });
+
+  it.each([
+    ['keeps only string capabilities', ['realtime_reply_context', 7, null], ['realtime_reply_context']],
+    ['treats a missing field as no capabilities', undefined, []],
+    ['treats a non-array field as no capabilities', 'realtime_reply_context', []],
+  ])('%s of the token that opened a WebSocket', async (_case, capabilities, expected) => {
+    const { apiFetch, openAvibeWebSocket } = await loadModules();
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValueOnce(Response.json({
+      token: 'tok',
+      base_url: 'https://example.test',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      ...(capabilities === undefined ? {} : { capabilities }),
+    }));
+    const opened: Array<[string, string]> = [];
+    vi.stubGlobal('WebSocket', class {
+      constructor(url: string, protocol: string) {
+        opened.push([url, protocol]);
+      }
+    });
+
+    const connection = await openAvibeWebSocket('/api/cloud/voice/realtime', 'avibe-asr-v1');
+
+    expect(opened).toEqual([['wss://example.test/api/cloud/voice/realtime', 'avibe-asr-v1.tok']]);
+    expect(connection.capabilities).toEqual(expected);
+  });
 });
