@@ -1973,6 +1973,43 @@ def test_unsaved_observation_fails_when_cleanup_is_not_durable(tmp_path, operati
     assert service.revocations.list() == []
 
 
+def test_provision_cancellation_fails_when_cleanup_is_not_durable(tmp_path):
+    adapter = FakeAdapter()
+    adapter.provision_started = asyncio.Event()
+    adapter.provision_block = asyncio.Event()
+    adapter.revoke_error = True
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    service.revocations.add = fail_journal_write
+
+    async def scenario():
+        task = asyncio.create_task(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Key",
+                    "key": "sk-test-provision-cancel-cleanup-failure",
+                }
+            )
+        )
+        await adapter.provision_started.wait()
+        task.cancel()
+        adapter.provision_block.set()
+        with pytest.raises(ModelHubError) as exc_info:
+            await task
+        return exc_info.value
+
+    refusal = asyncio.run(scenario())
+
+    assert (refusal.code, refusal.status) == ("engine_down", 503)
+    assert store.load().sources == []
+    assert service.revocations.list() == []
+
+
 def test_created_source_commit_failure_fails_when_cleanup_is_not_durable(tmp_path):
     adapter = FakeAdapter()
     adapter.revoke_error = True

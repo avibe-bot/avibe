@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { modelsApi } from './modelsApi';
 import { RouteRecordedTurn } from './RouteRecordedTurn';
@@ -26,6 +26,7 @@ describe('recorded turn error', () => {
       dirname(fileURLToPath(import.meta.url)), '../../../../..', 'docs/plans/model-hub-contracts/turn-provenance.schema.json',
     ), 'utf8'));
     expect([...PERSISTED_TURN_CONTRACT_VERSIONS]).toEqual(schema.properties.contract_version.enum);
+    expectTypeOf<TurnProvenance['contract_version']>().toEqualTypeOf<(typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number]>();
   });
   it('renders exact historical identity and opens that same structured record', async () => {
     const user = userEvent.setup();

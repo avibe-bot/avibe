@@ -7070,6 +7070,50 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
 
 @pytest.mark.parametrize(
     "disposition",
+    [RetainedMaterialDisposition.FLOW_SOURCE_REF, RetainedMaterialDisposition.UNKNOWN],
+)
+def test_hub_reauth_fail_closed_syncs_the_pruned_binding(tmp_path, disposition):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered"),
+            ModelHubModelConfig(id="manual-model", provenance="manual"),
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": None,
+        }
+    )
+    service._engine_synced = True
+    adapter.synced.clear()
+
+    asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert len(adapter.synced) == 1
+    synced = {binding.source_id: binding for binding in adapter.synced[0]}
+    assert synced[source.id].model_ids == ("manual-model",)
+
+
+@pytest.mark.parametrize(
+    "disposition",
     [
         RetainedMaterialDisposition.NONE,
         RetainedMaterialDisposition.FOREIGN_SOURCE_REF,
