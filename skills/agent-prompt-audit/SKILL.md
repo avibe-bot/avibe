@@ -88,6 +88,10 @@ Skill bodies, and references load on demand.
 
 Resolve the actual target (backend, model, effort) from the run or session
 record, not the Agent's current definition, which may have changed since.
+Attribute a symptom only to prompt text that existed when it ran: recover
+file-owned text at that time with `git log` / `git show`; Avibe does not keep
+history for state-owned text (Agent prompts, Task and Watch messages), so if
+it changed after the run, say the attribution is unconfirmed.
 `vibe runs show <id>` gives one run's prompt, result, and callback state;
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
 `messages` (sample a row with `select * from <table> limit 1` to see columns;
@@ -138,12 +142,13 @@ Quote the minimum excerpt and redact secrets and unrelated private content.
 
 A before/after probe runs a real backend on the user's account and writes
 session state, so run one only when the user asked for verification or
-approves it; otherwise put the proposed probe in the report. To reproduce the
-historical target, fork the affected session and pin its model:
-`vibe agent run --fork-session <session> --model <model> --reasoning-effort <effort> --sync --message ...`.
-Archived sessions and disabled Agents cannot be forked; then replay the
-minimal triggering message on an enabled Agent with the recorded backend,
-model, and effort, and note that the reproduction is approximate.
+approves it; otherwise put the proposed probe in the report. Do not fork the
+affected session: it already holds the failure and any correction, so a fork
+tests recovery rather than the original turn. Instead start a fresh run on an
+enabled Agent whose backend, model, and effort match the record (create a
+temporary one if none does), seeded with only the context before the failing
+turn — `vibe agent run --agent <agent> --sync --message-file <file>` — and mark
+the probe approximate when that context cannot be rebuilt.
 
 ## From symptom to likely cause
 
@@ -163,7 +168,7 @@ check against the transcript, not verdicts.
 
 ## Report
 
-Open with counts and the two or three findings that matter most. For each
+Open with counts and up to three findings that matter most; zero findings is a valid report. For each
 finding: location, the evidence excerpt, which idea above it violates and why
 on which target, confidence (high: reproduced in transcripts or documented;
 medium: consistent known behavior; low: heuristic, flag only), and the
