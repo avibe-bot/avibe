@@ -326,6 +326,7 @@ function UsageChart({
   const [width, setWidth] = React.useState(920);
   const [keyboardActivation, setKeyboardActivation] = React.useState(0);
   const hostRef = React.useRef<HTMLDivElement>(null);
+  const svgRef = React.useRef<SVGSVGElement>(null);
   const pinButtonRef = React.useRef<HTMLButtonElement>(null);
   const bucketButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const invokingBucketKeyRef = React.useRef<string | null>(null);
@@ -684,13 +685,22 @@ function UsageChart({
       return [...current, key];
     });
   };
-  const svgIndexFromPointer = (event: React.PointerEvent<SVGSVGElement>) => {
-    const bounds = event.currentTarget.getBoundingClientRect();
+  // One pointer path for the whole chart, the detail included: a sweep that
+  // crosses the detail keeps moving the bucket. Only the detail's header,
+  // which holds the pin control, holds the bucket still so it can be reached.
+  const trackPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const svg = svgRef.current;
+    if (event.pointerType === 'touch' || !svg) return;
+    if ((event.target as Element).closest('.model-hub-usage-tooltip-head')) {
+      cancelHoverClear();
+      return;
+    }
+    const bounds = svg.getBoundingClientRect();
     const position = ((event.clientX - bounds.left) / bounds.width) * width;
     const index = bars
       ? Math.floor((position - left) / plotWidth * report.buckets.length)
       : Math.round((position - left) / plotWidth * (report.buckets.length - 1));
-    return Math.max(0, Math.min(report.buckets.length - 1, index));
+    setHover(index, true);
   };
   const pinLabel = pinnedKey !== null
     ? t('settings.models.usage.chart.unpin')
@@ -708,15 +718,17 @@ function UsageChart({
         ariaLabel={t('settings.models.usage.chart.legend') as string}
         inset={left}
       />
-      <div className="model-hub-usage-chart-wrap" ref={hostRef}>
+      <div
+        className="model-hub-usage-chart-wrap"
+        ref={hostRef}
+        onPointerMove={trackPointer}
+        onPointerLeave={scheduleHoverClear}
+      >
         <svg
+          ref={svgRef}
           className="model-hub-usage-svg"
           viewBox={`0 0 ${width} ${height}`}
           aria-hidden="true"
-          onPointerMove={(event) => {
-            if (event.pointerType !== 'touch') setHover(svgIndexFromPointer(event), true);
-          }}
-          onPointerLeave={scheduleHoverClear}
         >
           <defs>
             <pattern id="usage-unknown-pattern" width="6" height="6" patternUnits="userSpaceOnUse">
@@ -811,8 +823,6 @@ function UsageChart({
             data-pinned={pinnedKey !== null ? 'true' : 'false'}
             data-side={docked ? 'docked' : tooltipSide}
             style={docked ? undefined : { width: tooltipWidth, transform: `translateX(${tooltipLeft}px)` }}
-            onPointerEnter={cancelHoverClear}
-            onPointerLeave={scheduleHoverClear}
             onKeyDownCapture={(event) => {
               if (event.key !== 'Escape') return;
               event.stopPropagation();
@@ -820,9 +830,10 @@ function UsageChart({
             }}
           >
             <div className="model-hub-usage-tooltip-head">
-              <span className="model-hub-usage-tooltip-range" aria-label={formatBucketRange(bucket, i18n.language, true)}>
-                {heading?.range}
-                {heading?.zone && <small>{heading.zone}</small>}
+              <span className="model-hub-usage-tooltip-range">
+                <span aria-hidden="true">{heading?.range}</span>
+                {heading?.zone && <small aria-hidden="true">{heading.zone}</small>}
+                <span className="sr-only">{formatBucketRange(bucket, i18n.language, true)}</span>
               </span>
               <div className="model-hub-usage-tooltip-actions">
                 {pinnedKey !== null && <span>{t('settings.models.usage.chart.pinned')}</span>}

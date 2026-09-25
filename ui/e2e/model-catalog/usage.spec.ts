@@ -101,9 +101,13 @@ test.describe('hermetic UsageTab', () => {
     const hitAreas = page.locator('.model-hub-usage-hit-area');
     const first = (await hitAreas.nth(2).boundingBox())!;
     const last = (await hitAreas.nth(20).boundingBox())!;
-    const midY = first.y + first.height * 0.75;
-    await page.mouse.move(first.x + first.width / 2, midY);
+    await page.mouse.move(first.x + first.width / 2, first.y + first.height * 0.75);
     await expect(dialog).toBeVisible();
+    // Sweep through the detail's own band, toward the side it sits on: the
+    // pointer crosses the detail on every step and must not be caught by it.
+    const detailBox = (await dialog.boundingBox())!;
+    const midY = detailBox.y + detailBox.height / 2;
+    await page.mouse.move(first.x + first.width / 2, midY);
     const seen = new Set([await heading.textContent()]);
     // Record every heading the detail shows while the pointer sweeps without
     // pausing: under a settle-delay the heading would hold still until the
@@ -121,6 +125,23 @@ test.describe('hermetic UsageTab', () => {
     for (const text of headings) seen.add(text);
     expect(seen.size).toBeGreaterThanOrEqual(10);
     await expect(svg).toBeVisible();
+
+    // Along the detail's header band the pointer can still walk onto the pin
+    // control: the header holds the bucket still once the pointer reaches it.
+    await hitAreas.nth(4).hover();
+    await expect.poll(async () => dialog.evaluate((node) => node.getAnimations().length)).toBe(0);
+    const held = await heading.textContent();
+    const head = (await dialog.locator('.model-hub-usage-tooltip-head').boundingBox())!;
+    const bucketBox = (await hitAreas.nth(4).boundingBox())!;
+    const startX = bucketBox.x + bucketBox.width / 2;
+    const pin = (await dialog.getByRole('button', { name: 'Pin this bucket' }).boundingBox())!;
+    await page.mouse.move(startX, head.y + head.height / 2);
+    await page.mouse.move(head.x + 2, head.y + head.height / 2);
+    await page.mouse.move(pin.x + pin.width / 2, pin.y + pin.height / 2, { steps: 12 });
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect(dialog).toHaveAttribute('data-pinned', 'true');
+    await expect(heading).toHaveText(held ?? '');
   });
 
   test('the detail sits beside the crosshair, right of it by default and left of it at the right edge', async ({ page }, testInfo) => {
