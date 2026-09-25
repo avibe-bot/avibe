@@ -209,7 +209,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         detached = service.activities.claim_completed_output("claude", key)
         self.assertIsNotNone(detached)
-        agent._detached_activity_outputs[key] = [detached]
+        agent._retain_activity_output_record(key, [detached])
         agent.emit_result_message = _dispatcher_owned_emit(service)
 
         await agent._receive_messages(
@@ -527,7 +527,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         activity = service.activities.claim_completed_output("claude", key)
         self.assertIsNotNone(activity)
-        agent._detached_activity_outputs[key] = [activity]
+        agent._retain_activity_output_record(key, [activity])
         agent.emit_result_message = AsyncMock(return_value="message-id")
 
         assistant = AssistantMessage(
@@ -987,9 +987,6 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         agent.controller.agent_auth_service = SimpleNamespace(
             maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
         )
-        agent.controller.claude_sessions[key] = SimpleNamespace(
-            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
-        )
         service.activities.start(
             backend="claude",
             runtime_key=key,
@@ -998,17 +995,20 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             kind="local_agent",
             turn_id="task-turn",
         )
+        client = _client(
+            [
+                TaskStartedMessage("task-buffered-failure-eof"),
+                TaskNotificationMessage(
+                    "task-buffered-failure-eof",
+                    "background finished",
+                ),
+                _failure_assistant("backend exploded"),
+            ]
+        )
+        client._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+        agent.controller.claude_sessions[key] = client
         await agent._receive_messages(
-            _client(
-                [
-                    TaskStartedMessage("task-buffered-failure-eof"),
-                    TaskNotificationMessage(
-                        "task-buffered-failure-eof",
-                        "background finished",
-                    ),
-                    _failure_assistant("backend exploded"),
-                ]
-            ),
+            client,
             "sess-buffered-failure-eof",
             "/tmp/work",
             context,
@@ -1175,14 +1175,16 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
         agent._process_assistant_terminal_frame = replay_failure
 
+        receiver_client = _client(
+            [
+                TaskStartedMessage("task-eof-write-fence"),
+                _failure_assistant("backend exploded"),
+            ]
+        )
+        client.receive_messages = receiver_client.receive_messages
         receiver = asyncio.create_task(
             agent._receive_messages(
-                _client(
-                    [
-                        TaskStartedMessage("task-eof-write-fence"),
-                        _failure_assistant("backend exploded"),
-                    ]
-                ),
+                client,
                 "sess-eof-write-fence",
                 "/tmp/work",
                 context,
@@ -1226,15 +1228,17 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
         agent._replay_buffered_terminal_failures = replay_failure
         agent._handle_receiver_exception = AsyncMock()
+        receiver_client = _failing_client(
+            [
+                TaskStartedMessage("task-error-write-fence"),
+                _failure_assistant("backend exploded"),
+            ],
+            RuntimeError("receiver disconnected"),
+        )
+        client.receive_messages = receiver_client.receive_messages
         receiver = asyncio.create_task(
             agent._receive_messages(
-                _failing_client(
-                    [
-                        TaskStartedMessage("task-error-write-fence"),
-                        _failure_assistant("backend exploded"),
-                    ],
-                    RuntimeError("receiver disconnected"),
-                ),
+                client,
                 "sess-error-write-fence",
                 "/tmp/work",
                 context,
@@ -1805,8 +1809,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(agent._has_pending_requests(key))
         self.assertNotIn(key, agent._synthetic_pending_owners)
-        self.assertNotIn(key, agent._detached_unsolicited_outputs)
-        self.assertNotIn(key, agent._detached_unsolicited_text)
+        self.assertFalse(agent._output_records_for_runtime(key))
         self.assertFalse(service._get_turn_gate(key).lock.locked())
 
         # The synthetic owner is retired only after the retry succeeds; a
@@ -1871,15 +1874,15 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, ["detached result", "detached result"])
         self.assertFalse(agent._has_pending_requests(key))
         self.assertFalse(service.runtime_turn_active(key))
-        self.assertIn(key, agent._detached_unsolicited_outputs)
-        self.assertEqual(agent._detached_unsolicited_text[key], "detached result")
+        retained = agent._output_record(key, None, owner="detached")
+        self.assertIsNotNone(retained)
+        self.assertEqual(retained.text, "detached result")
 
         allow_retry.set()
         self.assertFalse(
             await agent._flush_detached_unsolicited_output(key, context)
         )
-        self.assertNotIn(key, agent._detached_unsolicited_outputs)
-        self.assertNotIn(key, agent._detached_unsolicited_text)
+        self.assertFalse(agent._output_records_for_runtime(key))
         self.assertEqual(
             attempts,
             ["detached result", "detached result", "detached result"],

@@ -2502,7 +2502,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
+        client = controller.claude_sessions[composite_key]
+        client.receive_messages = _FailingClient().receive_messages
+        await agent._receive_messages(client, "session-1", "/tmp/work", context)
 
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         agent.session_handler.handle_session_error.assert_not_awaited()
@@ -3233,7 +3235,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        await agent._receive_messages(_Client(), "session-1", "/tmp/work", context)
+        client = controller.claude_sessions[composite_key]
+        client.receive_messages = _Client().receive_messages
+        await agent._receive_messages(client, "session-1", "/tmp/work", context)
 
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         controller.session_handler.cleanup_session.assert_awaited_once_with(
@@ -3855,7 +3859,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        await agent._receive_messages(_Client(), "session-1", "/tmp/work", context)
+        client = controller.claude_sessions[composite_key]
+        client.receive_messages = _Client().receive_messages
+        await agent._receive_messages(client, "session-1", "/tmp/work", context)
 
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         controller.session_handler.cleanup_session.assert_awaited_once_with(
@@ -3905,7 +3911,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        await agent._receive_messages(_Client(), "session-1", "/tmp/work", context)
+        client = controller.claude_sessions[composite_key]
+        client.receive_messages = _Client().receive_messages
+        await agent._receive_messages(client, "session-1", "/tmp/work", context)
 
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
             context,
@@ -4505,7 +4513,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        await agent._receive_messages(_Client(), "session-1", "/tmp/work", context)
+        client = controller.claude_sessions[composite_key]
+        client.receive_messages = _Client().receive_messages
+        await agent._receive_messages(client, "session-1", "/tmp/work", context)
 
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         self.assertNotIn(composite_key, controller.receiver_tasks)

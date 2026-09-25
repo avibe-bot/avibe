@@ -1612,6 +1612,65 @@ def test_force_end_backend_retains_terminal_snapshot_until_ack(tmp_path: Path):
     engine.dispose()
 
 
+def test_force_ended_snapshots_ack_without_restart(tmp_path: Path):
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    registry = SessionActivityRegistry(store)
+    for activity_id in ("active", "queued", "claimed"):
+        registry.start(
+            backend="claude", runtime_key=activity_id, session_id="ses-1",
+            activity_id=activity_id, kind="background_task",
+        )
+        if activity_id != "active":
+            registry.complete(
+                backend="claude", runtime_key=activity_id, activity_id=activity_id,
+                status="completed", expects_output=True,
+            )
+    registry.claim_completed_output_batch("claude", "claimed")
+    ended = registry.end_backend("claude", status="killed")
+    assert len(ended) == 3
+    for activity in ended:
+        registry.ack_recovered_terminal(activity)
+    assert store.list_activities() == []
+    assert SessionActivityRegistry(store).drain_recovered_terminals() == []
+    assert not registry.has_backend_work("claude")
+    engine.dispose()
+
+
+@pytest.mark.parametrize("ending_old", [False, True])
+def test_ending_generation_leaves_other_provisional_snapshot_classifiable(ending_old):
+    from core.runtime_activation import RuntimeActivationRegistry
+
+    activations = RuntimeActivationRegistry()
+    registry = SessionActivityRegistry(activation_registry=activations)
+    old = activations.attach("claude", "runtime")
+    new = activations.attach("claude", "runtime") if ending_old else None
+    owner = new or old
+    registry.start(
+        backend="claude", runtime_key="runtime", session_id="ses-1",
+        activity_id="old-task", kind="background_task",
+        metadata={"provenance_pending": True}, activation_identity=owner,
+    )
+    registry.complete(
+        backend="claude", runtime_key="runtime", activity_id="old-task",
+        status="failed", retain_terminal_snapshot=True, activation_identity=owner,
+    )
+    ending = old if ending_old else activations.attach("claude", "runtime")
+    assert registry.end_runtime(
+        "claude", "runtime", retain_terminal_snapshots=True, activation_identity=ending,
+    ) == []
+    classified = registry.classify_provisional_provenance(
+        "claude", "runtime", activity_ids={"old-task"}, parent_activity_ids=set(),
+        turn_id="old-turn", run_ids=["old-run"], delivery_key_external="old-delivery",
+        phase_id="old-phase", detached=False,
+    )
+    assert len(classified) == 1
+    assert classified[0].run_id == "old-run"
+    assert not classified[0].metadata.get("provenance_generation_ended")
+
+
 def test_force_end_backend_claimed_output_wins_late_delivery_race(tmp_path: Path):
     db_path = tmp_path / "state" / "vibe.sqlite"
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
@@ -1643,13 +1702,16 @@ def test_force_end_backend_claimed_output_wins_late_delivery_race(tmp_path: Path
     assert [(item.id, item.status) for item in completed] == [
         ("task-claimed", "killed"),
     ]
-    assert registry.has_backend_work("claude") is False
+    assert registry.has_backend_work("claude") is True
     assert registry.requeue_completed_output(claimed) is False
     assert registry.ack_completed_output(claimed) is False
     records = store.list_activities()
     assert len(records) == 1
     assert records[0]["phase"] == "terminal"
     assert records[0]["activity"]["status"] == "killed"
+    registry.ack_recovered_terminal(completed[0])
+    assert store.list_activities() == []
+    assert registry.has_backend_work("claude") is False
     engine.dispose()
 
 

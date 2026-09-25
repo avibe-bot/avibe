@@ -280,6 +280,9 @@ class SessionActivityRegistry:
         self._terminal_snapshots: dict[
             tuple[str, str], dict[str, SessionActivity]
         ] = defaultdict(dict)
+        self._terminal_snapshot_identities: dict[
+            tuple[str, str, str], RuntimeActivationIdentity
+        ] = {}
         self._provenance_persistence_recovery: dict[
             tuple[str, str], dict[str, str]
         ] = {}
@@ -576,7 +579,12 @@ class SessionActivityRegistry:
                 )
             )
             self._terminal_snapshots[connection_key][recovered.id] = recovered
-            self._recovered_terminals.append(recovered)
+            # Process-local generation numbers can repeat after a restart.
+            # Recovered terminals have no live classifier, not the identity of
+            # a freshly attached client whose counter happens to match.
+            finalized = self._finalize_generation_ended_snapshot_locked(recovered)
+            if finalized is None:
+                self._recovered_terminals.append(recovered)
 
     def set_connection(
         self,
@@ -764,6 +772,9 @@ class SessionActivityRegistry:
     ) -> SessionActivity:
         key = self._key(backend, runtime_key, activity_id)
         now = _now_iso()
+        incoming_metadata = dict(metadata or {})
+        if activation_identity is not None:
+            incoming_metadata["_runtime_generation"] = activation_identity.generation
         existing = self._active.get(key)
         if existing is None:
             activity = SessionActivity(
@@ -778,13 +789,13 @@ class SessionActivityRegistry:
                 parent_activity_id=parent_activity_id,
                 turn_id=turn_id,
                 run_id=run_id,
-                metadata=dict(metadata or {}),
+                metadata=incoming_metadata,
                 started_at=now,
                 updated_at=now,
             )
         else:
             merged = dict(existing.metadata)
-            merged.update(metadata or {})
+            merged.update(incoming_metadata)
             activity = replace(
                 existing,
                 session_id=session_id or existing.session_id,
@@ -839,9 +850,17 @@ class SessionActivityRegistry:
                 return self._complete_locked(
                     key=key,
                     status=normalized,
-                    metadata=metadata,
+                    metadata={
+                        **(metadata or {}),
+                        **(
+                            {"_runtime_generation": activation_identity.generation}
+                            if activation_identity is not None
+                            else {}
+                        ),
+                    },
                     expects_output=expects_output,
                     retain_terminal_snapshot=retain_terminal_snapshot,
+                    activation_identity=activation_identity,
                 )
 
         return self._commit_activation_write(
@@ -859,6 +878,7 @@ class SessionActivityRegistry:
         metadata: dict[str, Any] | None,
         expects_output: bool,
         retain_terminal_snapshot: bool,
+        activation_identity: RuntimeActivationIdentity | None = None,
     ) -> SessionActivity | None:
         backend, runtime_key, _activity_id = key
         now = _now_iso()
@@ -883,9 +903,12 @@ class SessionActivityRegistry:
             )
         elif retain_terminal_snapshot:
             self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
+            identity = self._active_identities.get(key) or activation_identity
             self._active.pop(key, None)
             self._active_identities.pop(key, None)
             self._terminal_snapshots[(backend, runtime_key)][completed.id] = completed
+            if identity is not None:
+                self._terminal_snapshot_identities[key] = identity
         else:
             self._delete_activity(completed)
             self._active.pop(key, None)
@@ -908,6 +931,8 @@ class SessionActivityRegistry:
         metadata.pop("provenance_pending", None)
         metadata.pop("provenance_human", None)
         metadata.pop("provenance_detached", None)
+        metadata.pop("run_ids", None)
+        metadata.pop("delivery_key_external", None)
         metadata["provenance_generation_ended"] = True
         metadata["provenance_unresolved"] = True
         finalized = replace(
@@ -2239,6 +2264,10 @@ class SessionActivityRegistry:
                 return
             self._delete_activity(current)
             snapshots.pop(str(activity.id), None)
+            self._terminal_snapshot_identities.pop(
+                self._activity_key(current),
+                None,
+            )
             if not snapshots:
                 self._terminal_snapshots.pop(key, None)
 
@@ -2324,27 +2353,39 @@ class SessionActivityRegistry:
             ]
             for activity in terminated_pending:
                 self._persist_activity(activity, phase=TERMINAL_SNAPSHOT_PHASE)
+                self._terminal_snapshots[
+                    (activity.backend, activity.runtime_key)
+                ][activity.id] = activity
             for key in [key for key in self._completed_outputs if key[0] == identity]:
                 self._completed_outputs.pop(key, None)
             for key in [key for key in self._claimed_completed_outputs if key[0] == identity]:
                 self._claimed_completed_outputs.pop(key, None)
             for activity in terminated_pending:
                 self._discard_recovered_output_id(self._activity_key(activity))
-            # Backend-wide force termination has no later Claude Result that
-            # could classify an Activity which was not already provisional.
-            # Keep only those explicit provenance snapshots addressable; the
-            # ordinary terminal records were already durably written above and
-            # must not keep the backend looking active forever.
-            for key, snapshots in list(self._terminal_snapshots.items()):
-                if key[0] != identity:
-                    continue
-                for activity_id, activity in list(snapshots.items()):
-                    if not activity.metadata.get("provenance_pending"):
-                        snapshots.pop(activity_id, None)
-                if not snapshots:
+            # Force-ended terminal snapshots remain registered until the normal
+            # acknowledgement removes both the durable row and in-memory owner.
+            # Without a store there is no restart-visible receipt to protect,
+            # so the in-memory-only registry may retire them immediately.
+            if self._store is None:
+                for key, snapshots in list(self._terminal_snapshots.items()):
+                    if key[0] != identity:
+                        continue
+                    for activity_id in list(snapshots):
+                        self._terminal_snapshot_identities.pop(
+                            (*key, activity_id),
+                            None,
+                        )
                     self._terminal_snapshots.pop(key, None)
-        completed.extend(terminated_pending)
-        return completed
+            else:
+                for key, snapshots in self._terminal_snapshots.items():
+                    if key[0] != identity:
+                        continue
+                    for activity in snapshots.values():
+                        completed.append(activity)
+        return list({
+            self._activity_key(activity): activity
+            for activity in [*completed, *terminated_pending]
+        }.values())
 
     def end_runtime(
         self,
@@ -2417,11 +2458,19 @@ class SessionActivityRegistry:
                     metadata=None,
                     expects_output=False,
                     retain_terminal_snapshot=retain_terminal_snapshots,
+                    activation_identity=activation_identity,
                 )
                 if activity is not None:
                     finalized = self._finalize_generation_ended_snapshot_locked(activity)
                     completed.append(finalized or activity)
             for activity in list(self._terminal_snapshots.get(key, {}).values()):
+                snapshot_key = self._activity_key(activity)
+                if activation_identity is not None:
+                    snapshot_identity = self._terminal_snapshot_identities.get(
+                        snapshot_key
+                    )
+                    if snapshot_identity is not activation_identity:
+                        continue
                 finalized = self._finalize_generation_ended_snapshot_locked(activity)
                 if finalized is not None and not any(
                     existing.id == finalized.id for existing in completed

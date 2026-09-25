@@ -112,3 +112,65 @@ real Result provenance against the local mock upstream.
 The current implementation scope is the Claude receiver and existing Activity,
 dispatcher, receipt, steering, and generation owners only. It does not add a
 cross-backend event abstraction or redesign the Claude SDK.
+
+## Bounded recovery-ledger decision (2026-09-25)
+
+The orchestrator authorized one ownership-model correction after ten
+findings-bearing reviewed heads, through `16c1ed184b12`. The circuit breaker
+remains cumulative; this decision does not reset it or authorize independent
+comment-by-comment pushes. Existing threads remain unchanged during this pass.
+
+The Claude adapter now has one phase/output recovery ledger instead of the
+parallel runtime-keyed detached text, Activity, MessageOutput, and provisional
+payload maps. A record captures its immutable identity, exact client activation,
+provenance, selected text, claimed batch, MessageOutput, context, and synthetic
+request owner. A runtime key locates records; it does not determine which request
+may be retired. Human request settlement still uses the existing pending Request
+and native-input receipts, not a second human terminal state machine.
+
+| Boundary | Owning transition |
+| --- | --- |
+| Assistant or claimed Activity | Create/update only the current generation's provisional record. |
+| Detached Result | Freeze selected text, batch, output identity, and context before any delivery await. A later failure Result gets another record. |
+| Delivery failure before acceptance | Keep the same record and retry through the existing managed Activity flush worker. |
+| External acceptance but failed local settlement without durable Message evidence | Keep the claim and original payload; refine only the record's retry policy to the dispatcher's existing local-settlement-only path. Never resend externally. |
+| Durable delivery and local settlement | Retire that record and only its captured synthetic Request/token. An unrelated current synthetic or human owner is untouched. |
+| EOF/error/Stop/replacement | Retire exactly the dead client. Frozen records survive; provisional detached records from that generation are conservatively frozen without borrowing replacement provenance. |
+| Activity classification | Update lineage and notify the Run owner without deleting awaiting/claimed output receipts. |
+| Terminal-snapshot acknowledgement | Delete only an indexed terminal snapshot, after Run-owner acceptance. Force-ended snapshots remain indexed until acknowledgement. |
+
+The existing admission fence is consulted before Result classification/replay,
+including while Stop is awaiting its native interrupt. A receiver revalidates its
+exact activation after waiting for a native frame; replacement cannot let the old
+receiver pop the new FIFO head or clear the new generation's phase state.
+Cancellation preserves a terminal recovery owner's pending request and gate.
+Recovery completion uses the captured owner/token rather than looking up whoever
+currently owns that runtime.
+An unclassified task that finishes after its pending human request has retired
+keeps its original Activity phase. Its late notification cannot become positive
+correlation for a newer human phase, and it remains classifiable without requiring
+another pending request to exist.
+
+Terminal snapshots retain their opaque activation identity in memory. A numeric
+generation is audit metadata only: a process restart can reuse the counter.
+Generation end finalizes only its own unresolved snapshots. Restart conservatively
+finalizes recovered provisional failed/stopped/killed/disconnected snapshots as
+generation-ended and unresolved, without assigning a new human Run. They then
+have a reachable drain/ack path.
+
+The managed worker rechecks the ledger after awaited delivery: a Result appended
+during a retry remains its responsibility even if the initial list was drained.
+There is no new generic queue, service, or per-output timer. Missing/unknown
+origin with competing Activity remains conservative; foreground execution mode
+and TaskStarted linkage are still not human-provenance evidence.
+
+Consumer coverage includes event-held native streams; old payload plus later
+failure and human phases; human and synthetic successor admission; Stop-first
+and Result-first ordering; EOF/error/replacement with persistent delivery failure;
+new Result during an in-flight retry; both generation-ending snapshot orders;
+SQLite classification/receipt restart; force-end service acknowledgement; and
+real-dispatcher external acceptance followed by failing local receipt storage.
+These are hermetic adapter/service/dispatcher consumers, not real Web/IM or SDK
+end-to-end tests. The ledger is process-local recovery across client generations;
+restart tests cover the existing durable Activity receipt/snapshot store, not a
+new durable outbox for never-accepted unsolicited text.
