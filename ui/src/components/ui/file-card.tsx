@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Download, Eye, File, FileArchive, FileText, Image as ImageIcon } from 'lucide-react';
+import { Download, Eye, File, FileArchive, FileAudio, FileText, FileVideo, Image as ImageIcon } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -8,7 +8,7 @@ import { apiFetch } from '@/lib/apiFetch';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { useFileViewer } from '@/components/ui/file-viewer-context';
-import { previewRenderKind, formatBytes } from '@/lib/filePreview';
+import { mediaKind, previewRenderKind, formatBytes } from '@/lib/filePreview';
 import { cn } from '@/lib/utils';
 
 // Download card for an agent-reply file that was rewritten to the same-origin
@@ -25,6 +25,9 @@ const DOC_EXT = new Set(['doc', 'docx', 'txt', 'md', 'rtf', 'csv', 'json', 'log'
 // Literal class strings (Tailwind can't see interpolated names) so the tint
 // utilities are actually generated.
 function kindOf(ext: string): { Icon: LucideIcon; tile: string } {
+  const media = mediaKind('', null, ext);
+  if (media === 'audio') return { Icon: FileAudio, tile: 'bg-violet/15 text-violet-ink' };
+  if (media === 'video') return { Icon: FileVideo, tile: 'bg-cyan/15 text-cyan-ink' };
   if (IMAGE_EXT.has(ext)) return { Icon: ImageIcon, tile: 'bg-cyan/15 text-cyan-ink' };
   if (ARCHIVE_EXT.has(ext)) return { Icon: FileArchive, tile: 'bg-gold/15 text-gold-ink' };
   if (ext === 'pdf') return { Icon: FileText, tile: 'bg-cyan/15 text-cyan-ink' };
@@ -76,46 +79,54 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
   const proxy = isProxyMediaUrl(href);
   // Gate the preview eye with the shared render classifier (not just the text-only previewKind) so the
   // chat offers in-app preview for every kind the kernel can render — PDF / Office / image included.
-  const previewable = previewRenderKind(meta?.name || label, meta?.content_type, meta?.ext) !== null;
+  const renderKind = previewRenderKind(meta?.name || label, meta?.content_type, meta?.ext);
+  // Audio plays right in the card (a compact native player under the title row) — opening an overlay
+  // just to press play adds a step. It needs the proxy URL (same-origin, cookie-authenticated, Range
+  // capable); the eye stays for every other previewable kind, including video.
+  const inlineAudio = renderKind === 'audio' && proxy;
+  const previewable = renderKind !== null && !inlineAudio;
 
   return (
-    <span className="my-1 inline-flex min-w-[240px] max-w-full items-center gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-2.5 align-middle no-underline">
-      <span className={cn('grid size-10 shrink-0 place-items-center rounded-lg', tile)}>
-        <Icon className="size-5" />
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="truncate text-[13px] font-semibold text-foreground">{title}</span>
-        {metaLine && <span className="font-mono text-[10px] text-muted">{metaLine}</span>}
-      </span>
-      <span className="ml-auto flex shrink-0 items-center gap-1.5">
-        {previewable &&
-          (proxy && viewer ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8"
-              aria-label={t('chat.media.preview')}
-              onClick={() => viewer.open({ url: href, name: meta?.name || label })}
-            >
-              <Eye className="size-4" />
-            </Button>
-          ) : (
-            <Button asChild variant="ghost" size="icon" className="size-8" aria-label={t('chat.media.preview')}>
-              <a href={href} target="_blank" rel="noopener noreferrer">
+    <span className="my-1 inline-flex min-w-[240px] max-w-full flex-col gap-2 rounded-[10px] border border-border bg-surface-2 px-3 py-2.5 align-middle no-underline">
+      <span className="flex min-w-0 items-center gap-3">
+        <span className={cn('grid size-10 shrink-0 place-items-center rounded-lg', tile)}>
+          <Icon className="size-5" />
+        </span>
+        <span className="flex min-w-0 flex-col">
+          <span className="truncate text-[13px] font-semibold text-foreground">{title}</span>
+          {metaLine && <span className="font-mono text-[10px] text-muted">{metaLine}</span>}
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {previewable &&
+            (proxy && viewer ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                aria-label={t('chat.media.preview')}
+                onClick={() => viewer.open({ url: href, name: meta?.name || label })}
+              >
                 <Eye className="size-4" />
-              </a>
-            </Button>
-          ))}
-        <Button asChild variant="ghost" size="icon" className="size-8 text-mint-ink" aria-label={t('chat.media.download')}>
-          <a
-            href={mediaDownloadHref(href)}
-            download
-            onClick={(e) => handleMediaDownloadClick(e, href, meta?.name || label)}
-          >
-            <Download className="size-4" />
-          </a>
-        </Button>
+              </Button>
+            ) : (
+              <Button asChild variant="ghost" size="icon" className="size-8" aria-label={t('chat.media.preview')}>
+                <a href={href} target="_blank" rel="noopener noreferrer">
+                  <Eye className="size-4" />
+                </a>
+              </Button>
+            ))}
+          <Button asChild variant="ghost" size="icon" className="size-8 text-mint-ink" aria-label={t('chat.media.download')}>
+            <a
+              href={mediaDownloadHref(href)}
+              download
+              onClick={(e) => handleMediaDownloadClick(e, href, meta?.name || label)}
+            >
+              <Download className="size-4" />
+            </a>
+          </Button>
+        </span>
       </span>
+      {inlineAudio && <audio controls preload="metadata" src={href} aria-label={title} className="h-9 w-full min-w-0" />}
     </span>
   );
 };

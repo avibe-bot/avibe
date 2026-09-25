@@ -191,6 +191,38 @@ def test_agent_download_and_metadata_preserve_real_filename(
     engine.dispose()
 
 
+@pytest.mark.parametrize("filename", ["voice.wav", "voice.m4a", "voice.aac", "voice.flac", "voice.opus"])
+def test_agent_audio_serves_inline_with_range_for_the_web_player(tmp_path, monkeypatch, filename, sqlite_schema_db_factory):
+    """An agent-sent audio file must stream inline (not force-download) so the chat's native
+    <audio> player can load and seek it, whatever alias ``mimetypes`` guessed for the type."""
+    from tests.ui_server_test_helpers import _save_config
+    from vibe import ui_server
+
+    _save_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    sqlite_schema_db_factory(db)
+    engine = create_sqlite_engine(db)
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
+    audio = tmp_path / filename
+    audio.write_bytes(bytes(range(256)))
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=f"[memo]({audio.as_uri()})")
+        token = conn.execute(select(media_objects.c.token)).scalar_one()
+
+    client = ui_server.app.test_client()
+    response = client.get(f"/api/media/{token}")
+    assert response.status_code == 200
+    assert response.headers["Content-Type"].startswith("audio/")
+    disposition = Message()
+    disposition["Content-Disposition"] = response.headers["Content-Disposition"]
+    assert disposition.get_content_disposition() == "inline"
+    ranged = client.get(f"/api/media/{token}", headers={"Range": "bytes=16-31"})
+    assert ranged.status_code == 206
+    assert ranged.content == bytes(range(16, 32))
+    engine.dispose()
+
+
 def test_uploaded_download_keeps_original_name_instead_of_storage_basename(tmp_path, monkeypatch, sqlite_schema_db_factory):
     from tests.ui_server_test_helpers import _save_config
     from vibe import ui_server

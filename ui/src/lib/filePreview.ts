@@ -167,15 +167,42 @@ export function docPreviewKind(name: string, mime?: string | null, serverExt?: s
   return OFFICE_MIME[m] ?? null;
 }
 
+// Audio / video a native <audio> / <video> element can play. Deliberately an allowlist rather than
+// `audio/*`: formats browsers can't decode (AIFF, WeChat SILK, AMR) must fall back to download instead
+// of opening a broken player. The ext decides when it's a known media ext; otherwise the content type
+// (including the aliases Python's ``mimetypes`` emits, e.g. ``audio/x-wav``) classifies a label-only
+// chat link. WebM is classified as video by ext — a <video> element also plays audio-only WebM.
+export type MediaKind = 'audio' | 'video';
+const AUDIO_EXT = new Set(['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac']);
+const VIDEO_EXT = new Set(['mp4', 'm4v', 'webm', 'mov']);
+const AUDIO_MIME = new Set([
+  'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave',
+  'audio/mp4', 'audio/x-m4a', 'audio/mp4a-latm', 'audio/aac', 'audio/x-aac',
+  'audio/ogg', 'audio/opus', 'audio/flac', 'audio/x-flac', 'audio/webm',
+]);
+const VIDEO_MIME = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/ogg', 'video/x-m4v']);
+
+export function mediaKind(name: string, mime?: string | null, serverExt?: string | null): MediaKind | null {
+  const ext = effectiveExt(name, serverExt);
+  if (AUDIO_EXT.has(ext)) return 'audio';
+  if (VIDEO_EXT.has(ext)) return 'video';
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  if (AUDIO_MIME.has(m)) return 'audio';
+  if (VIDEO_MIME.has(m)) return 'video';
+  return null;
+}
+
 // ── Unified preview dispatch ────────────────────────────────────────────────
 // HOW a file renders in the shared <FilePreview> kernel (one classifier for the File Browser, the
-// editor preview, and the chat viewer). Combines imageKind (raster/svg) + html + docPreviewKind
+// editor preview, and the chat viewer). Combines imageKind (raster/svg) + mediaKind (audio/video) + html + docPreviewKind
 // (office/pdf) + previewKind (text). 'code' is the catch-all for highlightable text — including
 // non-HTML markup (xml/vue/svelte) and plain text (highlights to nothing). Order matters: images and
 // HTML are decided before the text classifier so an .svg renders as an image, not edited source.
 export type PreviewRenderKind =
   | 'image'
   | 'svg'
+  | 'audio'
+  | 'video'
   | 'html'
   | 'pdf'
   | 'docx'
@@ -192,6 +219,8 @@ export function previewRenderKind(name: string, mime?: string | null, serverExt?
   const img = imageKind(name, mime, serverExt);
   if (img === 'raster') return 'image';
   if (img === 'svg') return 'svg';
+  const media = mediaKind(name, mime, serverExt);
+  if (media) return media;
   const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (HTML_EXT.has(ext) || m === 'text/html') return 'html';

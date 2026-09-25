@@ -10816,6 +10816,13 @@ _INLINE_SAFE_MEDIA_TYPES = {
     "audio/webm",
     "audio/flac",
     "audio/x-m4a",
+    # Aliases Python's ``mimetypes`` guesses for common audio (.wav/.m4a/.aac/.flac).
+    "audio/x-wav",
+    "audio/wave",
+    "audio/mp4a-latm",
+    "audio/x-aac",
+    "audio/x-flac",
+    "audio/opus",
     "video/mp4",
     "video/webm",
     "video/ogg",
