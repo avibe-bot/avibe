@@ -369,7 +369,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31.0" },
     { name = "sentry-sdk", specifier = ">=2.0.0" },
     { name = "slack-sdk", specifier = ">=3.26.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.0,<2.1" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
     { name = "typing-extensions", specifier = ">=4.12.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
