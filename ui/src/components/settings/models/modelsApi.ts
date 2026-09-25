@@ -43,6 +43,7 @@ import type {
   SupplyGap,
   UsageReport,
   UsageWindowKey,
+  QuotaSummary,
 } from './types';
 import { USAGE_DEFAULT_WINDOW } from './types';
 
@@ -162,6 +163,10 @@ export type ModelsApi = {
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   /** Usage analytics over the explicit modern window selector. */
   getUsageSummary(window?: UsageWindowKey): Promise<UsageReport>;
+  /** Subscription rate-limit windows, served from the service's 5-minute cache. */
+  getQuota(): Promise<QuotaSummary>;
+  /** The same report, re-read now (the service bounds how often). */
+  refreshQuota(): Promise<QuotaSummary>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
@@ -645,6 +650,8 @@ export const modelsApi: ModelsApi = {
     ).then((r) => r.events),
   getUsageSummary: (window = USAGE_DEFAULT_WINDOW) =>
     call<{ usage: UsageReport }>(`/api/models/usage?window=${window}`).then((r) => r.usage),
+  getQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota').then((r) => r.quota),
+  refreshQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota/refresh', jsonInit('POST')).then((r) => r.quota),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),

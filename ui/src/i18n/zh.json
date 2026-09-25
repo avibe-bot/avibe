@@ -896,6 +896,7 @@
         },
         "tab": {
           "hub": "供应商与路由",
+          "quota": "订阅额度",
           "usage": "用量",
           "logs": "日志"
         }
@@ -1328,6 +1329,86 @@
         "cooldown": "等待重试（自动恢复）",
         "needs_action": "需要处理",
         "error": "需要处理"
+      },
+      "quota": {
+        "title": "订阅额度",
+        "header_one": "{{count}} 个已登录的订阅账号",
+        "header_other": "{{count}} 个已登录的订阅账号",
+        "autoRefresh": "每 5 分钟自动刷新",
+        "refresh": "立即刷新",
+        "refreshing": "刷新中…",
+        "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
+        "left": "剩余",
+        "window": {
+          "session": "5 小时额度",
+          "weekly": "每周额度",
+          "model": "{{model}} 每周额度"
+        },
+        "hint": {
+          "shared": "所有模型共用",
+          "model": "只算 {{model}} 的用量"
+        },
+        "scoped": {
+          "title": "单独计算的模型额度",
+          "note": "这些模型也会同时扣每周额度，任一项用完就会暂停"
+        },
+        "pace": {
+          "ok": "够用到重置",
+          "slightlyFast": "稍快，仍够用到重置",
+          "fast": "用得偏快，预计 {{time}} 用完",
+          "exhausted": "已用完，{{duration}}后恢复",
+          "exhaustedUnknown": "已用完",
+          "paused": "暂停更新",
+          "reset": "已重置"
+        },
+        "reset": {
+          "in": "{{duration}}后重置",
+          "done": "已重置，等待刷新"
+        },
+        "meter": "{{label}} 已用 {{pct}}%",
+        "status": {
+          "ok": "可用",
+          "exhausted": "{{label}}已用完",
+          "reauth": "需重新登录",
+          "paused": "暂停更新"
+        },
+        "stale": {
+          "authExpired": "登录已过期，下面是 {{ago}}的数据",
+          "retained": "暂时读不到最新额度，下面是 {{ago}}的数据",
+          "reauth": "重新登录"
+        },
+        "unread": {
+          "auth_expired": "登录已过期，读不到额度",
+          "unsupported": "这个订阅不提供额度数据",
+          "error": "暂时读不到额度，稍后会自动重试"
+        },
+        "ago": {
+          "minutes_one": "{{count}} 分钟前",
+          "minutes_other": "{{count}} 分钟前",
+          "long": "{{duration}}前"
+        },
+        "duration": {
+          "days": "{{days}} 天 {{hours}} 小时",
+          "hours": "{{hours}} 小时 {{minutes}} 分",
+          "minutes": "{{minutes}} 分钟"
+        },
+        "clock": {
+          "today": "今天 {{time}}",
+          "tomorrow": "明天 {{time}}"
+        },
+        "stat": {
+          "tightest": "余量最少的额度",
+          "tightestAllSpent": "所有额度都已用完",
+          "tightestUnread": "暂时没有可读的额度",
+          "exhausted": "已用完",
+          "exhaustedUnit": "项额度",
+          "exhaustedNone": "所有账号都能正常使用",
+          "exhaustedNoneObserved": "已读到的额度都没用完",
+          "exhaustedNote": "{{name}} · {{time}} 恢复",
+          "resetsIn": "{{duration}}后重置"
+        },
+        "upcoming": "即将重置",
+        "footnote": "进度条是已用的部分，细竖线是这个周期已经过去的时间：进度条超过竖线，就是用得比时间快。"
       },
       "usage": {
         "title": "用量",
@@ -2253,6 +2334,15 @@
       },
       "error": {
         "unclassified": "未知错误，暂时不可用"
+      }
+    },
+    "quota": {
+      "error": {
+        "auth_expired": "登录已过期",
+        "rate_limited": "服务商暂时限制了额度查询",
+        "unsupported": "这个订阅不提供额度数据",
+        "unavailable": "暂时读不到额度",
+        "malformed": "服务商返回的额度数据读不懂"
       }
     }
   },
@@ -4322,6 +4412,7 @@
     "olderLoadFailed": "加载更早的消息失败，点击重试",
     "organizationNotice": "这是一个组织会话，消息会显示发送者。",
     "senderUnknown": "未知发送者",
+    "senderYou": "你",
     "forkedEmptyTitle": "复刻会话已创建",
     "forkedEmptyBody": "已从原会话上下文复刻，当前对话记录从空白开始，原会话上下文已保留，继续对话即可",
     "forkedFromPrefix": "复刻自",

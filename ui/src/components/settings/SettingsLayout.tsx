@@ -429,7 +429,7 @@ export const SettingsLayout: React.FC = () => {
         <nav
           aria-label={t('settings.navigationLabel')}
           className={clsx(
-            'min-h-0 shrink-0 border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
+            'min-h-0 shrink-0 border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3 md:pt-[calc(0.75rem+var(--shell-titlebar-inset))]',
             'w-full flex-col',
             standaloneMenu ? 'md:w-[var(--app-sidebar-w)]' : 'md:w-[196px]',
             atRoot ? 'flex' : 'hidden md:flex',
@@ -469,7 +469,9 @@ export const SettingsLayout: React.FC = () => {
           </div>
         </nav>
 
-        <section className={clsx('min-w-0 flex-1 overflow-y-auto', atRoot && 'hidden md:block')}>
+        {/* Under the macOS overlay title bar the header above is gone, so the
+            rail and the page start below the strip the traffic lights sit in. */}
+        <section className={clsx('min-w-0 flex-1 overflow-y-auto md:mt-[var(--shell-titlebar-inset)]', atRoot && 'hidden md:block')}>
           <div
             key={location.pathname}
             className={clsx(

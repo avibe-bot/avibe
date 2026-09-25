@@ -231,6 +231,14 @@ detail. The existing desktop/mobile dismissal case covers both stationary
 closure and subsequent deliberate hover; the keyboard unit case also covers
 Tab-away dismissal.
 
+After subscription quota PR #2171 landed as `6af1066eb`, the coordinating
+session requested a master integration before readiness. Preserve both reports'
+API/schema registrations, fixtures, scenario IDs, four-tab navigation, and
+independent lazy-read lifecycles; the usage consumer continues to send modern
+window selectors. Scope analytics-specific stat styling to its own root because
+quota reuses the legacy stat classes. The quota browser case first reproduced
+the unintended type-scale override and now guards the original quota styling.
+
 ## Known by design
 
 - This is metered gateway usage, not native subscription quota or monetary cost.

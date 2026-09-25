@@ -16,7 +16,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageReport } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
 // attention, so it needs a router in scope. Every render site wants the same
@@ -125,6 +125,8 @@ const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head
   ],
   supply_state: 'ok',
 };
+
+const quotaSummary: QuotaSummary = { refresh_interval_seconds: 300, sources: [] };
 
 const takeoverMappingTitle = /Replacement source → gpt-5\.6-sol \((?:Taken over|已自动切换)\)/i;
 const headMappingTitle = /^Paused source → gpt-5\.6-sol$/i;
@@ -265,6 +267,8 @@ const renderPage = (
   vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtimeValue);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
   vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
+  vi.spyOn(modelsApi, 'getQuota').mockResolvedValue(quotaSummary);
+  vi.spyOn(modelsApi, 'refreshQuota').mockResolvedValue(quotaSummary);
   return render(
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
@@ -591,7 +595,7 @@ describe('SettingsModelsPage surface branches', () => {
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
     // overview leaks in beside it.
-    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
     expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
   });
 
@@ -741,7 +745,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(toggle);
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
-    expect(await screen.findAllByRole('tab')).toHaveLength(3);
+    expect(await screen.findAllByRole('tab')).toHaveLength(4);
   });
 
   it('keeps routing controls available while an enabled gateway process is unavailable', async () => {
@@ -768,7 +772,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i })).toBeTruthy();
-    expect(screen.queryAllByRole('tab')).toHaveLength(3);
+    expect(screen.queryAllByRole('tab')).toHaveLength(4);
   });
 
   it('still allows persisted enablement to be turned off on an unsupported host', async () => {
@@ -843,7 +847,7 @@ describe('SettingsModelsPage surface branches', () => {
     renderPage([retainedSource]);
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
-    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeNull();
   });
 
@@ -2347,7 +2351,7 @@ describe('SettingsModelsPage usage region', () => {
       vi.restoreAllMocks();
       renderPage(sources);
 
-      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(3));
+      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(4));
       await openUsage();
       await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith('24h'));
     }
@@ -2398,5 +2402,103 @@ describe('SettingsModelsPage usage region', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/ }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
     expect(read.mock.calls.map(([window]) => window)).toEqual(['24h', '24h']);
+  });
+});
+
+// How the quota report is READ: off the first paint, live on open, and re-read on
+// the five-minute cadence the header promises for as long as the tab is open.
+describe('SettingsModelsPage quota region', () => {
+  const openQuota = () => userEvent.click(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ }));
+
+  it('MH-QUOTA-016: reads quota only while its tab is open, polls every five minutes, and forces on refresh', async () => {
+    const intervals = vi.spyOn(window, 'setInterval');
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getQuota);
+    const force = vi.mocked(modelsApi.refreshQuota);
+    expect(read).not.toHaveBeenCalled();
+
+    await openQuota();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    const poll = intervals.mock.calls.find(([, delay]) => delay === 5 * 60_000);
+    expect(poll).toBeTruthy();
+    await act(async () => { (poll![0] as () => void)(); });
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh now$|^立即刷新$/ }));
+    await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+
+    const clear = vi.spyOn(window, 'clearInterval');
+    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
+    expect(clear).toHaveBeenCalled();
+  });
+
+  // A quota read can be the first to see a refused grant, while the Source row
+  // itself is still healthy and so offers no repair button. The card's re-login
+  // must therefore reach the confirmed journey on its own, and the tab must
+  // re-read once the new grant lands instead of showing the expired one.
+  it('MH-QUOTA-017: signs an expired grant in again from the quota card and re-reads quota after', async () => {
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: { ...started, state: 'success' as const }, created: null, repaired: null });
+    renderPage([nativeSubscription]);
+    vi.mocked(modelsApi.getQuota).mockResolvedValue({
+      refresh_interval_seconds: 300,
+      sources: [{
+        source_id: nativeSubscription.id,
+        vendor: 'anthropic',
+        display_name: nativeSubscription.display_name,
+        account_label: null,
+        plan: null,
+        fetched_at: null,
+        state: 'auth_expired',
+        error_key: 'models.quota.error.auth_expired',
+        windows: [],
+      }],
+    });
+    await screen.findByText('Claude native login');
+    await openQuota();
+    const read = vi.mocked(modelsApi.getQuota);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    const trigger = await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ });
+    await userEvent.click(trigger);
+    expect(reauth).not.toHaveBeenCalled();
+    // Cancelling returns focus to the quota card's button, not to the document.
+    await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await userEvent.click(trigger);
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+    await waitFor(() => expect(reauth).toHaveBeenCalledWith(nativeSubscription.id));
+    // The flow's first status poll lands after its 2 s cadence.
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 4000 });
+    // The finished sign-in closes its dialog; focus returns to the quota card's button, not the document.
+    await waitFor(() => expect(document.activeElement).toBe(trigger), { timeout: 4000 });
+  }, 12000);
+  it('returns focus to the quota tab when a refresh removed the re-login button behind its confirmation', async () => {
+    renderPage([nativeSubscription]);
+    vi.mocked(modelsApi.getQuota).mockResolvedValue({
+      refresh_interval_seconds: 300,
+      sources: [{
+        source_id: nativeSubscription.id, vendor: 'anthropic', display_name: nativeSubscription.display_name,
+        account_label: null, plan: null, fetched_at: null, state: 'auth_expired',
+        error_key: 'models.quota.error.auth_expired', windows: [],
+      }],
+    });
+    await screen.findByText('Claude native login');
+    await openQuota();
+    const trigger = await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ });
+    await userEvent.click(trigger);
+    // A background read settles while the confirmation is open and drops the button.
+    trigger.remove();
+    await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ })));
   });
 });

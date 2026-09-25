@@ -849,6 +849,42 @@ export const USAGE_WINDOW_MAX_DAYS = 62 as const;
 export const USAGE_DEFAULT_WINDOW_DAYS = 30 as const;
 export const USAGE_DEFAULT_WINDOW: UsageWindowKey = '24h';
 
+/** `quota-summary.schema.json` — a subscription's own rate-limit windows. A
+ *  report, like usage: nothing in routing reads it. Money is deliberately absent;
+ *  the contract reserves an optional `value` block for it. */
+export type QuotaWindowKind = 'session' | 'weekly' | 'model_weekly' | 'other';
+
+export type QuotaWindow = {
+  id: string;
+  kind: QuotaWindowKind;
+  /** The upstream name. Views compose their own copy for `session`/`weekly`. */
+  label: string;
+  /** Present on `model_weekly`: the model the window alone counts. */
+  scope_model?: string;
+  used_pct: number;
+  window_seconds: number | null;
+  resets_at: string | null;
+};
+
+export type QuotaSourceState = 'ok' | 'stale' | 'auth_expired' | 'unsupported' | 'error';
+
+export type SourceQuota = {
+  source_id: string;
+  vendor: string;
+  display_name: string;
+  account_label: string | null;
+  plan: string | null;
+  fetched_at: string | null;
+  state: QuotaSourceState;
+  error_key?: string;
+  windows: QuotaWindow[];
+};
+
+export type QuotaSummary = {
+  refresh_interval_seconds: number;
+  sources: SourceQuota[];
+};
+
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;
 export type ApiErr = {

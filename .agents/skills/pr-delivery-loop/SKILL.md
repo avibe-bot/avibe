@@ -132,10 +132,11 @@ do not load them routinely. They introduce no additional delivery gates.
   without a clean pass also stop the loop, even for unrelated findings.
 - A lane delivers the full inventory and waits for its orchestrator's decision.
   The orchestrator diagnoses the whole class, records the scope decision, and
-  continues when the smallest complete fix is clear, reversible, and preserves
-  contracts. Escalate to the user only under the ownership criteria above.
-  The breaker stops blind patching; it neither proves a design rewrite necessary
-  nor transfers the decision automatically to the user.
+  continues with the smallest complete fix that is clear, reversible, and
+  contract-preserving; otherwise it escalates under the ownership rules above.
+  The breaker stops blind patching,
+  not the work: it does not prove a rewrite necessary, and no turn ends tripped
+  without a next action or a delivered report.
 - Fix actionable findings, reply, then resolve each addressed thread. If another
   person's pending review prevents a reply, never delete/dismiss it: preserve
   their drafts, report the blocker, keep observation live, and continue safe

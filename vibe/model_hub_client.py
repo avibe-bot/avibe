@@ -291,6 +291,9 @@ class ModelHubRemoteService:
             payload["days"] = USAGE_DEFAULT_WINDOW_DAYS
         return await _rpc("usage_summary", payload)
 
+    async def quota_summary(self, *, force: bool = False) -> dict:
+        return await _rpc("quota_summary", {"force": force})
+
     def agent_chain(self, backend: str, model_id: str) -> dict:
         return _rpc_sync(
             "get_agent_chain",

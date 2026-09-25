@@ -6801,6 +6801,8 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     tmp_path,
 ):
     service, store, adapter = _service(tmp_path)
+    from core.handlers.model_hub.quota import SubscriptionQuotaError
+
     source = ModelHubSourceConfig(
         id="src_huboauth01",
         kind="subscription",
@@ -6823,6 +6825,14 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
+    quota_reads = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        quota_reads.append(source_id)
+        raise SubscriptionQuotaError("auth_expired")
+
+    adapter.subscription_quota = subscription_quota
+    assert asyncio.run(service.quota_summary())["sources"][0]["state"] == "auth_expired"
 
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
@@ -6833,6 +6843,9 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
         }
     )
     result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    # The same ref names a new grant: its quota is re-read, not held behind the old failure.
+    asyncio.run(service.quota_summary())
+    assert quota_reads == [source.id, source.id]
 
     assert result["recovered"] is True
     assert result["source"]["state"]["status"] == "standby"
@@ -7006,6 +7019,14 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
+    quota_reads = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        quota_reads.append(source_id)
+        return {"plan": None, "windows": []}
+
+    adapter.subscription_quota = subscription_quota
+    assert asyncio.run(service.quota_summary())["sources"][0]["state"] == "ok"
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
@@ -7044,6 +7065,9 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     assert adapter.revoked == []
     assert adapter.orphan_cleanup_calls == []
     assert service.revocations.list() == []
+    # The fail-closed grant does not keep its pre-failure quota reading inside the refresh window.
+    asyncio.run(service.quota_summary())
+    assert quota_reads == [source.id, source.id]
 
 
 @pytest.mark.parametrize(
@@ -9554,3 +9578,60 @@ def test_signed_organization_member_completes_models_page_bootstrap(monkeypatch,
     # A valid signed session still needs CSRF for writes.
     response = client.post("/api/models/runtime/start", json={}, base_url=base_url, environ_base=remote_peer())
     assert response.status_code == 403
+
+
+def test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh(monkeypatch, tmp_path):
+    """MH-QUOTA-012: GET and forced-refresh routes return only hub subscriptions' parsed windows, per-Source failures, and a cached forced re-read."""
+
+    from core.handlers.model_hub.quota import SubscriptionQuotaError
+
+    service = _seed_response_conformance_service(tmp_path)
+    service.store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_codexsub01",
+            kind="subscription",
+            vendor="openai",
+            display_name="ChatGPT Pro",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[],
+            credential_ref="cred_codexsub01",
+        )
+    )
+    calls = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        calls.append(source_id)
+        if source_id == "src_codexsub01":
+            raise SubscriptionQuotaError("auth_expired")
+        return {"plan": None, "windows": [{
+            "id": "five_hour", "kind": "session", "label": "five_hour", "used_pct": 38.0,
+            "window_seconds": 18000, "resets_at": "2026-07-23T05:00:00Z",
+        }]}
+
+    service.adapter.subscription_quota = subscription_quota
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
+    client = app.test_client()
+    origin = "http://127.0.0.1:15131"
+
+    response = client.get("/api/models/quota", base_url=origin)
+    assert response.status_code == 200
+    body = response.get_json()
+    _assert_valid("quota-summary.schema.json", body["quota"])
+    sources = {source["source_id"]: source for source in body["quota"]["sources"]}
+    # API-key Sources have no subscription quota and are absent.
+    assert set(sources) == {"src_subscribe01", "src_codexsub01"}
+    assert sources["src_subscribe01"]["state"] == "ok"
+    assert sources["src_subscribe01"]["windows"][0]["used_pct"] == 38.0
+    assert sources["src_codexsub01"]["state"] == "auth_expired"
+    assert "cred_" not in json.dumps(body)
+    assert sorted(calls) == ["src_codexsub01", "src_subscribe01"]
+
+    headers = csrf_headers(client, origin)
+    refreshed = client.post("/api/models/quota/refresh", headers=headers, base_url=origin)
+    assert refreshed.status_code == 200
+    _assert_valid("quota-summary.schema.json", refreshed.get_json()["quota"])
+    # Inside the forced-refresh interval the cached snapshot answers.
+    assert len(calls) == 2
