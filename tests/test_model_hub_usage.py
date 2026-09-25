@@ -1583,6 +1583,279 @@ def test_hourly_report_preserves_uncertainty_for_timezone_orphaned_daily_rows(
     assert all(not bucket["history_complete"] for bucket in report["buckets"])
 
 
+@pytest.mark.parametrize(
+    ("old_zone", "new_zone"),
+    [
+        ("Pacific/Kiritimati", "Pacific/Honolulu"),
+        ("Pacific/Honolulu", "Pacific/Kiritimati"),
+    ],
+)
+@pytest.mark.parametrize("timestamp", [None, "not-an-instant"])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_timestampless_owner_days_use_a_conservative_utc_envelope(
+    tmp_path: Path,
+    old_zone: str,
+    new_zone: str,
+    timestamp: str | None,
+    overlap: bool,
+) -> None:
+    """Unknown owner dates are selected only when their UTC envelope can overlap."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = old_zone
+        time.tzset()
+        owner_day = local_usage_day(now)
+        if not overlap:
+            owner_day -= timedelta(days=3)
+        row = {
+            "day": owner_day.isoformat(),
+            "source_id": "src-unknown-time",
+            "model_id": "model-unknown-time",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+        }
+        if timestamp is not None:
+            row["last_metered_at"] = timestamp
+        path = tmp_path / "state" / "usage.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([row]), encoding="utf-8")
+
+        os.environ["TZ"] = new_zone
+        time.tzset()
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 0
+    if overlap:
+        assert any(not bucket["history_complete"] for bucket in report["buckets"])
+    else:
+        assert all(bucket["history_complete"] for bucket in report["buckets"])
+
+
+@pytest.mark.parametrize(
+    ("old_zone", "new_zone"),
+    [
+        ("Pacific/Kiritimati", "Pacific/Honolulu"),
+        ("Pacific/Honolulu", "Pacific/Kiritimati"),
+    ],
+)
+@pytest.mark.parametrize("timestamp", [None, "not-an-instant"])
+@pytest.mark.parametrize("max_rows", [1, 4])
+def test_timestampless_owner_survives_write_and_capacity_ranking(
+    tmp_path: Path,
+    old_zone: str,
+    new_zone: str,
+    timestamp: str | None,
+    max_rows: int,
+) -> None:
+    """The shared envelope keeps unknown owners without outranking known calls."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = old_zone
+        time.tzset()
+        owner_day = local_usage_day(now)
+        row = {
+            "day": owner_day.isoformat(),
+            "source_id": "src-old-zone",
+            "model_id": "model-old-zone",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+        }
+        if timestamp is not None:
+            row["last_metered_at"] = timestamp
+        path = tmp_path / "state" / "usage.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([row]), encoding="utf-8")
+
+        os.environ["TZ"] = new_zone
+        time.tzset()
+        ledger = _ledger(
+            tmp_path,
+            retention_days=1,
+            max_rows=max_rows,
+            now=_Clock(now),
+        )
+        ledger.record(
+            source_id="src-new-zone",
+            model_id="model-new-zone",
+            usage=ProtocolUsageReport(input_tokens=11),
+            at=now,
+        )
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        hourly = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert any(row["source_id"] == "src-new-zone" for row in persisted)
+    if max_rows == 1:
+        assert [row["source_id"] for row in persisted] == ["src-new-zone"]
+    else:
+        assert {row["source_id"] for row in persisted} == {
+            "src-old-zone", "src-new-zone",
+        }
+        assert any(not bucket["history_complete"] for bucket in hourly["buckets"])
+
+
+@pytest.mark.parametrize(
+    ("old_zone", "new_zone"),
+    [
+        ("Pacific/Kiritimati", "Pacific/Honolulu"),
+        ("Pacific/Honolulu", "Pacific/Kiritimati"),
+    ],
+)
+@pytest.mark.parametrize("timestamp", [None, "not-an-instant"])
+def test_timestampless_owner_outside_the_envelope_expires_on_write(
+    tmp_path: Path,
+    old_zone: str,
+    new_zone: str,
+    timestamp: str | None,
+) -> None:
+    """An unknown owner day outside the hourly envelope still expires normally."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = old_zone
+        time.tzset()
+        owner_day = local_usage_day(now) - timedelta(days=3)
+        row = {
+            "day": owner_day.isoformat(),
+            "source_id": "src-expired-unknown-time",
+            "model_id": "model-expired-unknown-time",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+        }
+        if timestamp is not None:
+            row["last_metered_at"] = timestamp
+        path = tmp_path / "state" / "usage.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([row]), encoding="utf-8")
+
+        os.environ["TZ"] = new_zone
+        time.tzset()
+        ledger = _ledger(tmp_path, retention_days=1, now=_Clock(now))
+        ledger.record(
+            source_id="src-new-zone",
+            model_id="model-new-zone",
+            usage=ProtocolUsageReport(input_tokens=11),
+            at=now,
+        )
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert [row["source_id"] for row in persisted] == ["src-new-zone"]
+
+
+@pytest.mark.parametrize("timestamp", [None, "not-an-instant"])
+def test_same_identity_merge_preserves_date_only_hourly_uncertainty(
+    tmp_path: Path, timestamp: str | None,
+) -> None:
+    """A fresh call cannot turn an earlier timestamp-less owner into certainty."""
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        row = {
+            "day": local_usage_day(now).isoformat(),
+            "source_id": "src-merged",
+            "model_id": "model-merged",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+        }
+        if timestamp is not None:
+            row["last_metered_at"] = timestamp
+        path = tmp_path / "state" / "usage.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([row]), encoding="utf-8")
+
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.record(
+            source_id="src-merged",
+            model_id="model-merged",
+            usage=ProtocolUsageReport(input_tokens=3),
+            at=now,
+        )
+        report = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+        daily = ledger.summary(days=1, now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["input_tokens"] == 3
+    assert any(not bucket["history_complete"] for bucket in report["buckets"])
+    assert daily["totals"]["input_tokens"] == 10
+
+
+@pytest.mark.parametrize("owner_day", [date.min, date.max])
+def test_timestampless_owner_day_extremes_do_not_overflow(
+    tmp_path: Path, owner_day: date,
+) -> None:
+    """Envelope construction degrades safely at both representable date edges."""
+
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    ledger = _ledger(tmp_path, now=_Clock(now))
+    ledger.path.parent.mkdir(parents=True)
+    ledger.path.write_text(
+        json.dumps([{
+            "day": owner_day.isoformat(),
+            "source_id": "src-extreme",
+            "model_id": "model-extreme",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+        }]),
+        encoding="utf-8",
+    )
+
+    report = ledger.report(window="24h", now=now)
+    ledger.record(
+        source_id="src-new",
+        model_id="model-new",
+        usage=ProtocolUsageReport(input_tokens=2),
+        at=now,
+    )
+
+    assert report["totals"]["requests"] == 0
+    assert ledger.summary(days=1, now=now)["totals"]["requests"] == 1
+
+
 def test_timezone_orphaned_hourly_rows_reconcile_against_utc_slices(
     tmp_path: Path,
 ) -> None:

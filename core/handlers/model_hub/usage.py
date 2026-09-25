@@ -101,6 +101,11 @@ USAGE_PUBLISHED_COUNT_BOUND: Final = USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
 # cannot be read — it recorded no instant, or recorded one that has not happened —
 # sorts as the least recently metered.
 _OLDEST_INSTANT: Final = datetime.min.replace(tzinfo=timezone.utc)
+# A persisted owner day has no timezone of its own. Every IANA timezone currently
+# in use fits inside UTC-12..UTC+14, so this is the smallest conservative envelope
+# that can contain one whole local day without consulting today's host timezone.
+_OWNER_DAY_MAX_AHEAD: Final = timedelta(hours=14)
+_OWNER_DAY_MAX_BEHIND: Final = timedelta(hours=12)
 
 _COUNTER_KEYS: Final = (
     "requests",
@@ -288,6 +293,79 @@ def _local_midnight(day: date) -> datetime:
     return datetime.combine(day, time.min).astimezone()
 
 
+def _utc_owner_day_envelope(day: date) -> Optional[tuple[datetime, datetime]]:
+    """Return the conservative UTC interval a timezone-less owner day can occupy."""
+
+    try:
+        start = (
+            datetime.combine(day, time.min).replace(tzinfo=timezone.utc)
+            - _OWNER_DAY_MAX_AHEAD
+        )
+        end = (
+            datetime.combine(day + timedelta(days=1), time.min).replace(
+                tzinfo=timezone.utc,
+            )
+            + _OWNER_DAY_MAX_BEHIND
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
+    return start, end
+
+
+def _local_owner_day_window(day: date) -> Optional[tuple[datetime, datetime]]:
+    """Return the current-zone interval for an owner day with a usable instant."""
+
+    try:
+        return (
+            _local_midnight(day).astimezone(timezone.utc),
+            _local_midnight(day + timedelta(days=1)).astimezone(timezone.utc),
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _intervals_overlap(
+    first_start: datetime,
+    first_end: datetime,
+    second_start: datetime,
+    second_end: datetime,
+) -> bool:
+    """Whether two half-open instant intervals overlap."""
+
+    return first_start < second_end and first_end > second_start
+
+
+def _unknown_time_owner_day_envelope(
+    row: dict,
+) -> Optional[tuple[datetime, datetime]]:
+    """Return an owner-day envelope only when its persisted instant is absent."""
+
+    if _instant(row.get("last_metered_at")) is not None:
+        return None
+    day = row.get("day")
+    if not isinstance(day, str):
+        return None
+    calendar_day = _calendar_day(day)
+    return _utc_owner_day_envelope(calendar_day) if calendar_day is not None else None
+
+
+def _hourly_owner_day_window(
+    row: dict,
+) -> Optional[tuple[datetime, datetime]]:
+    """Use one owner-day window for hourly selection and uncertainty projection."""
+
+    day = row.get("day")
+    if not isinstance(day, str):
+        return None
+    calendar_day = _calendar_day(day)
+    if calendar_day is None:
+        return None
+    unknown_owner_envelope = _unknown_time_owner_day_envelope(row)
+    if unknown_owner_envelope is not None:
+        return unknown_owner_envelope
+    return _local_owner_day_window(calendar_day)
+
+
 def _overlaps_local_day(start: datetime, end: datetime, day: date) -> bool:
     """Whether an instant interval intersects a local calendar day.
 
@@ -296,12 +374,12 @@ def _overlaps_local_day(start: datetime, end: datetime, day: date) -> bool:
     Unrepresentable persisted dates are invalid evidence, never a read failure.
     """
 
-    try:
-        day_start = _local_midnight(day)
-        day_end = _local_midnight(day + timedelta(days=1))
-        return start < end and start < day_end and end > day_start
-    except (OverflowError, OSError, ValueError):
-        return False
+    window = _local_owner_day_window(day)
+    return (
+        window is not None
+        and start < end
+        and _intervals_overlap(start, end, *window)
+    )
 
 
 def _hour_start(moment: datetime) -> datetime:
@@ -646,8 +724,11 @@ def _recency(
 
     Daily reports retain the existing owner-day ordering. Write retention and
     hourly reads also admit old-zone owners through UTC evidence, so their recency
-    calendar label must follow that evidence in the current zone. This changes
-    eviction only, never persisted daily ownership.
+    calendar label must follow that evidence in the current zone. An owner with
+    neither a usable instant nor a usable hourly key is admitted by its
+    plausibility envelope but ranks below every known instant, so uncertainty
+    cannot evict a newer call. This changes eviction only, never persisted daily
+    ownership.
     """
 
     metered = _instant(row["last_metered_at"])
@@ -664,6 +745,12 @@ def _recency(
         if evidence:
             latest = max(evidence)
             return (local_usage_day(latest).isoformat(), latest)
+        if (
+            _unknown_time_owner_day_envelope(row) is not None
+            or metered is None
+            or metered > ceiling
+        ):
+            return ("", _OLDEST_INSTANT)
     if metered is None or metered > ceiling:
         return (row["day"], _OLDEST_INSTANT)
     return (row["day"], metered)
@@ -783,21 +870,15 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
             _row_key(row),
         )
         incomplete = True
-    row_day = _calendar_day(row.get("day", ""))
     row_day_overlaps = False
-    if not incomplete and row_day is not None:
-        try:
-            day_start = _local_midnight(row_day).astimezone(timezone.utc)
-            day_end = _local_midnight(row_day + timedelta(days=1)).astimezone(timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            day_start = None
-            day_end = None
-        row_day_overlaps = (
-            day_start is not None
-            and day_end is not None
-            and day_start <= measured
-            and day_end > oldest_start
-        )
+    if not incomplete:
+        owner_day_window = _hourly_owner_day_window(row)
+        if owner_day_window is not None:
+            row_day_overlaps = _intervals_overlap(
+                oldest_start,
+                measured,
+                *owner_day_window,
+            )
     if not incomplete and (row_day_overlaps or retained or expired_known):
         # Compare durable UTC slices even when a host timezone change makes the
         # persisted local owner day fall outside the current display grid.
@@ -1124,8 +1205,22 @@ class BoundedUsageLedger:
         hourly_start = _hour_starts(measured)[0]
         placed = []
         for row in rows:
-            if not oldest <= row["day"] <= newest and not _has_recent_hourly_evidence(
-                row, hourly_start, measured
+            has_recent_hourly_evidence = _has_recent_hourly_evidence(
+                row, hourly_start, measured,
+            )
+            unknown_owner_envelope = _unknown_time_owner_day_envelope(row)
+            has_plausible_hourly_evidence = (
+                unknown_owner_envelope is not None
+                and _intervals_overlap(
+                    hourly_start,
+                    measured,
+                    *unknown_owner_envelope,
+                )
+            )
+            if (
+                not oldest <= row["day"] <= newest
+                and not has_recent_hourly_evidence
+                and not has_plausible_hourly_evidence
             ):
                 continue
             metered = _instant(row["last_metered_at"])
@@ -1192,11 +1287,11 @@ class BoundedUsageLedger:
             latest = _instant(row.get("last_metered_at"))
             if latest is not None and latest < horizon_start:
                 continue
-            row_day = _calendar_day(row["day"])
-            if row_day is not None and _overlaps_local_day(
+            owner_day_window = _hourly_owner_day_window(row)
+            if owner_day_window is not None and _intervals_overlap(
                 horizon_start,
                 report_instant,
-                row_day,
+                *owner_day_window,
             ):
                 candidates.append(row)
                 continue
@@ -1429,14 +1524,15 @@ class BoundedUsageLedger:
                     and first_start <= latest <= report_instant
                     and local_usage_day(latest) != row_day
                 )
-                if row_day is not None:
+                owner_day_window = _hourly_owner_day_window(row)
+                if owner_day_window is not None:
                     for index, start in enumerate(starts):
                         end = (
                             starts[index + 1]
                             if index + 1 < len(starts)
                             else report_instant
                         )
-                        if _overlaps_local_day(start, end, row_day):
+                        if _intervals_overlap(start, end, *owner_day_window):
                             incomplete.add(index)
                             overlapping = True
                 if not overlapping or owner_mismatch:
