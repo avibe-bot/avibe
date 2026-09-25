@@ -260,6 +260,31 @@ These are bounded repairs to existing owners, not another storage redesign.
 Keep valid zero-token reports and unreported requests distinct, preserve daily
 counts, and do not change public API fields or the approved pending-queue policy.
 
+Review of `39b083743a` added three findings (38 threads across eleven
+findings-bearing heads). The coordinating owner approved one bounded structural
+closure round before further implementation:
+
+- Replace the current-zone interpretation of timestamp-less owner dates with
+  one shared conservative UTC plausibility envelope. Read selection, write
+  retention, uncertainty projection, and capacity ranking must agree; an
+  unknown-time owner must not evict a known newer call. Sweep all hourly paths
+  that reinterpret owner dates, and cover absent/invalid timestamps, both zone
+  directions, partial/no overlap, expiry, subsequent writes, and bounded capacity.
+  Keep daily ownership, public fields, and persisted metadata unchanged.
+- Reuse the Model Hub percentage formatter with the active translator locale
+  for every usage percentage, preserving unavailable/zero guards and precision.
+- Expose the active metric column's direction through `aria-sort` and a
+  translated sort-state label; test the state against the actual row order.
+
+The owner also set a convergence rule: future P0/P1 findings and regressions of
+existing fixes remain actionable. New P2/P3 findings outside temporal evidence,
+locale formatting, existing-control accessibility, or this PR's contract are
+recorded as known follow-ups and dispositioned without another implementation
+round. Recurrence of the three approved classes requires a fresh class-level
+root-cause report. Readiness requires an exact-head clean review or only
+owner-approved follow-up dispositions, zero unresolved threads, full green CI,
+and a clean merge state. The coordinating owner alone performs the merge.
+
 ## Known by design
 
 - This is metered gateway usage, not native subscription quota or monetary cost.
