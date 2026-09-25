@@ -941,6 +941,24 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
     } in result["findings"]
 
 
+def _versioned_nodes(node):
+    """Yield every `contract_version` subschema, however deeply a branch nests it."""
+
+    if isinstance(node, dict):
+        declared = node.get("properties")
+        if isinstance(declared, dict) and isinstance(declared.get("contract_version"), dict):
+            yield declared["contract_version"]
+        for value in node.values():
+            yield from _versioned_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _versioned_nodes(item)
+
+
+def test_api_response_envelope_stays_versioned():
+    assert any(_versioned_nodes(_schema("api-response.schema.json")))
+
+
 def test_turn_provenance_contract_preserves_an_empty_stripped_effort():
     payload = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
     payload["served"]["stripped_reasoning_efforts"] = [""]

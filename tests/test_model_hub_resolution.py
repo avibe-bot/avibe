@@ -2010,6 +2010,30 @@ def test_provision_cancellation_fails_when_cleanup_is_not_durable(tmp_path):
     assert service.revocations.list() == []
 
 
+def test_credential_cleanup_settlement_has_one_durable_boundary():
+    from ast import AsyncFunctionDef, Attribute, Call, parse, walk
+    from pathlib import Path
+
+    tree = parse(
+        (Path(__file__).parents[1] / "core/handlers/model_hub/service.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    raw_cleanup_callers = {
+        function.name
+        for function in walk(tree)
+        if isinstance(function, AsyncFunctionDef)
+        and any(
+            isinstance(node, Call)
+            and isinstance(node.func, Attribute)
+            and node.func.attr == "_rollback_credential"
+            for node in walk(function)
+        )
+    }
+
+    assert raw_cleanup_callers == {"_require_credential_cleanup"}
+
+
 def test_created_source_cancellation_fails_when_cleanup_is_not_durable(tmp_path):
     adapter = FakeAdapter()
     service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
