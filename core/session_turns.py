@@ -7737,6 +7737,7 @@ class SessionTurnManager:
         entry = self.in_flight.get(session_id)
         active = entry is not None and not entry.task.done()
         native_turn_started = False
+        native_turn_id: str | None = None
         active_turn_id: str | None = None
         backend = ""
         backend_alive: Optional[bool] = None
@@ -7781,11 +7782,25 @@ class SessionTurnManager:
         try:
             with self._sqlite_engine().begin() as conn:
                 pending_input_count = len(delivery_store.list_queued(conn, session_id))
+                if active and self._durable_schema_available():
+                    durable_turn = delivery_store.active_turn(conn, session_id)
+                    if (
+                        durable_turn is not None
+                        and str(durable_turn["id"]) == str(active_turn_id or "")
+                    ):
+                        native_turn_id = (
+                            str(durable_turn.get("native_turn_id") or "").strip()
+                            or None
+                        )
                 if not active and self._durable_schema_available():
                     durable_turn = delivery_store.active_turn(conn, session_id)
                     if durable_turn is not None:
                         active = True
                         active_turn_id = str(durable_turn["id"])
+                        native_turn_id = (
+                            str(durable_turn.get("native_turn_id") or "").strip()
+                            or None
+                        )
                         native_turn_started = durable_turn["state"] == "active"
                         backend = str(durable_turn.get("backend") or "").strip()
                         initial = delivery_store.delivery_for_turn(
@@ -7891,6 +7906,8 @@ class SessionTurnManager:
         }
         if backend:
             result["backend"] = backend
+        if native_turn_id:
+            result["native_turn_id"] = native_turn_id
         if owner is not None:
             result["owner"] = owner
         if active and active_turn_id:
@@ -7900,6 +7917,44 @@ class SessionTurnManager:
             if recovery:
                 result["model_recovery"] = recovery
         return result
+
+    def native_turn_id_for_initial_message(
+        self,
+        session_id: str,
+        message_id: str,
+    ) -> str | None:
+        """Return the persisted native turn id for one turn's initial message."""
+
+        normalized_session_id = str(session_id or "").strip()
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_session_id or not normalized_message_id:
+            return None
+        try:
+            with self._sqlite_engine().connect() as conn:
+                row = conn.execute(
+                    select(session_turn_rows.c.native_turn_id)
+                    .select_from(
+                        session_turn_rows.join(
+                            delivery_rows,
+                            session_turn_rows.c.initial_delivery_id == delivery_rows.c.id,
+                        )
+                    )
+                    .where(session_turn_rows.c.session_id == normalized_session_id)
+                    .where(delivery_rows.c.message_id == normalized_message_id)
+                    .order_by(
+                        session_turn_rows.c.created_at.desc(),
+                        session_turn_rows.c.id.desc(),
+                    )
+                    .limit(1)
+                ).mappings().first()
+        except Exception:
+            logger.debug(
+                "Failed to read native turn id for initial message %s",
+                normalized_message_id,
+                exc_info=True,
+            )
+            return None
+        return str((row or {}).get("native_turn_id") or "").strip() or None
 
     async def release_for_service_shutdown(self) -> int:
         """Fail exact accepted Run owners without draining replacement work."""

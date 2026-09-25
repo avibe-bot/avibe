@@ -232,7 +232,9 @@ async def dispatch_model_hub_rpc(
     if operation == "migration_scan":
         return service.migration_scan()
     if operation == "migration_apply":
-        return await service.migration_apply(payload.get("item_ids"))
+        return await service.migration_apply(
+            payload.get("item_ids"), payload.get("clean_api_keys", False),
+        )
     if operation == "runtime_status":
         return await service.runtime_status()
     if operation == "runtime_install":

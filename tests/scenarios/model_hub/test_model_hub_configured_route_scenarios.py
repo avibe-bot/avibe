@@ -829,7 +829,7 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
 
     service.migration_guard = lambda backends: nullcontext(verify_fixture_idle)
     scan = service.migration_scan()["items"]
-    result = asyncio.run(service.migration_apply([item["id"] for item in scan]))
+    result = asyncio.run(service.migration_apply([item["id"] for item in scan], clean_api_keys=True))
 
     serialized = json.loads(json.dumps(store.load().to_payload()))
     reloaded = ModelHubConfig.from_payload(serialized)

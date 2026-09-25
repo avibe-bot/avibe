@@ -884,6 +884,12 @@ scenarios:
     kind: migration
     layer: unit
     test: "ui/src/components/onboarding/providers/providerStage.test.ts::MH-MIG-006: keeps a key whose display mask collides with a Hub source"
+  - id: MH-MIG-007
+    name: Default migration copies API keys, withdraws only subscription logins, and does not rediscover kept keys
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_007_default_apply_copies_api_keys_and_withdraws_only_subscriptions
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered

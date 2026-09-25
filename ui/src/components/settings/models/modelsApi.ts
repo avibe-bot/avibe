@@ -156,7 +156,8 @@ export type ModelsApi = {
   updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]): Promise<Source>;
   deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
-  applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
+  /** API keys are copied and kept natively unless `cleanApiKeys`. */
+  applyMigration(itemIds: string[], cleanApiKeys?: boolean): Promise<MigrationApplyResult>;
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   /** Metered token report over a trailing local-day window. `days` is a REQUEST:
@@ -640,7 +641,10 @@ export const modelsApi: ModelsApi = {
   updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then((r) => (r.source ?? r) as Source),
   deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
-  applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
+  applyMigration: (itemIds, cleanApiKeys = false) => call<MigrationApplyResult>(
+    '/api/models/migration/apply',
+    jsonInit('POST', { item_ids: itemIds, clean_api_keys: cleanApiKeys }),
+  ),
   listEvents: (limit = 20, before) =>
     call<{ events: ResolutionEvent[] }>(
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,

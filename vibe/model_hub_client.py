@@ -325,8 +325,8 @@ class ModelHubRemoteService:
     def migration_scan(self) -> dict:
         return _rpc_sync("migration_scan")
 
-    async def migration_apply(self, item_ids: object) -> dict:
-        return await _rpc("migration_apply", {"item_ids": item_ids})
+    async def migration_apply(self, item_ids: object, clean_api_keys: object = False) -> dict:
+        return await _rpc("migration_apply", {"item_ids": item_ids, "clean_api_keys": clean_api_keys})
 
     async def runtime_status(self) -> dict:
         return await _rpc("runtime_status")

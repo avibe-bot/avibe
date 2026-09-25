@@ -424,8 +424,10 @@ after exposure. Setup must not duplicate cleanup, custody writes, mode transitio
 or retry machinery, and must not send a second mode PATCH after successful apply.
 
 Cards, the primary action and Detected actions delegate to this feature's complete-group review. Keep
-every required backend/file visible and show the exact consequence
-`迁移后，CLI的认证信息将完全交由模型网关管理`, with **Not now / Start migration**. Only the latter
+every required backend/file visible and show the exact consequence from `copy-contract.json`
+(`onboarding.import.description`: subscription sign-ins move, API keys are copied and their native
+configuration is kept unless the dialog's unchecked cleanup opt-in is chosen), with
+**Not now / Start migration**. Only the latter
 explicit confirmation invokes apply. New/incomplete takeover invokes server dependency ensure
 before credential withdrawal and again before sync/start; it retains installation admission
 even when a healthy engine exists (operation table below). Selection, setup entry, gateway installation/start and

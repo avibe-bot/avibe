@@ -1791,7 +1791,9 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, Model Hub will manage the selected authentication.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.",
+        "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
+        "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
         "sharedFiles": "These backends share authentication saved in files and must migrate together: {{backends}}. Changing one selection updates the others.",
         "scanFailed": "Couldn't scan native configs, please retry",
@@ -5161,7 +5163,7 @@
     },
     "import": {
       "title": "Migrate to Model Hub",
-      "description": "After migration, these assistants connect through Model Hub. The matching keys are removed from their original config files; other settings stay as they are.",
+      "description": "After migration, these assistants connect through Model Hub. The keys in their original config files stay in place and are no longer used by these assistants; other settings stay as they are.",
       "action_one": "Review {{count}} selected",
       "action_other": "Review {{count}} selected",
       "scopeNote": "Only API keys can be migrated here. Handle subscription sign-ins and anything else in Settings.",
@@ -5171,7 +5173,7 @@
       "progressDetail": "Migrating authentication and updating linked assistant connections",
       "done_one": "Migrated {{count}} configuration item",
       "done_other": "Migrated {{count}} configuration items",
-      "doneDetail": "Migration and native authentication cleanup are complete. Check the assistants’ model routes.",
+      "doneDetail": "Migration is complete. Check the assistants’ model routes.",
       "remaining_one": "{{count}} item needs review. Continue any time.",
       "remaining_other": "{{count}} items need review. Continue any time.",
       "remainingAction": "Review remaining",

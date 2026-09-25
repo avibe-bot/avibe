@@ -99,12 +99,12 @@ def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, 
         await activate(ref)
 
     adapter.activate_oauth_credential = checked_activate
-    result = asyncio.run(service.migration_apply(item_ids))
+    result = asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
     assert result["applied"] == 1
     assert adapter.validated == adapter.activated
     assert service.migration_journal.load() is None
     assert not service.migration_blocked_backends
-    assert asyncio.run(service.migration_apply(item_ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     assert "refresh_token" not in service.migration_journal.path.with_name("last-completed.json").read_text()
 
@@ -126,7 +126,7 @@ def test_failure_after_possible_rotation_retains_current_owner_and_retries(monke
 
     adapter.activate_oauth_credential = activate_then_fail
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(item_ids))
+        asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
     assert service.migration_journal.load()["phase"] == "exposed"
     assert store.config.agents["codex"].mode == "hub"
     assert not (home / ".codex/auth.json").exists()
@@ -139,7 +139,7 @@ def test_failure_after_possible_rotation_retains_current_owner_and_retries(monke
         await activate(ref)
 
     adapter.activate_oauth_credential = resume
-    assert asyncio.run(service.migration_apply(item_ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     assert service.migration_journal.load() is None
 
@@ -165,7 +165,7 @@ def test_unavailable_runtime_preserves_native_oauth_before_custody(monkeypatch, 
 
     adapter.ensure_installed = unavailable
     with pytest.raises(ModelHubError) as failure:
-        asyncio.run(service.migration_apply(item_ids))
+        asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
     assert failure.value.code == code
     assert native.read_bytes() == before
     assert store.config.to_payload() == previous
@@ -197,7 +197,7 @@ def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
     original = native.read_bytes()
     service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     if legacy_receipt:
         # Published receipts predate snapshot-bound consent. Their item IDs
         # encode the same grant/target inventory, without the new display data.
@@ -217,9 +217,9 @@ def test_completed_receipt_recleans_resurrected_credentials_without_reimport(
         # Cleanup may have changed other configuration layers. Fresh consent
         # is required, but it must not provision the restored old OAuth again.
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply(ids))
+            asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     ids = rescanned_ids
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert service.migration_scan()["items"] == []
     assert store.config.to_payload() == current
     assert (len(adapter.provisioned), len(adapter.oauth_provisioned)) == provisions
@@ -234,11 +234,11 @@ def test_completed_receipt_does_not_authorize_new_unconsented_native_key(monkeyp
     _write(native, '{"provider":{"openai":{"options":{"apiKey":"fixture-first"}}}}')
     service, _, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
-    asyncio.run(service.migration_apply(ids))
+    asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     changed = '{"provider":{"openai":{"options":{"apiKey":"fixture-new"}}}}'
     native.write_text(changed)
     with pytest.raises(ModelHubError) as failure:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert failure.value.code == "migration_item_conflict"
     assert native.read_text() == changed
     assert len(adapter.provisioned) == 1
@@ -260,7 +260,7 @@ def test_receipt_retains_known_oauth_with_a_different_fresh_selection(
         _write(other, other_payload)
     service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
-    asyncio.run(service.migration_apply(ids))
+    asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     receipt = service.migration_journal.completed()
     if legacy_receipt:
         for row, identity in zip(receipt["items"], receipt.pop("inventory_ids"), strict=True):
@@ -274,7 +274,7 @@ def test_receipt_retains_known_oauth_with_a_different_fresh_selection(
     assert {row["backend"] for row in rows} == (
         {"codex", "opencode"} if selection == "mixed" else {"codex"}
     )
-    result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    result = asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert result["applied"] == len(rows)
     assert len(adapter.oauth_provisioned) == 1
     assert len(adapter.provisioned) == 1
@@ -299,7 +299,7 @@ def test_receipt_cannot_prove_a_second_native_oauth_authorization(
     original = json.loads(native.read_text())
     service, store, adapter = _service(tmp_path, migration_home=home)
     ids = [row["id"] for row in service.migration_scan()["items"]]
-    asyncio.run(service.migration_apply(ids))
+    asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     receipt = service.migration_journal.completed()
     if legacy_receipt:
         for row, identity in zip(receipt["items"], receipt.pop("inventory_ids"), strict=True):
@@ -314,7 +314,7 @@ def test_receipt_cannot_prove_a_second_native_oauth_authorization(
     before = native.read_bytes(), store.config.to_payload()
     rows = service.migration_scan()["items"]
     with pytest.raises(ModelHubError) as failure:
-        asyncio.run(service.migration_apply([row["id"] for row in rows]))
+        asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert failure.value.code == "migration_reauthorization_required"
     assert (native.read_bytes(), store.config.to_payload()) == before
     assert len(adapter.oauth_provisioned) == 1
@@ -335,7 +335,7 @@ def test_restart_recovers_exposed_handoff_without_native_tokens(monkeypatch, tmp
 
     adapter.validate_oauth_credential = offline
     with pytest.raises(ModelHubError):
-        asyncio.run(first.migration_apply(ids))
+        asyncio.run(first.migration_apply(ids, clean_api_keys=True))
     second, _, _ = _service(tmp_path, migration_home=home)
     second.store = store
     second.adapter = adapter
@@ -364,7 +364,7 @@ def test_caller_cancellation_does_not_abandon_credential_custody(monkeypatch, tm
             await activate(ref)
 
         adapter.activate_oauth_credential = paused
-        task = asyncio.create_task(service.migration_apply(ids))
+        task = asyncio.create_task(service.migration_apply(ids, clean_api_keys=True))
         await entered.wait()
         task.cancel()
         await asyncio.sleep(0)
@@ -391,7 +391,7 @@ def test_native_compare_and_swap_does_not_erase_a_concurrent_login(monkeypatch, 
 
     service.migration_guard = lambda backends: nullcontext(changed_during_preparation)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert path.read_text() == concurrent
     assert adapter.activated == []
     assert service.migration_journal.load()["phase"] == "reverting"
@@ -452,7 +452,7 @@ def test_rejected_refresh_finishes_custody_without_claiming_success(monkeypatch,
 
     adapter.validate_oauth_credential = reject_claude
     with pytest.raises(ModelHubError) as failure:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert failure.value.code == "migration_credentials_invalid"
     assert len(adapter.validated) == 2
     assert service.migration_journal.load() is None
@@ -466,7 +466,7 @@ def test_rejected_refresh_finishes_custody_without_claiming_success(monkeypatch,
     assert codex.state.status != "needs_action"
     assert service.migration_journal.completed()["outcome"] == "needs_auth"
     with pytest.raises(ModelHubError) as repeated:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert repeated.value.code == "migration_credentials_invalid"
     assert len(adapter.validated) == 2
     # Normal Hub config/auth repair is not trapped behind the migration gate.
@@ -489,7 +489,7 @@ def test_explicit_hub_reauth_can_repair_inconclusive_exposed_takeover(
 
     adapter.validate_oauth_credential = inconclusive
     with pytest.raises(ModelHubError) as pending:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert pending.value.code == "migration_recovery_pending"
     source = store.config.sources[0]
     retained_ref = source.credential_ref
@@ -537,7 +537,7 @@ def test_explicit_hub_reauth_can_repair_inconclusive_exposed_takeover(
     assert not (home / ".codex/auth.json").exists()
     assert store.config.sources[0].state.status == "needs_action"
     with pytest.raises(ModelHubError) as replay:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert replay.value.code != "migration_credentials_invalid"
 
 
@@ -559,7 +559,7 @@ def test_explicit_reauth_keeps_verified_sibling_usable(monkeypatch, tmp_path):
 
     adapter.validate_oauth_credential = validate
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     claude = next(source for source in store.config.sources if source.vendor == "anthropic")
     codex = next(source for source in store.config.sources if source.vendor == "openai")
     assert service.migration_journal.load()["validated_source_ids"] == [claude.id]
@@ -599,7 +599,7 @@ def test_rejected_grant_terminal_decision_recovers_after_crash(monkeypatch, tmp_
     else:
         service.migration_journal.complete = fail_receipt
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     record = service.migration_journal.load()
     assert record["phase"] == "exposed"
     assert record["terminal"]["invalid_source_ids"]

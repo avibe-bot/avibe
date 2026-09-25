@@ -106,7 +106,7 @@ def test_static_proof_and_custody_use_canonical_value(home, tmp_path, shape, raw
     item = _selected(_items(service, roots))
     assert item.secret == KEY
     assert raw not in json.dumps(item.to_payload()) and KEY not in repr(item)
-    result = asyncio.run(service.migration_apply([item.id]))
+    result = asyncio.run(service.migration_apply([item.id], clean_api_keys=True))
     assert result["applied"] == 1
     [source] = store.config.sources
     assert proof_values == [adapter.keys[source.credential_ref][2]] == [KEY]
@@ -151,7 +151,7 @@ def test_static_canonical_value_reuses_existing_ref(home, tmp_path, shape):
         "base_url": item.base_url, "supply_channel": "hub", "billing": "metered",
         "state": {"status": "standby"}, "models": [], "credential_ref": ref,
     }))
-    asyncio.run(service.migration_apply([item.id]))
+    asyncio.run(service.migration_apply([item.id], clean_api_keys=True))
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert store.config.sources[0].credential_ref == ref
     assert adapter.observed and not adapter.transient_refs
@@ -195,7 +195,7 @@ def test_padding_only_change_never_bypasses_exact_consent(home, tmp_path, shape,
 
         adapter.observe_source = mutate
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([item.id]))
+        asyncio.run(service.migration_apply([item.id], clean_api_keys=True))
     assert changed is not None and path.read_bytes() == changed
     assert not store.config.sources
     assert not adapter.oauth_provisioned
@@ -234,7 +234,7 @@ def test_padded_settings_bearer_uses_proven_header_after_custody(home, tmp_path)
             service, store, _ = _service(tmp_path, migration_home=home)
             runtime = _real_http_adapter(service, tmp_path)
             [row] = service.migration_scan()["items"]
-            await service.migration_apply([row["id"]])
+            await service.migration_apply([row["id"]], clean_api_keys=True)
             [source] = store.config.sources
             assert runtime.state_store.read_api_key(source.credential_ref) == HTTP_KEY
             assert await runtime.credential_auth_scheme(source.credential_ref) == "bearer"
