@@ -118,7 +118,7 @@ complaint is a missing result. Two starting points, each run
 with `vibe data query --sql-file <file>` (or `--sql-file -` for stdin):
 
 ```sql
--- The reported session, with the backend and model that actually ran
+-- The reported session and its current backend, model, and effort
 select id, scope_id, agent_name, agent_backend, model, reasoning_effort, status
 from agent_sessions where id = '<session>';
 
