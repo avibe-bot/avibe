@@ -34,7 +34,7 @@ CURRENCY: Final = "USD"
 _MAX_PRICE_PER_MTOK: Final = 100_000.0
 _MAX_FEE_USD: Final = 100_000.0
 _MAX_KEY_CHARS: Final = 128
-_MAX_INT_DIGITS: Final = 1000
+_MAX_INT_DIGITS: Final = 400  # below Python's lowest settable int-to-str digit limit (640)
 # An alias may point at another alias, but not forever.
 _MAX_ALIAS_HOPS: Final = 4
 # One-hour cache writes cost twice the input price where the table says nothing.
@@ -387,7 +387,13 @@ def billing_period(today: date, renewal_day: Optional[int]) -> tuple[str, date, 
 
 
 def _parse_int(digits: str) -> int | float:
-    return int(digits) if len(digits) <= _MAX_INT_DIGITS else math.inf
+    # Any integer that cannot convert, whatever the interpreter's digit limit, is out of range.
+    if len(digits) > _MAX_INT_DIGITS:
+        return math.inf
+    try:
+        return int(digits)
+    except ValueError:
+        return math.inf
 
 
 def _read_overrides(path: Path) -> dict[str, Any]:

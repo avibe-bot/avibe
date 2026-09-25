@@ -359,6 +359,30 @@ def test_an_integer_past_the_json_digit_limit_is_ignored_alone(tmp_path):
     assert table.fee("team_seat") == 30
 
 
+def test_an_integer_past_a_lowered_interpreter_digit_limit_is_ignored_alone(tmp_path, monkeypatch):
+    """MH-PRICE-013: The per-entry rejection holds when the interpreter's int digit limit is set lower."""
+
+    import sys
+
+    if not hasattr(sys, "set_int_max_str_digits"):
+        pytest.skip("interpreter has no int digit limit")
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        # Force the conversion path past the cheap length check.
+        monkeypatch.setattr("core.handlers.model_hub.pricing._MAX_INT_DIGITS", 10_000)
+        (tmp_path / PRICE_OVERRIDE_FILENAME).write_text(
+            '{"models": {"claude-opus-5": {"input": %s, "output": 25}, "claude-fable-5-1": {"input": 7, "output": 8}}}'
+            % ("9" * 700),
+            encoding="utf-8",
+        )
+        table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+    finally:
+        sys.set_int_max_str_digits(previous)
+    assert table.price("claude-opus-5").input == 5
+    assert table.price("claude-fable-5-1").input == 7
+
+
 def test_a_padded_plan_key_still_matches_the_source_plan_that_names_it():
     """MH-PRICE-013: Plan keys are trimmed like a Source's plan, and an exact key wins over a padded one."""
 
