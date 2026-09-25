@@ -392,6 +392,7 @@ describe('UsageTab', () => {
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('No price yet');
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('$0.50');
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).not.toContain('≥');
+    expect(container.querySelector('.model-hub-usage-table-scroll tbody')?.textContent).toMatch(/\d%/);
     cleanup();
 
     // A floor keeps its 「≥」 in the itemized rows and the table total, not only the card.
@@ -405,6 +406,8 @@ describe('UsageTab', () => {
     const table = drawn.container.querySelector('.model-hub-usage-table-scroll')!;
     expect(table.querySelector('tbody')!.textContent).toContain('≥ $0.50');
     expect(table.querySelector('tfoot')!.textContent).toContain('≥ $0.50');
+    // A share of a floor total is not a known fraction.
+    expect(table.querySelector('tbody')!.textContent).not.toMatch(/\d%/);
   });
 
   it('MH-USAGE-032: a floor bucket reads 「≥」 in the chart legend and the bucket detail, an exact one does not', async () => {

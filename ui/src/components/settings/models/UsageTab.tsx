@@ -1132,7 +1132,10 @@ export const UsageTab: React.FC<{
                   {sortedRows.map((row) => {
                     const value = usageMetricValue(row.counters, metric);
                     const totalValue = usageMetricValue(tableTotal, metric);
-                    const share = value === null || totalValue === null || totalValue === 0 ? null : value / totalValue;
+                    // A share of a floor or of an unpriced part is not a known fraction.
+                    const shareUnknown = metric === 'cost' && (row.counters.api_cost_lower_bound === true
+                      || tableTotal.api_cost_lower_bound === true || usageHasNoPrice(row.counters));
+                    const share = shareUnknown || value === null || totalValue === null || totalValue === 0 ? null : value / totalValue;
                     return (
                       <tr key={row.key}>
                         <th scope="row">
