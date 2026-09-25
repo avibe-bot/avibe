@@ -221,6 +221,24 @@ the tray preserves the last shown frame, with off-screen recovery against the
 current display work areas. Fullscreen, Spaces, visibility, and routes are not
 restored. An absent or corrupt store uses the centered 1200×800 default.
 
+On macOS the main window uses an overlay title bar with a hidden title: the
+traffic lights float over the page and there is no separate title strip.
+WKWebView has no `app-region` CSS, and Tauri's drag-region attribute needs an IPC
+grant the Workbench origin must not have, so the shell lays one transparent
+native view (`src/macos_title_bar.rs`) over the top 28pt, above the WebView. A
+drag there moves the window; a double-click follows the system "double-click a
+window's title bar" setting. No capability or command is added. The shell also
+sets `--shell-titlebar-inset: 28px` on the top-level document before any page
+script runs; `ui/src/index.css` defaults it to `0px`, and Workbench surfaces
+that reach the top edge add it so no control sits under the strip. Because the
+shell can adopt an already-running Runtime whose older Workbench predates this
+contract, the overlay is opt-in per page: after every main-window page load the
+shell natively asks whether the page declares
+`<meta name="avibe-shell-titlebar-inset">` (both `index.html` files do). A page
+that does not, or cannot answer, gets the standard title bar with the window
+title, the strip hidden, and the inset reset to `0px`. Windows and Linux keep
+the native title bar and a zero inset.
+
 For manual acceptance, use a packaged test install with isolated app config and
 a fake loopback Runtime: set a non-default frame, quit/relaunch, hide/Open, and
 deliver a link both before and after readiness. Check the destination and frame,

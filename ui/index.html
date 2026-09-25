@@ -11,6 +11,10 @@
          home + visualViewport --app-vvh chat, see useViewportHeightVar). -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Avibe</title>
+    <!-- Tells the macOS desktop shell this page lays itself out below its overlay
+         title bar (--shell-titlebar-inset); without it the shell keeps the standard
+         title bar. -->
+    <meta name="avibe-shell-titlebar-inset" content="supported" />
 
     <!-- PWA / iOS standalone: "Add to Home Screen" launches a full-screen app
          (no Safari chrome), which sidesteps the iOS keyboard whitespace/accessory

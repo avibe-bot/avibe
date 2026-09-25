@@ -23,6 +23,8 @@ mod notifications;
 
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
+#[cfg(target_os = "macos")]
+mod macos_title_bar;
 
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
@@ -1186,12 +1188,17 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .iter()
         .find(|config| config.label == MAIN_WINDOW)?
         .clone();
-    WebviewWindowBuilder::from_config(app, &config)
+    let builder = WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .initialization_script(DESKTOP_SHELL_MARKER)
-        .on_new_window(|url, _features| handle_new_window_request(url))
-        .build()
-        .ok()
+        .on_new_window(|url, _features| handle_new_window_request(url));
+    // macOS draws the page under an overlay title bar (`tauri.conf.json`).
+    #[cfg(target_os = "macos")]
+    let builder = builder.initialization_script(macos_title_bar::inset_script());
+    let window = builder.build().ok()?;
+    #[cfg(target_os = "macos")]
+    macos_title_bar::install(&window);
+    Some(window)
 }
 
 /// Tells the Workbench, before any of its scripts run, that it is rendered by
@@ -1603,6 +1610,10 @@ pub fn run() {
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                        // Each loaded page decides whether it sits under the overlay
+                        // title bar; an older adopted Workbench gets the standard one.
+                        #[cfg(target_os = "macos")]
+                        macos_title_bar::sync(webview);
                         apply_pending_deep_link(webview.app_handle());
                         // Settings become available the moment a Workbench is on
                         // screen, not at the monitor's first tick. The shared
