@@ -21,7 +21,7 @@ Preferred CLI shape:
 - remove one exact queued message after inspecting its stable ID: `vibe session queue remove '<session-id>' '<message-id>'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork another explicit Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
-- recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`
+- recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`; write cron weekdays as names (`mon` ... `sun`), since numeric weekdays are rejected
 - one-off task for this conversation: `vibe task add --at '<ISO-8601>' --message '...'`
 - task that creates a visible sibling Session: `vibe task add --create-session --same-scope --cron '<expr>' --message '...'`
 - scheduled command with no Agent turn: `vibe task add --cron '<expr>' --shell '<command>'`

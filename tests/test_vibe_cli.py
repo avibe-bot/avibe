@@ -448,6 +448,29 @@ def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
     ]
 
 
+def test_doctor_lists_stored_cron_tasks_with_numeric_weekdays(monkeypatch):
+    """Tasks written before numeric weekdays were refused still fire a day off intent."""
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+    assert cli._scheduled_task_weekday_items() == []
+
+    store = cli.ScheduledTaskStore()
+    for cron in ("0 7 * * 6", "0 9 * * mon-fri", "0 * * * *"):
+        store.add_task(
+            session_key="slack::channel::C123",
+            prompt="hello",
+            schedule_type="cron",
+            cron=cron,
+            timezone_name="UTC",
+        )
+
+    [item] = cli._scheduled_task_weekday_items()
+
+    assert item["status"] == "warn"
+    assert item["code"] == "runtime.cron_numeric_weekday"
+    assert [task["cron"] for task in item["tasks"]] == ["0 7 * * 6"]
+    assert "0 7 * * 6" in item["message"]
+
+
 def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")

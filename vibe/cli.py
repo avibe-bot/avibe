@@ -54,6 +54,7 @@ from core.caller_context import (
     caller_resource_user_context_from_env,
 )
 from core.command_runner import command_line_preview
+from core.cron_weekday import ambiguous_weekday_field, weekday_readings
 from core.install_integrity import verify_python_environment, verify_site_packages
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
@@ -828,7 +829,7 @@ def _task_add_examples_text() -> str:
           Use --cwd only for Sessions created by this task; existing target Sessions keep their own cwd.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
           Use --cron for recurring jobs and --at for one-shot jobs.
-          Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid. Prefer weekday names such as mon, tue, or sun when scheduling by day of week.
+          Write cron weekdays as names (mon, tue, ... sun). Numeric weekdays are rejected because Avibe's scheduler reads 0 as Monday while crontab(5) reads 0 as Sunday.
           --timezone controls how --cron and naive --at timestamps are interpreted.
 
         Command tasks:
@@ -871,7 +872,7 @@ def _task_update_examples_text() -> str:
           Use --reset-delivery to return to following the session target directly.
           Use --same-scope or --scope-id when this task should create new Sessions in a specific scope.
           When changing schedule fields, pass either --cron or --at.
-          Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid. Prefer weekday names such as mon, tue, or sun when scheduling by day of week.
+          Write cron weekdays as names (mon, tue, ... sun). Numeric weekdays are rejected because Avibe's scheduler reads 0 as Monday while crontab(5) reads 0 as Sunday.
           Use --clear-name if you want the task to stop storing a custom name.
         """
     )
@@ -1505,6 +1506,44 @@ def _show_git_checkpoint_items() -> list[dict]:
             "status": "warn",
             "message": i18n_t("doctor.item.showGitUnavailable", _configured_cli_language()),
             "code": "runtime.show_git_unavailable",
+        }
+    ]
+
+
+def _scheduled_task_weekday_items() -> list[dict]:
+    """Warn about stored cron tasks whose numeric weekday may fire a day off intent."""
+
+    if not paths.get_sqlite_state_path().exists():
+        return []
+    try:
+        with _definition_read_store() as store:
+            rows = store.list_scheduled_tasks()
+    except Exception:
+        logger.debug("Skipping cron weekday doctor check", exc_info=True)
+        return []
+    affected = [
+        {"id": row["id"], "name": row.get("name"), "cron": row["cron"]}
+        for row in rows
+        if row.get("schedule_type") == "cron"
+        and row.get("cron")
+        and not row.get("retired_at")
+        and ambiguous_weekday_field(row["cron"]) is not None
+    ]
+    if not affected:
+        return []
+    language = _configured_cli_language()
+    return [
+        {
+            "status": "warn",
+            "message": i18n_t(
+                "doctor.item.cronNumericWeekday",
+                language,
+                count=len(affected),
+                tasks=", ".join(f"{item['id']} ({item['cron']})" for item in affected),
+            ),
+            "action": i18n_t("doctor.action.cronNumericWeekday", language),
+            "code": "runtime.cron_numeric_weekday",
+            "tasks": affected,
         }
     ]
 
@@ -4213,17 +4252,7 @@ def cmd_task_add(args):
         store = _task_store()
 
         if args.cron:
-            try:
-                CronTrigger.from_crontab(args.cron, timezone=timezone)
-            except ValueError as exc:
-                raise TaskCliError(
-                    f"invalid cron expression: {args.cron}",
-                    code="invalid_cron",
-                    hint="Use standard 5-field crontab format: minute hour day-of-month month day-of-week.",
-                    example="0 * * * *",
-                    help_command="vibe task add --help",
-                    details={"cron": args.cron},
-                ) from exc
+            _validate_task_cron(args.cron, timezone, help_command="vibe task add --help")
             task = store.add_task(
                 name=_normalize_task_name(getattr(args, "name", None)),
                 session_key=session_key,
@@ -4449,6 +4478,44 @@ def _resolve_definition_name_update(args, task, *, help_command: str) -> Optiona
     return task.name
 
 
+def _validate_task_cron(cron: str, timezone: ZoneInfo, *, help_command: str) -> None:
+    """Refuse a cron the scheduler cannot parse or whose weekday digits are ambiguous."""
+
+    try:
+        CronTrigger.from_crontab(cron, timezone=timezone)
+    except ValueError as exc:
+        raise TaskCliError(
+            f"invalid cron expression: {cron}",
+            code="invalid_cron",
+            hint="Use standard 5-field crontab format: minute hour day-of-month month day-of-week.",
+            example="0 * * * *",
+            help_command=help_command,
+            details={"cron": cron},
+        ) from exc
+    weekday = ambiguous_weekday_field(cron)
+    if weekday is None:
+        return
+    lang = _configured_cli_language()
+    hint = i18n_t("error.cronNumericWeekday.hint", lang)
+    avibe_reading, crontab_reading = weekday_readings(weekday)
+    if avibe_reading is not None and crontab_reading is not None:
+        readings = i18n_t(
+            "error.cronNumericWeekday.readings",
+            lang,
+            avibe=avibe_reading,
+            crontab=crontab_reading,
+        )
+        hint = f"{readings} {hint}"
+    raise TaskCliError(
+        i18n_t("error.cronNumericWeekday.message", lang, field=weekday),
+        code="ambiguous_cron_weekday",
+        hint=hint,
+        example="0 9 * * mon-fri",
+        help_command=help_command,
+        details={"cron": cron, "day_of_week": weekday},
+    )
+
+
 def _resolve_definition_schedule_update(
     args,
     task,
@@ -4478,17 +4545,7 @@ def _resolve_definition_schedule_update(
             help_command=help_command,
         )
     if args.cron:
-        try:
-            CronTrigger.from_crontab(args.cron, timezone=timezone)
-        except ValueError as exc:
-            raise TaskCliError(
-                f"invalid cron expression: {args.cron}",
-                code="invalid_cron",
-                hint="Use standard 5-field crontab format: minute hour day-of-month month day-of-week.",
-                example="0 * * * *",
-                help_command=help_command,
-                details={"cron": args.cron},
-            ) from exc
+        _validate_task_cron(args.cron, timezone, help_command=help_command)
         return "cron", args.cron, None, timezone_name
     if args.at:
         try:
@@ -12358,6 +12415,7 @@ def _doctor(*, deep: bool = False):
         *_restart_state_items(),
         *_runtime_architecture_items(),
         *_show_git_checkpoint_items(),
+        *_scheduled_task_weekday_items(),
     ]:
         runtime_items.append(item)
         status = item.get("status")
@@ -17437,7 +17495,9 @@ def build_parser():
         help=argparse.SUPPRESS,
     )
     schedule_group = task_add_parser.add_mutually_exclusive_group(required=True)
-    schedule_group.add_argument("--cron", help="Recurring schedule in 5-field crontab format")
+    schedule_group.add_argument(
+        "--cron", help="Recurring schedule in 5-field crontab format; write weekdays as names (mon ... sun)"
+    )
     schedule_group.add_argument("--at", help="One-shot timestamp in ISO 8601 format")
     # Not ``required=True`` any more: a command task carries no message at all, so the
     # "message or command" choice is enforced in ``cmd_task_add`` where both inputs are
@@ -17513,7 +17573,9 @@ def build_parser():
         action="store_true",
         help="Clear any stored delivery override so delivery follows the session target directly",
     )
-    task_update_parser.add_argument("--cron", help="Replace the schedule with a recurring 5-field crontab")
+    task_update_parser.add_argument(
+        "--cron", help="Replace the schedule with a recurring 5-field crontab; write weekdays as names (mon ... sun)"
+    )
     task_update_parser.add_argument("--at", help="Replace the schedule with a one-shot ISO 8601 timestamp")
     task_update_parser.add_argument("--message", help="Replace the stored user message text")
     task_update_parser.add_argument("--message-file", help="Replace the stored user message from a UTF-8 text file")
