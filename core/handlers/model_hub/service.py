@@ -4607,21 +4607,26 @@ class ModelHubService:
                 model_id,
             )
             # Suppliers speak first, models.dev fills what they left unsaid, and
-            # an unstated ladder falls back to the tiers the model family's own
-            # protocol accepts, unless models.dev says it cannot reason at all.
+            # an unstated ladder falls back to the tiers the backend's request
+            # protocol accepts, unless models.dev says the model cannot reason.
             match = described.get(model_id)
             enrichment = (
                 {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
                 if match is not None
                 else {}
             )
+            if reasoning_efforts and enrichment.get("supports_reasoning") is False:
+                # A supplier's ladder outranks the catalog's flag, and a false
+                # flag would suppress that ladder at launch.
+                enrichment["supports_reasoning"] = None
             display_name = display_name or (match or {}).get("display_name")
             if not reasoning_efforts and match is not None:
                 reasoning_efforts = list(match["reasoning_efforts"])
             if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
-                reasoning_efforts = list(
-                    PROTOCOL_REASONING_EFFORT_DEFAULTS[native_protocol_for_model_id(model_id)]
-                )
+                request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
+                    agent_backend
+                ) or native_protocol_for_model_id(model_id)
+                reasoning_efforts = list(PROTOCOL_REASONING_EFFORT_DEFAULTS[request_protocol])
             admitted = admissible_backend_model(
                 agent_backend,
                 model_id,

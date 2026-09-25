@@ -2626,11 +2626,17 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
             # A near neighbour of a catalog id, which must not borrow its row.
             ModelHubModelConfig(id="gpt-described-mini", provenance="discovered"),
             ModelHubModelConfig(id="claude-unknown", provenance="discovered"),
+            ModelHubModelConfig(
+                id="gpt-relay-reasons",
+                provenance="discovered",
+                reasoning_efforts=["low", "high"],
+            ),
         ],
         credential_ref="cred_enrich001",
     )
     store.config.sources = [source]
-    store.config.agents["codex"].sources.order = [source.id]
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id]
     service.models_dev_catalog = lambda: {
         "openai": {
             "name": "OpenAI",
@@ -2649,6 +2655,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
                     "reasoning_options": [{"type": "effort", "values": ["low"]}],
                 },
                 "gpt-no-reasoning": {"name": "GPT No Reasoning", "reasoning": False},
+                "gpt-relay-reasons": {"name": "GPT Relay Reasons", "reasoning": False},
             },
         }
     }
@@ -2673,12 +2680,25 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
     assert rows["gpt-supplier-says"]["display_name"] == "Relay label"
     assert rows["gpt-supplier-says"]["reasoning_efforts"] == ["high"]
     assert rows["gpt-supplier-says"]["models_dev_id"] == "openai/gpt-supplier-says"
-    # Nobody states a ladder: the tiers the family's protocol accepts, and no
+    # Nobody states a ladder: the tiers the backend's request protocol accepts —
+    # fixed for Codex and Claude, the model family's for OpenCode — and no
     # description.
-    for model_id in ("gpt-unknown", "gpt-described-mini"):
-        assert rows[model_id]["reasoning_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
-        assert "models_dev_id" not in rows[model_id]
-    assert rows["claude-unknown"]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    openai = ["minimal", "low", "medium", "high", "xhigh"]
+    anthropic = ["low", "medium", "high", "xhigh", "max"]
+    for model_id in ("gpt-unknown", "gpt-described-mini", "claude-unknown"):
+        assert rows[model_id]["reasoning_efforts"] == openai
+    assert "models_dev_id" not in rows["gpt-unknown"]
+    assert "models_dev_id" not in rows["gpt-described-mini"]
+    elsewhere = {
+        backend: {row["id"]: row for row in service.agent_model_candidates(backend)["providers"]}
+        for backend in ("claude", "opencode")
+    }
+    assert elsewhere["claude"]["gpt-unknown"]["reasoning_efforts"] == anthropic
+    assert elsewhere["opencode"]["gpt-unknown"]["reasoning_efforts"] == openai
+    assert elsewhere["opencode"]["claude-unknown"]["reasoning_efforts"] == anthropic
+    # A supplier's ladder is not switched off by the catalog's reasoning flag.
+    assert rows["gpt-relay-reasons"]["reasoning_efforts"] == ["low", "high"]
+    assert rows["gpt-relay-reasons"]["supports_reasoning"] is None
     # A model stated not to reason gets no invented ladder.
     assert rows["gpt-no-reasoning"]["reasoning_efforts"] == []
     assert rows["gpt-no-reasoning"]["supports_reasoning"] is False

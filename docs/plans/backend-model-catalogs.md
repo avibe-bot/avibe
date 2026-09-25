@@ -265,8 +265,10 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   proposes that entry's `models_dev_id`, limits, modalities and capabilities, and its display
   name and efforts fill only what suppliers left empty. When no side states efforts and
   models.dev does not say `supports_reasoning: false`, the proposal is the
-  `PROTOCOL_REASONING_EFFORT_DEFAULTS` ladder of the protocol the id's model family derives
-  (`anthropic` for Claude families, `openai_responses` otherwise). The match reads the cached catalog only and
+  `PROTOCOL_REASONING_EFFORT_DEFAULTS` ladder of the backend's request protocol (Claude
+  `anthropic`, Codex `openai_responses`, OpenCode the id's derived `native_protocol`). A
+  models.dev `supports_reasoning: false` is proposed as `null` when suppliers state efforts,
+  so the catalog flag cannot suppress a supplier's ladder. The match reads the cached catalog only and
   an unreadable catalog proposes no enrichment. The picker copies
   those proposals into the editable catalog draft; the custom editor copies the chosen
   models.dev suggestion. A proposal contains only values the catalog can store — an effort
