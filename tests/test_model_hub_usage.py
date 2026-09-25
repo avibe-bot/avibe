@@ -723,11 +723,22 @@ def test_usage_writer_preserves_daily_owners_inside_one_utc_hour(
         time.tzset()
 
 
-@pytest.mark.parametrize("future_minute", [45, 75], ids=["current-hour", "next-hour"])
+@pytest.mark.parametrize(
+    ("future_minute", "owner_day"),
+    [
+        pytest.param(45, "2026-09-24", id="current-hour"),
+        pytest.param(75, "2026-09-24", id="next-hour"),
+        pytest.param(45, "2026-09-25", id="old-zone-current-hour"),
+    ],
+)
 def test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write(
-    tmp_path: Path, future_minute: int,
+    tmp_path: Path, future_minute: int, owner_day: str,
 ) -> None:
-    """MH-USAGE-BACKEND-008: future evidence cannot masquerade as complete history."""
+    """MH-USAGE-BACKEND-008: future evidence cannot masquerade as complete history.
+
+    A current UTC slice still witnesses uncertain history when a timezone change
+    leaves its old owner outside the local grid; same-zone fixtures missed this.
+    """
 
     previous_tz = os.environ.get("TZ")
     now = datetime(2026, 9, 24, 12, 15, tzinfo=timezone.utc)
@@ -742,7 +753,7 @@ def test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write(
         ledger = _ledger(tmp_path, now=_Clock(now))
         ledger.path.parent.mkdir(parents=True)
         ledger.path.write_text(json.dumps([{
-            "day": "2026-09-24", "source_id": "src_future", "model_id": "model-x",
+            "day": owner_day, "source_id": "src_future", "model_id": "model-x",
             **counts,
             "last_metered_at": future.isoformat(),
             "hourly_history_complete": True,
@@ -755,11 +766,15 @@ def test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write(
         report = ledger.report(window="24h", now=now)
         assert ledger.path.read_bytes() == before
         assert report["totals"]["requests"] == 0
-        assert all(
-            bucket["history_complete"] == (bucket["start_at"][:10] != "2026-09-24")
-            for bucket in report["buckets"]
-        )
-        assert ledger.summary(days=1, now=now)["totals"] == counts
+        if owner_day == "2026-09-24":
+            assert all(
+                bucket["history_complete"] == (bucket["start_at"][:10] != owner_day)
+                for bucket in report["buckets"]
+            )
+            assert ledger.summary(days=1, now=now)["totals"] == counts
+        else:
+            assert all(not bucket["history_complete"] for bucket in report["buckets"])
+            assert ledger.summary(days=1, now=now)["totals"]["requests"] == 0
 
         # A real call triggers persistence; read and write use the same policy.
         ledger.record(
@@ -770,7 +785,9 @@ def test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write(
         assert report["totals"]["requests"] == 1
         assert report["totals"]["input_tokens"] == 5
         assert any(not bucket["history_complete"] for bucket in report["buckets"])
-        assert ledger.summary(days=1, now=now)["totals"]["requests"] == 2
+        assert ledger.summary(days=1, now=now)["totals"]["requests"] == (
+            2 if owner_day == "2026-09-24" else 1
+        )
     finally:
         if previous_tz is None:
             os.environ.pop("TZ", None)
@@ -1267,6 +1284,201 @@ def test_hourly_report_uses_utc_evidence_after_a_timezone_change(
     [populated] = [bucket for bucket in report["buckets"] if bucket["rows"]]
     assert populated["rows"][0]["source_id"] == "src-timezone-change"
     assert all(bucket["history_complete"] for bucket in report["buckets"])
+
+
+@pytest.mark.parametrize(
+    ("old_zone", "new_zone"),
+    [
+        ("Pacific/Kiritimati", "Pacific/Honolulu"),
+        ("Pacific/Honolulu", "Pacific/Kiritimati"),
+    ],
+)
+@pytest.mark.parametrize("daily_only", [False, True])
+def test_timezone_change_preserves_recent_owners_across_a_write(
+    tmp_path: Path, old_zone: str, new_zone: str, daily_only: bool,
+) -> None:
+    """Recent UTC evidence survives writes at either local retention edge.
+
+    Read-only timezone coverage missed the subsequent write deleting its owner.
+    Released daily-only owners must also survive without inventing hourly counts.
+    """
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = old_zone
+        time.tzset()
+        ledger = _ledger(tmp_path, retention_days=1, now=_Clock(now))
+        ledger.record(
+            source_id="src_old-zone", model_id="模型-β",
+            usage=ProtocolUsageReport(input_tokens=7), at=now - timedelta(hours=6),
+        )
+        original = json.loads(ledger.path.read_text(encoding="utf-8"))[0]
+        if daily_only:
+            original = {
+                key: value for key, value in original.items()
+                if key != "hours" and not key.startswith("hourly_")
+            }
+            ledger.path.write_text(json.dumps([original]), encoding="utf-8")
+
+        os.environ["TZ"] = new_zone
+        time.tzset()
+        reopened = _ledger(tmp_path, retention_days=1, now=_Clock(now))
+        reopened.record(
+            source_id="src_new-zone", model_id="模型-β",
+            usage=ProtocolUsageReport(input_tokens=11), at=now,
+        )
+        persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
+        hourly = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    old = next(item for item in persisted if item["source_id"] == "src_old-zone")
+    assert old["day"] == original["day"]
+    assert old["input_tokens"] == 7
+    assert hourly["totals"]["requests"] == (1 if daily_only else 2)
+    assert hourly["totals"]["input_tokens"] == (11 if daily_only else 18)
+    if not daily_only:
+        assert all(item["history_complete"] for item in hourly["buckets"])
+    else:
+        assert any(not item["history_complete"] for item in hourly["buckets"])
+
+
+@pytest.mark.parametrize("new_zone", ["UTC", "Pacific/Honolulu", "Asia/Kathmandu"])
+def test_legacy_latest_hour_remains_uncertain_after_timezone_change(
+    tmp_path: Path, new_zone: str,
+) -> None:
+    """Local-owner overlap cannot erase uncertainty at the actual UTC call.
+
+    The previous no-overlap test missed owners overlapping only later buckets.
+    """
+
+    previous_tz = os.environ.get("TZ")
+    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    latest = datetime(2026, 9, 24, 12, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = new_zone
+        time.tzset()
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps([{
+                "day": "2026-09-25", "source_id": "src_legacy", "model_id": "model",
+                "requests": 2, "token_reports": 2, "input_tokens": 7,
+                "cached_input_tokens": 0, "output_tokens": 0,
+                "last_metered_at": latest.isoformat(),
+            }]),
+            encoding="utf-8",
+        )
+        report = ledger.report(window="24h", now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    assert report["totals"]["requests"] == 0
+    [affected] = [
+        bucket for bucket in report["buckets"]
+        if datetime.fromisoformat(bucket["start_at"]) <= latest
+        < datetime.fromisoformat(bucket["end_at"])
+    ]
+    assert affected["history_complete"] is False
+    # Without the original zone, the other daily call cannot be placed either.
+    assert all(not bucket["history_complete"] for bucket in report["buckets"])
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_pruned_hours_do_not_become_complete_zero_after_clock_rollback(
+    tmp_path: Path, rewrite: bool,
+) -> None:
+    """A previously pruned hour can re-enter the horizon without its counters.
+
+    Forward-only retention tests never queried behind the persisted expiry bound.
+    """
+
+    previous_tz = os.environ.get("TZ")
+    clock = _Clock(datetime(2026, 9, 24, 17, 30, tzinfo=timezone.utc))
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        ledger = _ledger(tmp_path, now=clock)
+        for hour in (12, 16):
+            ledger.record(
+                source_id="src_rollback", model_id="model",
+                usage=ProtocolUsageReport(input_tokens=7),
+                at=clock.moment.replace(hour=hour),
+            )
+        clock.moment = datetime(2026, 9, 25, 13, 30, tzinfo=timezone.utc)
+        ledger.record(source_id="src_other", model_id="model", usage=None, at=clock.moment)
+        forward = ledger.report(window="24h", now=clock.moment)
+        assert all(bucket["history_complete"] for bucket in forward["buckets"])
+        clock.moment -= timedelta(hours=2)
+        if rewrite:
+            ledger.record(source_id="src_new", model_id="model", usage=None, at=clock.moment)
+        report = _ledger(tmp_path, now=clock).report(window="24h", now=clock.moment)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    [expired_bucket] = [
+        bucket for bucket in report["buckets"]
+        if bucket["start_at"] == "2026-09-24T12:00:00+00:00"
+    ]
+    assert expired_bucket["rows"] == []
+    assert expired_bucket["history_complete"] is False
+
+
+@pytest.mark.parametrize("boundary", [None, "invalid", "2026-09-24T12:30:00Z"])
+def test_undated_expired_totals_cannot_claim_complete_hourly_history(
+    tmp_path: Path, boundary: str | None,
+) -> None:
+    """Older or damaged expiry metadata cannot prove which hours were removed.
+
+    Counter-only reconciliation missed an undated expired contribution, including
+    when a valid duplicate is merged onto it during a subsequent write.
+    """
+
+    now = datetime(2026, 9, 25, 13, 30, tzinfo=timezone.utc)
+    ledger = _ledger(tmp_path, now=_Clock(now))
+    ledger.record(
+        source_id="src_expiry", model_id="model",
+        usage=ProtocolUsageReport(input_tokens=7), at=now - timedelta(hours=1),
+    )
+    [recent] = json.loads(ledger.path.read_text(encoding="utf-8"))
+    expired = {
+        **recent,
+        "hours": [],
+        "hourly_expired_totals": {
+            key: recent[key] for key in (
+                "requests", "token_reports", "input_tokens",
+                "cached_input_tokens", "output_tokens",
+            )
+        },
+        "hourly_expired_before": boundary,
+        "last_metered_at": (now - timedelta(hours=25)).isoformat(),
+    }
+    ledger.path.write_text(json.dumps([expired, recent]), encoding="utf-8")
+    before = ledger.report(window="24h", now=now)
+    ledger.record(
+        source_id="src_expiry", model_id="model",
+        usage=ProtocolUsageReport(input_tokens=3), at=now,
+    )
+    after = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+
+    assert before["totals"]["input_tokens"] == 7
+    assert after["totals"]["input_tokens"] == 10
+    assert ledger.summary(days=7, now=now)["totals"]["input_tokens"] == 17
+    assert any(not bucket["history_complete"] for bucket in before["buckets"])
+    assert any(not bucket["history_complete"] for bucket in after["buckets"])
 
 
 def test_hourly_report_preserves_uncertainty_for_timezone_orphaned_daily_rows(

@@ -113,8 +113,13 @@ daily reports and include pre-upgrade usage; hourly slices are never added to
 those totals a second time. Retain only the hourly slices needed for the
 24-hour view, with explicit capacity and corruption handling. Persist the
 aggregate counters pruned outside that horizon so a partial oldest local day can
-distinguish ordinary retention expiry from a missing in-horizon slice. Existing
-batching must not combine calls from different hours before the ledger sees
+distinguish ordinary retention expiry from a missing in-horizon slice. The optional
+internal `hourly_expired_before` field records their exclusive UTC-hour boundary;
+if a clock rollback brings pruned evidence into range, hourly history is incomplete.
+Nonzero expired counters without a valid boundary also retain uncertainty. Keep
+UTC-recent rows through subsequent writes after host timezone changes, without
+changing their original daily ownership or the daily ledger's capacity policy.
+Existing batching must not combine calls from different hours before the ledger sees
 their temporal identity. It must also retain distinct local-day owners when a
 UTC hour spans midnight; a fold is valid only within both temporal boundaries.
 
