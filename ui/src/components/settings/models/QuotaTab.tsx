@@ -80,7 +80,7 @@ const useQuotaText = (now: number) => {
   const planLabel = React.useCallback((vendor: string, plan: string) => {
     const { family, id } = quotaPlanId(vendor, plan);
     const key = family ? `settings.models.quota.plan.${family}.${id}` : null;
-    return key && i18n.exists(key) ? t(key as never) as string : titleCasePlan(plan);
+    return key && i18n.exists(key) ? t(key as never) as string : titleCasePlan(id);
   }, [i18n, t]);
   const ago = React.useCallback((at: number) => {
     const ms = Math.max(0, now - at);

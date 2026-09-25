@@ -280,6 +280,7 @@ describe('QuotaTab', () => {
     // Known ids, whatever their casing or separators, and with or without the vendor's prefix.
     expect(badge('openai', 'prolite')).toBe('Pro 5x');
     expect(badge('codex', 'ProLite')).toBe('Pro 5x');
+    expect(badge('openai', 'chatgpt_pro_5x')).toBe('Pro 5x');
     expect(badge('openai', 'pro')).toBe('Pro');
     expect(badge('openai', 'business')).toBe('Business');
     expect(badge('anthropic', 'claude_max_20x')).toBe('Max 20x');
@@ -288,6 +289,8 @@ describe('QuotaTab', () => {
     expect(badge('anthropic', 'prolite')).toBe('Prolite');
     expect(badge('openai', 'team_plus-annual')).toBe('Team Plus Annual');
     expect(badge('xai', 'supergrok')).toBe('Supergrok');
+    // An unknown id still drops the vendor prefix the badge never repeats.
+    expect(badge('openai', 'chatgpt_team_plus')).toBe('Team Plus');
     await i18n.changeLanguage('en');
     try {
       expect(badge('openai', 'prolite')).toBe('Pro 5x');
