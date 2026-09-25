@@ -385,11 +385,11 @@ def persist_agent_message(
                 # to same-origin media-proxy URLs so the browser renders agent images
                 # inline + files as download cards. IM rows keep the raw ``file://``
                 # (the dispatcher uploads those to the platform separately). Scoped to
-                # the user-visible result/notify rows so we don't mint tokens for the
-                # hidden intermediate assistant stream.
+                # transcript-visible rows (result/notify/interim …) so we don't mint
+                # tokens for the hidden intermediate assistant stream.
                 if (
                     context.platform == "avibe"
-                    and spec_for(message_type)["inboxPreview"]
+                    and spec_for(message_type)["transcript"]
                     and row_session_id
                 ):
                     try:
