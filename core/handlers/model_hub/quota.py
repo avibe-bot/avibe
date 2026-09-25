@@ -137,6 +137,7 @@ def _window(
     window_seconds: Optional[int],
     resets_at: Optional[str],
     scope_model: Optional[str] = None,
+    label_is_key: bool = False,
 ) -> dict[str, Any]:
     window: dict[str, Any] = {
         "id": window_id[:128],
@@ -149,6 +150,9 @@ def _window(
     }
     if scope_model is not None:
         window["scope_model"] = scope_model
+    # Only the parser knows whether `label` is an upstream key or display text.
+    if label_is_key:
+        window["label_is_key"] = True
     return window
 
 
@@ -186,6 +190,7 @@ def _claude_limit_rows(rows: list[object]) -> list[dict[str, Any]]:
         scope_model = _label(model.get("display_name"))
         resets_at = _iso_timestamp(row.get("resets_at"))
         # Classify on the server's `kind`, never on its display text.
+        label_is_key = False
         if upstream_kind == "session":
             kind: QuotaWindowKind = "session"
             seconds: Optional[int] = SESSION_WINDOW_SECONDS
@@ -196,9 +201,11 @@ def _claude_limit_rows(rows: list[object]) -> list[dict[str, Any]]:
             kind, seconds, label = "model_weekly", WEEKLY_WINDOW_SECONDS, scope_model
         else:
             surface = scope.get("surface") if isinstance(scope.get("surface"), dict) else {}
-            generic = scope_model or _label(surface.get("display_name")) or _label(upstream_kind)
+            display = scope_model or _label(surface.get("display_name"))
+            generic = display or _label(upstream_kind)
             if generic is None:
                 continue
+            label_is_key = display is None
             kind = "other"
             seconds = WEEKLY_WINDOW_SECONDS if row.get("group") == "weekly" else None
             label = generic
@@ -211,6 +218,7 @@ def _claude_limit_rows(rows: list[object]) -> list[dict[str, Any]]:
                 window_seconds=seconds,
                 resets_at=resets_at,
                 scope_model=scope_model if kind == "model_weekly" else None,
+                label_is_key=label_is_key,
             )
         )
     return windows
@@ -245,6 +253,7 @@ def _claude_top_level(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 window_seconds=seconds,
                 resets_at=_iso_timestamp(value.get("resets_at")),
                 scope_model=scope_model,
+                label_is_key=kind == "other",
             )
         )
     return windows
@@ -367,9 +376,11 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
             if not isinstance(item, dict) or not isinstance(item.get("rate_limit"), dict):
                 continue
             feature = item.get("metered_feature")
-            scope_model = (
+            named = (
                 _CODEX_FEATURE_LABELS.get(feature) if isinstance(feature, str) else None
-            ) or _label(item.get("limit_name")) or _label(feature)
+            ) or _label(item.get("limit_name"))
+            # Named by `metered_feature` alone, the label is that feature's id.
+            scope_model = named or _label(feature)
             if scope_model is None:
                 continue
             for slot in ("primary_window", "secondary_window"):
@@ -388,6 +399,7 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
                         window_seconds=seconds,
                         resets_at=resets_at,
                         scope_model=scope_model if weekly else None,
+                        label_is_key=named is None,
                     )
                 )
     plan = _label(payload.get("plan_type"))

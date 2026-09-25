@@ -160,6 +160,42 @@ def test_claude_quota_parser_prefers_server_limits_and_keeps_unknown_rows():
     assert "scope_model" not in other
 
 
+def test_quota_windows_mark_exactly_the_labels_that_are_upstream_keys():
+    """MH-QUOTA-002/003: `label_is_key` marks a label taken from an upstream key, never a display name."""
+
+    def flagged(windows):
+        return {window["label"]: window.get("label_is_key", False) for window in windows}
+
+    # Claude top level: an unknown key is its own label; known keys carry product copy.
+    legacy = {**CLAUDE_LEGACY, "seven_day_cowork": {"utilization": 5, "resets_at": None}}
+    windows = parse_claude_quota(json.dumps(legacy))["windows"]
+    _validate_windows({"windows": windows})
+    assert flagged(windows) == {"five_hour": False, "seven_day": False, "Sonnet": False, "Fable": False,
+                                "seven_day_cowork": True}
+    # Claude `limits[]`: only the `kind` fallback is a key; model and surface display names are text.
+    limits = {"limits": [
+        {"kind": "monthly_surface", "percent": 1, "scope": {"surface": {"display_name": "claude-code"}}},
+        {"kind": "monthly_model", "percent": 2, "scope": {"model": {"display_name": "Claude_Code"}}},
+        {"kind": "seven_day_cowork", "percent": 3, "scope": {}},
+    ]}
+    windows = parse_claude_quota(json.dumps(limits))["windows"]
+    _validate_windows({"windows": windows})
+    assert flagged(windows) == {"claude-code": False, "Claude_Code": False, "seven_day_cowork": True}
+    # Codex: `limit_name` is display text; a lone `metered_feature` is the feature's id.
+    window = {"used_percent": 3, "limit_window_seconds": 3600, "reset_after_seconds": 10, "reset_at": 1790000100}
+    weekly = {**window, "limit_window_seconds": 604800}
+    report = {"additional_rate_limits": [
+        {"limit_name": "gpt_5_codex", "metered_feature": "x_feature", "rate_limit": {"primary_window": window}},
+        {"metered_feature": "future_feature", "rate_limit": {"primary_window": window, "secondary_window": weekly}},
+        {"metered_feature": "codex_bengalfox", "rate_limit": {"primary_window": weekly}},
+    ]}
+    windows = parse_codex_quota(json.dumps(report))["windows"]
+    _validate_windows({"windows": windows})
+    assert flagged(windows) == {"gpt_5_codex · 1h": False, "future_feature · 1h": True, "future_feature": True,
+                                "Spark": False}
+    assert next(w for w in windows if w["label"] == "future_feature")["scope_model"] == "future_feature"
+
+
 @pytest.mark.parametrize(
     ("seconds", "label"),
     [(60, "1m"), (1800, "30m"), (3600, "1h"), (5400, "1h 30m"), (18000, "5h"), (86400, "1d"),

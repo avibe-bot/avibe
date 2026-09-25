@@ -1342,7 +1342,11 @@
         "window": {
           "session": "5-hour limit",
           "weekly": "Weekly limit",
-          "model": "{{model}} weekly limit"
+          "model": "{{model}} weekly limit",
+          "span": {
+            "hours": "{{hours}}-hour",
+            "days": "{{days}}-day"
+          }
         },
         "hint": {
           "shared": "Shared by all models",

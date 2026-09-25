@@ -10,6 +10,32 @@ const overlaps = (a: Box, b: Box) =>
   a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 type Box = { x: number; y: number; width: number; height: number };
 
+const SPAN = { en: '7-day Cowork', zh: '7 天 Cowork' } as const;
+
+/**
+ * MH-QUOTA-015: an unrecognised upstream id reads as words, and every row title
+ * holds one line beside its remaining figure — a name longer than the row
+ * ellipsizes, keeping its full text as the title and the meter's name.
+ */
+const titlesHold = async (page: Page, lang: 'en' | 'zh') => {
+  await expect(page.locator('[data-quota-window="seven_day_cowork"] .model-hub-quota-row-title strong')).toHaveText(SPAN[lang]);
+  for (const title of await page.locator('.model-hub-quota-row-title').all()) await expect(title).not.toContainText(/_/);
+  const stress = page.locator('[data-quota-window="x"] .model-hub-quota-row-title strong');
+  const name = 'Unrecognised Upstream Limit Name Unrecognised Upstream Limit Name';
+  await expect(stress).toHaveAttribute('title', name);
+  await expect(page.locator('[data-quota-window="x"] [role="meter"]')).toHaveAccessibleName(new RegExp(`^${name}`));
+  expect(await stress.evaluate((el) => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === 'ellipsis')).toBe(true);
+  for (const row of await page.locator('[data-quota-window]').all()) {
+    const title = row.locator('.model-hub-quota-row-title');
+    const [titleBox, leftBox, rowBox] = await Promise.all([box(title), box(row.locator('.model-hub-quota-left')), box(row)]);
+    const lineHeight = await title.locator('strong').evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+    expect(titleBox.height).toBeLessThanOrEqual(lineHeight + 1);
+    expect(overlaps(titleBox, leftBox)).toBe(false);
+    expect(titleBox.x + titleBox.width).toBeLessThanOrEqual(leftBox.x);
+    expect(leftBox.x + leftBox.width).toBeLessThanOrEqual(rowBox.x + rowBox.width + 1);
+  }
+};
+
 /**
  * MH-QUOTA-029: a tap (or, without touch, a click) on the weekly countdown opens
  * its exact moment inside the viewport, clear of its own row's remaining figure
@@ -32,7 +58,7 @@ const openHintClear = async (page: Page, width: number, touch: boolean) => {
 };
 
 for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]] as const) {
-  test(`MH-QUOTA-015: holds the narrow layout at ${width}px — one account per line, stacked footers, wrapping labels (${lang})`, async ({ page }, testInfo) => {
+  test(`MH-QUOTA-015: holds the narrow layout at ${width}px — one account per line, stacked footers, one-line labels (${lang})`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
     await page.goto(`/e2e/model-catalog/fixture.html?view=quota&lang=${lang}`);
     const cards = page.getByRole('article');
@@ -55,12 +81,7 @@ for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]]
       expect(await fits(row)).toBe(true);
     }
 
-    // A long upstream name wraps inside its card instead of widening it.
-    const title = page.locator('[data-quota-window="x"] .model-hub-quota-row-title');
-    const [titleBox, cardBox] = await Promise.all([box(title), box(cards.nth(0))]);
-    expect(titleBox.x + titleBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
-    expect(await fits(title)).toBe(true);
-    expect(titleBox.height).toBeGreaterThan(20);
+    await titlesHold(page, lang);
 
     // Each upcoming-reset chip stays inside the list; a long window name
     // truncates rather than pushing the chip, or its time, past the edge.
@@ -109,6 +130,7 @@ for (const lang of ['en', 'zh'] as const) {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`/e2e/model-catalog/fixture.html?view=quota&lang=${lang}`);
     await expect(page.getByRole('article')).toHaveCount(2);
+    await titlesHold(page, lang);
     await openHintClear(page, 1280, Boolean(testInfo.project.use.hasTouch));
     await page.screenshot({ path: testInfo.outputPath('quota-reset-hint-desktop.png') });
   });

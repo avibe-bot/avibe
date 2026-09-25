@@ -21,7 +21,8 @@ const valued = (over: Partial<SourceQuotaValue>): SourceQuotaValue => ({
   ...over,
 });
 
-// Two accounts, one with an unrecognised window whose upstream name is one long word;
+// Two accounts, one with unrecognised windows — a realistic new upstream id and a
+// stress-case identifier far longer than its row;
 // one paid off many times over on a known cycle, one short on the trailing 30 days.
 
 const sources: SourceQuota[] = [
@@ -31,7 +32,8 @@ const sources: SourceQuota[] = [
     windows: [
       limit({}),
       limit({ id: 'seven_day', label: 'seven_day', used_pct: 61, ...weekly }),
-      limit({ ...weekly, id: 'x', kind: 'other', label: 'unrecognised_upstream_limit_name_'.repeat(2), used_pct: 12 }),
+      limit({ ...weekly, id: 'x', kind: 'other', label: 'unrecognised_upstream_limit_name_'.repeat(2), label_is_key: true, used_pct: 12 }),
+      limit({ ...weekly, id: 'seven_day_cowork', kind: 'other', label: 'seven_day_cowork', label_is_key: true, used_pct: 27 }),
     ],
     value: valued({
       plan_key: 'claude_max_20x', fee_usd: 200, multiple: 6.4201, week: priced(412.37),

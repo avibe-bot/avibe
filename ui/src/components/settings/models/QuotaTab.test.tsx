@@ -258,6 +258,35 @@ describe('QuotaTab', () => {
     expect(screen.getByRole('article').querySelector('[data-quota-window="x"] small')).toBeNull();
   });
 
+  it('names an unrecognised identifier in words, its span in the window wording, with the full name as its title', async () => {
+    const title = () => screen.getByRole('article').querySelector('[data-quota-window="x"] strong')!;
+    draw(readyRegion(summary([claude({ windows: [window({ id: 'x', kind: 'other', label: 'seven_day_cowork', label_is_key: true })] })])));
+    expect(title().textContent).toBe('7 天 Cowork');
+    expect(title().getAttribute('title')).toBe('7 天 Cowork');
+    expect(screen.queryByText(/seven_day/)).toBeNull();
+    await i18n.changeLanguage('en');
+    try {
+      cleanup();
+      draw(readyRegion(summary([claude({ windows: [
+        window({ id: 'x', kind: 'other', label: 'seven_day_cowork', label_is_key: true }),
+        window({ id: 'y', kind: 'model_weekly', label: 'claude_opus', scope_model: 'claude_opus', label_is_key: true }),
+        window({ id: 'z', kind: 'other', label: 'future_feature · 1h', label_is_key: true }),
+      ] })])));
+      expect(title().textContent).toBe('7-day Cowork');
+      expect(screen.getByText('Claude Opus weekly limit')).toBeTruthy();
+      expect(screen.getByRole('meter', { name: '7-day Cowork: 38% used' })).toBeTruthy();
+      expect(screen.getByText('Future Feature · 1h')).toBeTruthy();
+    } finally {
+      await i18n.changeLanguage('zh');
+    }
+  });
+
+  it('shows an upstream display name as written unless the server marks it an id', () => {
+    const labels = ['Claude_Code', 'claude-code', 'seven_day_cowork', 'GPT-5 Codex'];
+    draw(readyRegion(summary([claude({ windows: labels.map((label, index) => window({ id: `o${index}`, kind: 'other', label })) })])));
+    for (const label of labels) expect(screen.getByText(label)).toBeTruthy();
+  });
+
   it('renders the English copy through the same keys', async () => {
     await i18n.changeLanguage('en');
     try {

@@ -172,6 +172,10 @@
           "minLength": 1,
           "maxLength": 64
         },
+        "label_is_key": {
+          "description": "Present (true) when `label` (and `scope_model`, if any) is an upstream identifier rather than display text, so the UI may read it as words. Absent means show it as written.",
+          "const": true
+        },
         "used_pct": {
           "type": "number",
           "minimum": 0,

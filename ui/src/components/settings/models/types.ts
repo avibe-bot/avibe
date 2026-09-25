@@ -891,6 +891,8 @@ export type QuotaWindow = {
   label: string;
   /** Present on `model_weekly`: the model the window alone counts. */
   scope_model?: string;
+  /** Present when `label` (and `scope_model`) is an upstream id, not display text. */
+  label_is_key?: true;
   used_pct: number;
   window_seconds: number | null;
   resets_at: string | null;
