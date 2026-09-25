@@ -335,26 +335,16 @@ def _intervals_overlap(
     return first_start < second_end and first_end > second_start
 
 
-def _unknown_time_owner_day_envelope(
-    row: dict,
-) -> Optional[tuple[datetime, datetime]]:
-    """Return an owner-day envelope only when its persisted instant is absent."""
-
-    if _instant(row.get("last_metered_at")) is not None:
-        return None
-    day = row.get("day")
-    if not isinstance(day, str):
-        return None
-    calendar_day = _calendar_day(day)
-    return _utc_owner_day_envelope(calendar_day) if calendar_day is not None else None
-
-
 def _has_unresolved_hourly_mass(row: dict) -> bool:
     """Whether daily counters still contain usage no hourly field can locate."""
 
     hours = row.get("hours")
     expired = row.get("hourly_expired_totals")
-    if not isinstance(hours, list) or not isinstance(expired, dict):
+    if not isinstance(hours, list):
+        return True
+    if expired is None:
+        expired = _empty_totals()
+    elif not isinstance(expired, dict):
         return True
     known = _empty_totals()
     for item in hours:
@@ -367,9 +357,17 @@ def _has_unresolved_hourly_mass(row: dict) -> bool:
 
 def _hourly_owner_day_window(
     row: dict,
-    measured: datetime,
 ) -> Optional[tuple[datetime, datetime]]:
-    """Use one owner-day window for hourly selection and uncertainty projection."""
+    """Return the window that bounds any hourly uncertainty in a row.
+
+    A timestamp-less daily-only row has no trustworthy hour, so its owner date
+    uses the timezone-independent envelope. A merged row with an hour list can
+    also contain older residual mass that the later exact timestamp cannot
+    locate; that residual uses the same envelope. A timestamp on a daily-only
+    legacy row keeps the existing local-day compatibility semantics.
+    Fully reconciled rows keep the local-day window for future or otherwise
+    incomplete slice validation.
+    """
 
     day = row.get("day")
     if not isinstance(day, str):
@@ -377,21 +375,37 @@ def _hourly_owner_day_window(
     calendar_day = _calendar_day(day)
     if calendar_day is None:
         return None
-    unknown_owner_envelope = _unknown_time_owner_day_envelope(row)
-    if unknown_owner_envelope is not None:
-        return unknown_owner_envelope
-    latest = _instant(row.get("last_metered_at"))
-    if (
-        latest is not None
-        and latest <= measured
-        and row.get("hourly_history_complete") is not True
-        and isinstance(row.get("hours"), list)
-        and _has_unresolved_hourly_mass(row)
+    unresolved = _has_unresolved_hourly_mass(row)
+    if unresolved and (
+        isinstance(row.get("hours"), list)
+        or _instant(row.get("last_metered_at")) is None
     ):
         envelope = _utc_owner_day_envelope(calendar_day)
         if envelope is not None:
             return envelope
     return _local_owner_day_window(calendar_day)
+
+
+def _hourly_uncertainty_was_dropped(
+    rows: Sequence[dict],
+    held: Sequence[dict],
+    start: datetime,
+    end: datetime,
+) -> bool:
+    """Whether capacity removed unresolved mass that overlaps the hourly view."""
+
+    held_keys = {_row_key(row) for row in held}
+    for row in rows:
+        if _row_key(row) in held_keys or not _has_unresolved_hourly_mass(row):
+            continue
+        owner_day_window = _hourly_owner_day_window(row)
+        if owner_day_window is not None and _intervals_overlap(
+            start,
+            end,
+            *owner_day_window,
+        ):
+            return True
+    return False
 
 
 def _overlaps_local_day(start: datetime, end: datetime, day: date) -> bool:
@@ -773,11 +787,7 @@ def _recency(
         if evidence:
             latest = max(evidence)
             return (local_usage_day(latest).isoformat(), latest)
-        if (
-            _unknown_time_owner_day_envelope(row) is not None
-            or metered is None
-            or metered > ceiling
-        ):
+        if metered is None or metered > ceiling:
             return ("", _OLDEST_INSTANT)
     if metered is None or metered > ceiling:
         return (row["day"], _OLDEST_INSTANT)
@@ -900,7 +910,7 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
         incomplete = True
     row_day_overlaps = False
     if not incomplete:
-        owner_day_window = _hourly_owner_day_window(row, measured)
+        owner_day_window = _hourly_owner_day_window(row)
         if owner_day_window is not None:
             row_day_overlaps = _intervals_overlap(
                 oldest_start,
@@ -1090,6 +1100,16 @@ class BoundedUsageLedger:
                 _row_key(row),
             )
         retained = self._within_capacity(holdable, measured=measured, utc_owner_days=True)
+        if _hourly_uncertainty_was_dropped(
+            holdable,
+            retained,
+            _hour_starts(measured)[0],
+            measured,
+        ):
+            # Capacity may evict an uncertain owner in favor of a known newer
+            # call. Preserve the existing degradation witness on a survivor so
+            # reopening cannot publish the retained row as complete history.
+            retained = [{**row, "history_degraded": True} for row in retained]
         write_state_document(self.path, sorted(retained, key=_row_key))
 
     def record(
@@ -1236,13 +1256,13 @@ class BoundedUsageLedger:
             has_recent_hourly_evidence = _has_recent_hourly_evidence(
                 row, hourly_start, measured,
             )
-            unknown_owner_envelope = _unknown_time_owner_day_envelope(row)
+            owner_day_window = _hourly_owner_day_window(row)
             has_plausible_hourly_evidence = (
-                unknown_owner_envelope is not None
+                owner_day_window is not None
                 and _intervals_overlap(
                     hourly_start,
                     measured,
-                    *unknown_owner_envelope,
+                    *owner_day_window,
                 )
             )
             if (
@@ -1313,9 +1333,16 @@ class BoundedUsageLedger:
                 candidates.append(row)
                 continue
             latest = _instant(row.get("last_metered_at"))
-            if latest is not None and latest < horizon_start:
+            if (
+                latest is not None
+                and latest < horizon_start
+                and not (
+                    isinstance(row.get("hours"), list)
+                    and _has_unresolved_hourly_mass(row)
+                )
+            ):
                 continue
-            owner_day_window = _hourly_owner_day_window(row, report_instant)
+            owner_day_window = _hourly_owner_day_window(row)
             if owner_day_window is not None and _intervals_overlap(
                 horizon_start,
                 report_instant,
@@ -1333,7 +1360,13 @@ class BoundedUsageLedger:
                 len(candidates) - len(held),
                 self.max_rows,
             )
-        return sorted(held, key=_row_key), read.degraded
+        capacity_degraded = _hourly_uncertainty_was_dropped(
+            candidates,
+            held,
+            horizon_start,
+            report_instant,
+        )
+        return sorted(held, key=_row_key), read.degraded or capacity_degraded
 
     def summary(
         self,
@@ -1542,6 +1575,7 @@ class BoundedUsageLedger:
         for row in rows:
             # Read-only projection must apply the same temporal evidence policy
             # as persistence, including future slices in an otherwise valid day.
+            owner_day_window = _hourly_owner_day_window(row)
             row = _retain_hour_slices(row, report_instant)
             row_day = _calendar_day(row["day"])
             if row.get("hourly_history_complete") is not True:
@@ -1552,7 +1586,6 @@ class BoundedUsageLedger:
                     and first_start <= latest <= report_instant
                     and local_usage_day(latest) != row_day
                 )
-                owner_day_window = _hourly_owner_day_window(row, report_instant)
                 if owner_day_window is not None:
                     for index, start in enumerate(starts):
                         end = (

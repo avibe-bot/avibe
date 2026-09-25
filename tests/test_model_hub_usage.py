@@ -1708,6 +1708,7 @@ def test_timestampless_owner_survives_write_and_capacity_ranking(
     assert any(row["source_id"] == "src-new-zone" for row in persisted)
     if max_rows == 1:
         assert [row["source_id"] for row in persisted] == ["src-new-zone"]
+        assert all(not bucket["history_complete"] for bucket in hourly["buckets"])
     else:
         assert {row["source_id"] for row in persisted} == {
             "src-old-zone", "src-new-zone",
@@ -1832,64 +1833,135 @@ def test_same_identity_merge_preserves_date_only_hourly_uncertainty(
     assert daily["totals"]["input_tokens"] == 10
 
 
+def test_delayed_exact_merge_does_not_age_out_legacy_hourly_uncertainty(
+    tmp_path: Path,
+) -> None:
+    """A delayed exact call cannot narrow legacy mass at a later report time."""
+
+    previous_tz = os.environ.get("TZ")
+    write_now = datetime(2026, 9, 25, 22, 15, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+    report_now = datetime(2026, 9, 26, 1, 15, tzinfo=timezone.utc)
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        path = tmp_path / "state" / "usage.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([{
+            "day": "2026-09-25",
+            "source_id": "src-delayed-merge",
+            "model_id": "model-delayed-merge",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+        }]), encoding="utf-8")
+
+        ledger = _ledger(tmp_path, now=_Clock(write_now))
+        before = ledger.report(window="24h", now=report_now)
+        before_incomplete = {
+            bucket["start_at"]
+            for bucket in before["buckets"]
+            if not bucket["history_complete"]
+        }
+        ledger.record(
+            source_id="src-delayed-merge",
+            model_id="model-delayed-merge",
+            usage=ProtocolUsageReport(input_tokens=3),
+            at=captured_at,
+        )
+        after = _ledger(tmp_path, now=_Clock(report_now)).report(
+            window="24h",
+            now=report_now,
+        )
+        daily = ledger.summary(days=2, now=report_now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+    after_incomplete = {
+        bucket["start_at"]
+        for bucket in after["buckets"]
+        if not bucket["history_complete"]
+    }
+    assert len(before_incomplete) == 24
+    assert after_incomplete == before_incomplete
+    assert after["totals"]["input_tokens"] == 0
+    assert daily["totals"]["input_tokens"] == 10
+
+
 @pytest.mark.parametrize("unknown_first", [False, True])
 def test_duplicate_known_and_date_only_rows_preserve_hourly_uncertainty(
     tmp_path: Path, unknown_first: bool,
 ) -> None:
     """Duplicate-row coalescing cannot make unknown historical mass certain."""
 
+    previous_tz = os.environ.get("TZ")
     now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
-    owner_day = local_usage_day(now).isoformat()
-    unknown = {
-        "day": owner_day,
-        "source_id": "src-duplicate-uncertainty",
-        "model_id": "model-duplicate-uncertainty",
-        "requests": 1,
-        "token_reports": 1,
-        "input_tokens": 7,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-    }
-    known = {
-        **unknown,
-        "requests": 1,
-        "token_reports": 1,
-        "input_tokens": 3,
-        "last_metered_at": now.isoformat(),
-        "hours": [{
-            "key": now.replace(minute=0, second=0, microsecond=0).isoformat(),
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        owner_day = local_usage_day(now).isoformat()
+        unknown = {
+            "day": owner_day,
+            "source_id": "src-duplicate-uncertainty",
+            "model_id": "model-duplicate-uncertainty",
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 7,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+        }
+        known = {
+            **unknown,
             "requests": 1,
             "token_reports": 1,
             "input_tokens": 3,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
             "last_metered_at": now.isoformat(),
-        }],
-        "hourly_expired_totals": {
-            "requests": 0,
-            "token_reports": 0,
-            "input_tokens": 0,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
-        },
-        "hourly_history_complete": True,
-    }
-    path = tmp_path / "state" / "usage.json"
-    path.parent.mkdir(parents=True)
-    rows = [unknown, known] if unknown_first else [known, unknown]
-    path.write_text(json.dumps(rows), encoding="utf-8")
+            "hours": [{
+                "key": now.replace(minute=0, second=0, microsecond=0).isoformat(),
+                "requests": 1,
+                "token_reports": 1,
+                "input_tokens": 3,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "last_metered_at": now.isoformat(),
+            }],
+            "hourly_expired_totals": {
+                "requests": 0,
+                "token_reports": 0,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+            },
+            "hourly_history_complete": True,
+        }
+        path = tmp_path / "state" / "usage.json"
+        path.parent.mkdir(parents=True)
+        rows = [unknown, known] if unknown_first else [known, unknown]
+        path.write_text(json.dumps(rows), encoding="utf-8")
 
-    ledger = _ledger(tmp_path, now=_Clock(now))
-    report = ledger.report(window="24h", now=now)
-    incomplete = {
-        bucket["start_at"]
-        for bucket in report["buckets"]
-        if not bucket["history_complete"]
-    }
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        report = ledger.report(window="24h", now=now)
+        incomplete = {
+            bucket["start_at"]
+            for bucket in report["buckets"]
+            if not bucket["history_complete"]
+        }
 
-    assert len(incomplete) == 15
-    assert report["totals"]["input_tokens"] == 3
-    assert ledger.summary(days=1, now=now)["totals"]["input_tokens"] == 10
+        assert len(incomplete) == 15
+        assert report["totals"]["input_tokens"] == 3
+        assert ledger.summary(days=1, now=now)["totals"]["input_tokens"] == 10
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
 
 
 @pytest.mark.parametrize("owner_day", [date.min, date.max])
@@ -1898,33 +1970,44 @@ def test_timestampless_owner_day_extremes_do_not_overflow(
 ) -> None:
     """Envelope construction degrades safely at both representable date edges."""
 
-    now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
-    ledger = _ledger(tmp_path, now=_Clock(now))
-    ledger.path.parent.mkdir(parents=True)
-    ledger.path.write_text(
-        json.dumps([{
-            "day": owner_day.isoformat(),
-            "source_id": "src-extreme",
-            "model_id": "model-extreme",
-            "requests": 1,
-            "token_reports": 1,
-            "input_tokens": 1,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
-        }]),
-        encoding="utf-8",
-    )
+    previous_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        now = datetime(2026, 9, 25, 0, 15, tzinfo=timezone.utc)
+        ledger = _ledger(tmp_path, now=_Clock(now))
+        ledger.path.parent.mkdir(parents=True)
+        ledger.path.write_text(
+            json.dumps([{
+                "day": owner_day.isoformat(),
+                "source_id": "src-extreme",
+                "model_id": "model-extreme",
+                "requests": 1,
+                "token_reports": 1,
+                "input_tokens": 1,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+            }]),
+            encoding="utf-8",
+        )
 
-    report = ledger.report(window="24h", now=now)
-    ledger.record(
-        source_id="src-new",
-        model_id="model-new",
-        usage=ProtocolUsageReport(input_tokens=2),
-        at=now,
-    )
+        report = ledger.report(window="24h", now=now)
+        ledger.record(
+            source_id="src-new",
+            model_id="model-new",
+            usage=ProtocolUsageReport(input_tokens=2),
+            at=now,
+        )
+        daily = ledger.summary(days=1, now=now)
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
 
     assert report["totals"]["requests"] == 0
-    assert ledger.summary(days=1, now=now)["totals"]["requests"] == 1
+    assert daily["totals"]["requests"] == 1
 
 
 def test_timezone_orphaned_hourly_rows_reconcile_against_utc_slices(
