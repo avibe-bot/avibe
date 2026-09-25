@@ -526,14 +526,16 @@ def exact_models_dev_matches(
         return tuple(dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])))
 
     def fold(value: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]+", "", value)
+        # Punctuation only: Unicode letters and digits are part of the identity.
+        return "".join(char for char in value if char.isalnum())
 
     literal: dict[str, list[str]] = {}
     folded: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
         for key in keys(model_id):
             literal.setdefault(key, []).append(model_id)
-            folded.setdefault(fold(key), []).append(model_id)
+            if fold(key):
+                folded.setdefault(fold(key), []).append(model_id)
     if not literal or not catalog:
         return {}
     vendor_map = load_model_vendor_map()
@@ -542,7 +544,7 @@ def exact_models_dev_matches(
     def admit(provider_id: str, model_id: str, _display_name: str):
         hits = [(0, requested) for requested in literal.get(f"{provider_id}/{model_id}", ())]
         hits += [(1, requested) for requested in literal.get(model_id, ())]
-        hits += [(2, requested) for requested in folded.get(fold(model_id), ())]
+        hits += [(2, requested) for requested in folded.get(fold(model_id) or "\0", ())]
         return hits or None
 
     for copies in _catalog_rows(catalog, vendor_map, admit).values():

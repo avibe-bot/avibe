@@ -351,6 +351,8 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
                 "gpt-target-mini": {"name": "GPT target mini"},
                 "foo": {"name": "Foo"},
                 "Case-Target": {"name": "Case target"},
+                "モデル-a": {"name": "Unicode neighbour"},
+                "—": {"name": "Punctuation only"},
             },
         },
     }
@@ -358,7 +360,7 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
     matches = models_dev_catalog.exact_models_dev_matches(
         [
             "gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini", "claude-3.5-target",
-            "gpt", "gpt-target-max", "avibe-foo", "case-target",
+            "gpt", "gpt-target-max", "avibe-foo", "case-target", "模型-a", "-",
         ],
         catalog,
     )
@@ -368,7 +370,8 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
     assert matches["openrouter/gpt-target"]["models_dev_id"] == "openrouter/gpt-target"
     # A relay prefix falls back to the last segment.
     assert matches["relay/gpt-target-mini"]["models_dev_id"] == "openai/gpt-target-mini"
-    # Punctuation folds; substrings, search aliases, and case changes never match.
+    # Punctuation folds; letters in any script, substrings, search aliases, and
+    # case never do, and an id that folds to nothing matches nothing.
     assert matches["claude-3.5-target"]["models_dev_id"] == "openrouter/claude-3-5-target"
     assert set(matches) == {
         "gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini", "claude-3.5-target",
