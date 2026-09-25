@@ -1,10 +1,38 @@
-import { expect, test, type Locator } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const box = async (locator: Locator) => {
   await expect(locator).toBeVisible();
   return (await locator.boundingBox())!;
 };
 const fits = (locator: Locator) => locator.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+
+const overlaps = (a: Box, b: Box) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+type Box = { x: number; y: number; width: number; height: number };
+
+/**
+ * MH-QUOTA-029: a tap (or, without touch, a click) on the weekly countdown opens
+ * its exact moment inside the viewport, covering no row's remaining figure and
+ * not this row's pace line.
+ */
+const openHintClear = async (page: Page, width: number, touch: boolean) => {
+  const row = page.locator('[data-quota-window="seven_day"]').first();
+  const countdown = row.locator('.model-hub-quota-reset button');
+  await (touch ? countdown.tap() : countdown.click());
+  const hint = page.getByRole('dialog');
+  await expect(hint).toContainText(/\d{1,2}:\d{2}/);
+  // Measure where it settles, not mid slide-in.
+  await hint.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
+  const hintBox = await box(hint);
+  expect(hintBox.x).toBeGreaterThanOrEqual(0);
+  expect(hintBox.x + hintBox.width).toBeLessThanOrEqual(width);
+  expect(overlaps(hintBox, await box(countdown))).toBe(false);
+  expect(overlaps(hintBox, await box(row.locator('.model-hub-quota-pace')))).toBe(false);
+  const card = page.getByRole('article').filter({ has: row });
+  for (const figure of await card.locator('.model-hub-quota-left').all()) {
+    expect(overlaps(hintBox, await box(figure))).toBe(false);
+  }
+};
 
 for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]] as const) {
   test(`MH-QUOTA-015: holds the narrow layout at ${width}px — one account per line, stacked footers, wrapping labels (${lang})`, async ({ page }, testInfo) => {
@@ -69,27 +97,22 @@ for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]]
     }
     await expect(page.locator('.model-hub-quota-plan')).toHaveText(['Max', 'Pro 5x']);
 
-    // A tap (or, without touch, a click) on a countdown opens its exact moment, inside the viewport.
-    const countdown = page.locator('[data-quota-window="seven_day"] .model-hub-quota-reset button');
-    const touch = Boolean(testInfo.project.use.hasTouch);
-    await (touch ? countdown.tap() : countdown.click());
-    const hint = page.getByRole('dialog');
-    await expect(hint).toContainText(/\d{1,2}:\d{2}/);
-    // Measure where it settles, not mid slide-in.
-    await hint.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
-    const hintBox = await box(hint);
-    expect(hintBox.x).toBeGreaterThanOrEqual(0);
-    expect(hintBox.x + hintBox.width).toBeLessThanOrEqual(width);
-    // It opens below the line, clear of the row's remaining-percentage figure.
-    const figure = await box(page.locator('[data-quota-window="seven_day"] .model-hub-quota-left'));
-    const line = await box(countdown);
-    expect(hintBox.y).toBeGreaterThanOrEqual(line.y + line.height);
-    expect(hintBox.y).toBeGreaterThanOrEqual(figure.y + figure.height);
+    await openHintClear(page, width, Boolean(testInfo.project.use.hasTouch));
     await page.screenshot({ path: testInfo.outputPath('quota-reset-hint.png') });
     await page.keyboard.press('Escape');
-    await expect(hint).toBeHidden();
+    await expect(page.getByRole('dialog')).toBeHidden();
 
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('quota-layout.png'), fullPage: true });
+  });
+}
+
+for (const lang of ['en', 'zh'] as const) {
+  test(`MH-QUOTA-029: at desktop width the exact moment opens beside its countdown, clear of every figure (${lang})`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`/e2e/model-catalog/fixture.html?view=quota&lang=${lang}`);
+    await expect(page.getByRole('article')).toHaveCount(2);
+    await openHintClear(page, 1280, Boolean(testInfo.project.use.hasTouch));
+    await page.screenshot({ path: testInfo.outputPath('quota-reset-hint-desktop.png') });
   });
 }
