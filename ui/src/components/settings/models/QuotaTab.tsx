@@ -90,24 +90,28 @@ const useQuotaText = (now: number) => {
       : t('settings.models.quota.ago.long', { duration: duration(ms) }) as string;
   }, [duration, now, t]);
   /**
-   * An upstream name as shown: an identifier (`seven_day_cowork`) in words, its
-   * spans in this product's window wording (「7-day Cowork」); text stays as written.
+   * An upstream name as shown. Display text stays as written; a name the server
+   * marks as an upstream id (`seven_day_cowork`) reads as words, its spans in this
+   * product's window wording (「7-day Cowork」). A composed name (`feature_id · 1h`)
+   * reads each id in it the same way.
    */
-  const upstreamName = React.useCallback((label: string) => {
-    const parts = limitLabelParts(label);
-    return parts ? parts.map((part) => ('span' in part
-      ? t(`settings.models.quota.window.span.${part.span}`, { [part.span]: part.count }) as string
-      : part.word)).join(' ') : label;
-  }, [t]);
+  const upstreamName = React.useCallback((label: string, isKey: boolean) => (isKey
+    ? label.split(/(\s+)/).map((token) => {
+      const parts = limitLabelParts(token);
+      return parts ? parts.map((part) => ('span' in part
+        ? t(`settings.models.quota.window.span.${part.span}`, { [part.span]: part.count }) as string
+        : part.word)).join(' ') : token;
+    }).join('')
+    : label), [t]);
   /** A window's name: the vendor's own model name, framed in this product's words. */
   const windowLabel = React.useCallback((window: QuotaWindow) => {
     if (window.kind === 'session') return t('settings.models.quota.window.session') as string;
     if (window.kind === 'weekly') return t('settings.models.quota.window.weekly') as string;
-    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model: window.scope_model ?? upstreamName(window.label) }) as string;
-    return upstreamName(window.label);
+    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
+    return upstreamName(window.label, Boolean(window.label_is_key));
   }, [t, upstreamName]);
   const windowHint = React.useCallback((window: QuotaWindow) => {
-    if (window.kind === 'model_weekly') return t('settings.models.quota.hint.model', { model: window.scope_model ?? upstreamName(window.label) }) as string;
+    if (window.kind === 'model_weekly') return t('settings.models.quota.hint.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
     if (window.kind === 'session' || window.kind === 'weekly') return t('settings.models.quota.hint.shared') as string;
     return null;
   }, [t, upstreamName]);

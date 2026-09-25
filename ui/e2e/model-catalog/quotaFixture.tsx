@@ -32,8 +32,8 @@ const sources: SourceQuota[] = [
     windows: [
       limit({}),
       limit({ id: 'seven_day', label: 'seven_day', used_pct: 61, ...weekly }),
-      limit({ ...weekly, id: 'x', kind: 'other', label: 'unrecognised_upstream_limit_name_'.repeat(2), used_pct: 12 }),
-      limit({ ...weekly, id: 'seven_day_cowork', kind: 'other', label: 'seven_day_cowork', used_pct: 27 }),
+      limit({ ...weekly, id: 'x', kind: 'other', label: 'unrecognised_upstream_limit_name_'.repeat(2), label_is_key: true, used_pct: 12 }),
+      limit({ ...weekly, id: 'seven_day_cowork', kind: 'other', label: 'seven_day_cowork', label_is_key: true, used_pct: 27 }),
     ],
     value: valued({
       plan_key: 'claude_max_20x', fee_usd: 200, multiple: 6.4201, week: priced(412.37),

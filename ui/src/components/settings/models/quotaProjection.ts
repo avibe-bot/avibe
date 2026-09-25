@@ -226,15 +226,13 @@ const spanCount = (tokens: string[], index: number): { count: number; length: nu
 };
 
 /**
- * An upstream limit name that is an identifier (`seven_day_cowork`), read as
- * words: a count followed by `hour`/`day` becomes a span, every other token a
- * word. A name that is already text — spaces, CJK, a single bare word, or a
- * capitalised hyphenated display name (`Claude-Code`) — is `null`, and stays as
- * the vendor wrote it.
+ * An upstream limit id (`seven_day_cowork`), read as words: a count followed by
+ * `hour`/`day` becomes a span, every other token a word. Whether a name is an id
+ * is the server's call (`label_is_key`); this only declines a token that is not
+ * id-shaped — spaces, CJK, or a single bare word — with `null`.
  */
 export function limitLabelParts(label: string): LimitLabelPart[] | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(label)) return null;
-  if (!label.includes('_') && !(label.includes('-') && label === label.toLowerCase())) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(label) || !/[_-]/.test(label)) return null;
   const tokens = label.split(/[_-]+/).filter(Boolean);
   if (!tokens.length) return null;
   const parts: LimitLabelPart[] = [];

@@ -27,8 +27,8 @@ describe('limitLabelParts', () => {
     expect(limitLabelParts('0_day')).toEqual([{ word: '0' }, { word: 'Day' }]);
   });
 
-  it('leaves text, display names, and single words as the vendor wrote them', () => {
-    for (const label of ['Opus', 'fable', 'Code review', '非常长的上游额度名称', 'GPT-5 Codex', 'Claude-Code', 'GPT-5', 'seven day', '', '__', 'a.b_c']) {
+  it('declines a token that is not id-shaped', () => {
+    for (const label of ['Opus', 'fable', 'Code review', '非常长的上游额度名称', 'GPT-5 Codex', 'seven day', '', '__', 'a.b_c']) {
       expect(limitLabelParts(label)).toBeNull();
     }
   });
