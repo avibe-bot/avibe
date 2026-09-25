@@ -9200,34 +9200,80 @@ def test_recovery_fact_consumption_census_has_no_default_producer():
     assert "X-Avibe-Show-Recovery-Poll" not in recovery_source
 
 
-def test_runtime_http_transport_census_closes_every_direct_client_path():
-    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager)))
-    functions = {
-        node.name: node
-        for node in manager_tree.body[0].body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    direct_clients = {
-        name
-        for name, function in functions.items()
-        if any(isinstance(node, ast.Attribute) and node.attr == "AsyncClient" for node in ast.walk(function))
-    }
-    assert direct_clients == {
-        "_healthy",
-        "_probe_capabilities_payload",
-        "_request_runtime_transport",
-    }
-    for request_owner in ("request", "request_global"):
-        calls = [
-            node
-            for node in ast.walk(functions[request_owner])
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_request_runtime_transport"
-        ]
-        assert len(calls) == 1
-    for internal_probe in ("_healthy", "_probe_capabilities_payload"):
-        assert any(isinstance(node, ast.Try) and node.handlers for node in ast.walk(functions[internal_probe]))
+def test_show_runtime_startup_health_probe_turns_transport_failure_into_health_timeout(monkeypatch, tmp_path):
+    """A refused ``/health`` connection is a retryable probe miss, not a crash.
+
+    Breaks if ``_healthy`` lets a transport error escape: ``ensure()`` would then
+    raise out of startup instead of retrying until the shared deadline and
+    reporting ``runtime_start_health_timeout``. Every other startup test replaces
+    ``_healthy`` wholesale, so only this one runs its real client path.
+    """
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    health_urls = []
+
+    async def refuse(_client, url, **_kwargs):
+        health_urls.append(url)
+        if len(health_urls) == 2:
+            # Jump the loop clock past the startup deadline on the second refusal,
+            # so the retry count does not depend on how fast a CI worker runs.
+            loop = asyncio.get_running_loop()
+            real_time = loop.time
+            loop.time = lambda: real_time() + 3600
+        raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+
+    def fake_stop():
+        manager._process = None
+        manager._base_url = None
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 600.0)
+    monkeypatch.setattr("core.show_runtime._STARTUP_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.get", refuse)
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_health_timeout"
+    assert health_urls == ["http://127.0.0.1:12345/health"] * 2
+
+
+def test_show_runtime_capability_probe_treats_transport_failure_as_unknown(monkeypatch, tmp_path):
+    """A refused ``/capabilities`` connection answers "unknown", never raises.
+
+    Breaks if ``_probe_capabilities_payload`` stops catching transport errors:
+    capability negotiation would raise instead of falling back to the retry path
+    that a ``None`` answer selects.
+    """
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    async def refuse(_client, url, **_kwargs):
+        raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.get", refuse)
+
+    assert asyncio.run(manager._probe_capabilities_payload("http://127.0.0.1:12345")) is None
+    assert asyncio.run(manager._probe_render_markdown_capability("http://127.0.0.1:12345")) is None
 
 
 def test_provider_install_entrypoints_converge_on_single_admission_owner():
