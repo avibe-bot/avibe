@@ -34,6 +34,7 @@ CURRENCY: Final = "USD"
 _MAX_PRICE_PER_MTOK: Final = 100_000.0
 _MAX_FEE_USD: Final = 100_000.0
 _MAX_KEY_CHARS: Final = 128
+_MAX_INT_DIGITS: Final = 1000
 # An alias may point at another alias, but not forever.
 _MAX_ALIAS_HOPS: Final = 4
 # One-hour cache writes cost twice the input price where the table says nothing.
@@ -232,9 +233,11 @@ class PriceTable:
         self._fees = dict(PLAN_FEES_USD)
         plans = overrides.get("plans")
         if isinstance(plans, Mapping):
-            for key, entry in plans.items():
+            # Keys are trimmed like a Source's `plan`; an exact key wins over a padded one.
+            for key, entry in sorted(plans.items(), key=lambda item: isinstance(item[0], str) and item[0] == item[0].strip()):
+                key = key.strip() if isinstance(key, str) else None
                 fee = _bounded(entry.get("fee_usd"), _MAX_FEE_USD) if isinstance(entry, Mapping) else None
-                if isinstance(key, str) and 0 < len(key) <= 64 and fee is not None:
+                if key and len(key) <= 64 and fee is not None:
                     self._fees[key] = fee
         self._sources: dict[str, SourcePlan] = {}
         sources = overrides.get("sources")
@@ -383,9 +386,15 @@ def billing_period(today: date, renewal_day: Optional[int]) -> tuple[str, date, 
     return "billing_cycle", start, renews
 
 
+def _parse_int(digits: str) -> int | float:
+    return int(digits) if len(digits) <= _MAX_INT_DIGITS else math.inf
+
+
 def _read_overrides(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        # An integer too long for the parser's digit limit becomes an out-of-range
+        # number, so only its entry is rejected rather than the whole file.
+        payload = json.loads(path.read_text(encoding="utf-8"), parse_int=_parse_int)
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, RecursionError) as exc:

@@ -1521,8 +1521,9 @@ bucket, and the 24-hour totals over it, whose `history_complete` is false.
 The override file is optional and read on every summary; an unreadable file is
 ignored with a warning. An invalid entry is ignored on its own and the rest still
 apply: a price or fee that is not a finite number in range (including a JSON
-integer too large for a float), or a `models` key longer than 128 characters.
-A Source's `plan` is trimmed of surrounding whitespace. Every member is optional:
+integer too large for a float or too long to parse), or a `models` key longer
+than 128 characters. A Source's `plan` and the `plans` keys are trimmed of
+surrounding whitespace; an exact key wins over a padded one. Every member is optional:
 
 ```json
 {
