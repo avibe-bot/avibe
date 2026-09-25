@@ -73,7 +73,7 @@ Verify against the current machine; these are starting points.
 | Layer | Where | How it changes |
 | --- | --- | --- |
 | Avibe runtime prompt | `vibe debug prompt export --format json` lists every source; `vibe debug prompt export --format json --context-file <file>` renders a composition from the inputs you supply (backend, Agent instructions, Skill directory, context), so it approximates the target only as well as those inputs match (history in the Avibe repo `core/prompts/`, if checked out) | Proposal to the Avibe repository |
-| Global rules and native backend config | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, Codex `developer_instructions` in `$CODEX_HOME/config.toml` (default `~/.codex`), … | Edit the source if the file is generated or imports others |
+| Global rules and native backend config | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, Codex `developer_instructions` in `$CODEX_HOME/config.toml` (default `~/.codex`), OpenCode `instructions` in global or project `opencode.json[c]`, … | Edit the source if the file is generated or imports others |
 | Project rules | nearest `AGENTS.md` / `CLAUDE.md` chain | The repository's own delivery process |
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
 | Skills | user skill dirs (follow symlinks), Avibe `skills/`, project `.agents/skills/` | The directory's owner |
@@ -103,8 +103,9 @@ no history covers it, say the attribution is unconfirmed.
 to — a channel's `scope_id` can hold other people's threads; the user's
 own corrections in `messages` are usually the sharpest evidence. For a
 recurring Task or Watch, `vibe runs list --definition-id <id>` gathers its
-fires across per-run Sessions. A stuck turn stays `running`, so include
-long-running rows when the complaint is a stall. Two starting points, each run
+fires across per-run Sessions. A stuck delegated turn stays `running`, so include
+long-running rows when the complaint is a stall; ordinary IM turns have no
+`agent_runs` row, so read that Session's messages instead. Two starting points, each run
 with `vibe data query --sql-file <file>` (or `--sql-file -` for stdin):
 
 ```sql
