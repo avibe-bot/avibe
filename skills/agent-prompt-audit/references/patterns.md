@@ -72,8 +72,10 @@ Most costly Avibe failures are here, and the fix is often *adding* a clause.
   repository files, long procedures in always-loaded text instead of an
   on-demand Skill, secrets or volatile facts anywhere. Fix: move it to the
   layer whose load timing matches its use.
-- **Skill descriptions.** Loaded on every turn for every Agent: vague ones
-  under-trigger, enumerated synonym lists tax every request. Fix: name intent
+- **Skill descriptions.** Those on the injected catalog page are loaded on
+  every turn; later pages and `disable-model-invocation` Skills reach the
+  Agent only when listed or named. Vague injected ones under-trigger,
+  enumerated synonym lists tax every request. Fix: name intent
   categories and the trigger conditions in one or two sentences.
 - **Stale facts.** Paths, flags, versions, or CLI shapes that no longer match
   the machine. Fix: verify against the current CLI or code and correct.

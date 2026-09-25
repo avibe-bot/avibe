@@ -102,7 +102,7 @@ text, and mirrors.
 When asked to apply, back up first and edit where the text is owned:
 the source of a generated or imported file rather than its output (then
 regenerate it the way the source documents), personal files directly, Agent
-prompts through `vibe agent update --system-prompt-file`, Tasks and Watches
+prompts through `vibe agent update <name> --system-prompt-file <file>`, Tasks and Watches
 through `vibe task update` and `vibe watch update`, repository files through the
 repository's own delivery process as its AGENTS.md defines it, and
 Avibe-injected prompts only as a proposal to the Avibe repository.
@@ -111,7 +111,9 @@ Avibe-injected prompts only as a proposal to the Avibe repository.
 
 A removal is a hypothesis. For contested changes, probe behavior before and
 after on each target backend with a scratch run that exercises the
-instruction's purpose (`vibe agent run --agent <name> --sync --message ...`),
+instruction's purpose. Probe the target resolved in step 1, not the Agent's
+current definition: fork the affected session and pin its model and effort
+(`vibe agent run --fork-session <session> --model <model> --reasoning-effort <effort> --sync --message ...`),
 and read the transcript rather than asking the model whether it needs the
 rule. Change one thing at a time where stakes are high. If a cut regresses,
 re-add it in minimal form. Re-audit after any model or backend change.
