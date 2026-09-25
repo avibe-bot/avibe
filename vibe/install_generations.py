@@ -265,9 +265,6 @@ def _restart_is_unsettled() -> bool:
     from vibe import upgrade
 
     path = upgrade.runtime_mod.get_restart_status_path()
-    # A follow-up requested during the current restart still owns a handoff.
-    if (paths.get_runtime_dir() / "pending_restart.json").exists():
-        return True
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -278,7 +275,26 @@ def _restart_is_unsettled() -> bool:
         state = upgrade.RestartState(payload.get("state"))
     except (ValueError, TypeError):
         return True
-    return state is upgrade.RestartState.UNKNOWN or upgrade.restart_record_is_pending(payload, path)
+    if state is upgrade.RestartState.UNKNOWN or upgrade.restart_record_is_pending(payload, path):
+        return True
+    if state is not upgrade.RestartState.SUCCEEDED:
+        return False
+    try:
+        followup = json.loads((paths.get_runtime_dir() / "pending_restart.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    if not isinstance(followup, dict):
+        return True
+    job_id = followup.get("restart_job_id")
+    if job_id and job_id != payload.get("job_id"):
+        return False
+    # Success is written before the supervisor consumes its follow-up. Reuse
+    # the existing process identity/seed grace policy for that unfinished tail,
+    # without letting failed, superseded or abandoned markers veto forever.
+    # A released unscoped marker is consumable by any successful supervisor.
+    return upgrade.restart_record_is_pending(
+        {**payload, "state": upgrade.RestartState.RUNNING.value}, path,
+    )
 
 
 def _launcher_targets(

@@ -244,6 +244,40 @@ this inventory.
 
 ## Review accounting
 
+### Post-master-sync peer finding: stale follow-up ownership
+
+The independent pre-push review of local merge `e4b2b9df4` found one
+liveness defect: a failed supervisor's `pending_restart.json` survives future
+jobs with different IDs, and the collector treated its existence as permanent
+handoff ownership. This is a local finding, not another findings-bearing Codex
+head. The remote head remains `a29e596a3`, with a clean head-bound automatic
+review and all 12 threads resolved; its one exact-head lint run failed during
+dependency installation. The local master merge includes the separately merged
+SQLAlchemy fix from #2176 rather than duplicating it in this PR.
+
+The delivery owner narrows the correction to the existing restart-ownership
+boundary after inspecting the producer, consumer and successful supervisor tail:
+
+- Ordinary scheduled/running ownership keeps the existing PID identity and
+  bounded seed-grace policy, independent of a stale follow-up's job ID.
+- A failed/cancelled/otherwise terminal non-successful job, missing status,
+  or expired abandoned seed cannot turn a leftover follow-up into an owner.
+- Success is not alone proof that the handoff ended: collection precedes
+  follow-up consumption. A matching (or released unscoped) follow-up still pins
+  a successful supervisor using the same PID identity/grace policy. A different
+  job's marker adds no pin.
+- Unknown or unreadable status remains conservative. The collector never
+  consumes or rewrites the follow-up marker; that still belongs to the supervisor.
+
+The existing follow-up test is expanded at the activation/retirement boundary
+to distinguish live handoffs from failed, superseded, expired and PID-reused
+ones and to verify repeated convergence without changing the marker. No new
+schema, process scan, deletion eligibility, workflow or README change is needed.
+Before the production correction, the matrix and existing restart controls
+produced 11 failures (all stale owners retaining every generation) and 11 passes.
+After the correction, all 22 pass. Independent frozen-diff re-review is required
+before publishing this correction and the master synchronization.
+
 The published head before this simplification is
 `b0c134dd19e3cdd596154b544c480142f6d06171`: eight unresolved threads, terminal
 Codex findings, and terminal installer CI failure. Six distinct Codex heads

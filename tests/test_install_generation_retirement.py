@@ -825,14 +825,74 @@ def test_installer_diagnostics_restore_logging_without_a_traceback(
     assert retention.logger.level == level
 
 
-def test_pending_followup_defers_collection(installation):
+@pytest.mark.parametrize("state,owner,old_status,marker_job,deferred", [
+    ("failed", "live", False, "active", False),
+    ("error", "dead", False, "active", False),
+    ("cancelled", "dead", False, "active", False),
+    ("skipped", "dead", False, "active", False),
+    (None, "dead", False, "active", False),
+    ("running", "dead", True, "active", False),
+    ("scheduled", "seed", True, "active", False),
+    ("succeeded", "dead", True, "active", False),
+    ("succeeded", "reused", True, "active", False),
+    ("succeeded", "legacy", True, "active", False),
+    ("succeeded", "live", False, "previous-job", False),
+    ("succeeded", "live", True, "active", True),
+    ("succeeded", "live", True, None, True),
+    ("succeeded", "dead", False, "active", True),
+    ("unknown", "dead", True, "active", True),
+    ("future-state", "dead", True, "active", True),
+    ("unreadable", "dead", True, "active", True),
+])
+def test_pending_followup_respects_restart_ownership(
+    installation, monkeypatch, state, owner, old_status, marker_job, deferred,
+):
+    """A stale follow-up cannot veto normal activations indefinitely.
+
+    Existence-only coverage missed failed, superseded and abandoned jobs.
+    A matching supervisor still owns its successful tail until it consumes the
+    follow-up; unknown evidence and the existing seed grace remain conservative.
+    """
+    from vibe import restart_supervisor
+
     root, launcher = installation
     old = candidate(root, "old")
-    paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
-    (paths.get_runtime_dir() / "pending_restart.json").write_text('{"restart_job_id":"active"}')
-    current = activate(root, launcher, "selected")
-    assert old.exists()
+    restart_supervisor.mark_pending_restart(
+        trigger="web-ui-config-pending", restart_job_id=marker_job,
+    )
+    marker = paths.get_runtime_dir() / "pending_restart.json"
+    marker_bytes = marker.read_bytes()
+    status = runtime.get_restart_status_path()
+    if state is not None:
+        payload = {
+            "job_id": "active", "state": state,
+            "supervisor_pid": None if owner == "seed" else 123,
+        }
+        if owner not in {"legacy", "seed"}:
+            payload["supervisor_started_at"] = 100.0
+        runtime.write_json(status, payload)
+        if old_status:
+            os.utime(status, (1, 1))
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: owner not in {"dead", "seed"})
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 200.0 if owner == "reused" else 100.0)
+    if state == "unreadable":
+        original_read = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == status:
+                raise PermissionError("restart status unavailable")
+            return original_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+
+    for index in range(3):
+        current = activate(root, launcher, f"selected-{index}")
     assert current.exists()
+    assert launcher.resolve() == current.resolve()
+    assert old.exists() is deferred
+    expected = {"old", "selected-0", "selected-1", "selected-2"} if deferred else {"selected-2"}
+    assert {path.name for path in root.iterdir()} == expected
+    assert marker.read_bytes() == marker_bytes  # Only the supervisor consumes it.
 
 
 def test_stage_is_marked_before_uv_and_failed_helper_transfer_stays_precommit(
