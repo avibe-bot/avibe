@@ -1519,7 +1519,10 @@ that could not see all usage: a degraded ledger read (rows dropped), or an hourl
 bucket, and the 24-hour totals over it, whose `history_complete` is false.
 
 The override file is optional and read on every summary; an unreadable file is
-ignored with a warning. Every member is optional:
+ignored with a warning. An invalid entry is ignored on its own and the rest still
+apply: a price or fee that is not a finite number in range (including a JSON
+integer too large for a float), or a `models` key longer than 128 characters.
+A Source's `plan` is trimmed of surrounding whitespace. Every member is optional:
 
 ```json
 {

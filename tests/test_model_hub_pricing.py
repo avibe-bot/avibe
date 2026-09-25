@@ -310,6 +310,48 @@ def test_override_file_sets_a_sources_plan_fee_and_renewal_day():
     assert table.source_plan("src_a").renewal_day == 31
 
 
+def test_an_invalid_override_entry_is_ignored_and_the_rest_still_apply(tmp_path):
+    """MH-PRICE-013: A huge, non-finite, or over-long override entry is dropped alone; the other entries still apply."""
+
+    huge = 10**400  # a JSON integer too large for a float
+    (tmp_path / PRICE_OVERRIDE_FILENAME).write_text(
+        json.dumps({
+            "models": {
+                "claude-opus-5": {"input": huge, "output": 25},
+                "claude-haiku-4-5": {"input": 1e308 * 10, "output": 5},
+                "x" * 129: {"input": 1, "output": 2},
+                "claude-fable-5-1": {"input": 7, "output": 8},
+            },
+            "plans": {"claude_max_20x": {"fee_usd": huge}, "team_seat": {"fee_usd": 30}},
+            "sources": {"src_a": {"plan": "  team_seat \n", "renewal_day": 14}, "src_b": {"plan": "   "}},
+        }),
+        encoding="utf-8",
+    )
+    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+
+    # Rejected entries fall through to models.dev, as an absent override would.
+    assert table.price("claude-opus-5").input == 5
+    assert table.price("claude-haiku-4-5").input == 1
+    assert table.price("x" * 129) is None
+    assert table.fee("claude_max_20x") == 200
+    # Their neighbours still apply.
+    assert table.price("claude-fable-5-1").input == 7
+    assert table.fee("team_seat") == 30
+    assert table.source_plan("src_a").plan == "team_seat"
+    assert table.resolve_plan_key("src_a", "anthropic", None) == "team_seat"
+    assert table.source_plan("src_a").renewal_day == 14
+    assert table.source_plan("src_b").plan is None
+
+
+def test_a_128_character_override_model_key_is_the_longest_honoured():
+    """MH-PRICE-013: A model key of up to 128 characters takes an override; a longer one is ignored alone."""
+
+    at_limit, over = "m" * 128, "n" * 129
+    table = _table({"models": {at_limit: {"input": 1, "output": 2}, over: {"input": 3, "output": 4}}})
+    assert table.price(at_limit).input == 1
+    assert table.price(over) is None
+
+
 @pytest.mark.parametrize(
     ("today", "renewal_day", "expected"),
     [

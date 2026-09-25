@@ -104,13 +104,22 @@ class ModelPrice:
     charges_cache_writes: bool = False
 
 
-def _price(value: object) -> Optional[float]:
+def _bounded(value: object, ceiling: float) -> Optional[float]:
+    """A number in [0, ceiling], or None. An int too large for a float is out of range, not an error."""
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
-    if not math.isfinite(number) or number < 0 or number > _MAX_PRICE_PER_MTOK:
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0 or number > ceiling:
         return None
     return number
+
+
+def _price(value: object) -> Optional[float]:
+    return _bounded(value, _MAX_PRICE_PER_MTOK)
 
 
 def model_price(cost: object) -> Optional[ModelPrice]:
@@ -224,16 +233,9 @@ class PriceTable:
         plans = overrides.get("plans")
         if isinstance(plans, Mapping):
             for key, entry in plans.items():
-                fee = entry.get("fee_usd") if isinstance(entry, Mapping) else None
-                if (
-                    isinstance(key, str)
-                    and 0 < len(key) <= 64
-                    and not isinstance(fee, bool)
-                    and isinstance(fee, (int, float))
-                    and math.isfinite(fee)
-                    and 0 <= fee <= _MAX_FEE_USD
-                ):
-                    self._fees[key] = float(fee)
+                fee = _bounded(entry.get("fee_usd"), _MAX_FEE_USD) if isinstance(entry, Mapping) else None
+                if isinstance(key, str) and 0 < len(key) <= 64 and fee is not None:
+                    self._fees[key] = fee
         self._sources: dict[str, SourcePlan] = {}
         sources = overrides.get("sources")
         if isinstance(sources, Mapping):
@@ -241,9 +243,10 @@ class PriceTable:
                 if not isinstance(source_id, str) or not isinstance(entry, Mapping):
                     continue
                 plan = entry.get("plan")
+                plan = plan.strip()[:64] if isinstance(plan, str) else None
                 day = entry.get("renewal_day")
                 self._sources[source_id] = SourcePlan(
-                    plan=plan[:64] if isinstance(plan, str) and plan.strip() else None,
+                    plan=plan or None,
                     renewal_day=(
                         day
                         if isinstance(day, int) and not isinstance(day, bool) and 1 <= day <= 31
