@@ -3,7 +3,7 @@ node_modules/
 dist/
 
 # Rust workspace
-target/
+/target
 
 # Target-specific private Runtime payloads are release build products.
 src-tauri/resources/runtime/*
