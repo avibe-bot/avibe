@@ -90,7 +90,14 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
             'echo "$status" | grep -q \'"running": true\' && break; '
             "sleep 1; "
             "done; "
-            'echo "$status" | grep -q \'"running": true\''
+            'echo "$status" | grep -q \'"running": true\'; '
+            # This runtime belongs to the disposable container. Stop it before
+            # checking retirement down to the selected generation.
+            "/home/installer/.local/bin/vibe stop; "
+            "for attempt in 1 2 3; do "
+            "bash /work/install.sh; "
+            'test "$(find /home/installer/.avibe/runtime/install-generations -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1; '
+            "done"
         )
         command = (
             "apt-get update >/dev/null && "

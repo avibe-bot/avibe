@@ -675,11 +675,14 @@ def test_permissions_026_a_deferred_activation_runs_as_the_installation(
     launcher, so it is Avibe's own work by construction. The interpreter
     isolation this spawn already needs is unchanged — only the caller hop ends.
     """
-    from vibe import upgrade
+    from vibe import install_generations, upgrade
 
     caller_environment("member")
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "checkout"))
-    candidate = tmp_path / "generation" / "python"
+    root = tmp_path / "install-generations"
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    generation = root / "generation"
+    candidate = generation / "bin" / "python"
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.touch()
     monkeypatch.setattr(upgrade, "_candidate_python", lambda launcher: candidate)
@@ -692,6 +695,9 @@ def test_permissions_026_a_deferred_activation_runs_as_the_installation(
         class Proc:
             pid = 99001
 
+            def terminate(self):
+                pytest.fail("a valid installation handoff must not terminate its helper")
+
         return Proc()
 
     monkeypatch.setattr(upgrade.subprocess, "Popen", fake_popen)
@@ -699,13 +705,14 @@ def test_permissions_026_a_deferred_activation_runs_as_the_installation(
     upgrade.defer_upgrade_activation(
         SimpleNamespace(
             launcher=tmp_path / "stable" / "vibe",
-            candidate_launcher=tmp_path / "generation" / "vibe",
+            candidate_launcher=generation / "bin" / "vibe",
             source_generation=None,
         ),
         parent_pid=os.getpid(),
     )
 
     assert "__activate-upgrade" in spawned["command"]
+    assert (generation / install_generations.INSTALLER_PID).read_text() == "99001"
     assert set(spawned["env"]) & CALLER_CONTEXT_ENV_NAMES == set()
     # The isolation this spawn already had is still what it was.
     assert "PYTHONPATH" not in spawned["env"]

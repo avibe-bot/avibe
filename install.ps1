@@ -418,15 +418,25 @@ function Invoke-UvToolInstallAttempt {
     $generationBin = Join-Path $generationRoot "bin"
     $stableBin = Get-StableBinDirectory
     $stableLauncher = Join-Path $stableBin "vibe.exe"
-    # The candidate's shared Python activation owner resolves this snapshot to
-    # a generation. PowerShell must not duplicate junction/symlink identity.
-    $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
-    $previousSourcePath = $launcherState.SourcePath
     New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
-
+    # Protect the source snapshot throughout staging outside the Python lock.
+    # The collector ignores this marker only for its own candidate.
+    $installerMarker = Join-Path $generationRoot ".avibe-installing"
+    $installerMarkerTemporary = "$installerMarker.new"
     $previousToolDir = $env:UV_TOOL_DIR
     $previousToolBinDir = $env:UV_TOOL_BIN_DIR
     try {
+        try {
+            Set-Content -LiteralPath $installerMarkerTemporary -Value $PID -Encoding UTF8
+            [System.IO.File]::Move($installerMarkerTemporary, $installerMarker)
+        } catch {
+            Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+        }
+        # The candidate's shared Python activation owner resolves this snapshot to
+        # a generation. PowerShell must not duplicate junction/symlink identity.
+        $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
+        $previousSourcePath = $launcherState.SourcePath
         $env:UV_TOOL_DIR = $generationTools
         $env:UV_TOOL_BIN_DIR = $generationBin
         $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
@@ -507,8 +517,14 @@ function Invoke-UvToolInstallAttempt {
                 Output = if ($activation.Output) { $activation.Output } else { "candidate Avibe environment could not be activated" }
             }
         }
+        if ($activation.Output) {
+            # Retention may defer safely while activation succeeds. Do not hide
+            # its ownership/visibility diagnostics in captured native output.
+            Write-Host $activation.Output
+        }
         return $result
     } finally {
+        Remove-Item -LiteralPath $installerMarker -Force -ErrorAction SilentlyContinue
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
         if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
     }

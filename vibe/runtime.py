@@ -2009,6 +2009,9 @@ def start_service(
         _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
     if start_info is not None:
         start_info.capture(ready_pid, reused=start_info.reused)
+    from vibe.install_generations import collect_install_generations
+
+    collect_install_generations()
     return ready_pid
 
 
