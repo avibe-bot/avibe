@@ -167,3 +167,7 @@ proposed change — a file hunk, or a before/after payload plus the update
 command for text stored in Avibe state. Rewrite rather than delete when the
 concern is still live, and complete each removal across duplicates, tests, and
 mirrors.
+
+State each finding's confidence once and the audit's overall limits once;
+repeating caveats in every paragraph buries the findings. Read-only checks,
+such as `--help` or reading a file, settle a doubt faster than flagging it.
