@@ -100,9 +100,9 @@ export const SearchPage: React.FC = () => {
     // Full-screen focused surface (like ChatPage): fixed over the shell, its own
     // header is the top of the screen, and it scrolls internally. Desktop never
     // routes here (sidebar field + ⌘K own search), but keep it sane if hit.
-    <div className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:absolute md:pt-[var(--shell-titlebar-inset)]">
+    <div className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:absolute">
       {/* Header — back chevron + active search field (design.pen P6Nsz/KmsNV). */}
-      <header className="flex shrink-0 items-center gap-2.5 border-b border-border bg-background/92 px-4 py-3 backdrop-blur">
+      <header className="flex shrink-0 items-center gap-2.5 border-b border-border bg-background/92 px-4 py-3 backdrop-blur md:pt-[max(0.75rem,var(--shell-titlebar-inset))]">
         <Button
           type="button"
           variant="ghost"
