@@ -7,7 +7,6 @@ import inspect
 import io
 import json
 import re
-import textwrap
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -4515,6 +4514,15 @@ def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
     assert adapter.synced == []
 
 
+async def _confirm_guard(call):
+    try:
+        return await call({})
+    except ModelHubError as refusal:
+        if "would_remove_hops" not in (refusal.data or {}):
+            raise
+        return await call({"force": True, **refusal.data})
+
+
 def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
     service_node = next(
         node
@@ -4607,6 +4615,137 @@ def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
     asyncio.run(service._commit_synced(previous, changed))
 
     assert len(adapter.synced) == 1
+    assert service._engine_synced is True
+
+
+def _catalog_without(service, model_id):
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
+    return baseline, [model for model in baseline if model["id"] != model_id]
+
+
+async def _delete_seeded_custom_model(service):
+    service.store.config.sources[0].models.append(
+        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+    )
+    return await service.delete_custom_model("src_first0001", "claude-extra-model")
+
+
+async def _reconcile_builtin_supplied_model(service):
+    service.store.config.sources[0].models.append(
+        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+    )
+    catalog = [{"id": model.id} for model in service.store.config.agents["claude"].models]
+    service._builtin_snapshots = lambda _backends: {
+        "claude": {"complete": True, "models": [*catalog, {"id": "claude-extra-model"}]},
+    }
+    return await service.reconcile_builtin_models(("claude",))
+
+
+_PROJECTION_MODEL = "claude-opus-4-6"
+_PROJECTION_MUTATIONS = {
+    "rename_source": (
+        lambda service: service.patch_source("src_first0001", {"display_name": "Renamed"}),
+        None,
+    ),
+    "switch_mode_direct": (
+        lambda service: service.set_agent_mode("claude", "direct"),
+        None,
+    ),
+    "reorder_agent_sources": (
+        lambda service: service.set_agent_sources("claude", {"order": ["src_second001", "src_first0001"]}),
+        None,
+    ),
+    "reorder_chain": (
+        lambda service: service.set_agent_chain(
+            "claude",
+            _PROJECTION_MODEL,
+            {"hops": [
+                {"source_id": "src_second001", "model_id": _PROJECTION_MODEL},
+                {"source_id": "src_first0001", "model_id": _PROJECTION_MODEL},
+            ]},
+        ),
+        None,
+    ),
+    "retarget_base_url": (
+        lambda service: _confirm_guard(lambda guard: service.patch_source(
+            "src_first0001", {"base_url": "https://relay.example/v1", **guard},
+        )),
+        lambda bindings: bindings["src_first0001"].base_url == "https://relay.example/v1",
+    ),
+    "delete_source": (
+        lambda service: _confirm_guard(lambda guard: service.delete_source(
+            "src_second001",
+            force=guard.get("force", False),
+            confirmed_remove_hops=guard.get("would_remove_hops"),
+            confirmed_interruptions=guard.get("would_interrupt"),
+        )),
+        lambda bindings: set(bindings) == {"src_first0001"},
+    ),
+    "add_custom_model": (
+        lambda service: service.add_custom_model(
+            "src_first0001", {"model_id": "claude-extra-model", "reasoning_efforts": []},
+        ),
+        lambda bindings: "claude-extra-model" in bindings["src_first0001"].model_ids,
+    ),
+    "delete_custom_model": (
+        _delete_seeded_custom_model,
+        lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL,),
+    ),
+    "reconcile_builtin_models": (
+        _reconcile_builtin_supplied_model,
+        lambda bindings: "claude-extra-model" in bindings["src_first0001"].route_model_ids,
+    ),
+    "refresh_source": (
+        lambda service: service.refresh_source("src_first0001"),
+        lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL, "claude-sonnet-4-6"),
+    ),
+    "set_reasoning_efforts": (
+        lambda service: service.update_model_reasoning_efforts(
+            "src_first0001", _PROJECTION_MODEL, {"reasoning_efforts": ["low"]},
+        ),
+        lambda bindings: bindings["src_first0001"].model_reasoning_efforts == ((_PROJECTION_MODEL, ("low",)),),
+    ),
+    "drop_agent_source": (
+        lambda service: _confirm_guard(lambda guard: service.set_agent_sources(
+            "claude", {"order": ["src_first0001"], **guard},
+        )),
+        lambda bindings: bindings["src_second001"].route_model_ids == (_PROJECTION_MODEL,),
+    ),
+    "shorten_chain": (
+        lambda service: _confirm_guard(lambda guard: service.set_agent_chain(
+            "claude",
+            _PROJECTION_MODEL,
+            {"hops": [{"source_id": "src_first0001", "model_id": _PROJECTION_MODEL}], **guard},
+        )),
+        lambda bindings: _PROJECTION_MODEL not in bindings["src_second001"].route_model_ids,
+    ),
+    "remove_catalog_model": (
+        lambda service: _confirm_guard(lambda guard: service.set_agent_models(
+            "claude",
+            *_catalog_without(service, "claude-opus-4-7"),
+            force=guard.get("force", False),
+            confirmed_remove_hops=guard.get("would_remove_hops"),
+            confirmed_interruptions=guard.get("would_interrupt"),
+        )),
+        lambda bindings: "claude-opus-4-7" not in bindings["src_first0001"].route_model_ids,
+    ),
+}
+
+
+@pytest.mark.parametrize("mutation", _PROJECTION_MUTATIONS)
+def test_public_mutations_sync_the_engine_only_when_bindings_change(tmp_path, mutation):
+    service, store, adapter = _service(tmp_path)
+    _set_claude_route_fixture(store, ("src_first0001", "src_second001"), _PROJECTION_MODEL)
+    service._engine_synced = True
+    call, synced_projection = _PROJECTION_MUTATIONS[mutation]
+
+    asyncio.run(call(service))
+
+    if synced_projection is None:
+        assert adapter.synced == []
+    else:
+        assert len(adapter.synced) == 1
+        assert synced_projection({binding.source_id: binding for binding in adapter.synced[0]})
     assert service._engine_synced is True
 
 
@@ -7084,6 +7223,50 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
 
 @pytest.mark.parametrize(
     "disposition",
+    [RetainedMaterialDisposition.FLOW_SOURCE_REF, RetainedMaterialDisposition.UNKNOWN],
+)
+def test_hub_reauth_fail_closed_syncs_the_pruned_binding(tmp_path, disposition):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered"),
+            ModelHubModelConfig(id="manual-model", provenance="manual"),
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": None,
+        }
+    )
+    service._engine_synced = True
+    adapter.synced.clear()
+
+    asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert len(adapter.synced) == 1
+    synced = {binding.source_id: binding for binding in adapter.synced[0]}
+    assert synced[source.id].model_ids == ("manual-model",)
+
+
+@pytest.mark.parametrize(
+    "disposition",
     [
         RetainedMaterialDisposition.NONE,
         RetainedMaterialDisposition.FOREIGN_SOURCE_REF,
@@ -7432,6 +7615,171 @@ def test_failed_hub_create_keeps_flow_when_ref_cleanup_is_not_durable(tmp_path):
     assert adapter.revoked == ["cred_create_flow"]
     assert service.revocations.list() == []
     assert service.oauth_flows.binding(flow["flow_id"]) is not None
+
+
+def _make_ref_cleanup_non_durable(service, adapter):
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    async def fail_revocation(credential_ref):
+        adapter.revoked.append(credential_ref)
+        raise RuntimeError("engine is unavailable")
+
+    service.revocations.add = fail_journal_write
+    adapter.revoke_credential = fail_revocation
+
+
+def test_unbound_hub_start_fails_when_ref_cleanup_is_not_durable(tmp_path):
+    service, _, adapter = _service(tmp_path)
+    start_oauth = adapter.start_oauth
+
+    async def start_foreign_flow_with_material(source_id, vendor):
+        flow = await start_oauth(source_id, vendor)
+        return OAuthFlowState(
+            **{
+                **flow.__dict__,
+                "source_id": "src_foreign001",
+                "credential_ref": "cred_unbound_flow",
+            }
+        )
+
+    adapter.start_oauth = start_foreign_flow_with_material
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked == ["cred_unbound_flow"]
+    assert service.revocations.list() == []
+
+
+def test_failed_hub_oauth_source_creation_keeps_flow_when_ref_cleanup_is_not_durable(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_rollback",
+        }
+    )
+    adapter.fail_sync = True
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            _create_source(
+                service,
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Rollback subscription",
+                    "supply_channel": "hub",
+                    "oauth_flow_ref": flow["flow_id"],
+                },
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked == ["cred_oauth_rollback"]
+    assert store.config.sources == []
+    assert service.revocations.list() == []
+    assert service.oauth_flows.channel(flow["flow_id"]) == "hub"
+
+
+def test_cancelled_hub_oauth_source_creation_fails_when_ref_cleanup_is_not_durable(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_cancelled",
+        }
+    )
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    async def scenario():
+        observing = asyncio.Event()
+
+        async def blocked_observation(*_args, **_kwargs):
+            observing.set()
+            await asyncio.Event().wait()
+
+        adapter.observe_source = blocked_observation
+        task = asyncio.create_task(
+            _create_source(
+                service,
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Cancelled subscription",
+                    "supply_channel": "hub",
+                    "oauth_flow_ref": flow["flow_id"],
+                },
+            )
+        )
+        await observing.wait()
+        task.cancel()
+        with pytest.raises(ModelHubError) as exc_info:
+            await task
+        return exc_info.value
+
+    refusal = asyncio.run(scenario())
+
+    assert (refusal.code, refusal.status) == ("engine_down", 503)
+    assert adapter.revoked == ["cred_oauth_cancelled"]
+    assert store.config.sources == []
+    assert service.revocations.list() == []
+
+
+def test_orphaned_hub_reauth_fails_when_ref_cleanup_is_not_durable(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+    with pytest.raises(ModelHubError) as delete_refusal:
+        asyncio.run(service.delete_source(source.id))
+    asyncio.run(
+        service.delete_source(
+            source.id,
+            force=True,
+            confirmed_remove_hops=delete_refusal.value.data["would_remove_hops"],
+            confirmed_interruptions=delete_refusal.value.data["would_interrupt"],
+        )
+    )
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_orphan",
+        }
+    )
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked[-1] == "cred_hub_orphan"
+    assert service.revocations.list() == []
 
 
 @pytest.mark.parametrize(
@@ -8245,36 +8593,44 @@ def test_nonce_oauth_start_owner_cancellation_releases_waiter_and_tuple(tmp_path
     assert len(adapter.oauth_start_calls) == 1
 
 
-def test_oauth_start_keeps_every_owner_await_inside_the_installed_task(tmp_path):
+@pytest.mark.parametrize("channel", ("native_cli", "hub"))
+def test_nonce_oauth_start_retry_arriving_at_the_claim_joins_the_owner(tmp_path, channel):
     """A claimed nonce stays awaitable and releasable from the claim onward.
 
     The claim is what a concurrent same-tuple retry looks for, and the only
-    release is ``start_and_remember``'s own ``finally``. An owner await placed
-    before the task is installed therefore strands the tuple until restart, so
-    this asserts the property rather than the one pre-check that broke it: on the
-    owner path from claim to install there is nothing to wait on at all.
+    release is the owner task's own ``finally``. The retry is scheduled the
+    instant the owner claims, so any owner await before its task is installed
+    lets the retry find a pending claim with no task and fail ``engine_down``.
     """
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(ModelHubService.oauth_start)))
-    body = tree.body[0].body
-    claim = next(i for i, stmt in enumerate(body) if "claim_nonce" in ast.unparse(stmt))
-    install = next(i for i, stmt in enumerate(body) if "_oauth_start_tasks[nonce_key] = task" in ast.unparse(stmt))
+    async def run_retry_at_claim():
+        service, _, adapter = _service(tmp_path)
+        request = {
+            "vendor": "anthropic",
+            "channel": channel,
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+        claim_nonce = service.oauth_flows.claim_nonce
+        retries = []
 
-    for stmt in body[claim + 1 : install]:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # The task's own awaits are the safe ones: it is installed before it
-            # is awaited, and it owns the release.
-            continue
-        if isinstance(stmt, ast.If) and ast.unparse(stmt.test) == "nonce_key is None":
-            # No nonce, no claim — nothing for a retry to await or for a
-            # cancellation to leak.
-            continue
-        waits = [node for node in ast.walk(stmt) if isinstance(node, (ast.Await, ast.AsyncWith, ast.AsyncFor))]
-        assert not waits, f"owner awaits before its task is installed: {ast.unparse(stmt)}"
+        def claim_then_retry(*args, **kwargs):
+            claim = claim_nonce(*args, **kwargs)
+            if claim.owner:
+                retries.append(asyncio.create_task(service.oauth_start(dict(request))))
+            return claim
+
+        service.oauth_flows.claim_nonce = claim_then_retry
+        first = await service.oauth_start(request)
+        return first, await retries[0], adapter
+
+    first, retried, adapter = asyncio.run(run_retry_at_claim())
+
+    assert retried == first
+    assert len(adapter.oauth_start_calls) == 1
 
 
 def test_nonce_oauth_start_coalesces_a_retry_while_the_native_slot_read_waits(tmp_path):
-    """The member the structure guard above exists for, end to end."""
+    """A retry that waits behind the native-slot lock still joins the owner."""
 
     async def run_concurrent_start():
         service, _, adapter = _service(tmp_path)

@@ -6456,8 +6456,8 @@ class ModelHubService:
         # the native-slot read used to be one — strands the tuple until restart:
         # the retry finds a pending claim with no task and gets ``engine_down``,
         # and a cancelled owner never reaches the release at all.
-        # ``test_oauth_start_keeps_every_owner_await_inside_the_installed_task``
-        # holds the shape so the next pre-check cannot re-open the window.
+        # ``test_nonce_oauth_start_retry_arriving_at_the_claim_joins_the_owner``
+        # retries at the claim so the next pre-check cannot re-open the window.
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()
             flow: OAuthFlowState | None = None

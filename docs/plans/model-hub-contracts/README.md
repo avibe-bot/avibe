@@ -196,7 +196,8 @@ comparison. A gate may not report success by comparing stale input with itself.
 - `tests/test_model_hub_runtime.py`
 - `ui/src/components/settings/models/*.test.*`
 
-`tests/test_model_hub_config.py::test_every_versioned_object_ends_at_the_terminal_version_the_code_writes`
+`scripts/check_model_hub_authorities.py`, run by
+`tests/test_model_hub_config.py::test_model_hub_authority_closure_is_generated_from_live_files`,
 enforces the closure over whatever files this directory holds rather than over this list
 — versioned objects by their shape, and every `contract_version` a document writes as
 text — so an object or declaration added later is covered without an edit here. This
