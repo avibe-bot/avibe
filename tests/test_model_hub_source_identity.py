@@ -143,6 +143,39 @@ def test_claude_filename_migration_preserves_ref_source_and_prefix(tmp_path):
     assert migrated["prefix"] == prefix
 
 
+def test_claude_filename_migration_backfills_released_legacy_metadata_from_prefix(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    new_name = "claude-00f765af-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    identity = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    store.write_oauth_auth_file(old_name, identity)
+    (store.auth_dir / old_name).rename(store.auth_dir / new_name)
+
+    # This is the released v7.2 shape: auth_name and prefix only. Do not first
+    # reconcile the old name, because that would seed the new field and hide
+    # the upgrade path under test.
+    metadata_path = store._credential_path(ref)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("oauth_identity", None)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    metadata_path.chmod(0o600)
+
+    assert store.reconcile_oauth_auth_file(new_name, auth_provider="claude") == ref
+    migrated = store.credential_metadata(ref)
+    assert migrated["auth_name"] == new_name
+    assert migrated["prefix"] == prefix
+    assert migrated["oauth_identity"]["organization_uuid"] == "organization-a"
+
+
 def test_claude_filename_migration_rejects_cross_source_rebind(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     old_name = "claude-user@example.com.json"

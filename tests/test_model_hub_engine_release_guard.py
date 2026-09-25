@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import build_model_hub_engine
 from scripts import model_hub_engine_release_guard as guard
 
 
@@ -103,7 +104,24 @@ def test_fetch_source_verifies_upstream_bytes_and_builds_publishable_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest_path, _owned, upstream = _manifest(tmp_path)
-    monkeypatch.setattr(guard, "_download", _fake_download(upstream))
+    def build_source(manifest: Path, output: Path) -> Path:
+        output.mkdir()
+        output_manifest = output / "model-hub-engine-manifest.json"
+        output_manifest.write_bytes(manifest.read_bytes())
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        for raw in payload["assets"]:
+            name = Path(raw["url"]).name
+            archive = upstream[
+                f"{guard.UPSTREAM_RELEASE_ROOT}/{payload['release_tag']}/{name}"
+            ]
+            (output / name).write_bytes(archive)
+            (output / f"{name}.sha256").write_text(
+                f"{hashlib.sha256(archive).hexdigest()}  {name}\n",
+                encoding="utf-8",
+            )
+        return output_manifest
+
+    monkeypatch.setattr(build_model_hub_engine, "build_source_release", build_source)
 
     spec = guard.fetch_upstream_assets(manifest_path, tmp_path / "publish")
 

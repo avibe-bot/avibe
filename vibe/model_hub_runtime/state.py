@@ -1062,14 +1062,52 @@ class EngineStateStore:
                 raise EngineStateError("OAuth auth record binding is ambiguous")
             if exact:
                 credential_ref, metadata = exact[0]
-                self._secure_write_json(
-                    self._credential_path(credential_ref),
-                    {
-                        **metadata,
-                        **({"oauth_identity": identity} if identity else {}),
-                    },
-                )
+                updated = {
+                    **metadata,
+                    **({"oauth_identity": identity} if identity else {}),
+                }
+                if updated != metadata:
+                    self._secure_write_json(
+                        self._credential_path(credential_ref),
+                        updated,
+                    )
                 return credential_ref
+
+            # v7.2 metadata has only the opaque auth filename and the Avibe
+            # prefix. CPA preserves that prefix when it renames a Claude file,
+            # so it is the only released identity anchor available before this
+            # version can seed oauth_identity. Require one vendor-scoped owner:
+            # a duplicate prefix is ambiguity, never a reason to guess.
+            payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
+            if payload_prefix:
+                prefix_matches = [
+                    (credential_ref, metadata)
+                    for credential_ref, metadata in credentials
+                    if str(metadata.get("prefix") or "").strip().strip("/") == payload_prefix
+                ]
+                if len(prefix_matches) > 1:
+                    raise EngineStateError("OAuth auth record prefix is ambiguous")
+                if prefix_matches:
+                    credential_ref, metadata = prefix_matches[0]
+                    stored_identity = _oauth_identity_from_metadata(metadata)
+                    if (
+                        stored_identity
+                        and identity
+                        and not _oauth_identity_matches(stored_identity, identity)
+                    ):
+                        raise EngineStateError("OAuth auth record identity conflicts")
+                    updated = {
+                        **metadata,
+                        "auth_name": normalized_name,
+                        **({"oauth_identity": identity} if identity else {}),
+                    }
+                    if updated != metadata:
+                        self._secure_write_json(
+                            self._credential_path(credential_ref),
+                            updated,
+                        )
+                    return credential_ref
+
             if not identity:
                 return None
             identity_matches = [
@@ -1088,14 +1126,16 @@ class EngineStateStore:
             prefix = str(metadata.get("prefix") or "").strip()
             if not prefix or str(payload.get("prefix") or "").strip().strip("/") != prefix:
                 return None
-            self._secure_write_json(
-                self._credential_path(credential_ref),
-                {
-                    **metadata,
-                    "auth_name": normalized_name,
-                    "oauth_identity": identity,
-                },
-            )
+            updated = {
+                **metadata,
+                "auth_name": normalized_name,
+                "oauth_identity": identity,
+            }
+            if updated != metadata:
+                self._secure_write_json(
+                    self._credential_path(credential_ref),
+                    updated,
+                )
             return credential_ref
 
     def oauth_account_label(

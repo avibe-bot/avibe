@@ -320,7 +320,10 @@ def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
 
 
 def fetch_upstream_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
-    return _materialize(manifest_path, output_dir, from_upstream=True)
+    from scripts.build_model_hub_engine import build_source_release
+
+    generated_manifest = build_source_release(manifest_path, output_dir)
+    return load_release_spec(generated_manifest)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -331,7 +334,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--output-dir", type=Path, required=True)
     fetch_source = subparsers.add_parser(
         "fetch-source",
-        help="Fetch verified upstream bytes for initial Avibe release publication.",
+        help="Build patched source assets for initial Avibe release publication.",
     )
     fetch_source.add_argument("--output-dir", type=Path, required=True)
     verify = subparsers.add_parser("verify", help="Verify a materialized release directory.")

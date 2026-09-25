@@ -108,7 +108,7 @@ _OAUTH_ENDPOINTS = {
 # rather than an endpoint Avibe may synthesize a request against.
 #
 # Read from the engine at the commit `cliproxyapi_manifest.json` pins
-# (v7.2.149, `2a6b87ac`); each row is one of its serving surfaces, not a guess:
+# (v7.3.16, `c404af96`); each row is one of its serving surfaces, not a guess:
 #
 #   gemini  `internal/translator/antigravity/openai/chat-completions/init.go:9`
 #           registers `translator.Register(OpenAI, Antigravity, ...)`, so an
@@ -2003,7 +2003,7 @@ class CLIProxyEngineAdapter:
             ]
             if len(matches) != 1:
                 raise EngineStateError("OAuth credential validation is inconclusive")
-            # CPA v7.2.149 loses refresh failure details ("token expired") and
+            # CPA v7.3.16 loses refresh failure details ("token expired") and
             # also puts request failures in status_message. None of those
             # inventory strings proves that a refresh grant was rejected.
             try:
@@ -2690,8 +2690,6 @@ class CLIProxyEngineAdapter:
             inventory = await run_owned_in_thread(_auth_inventory, client)
         except (EngineClientError, OSError):
             raise SubscriptionQuotaError("unavailable") from None
-        await self._reconcile_oauth_inventory(inventory)
-        metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
         auth_name = str(metadata.get("auth_name") or "")
         matches = [
             auth

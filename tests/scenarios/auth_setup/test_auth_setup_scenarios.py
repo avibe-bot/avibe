@@ -3676,7 +3676,11 @@ def test_hub_oauth_model_free_observation_closed_loop(
         else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
     )
     auth_name = "oauth-test.json"
-    grant = {"access_token": bound_token, "refresh_token": "test-refresh-grant"}
+    grant = {
+        "type": "codex" if is_openai else "claude",
+        "access_token": bound_token,
+        "refresh_token": "test-refresh-grant",
+    }
     state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
 
     def management_request(method, path, *, query=None, payload=None):
@@ -3758,7 +3762,10 @@ def test_hub_oauth_model_free_observation_closed_loop(
         assert source["state"]["status"] == "standby"
         assert [model["id"] for model in source["models"]] == ["gpt-5.6"]
         assert service.list_sources() == [source]
-        assert all(secret not in json.dumps(terminal) for secret in grant.values())
+        assert all(
+            grant[key] not in json.dumps(terminal)
+            for key in ("access_token", "refresh_token")
+        )
         assert (await service.oauth_status(h.flow_id))["source"] == source
         assert adapter.revoked == []
         assert len(api_calls) == 1
