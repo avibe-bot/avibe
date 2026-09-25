@@ -1841,6 +1841,8 @@
   --model-hub-order-width: 460px;
   width: min(var(--model-hub-order-width), 100vw);
   border-left: 1px solid var(--border-strong);
+  /* Clears the desktop shell's overlay title bar (0 elsewhere). */
+  padding-top: var(--shell-titlebar-inset);
   box-shadow: var(--model-hub-drawer-shadow);
 }
 

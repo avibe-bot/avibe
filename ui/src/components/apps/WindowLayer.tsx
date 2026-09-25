@@ -296,7 +296,7 @@ export const WindowLayer: React.FC<{ active?: boolean }> = ({ active = true }) =
         // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
         // the sidebar and maximize fills the whole screen. This layer (z-20) sits ABOVE the sidebar
         // (z-10), but below the portaled Apps launcher and Dock (z-30).
-        className="pointer-events-none fixed inset-0 z-20 hidden md:block"
+        className="pointer-events-none fixed inset-x-0 bottom-0 top-[var(--shell-titlebar-inset)] z-20 hidden md:block"
       >
         {windows.map((w) => {
           // For a showpage window, join the inventory (already loaded above — no new

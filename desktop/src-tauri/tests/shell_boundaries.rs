@@ -278,6 +278,7 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
         .unwrap();
     assert!(macos_dependencies.contains("objc2 = \"0.6.4\""));
     assert!(macos_dependencies.contains("objc2-foundation = { version = \"0.3.2\""));
+    assert!(macos_dependencies.contains("objc2-app-kit = { version = \"0.3.2\""));
     assert!(!cargo.contains("objc2-core-services"));
 }
 
@@ -660,6 +661,61 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_SHELL__ === true"),
         "the Workbench must read the same marker the shell defines"
+    );
+}
+
+#[test]
+fn the_macos_overlay_title_bar_drags_natively_and_insets_the_page() {
+    let window = &config()["app"]["windows"][0];
+    assert_eq!(window["titleBarStyle"], "Overlay");
+    assert_eq!(window["hiddenTitle"], true);
+
+    let source = shipping_source("src/lib.rs");
+    let builder = source
+        .split("fn ensure_main_window(")
+        .nth(1)
+        .expect("main window builder")
+        .split("\n}\n")
+        .next()
+        .expect("builder body");
+    for required in [
+        "#[cfg(target_os = \"macos\")]\n    let builder = builder.initialization_script(macos_title_bar::INSET_SCRIPT);",
+        "#[cfg(target_os = \"macos\")]\n    macos_title_bar::install(&window);",
+    ] {
+        assert!(builder.contains(required), "every macOS main window must keep {required}");
+    }
+
+    // The drag is native: the page gets no drag command, and no capability or
+    // IPC path is widened to the remote Workbench origin for it.
+    let native = shipping_source("src/macos_title_bar.rs");
+    for required in [
+        "performWindowDragWithEvent(event)",
+        "AppleActionOnDoubleClick",
+        "acceptsFirstMouse:",
+        "NSWindowOrderingMode::Above",
+        "pub const TITLE_BAR_INSET: f64 = 28.0;",
+        "'--shell-titlebar-inset', '28px'",
+        "if (window.self === window.top)",
+    ] {
+        assert!(native.contains(required), "the native title bar must retain {required}");
+    }
+    for forbidden in [
+        "invoke_handler",
+        "#[tauri::command]",
+        ".emit(",
+        "data-tauri-drag-region",
+    ] {
+        assert!(
+            !native.contains(forbidden),
+            "the native title bar must not use {forbidden}"
+        );
+    }
+    assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
+
+    let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
+    assert!(
+        css.contains("--shell-titlebar-inset: 0px;"),
+        "outside the macOS shell the Workbench must lay out with no title bar inset"
     );
 }
 

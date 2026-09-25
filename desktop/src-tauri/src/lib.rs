@@ -23,6 +23,8 @@ mod notifications;
 
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
+#[cfg(target_os = "macos")]
+mod macos_title_bar;
 
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
@@ -1186,12 +1188,17 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .iter()
         .find(|config| config.label == MAIN_WINDOW)?
         .clone();
-    WebviewWindowBuilder::from_config(app, &config)
+    let builder = WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .initialization_script(DESKTOP_SHELL_MARKER)
-        .on_new_window(|url, _features| handle_new_window_request(url))
-        .build()
-        .ok()
+        .on_new_window(|url, _features| handle_new_window_request(url));
+    // macOS draws the page under an overlay title bar (`tauri.conf.json`).
+    #[cfg(target_os = "macos")]
+    let builder = builder.initialization_script(macos_title_bar::INSET_SCRIPT);
+    let window = builder.build().ok()?;
+    #[cfg(target_os = "macos")]
+    macos_title_bar::install(&window);
+    Some(window)
 }
 
 /// Tells the Workbench, before any of its scripts run, that it is rendered by
