@@ -48,7 +48,7 @@ pub fn parse_deep_link(raw: &str) -> Option<DeepLinkTarget> {
             };
             format!("{prefix}/{identifier}")
         }
-        ("settings", "") => "/admin/settings/service".to_owned(),
+        ("settings", "") => "/settings/general".to_owned(),
         ("vaults", path) => {
             let identifier = path.strip_prefix("/request/")?;
             if !valid_identifier(identifier) {
@@ -162,7 +162,7 @@ mod tests {
     const MAPPINGS: &[(&str, &str)] = &[
         ("avibe://session/ses.A_b-9", "/chat/ses.A_b-9"),
         ("avibe://show/ses.A_b-9", "/apps/show/ses.A_b-9"),
-        ("avibe://settings", "/admin/settings/service"),
+        ("avibe://settings", "/settings/general"),
         ("avibe://vaults/request/req.A_b-9", "/vaults?request_id=req.A_b-9"),
     ];
 
