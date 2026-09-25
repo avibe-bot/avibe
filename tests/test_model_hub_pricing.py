@@ -310,6 +310,100 @@ def test_override_file_sets_a_sources_plan_fee_and_renewal_day():
     assert table.source_plan("src_a").renewal_day == 31
 
 
+def test_an_invalid_override_entry_is_ignored_and_the_rest_still_apply(tmp_path):
+    """MH-PRICE-013: A huge, non-finite, or over-long override entry is dropped alone; the other entries still apply."""
+
+    huge = 10**400  # a JSON integer too large for a float
+    (tmp_path / PRICE_OVERRIDE_FILENAME).write_text(
+        json.dumps({
+            "models": {
+                "claude-opus-5": {"input": huge, "output": 25},
+                "claude-haiku-4-5": {"input": 1e308 * 10, "output": 5},
+                "x" * 129: {"input": 1, "output": 2},
+                "claude-fable-5-1": {"input": 7, "output": 8},
+            },
+            "plans": {"claude_max_20x": {"fee_usd": huge}, "team_seat": {"fee_usd": 30}},
+            "sources": {"src_a": {"plan": "  team_seat \n", "renewal_day": 14}, "src_b": {"plan": "   "}},
+        }),
+        encoding="utf-8",
+    )
+    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+
+    # Rejected entries fall through to models.dev, as an absent override would.
+    assert table.price("claude-opus-5").input == 5
+    assert table.price("claude-haiku-4-5").input == 1
+    assert table.price("x" * 129) is None
+    assert table.fee("claude_max_20x") == 200
+    # Their neighbours still apply.
+    assert table.price("claude-fable-5-1").input == 7
+    assert table.fee("team_seat") == 30
+    assert table.source_plan("src_a").plan == "team_seat"
+    assert table.resolve_plan_key("src_a", "anthropic", None) == "team_seat"
+    assert table.source_plan("src_a").renewal_day == 14
+    assert table.source_plan("src_b").plan is None
+
+
+def test_an_integer_past_the_json_digit_limit_is_ignored_alone(tmp_path):
+    """MH-PRICE-013: An integer too long for the JSON parser drops only its entry, not the file."""
+
+    digits = "9" * 5000
+    (tmp_path / PRICE_OVERRIDE_FILENAME).write_text(
+        '{"models": {"claude-opus-5": {"input": %s, "output": 25}, "claude-fable-5-1": {"input": 7, "output": 8}},'
+        ' "plans": {"claude_max_20x": {"fee_usd": %s}, "team_seat": {"fee_usd": 30}}}' % (digits, digits),
+        encoding="utf-8",
+    )
+    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+    assert table.price("claude-opus-5").input == 5
+    assert table.price("claude-fable-5-1").input == 7
+    assert table.fee("claude_max_20x") == 200
+    assert table.fee("team_seat") == 30
+
+
+def test_an_integer_past_a_lowered_interpreter_digit_limit_is_ignored_alone(tmp_path, monkeypatch):
+    """MH-PRICE-013: The per-entry rejection holds when the interpreter's int digit limit is set lower."""
+
+    import sys
+
+    if not hasattr(sys, "set_int_max_str_digits"):
+        pytest.skip("interpreter has no int digit limit")
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        # Force the conversion path past the cheap length check.
+        monkeypatch.setattr("core.handlers.model_hub.pricing._MAX_INT_DIGITS", 10_000)
+        (tmp_path / PRICE_OVERRIDE_FILENAME).write_text(
+            '{"models": {"claude-opus-5": {"input": %s, "output": 25}, "claude-fable-5-1": {"input": 7, "output": 8}}}'
+            % ("9" * 700),
+            encoding="utf-8",
+        )
+        table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+    finally:
+        sys.set_int_max_str_digits(previous)
+    assert table.price("claude-opus-5").input == 5
+    assert table.price("claude-fable-5-1").input == 7
+
+
+def test_a_padded_plan_key_still_matches_the_source_plan_that_names_it():
+    """MH-PRICE-013: Plan keys are trimmed like a Source's plan, and an exact key wins over a padded one."""
+
+    table = _table({
+        "plans": {" team ": {"fee_usd": 30}, " solo ": {"fee_usd": 10}, "solo": {"fee_usd": 12}},
+        "sources": {"src_a": {"plan": " team "}, "src_b": {"plan": "solo"}},
+    })
+    assert table.resolve_plan_key("src_a", "anthropic", None) == "team"
+    assert table.fee("team") == 30
+    assert table.fee("solo") == 12
+
+
+def test_a_128_character_override_model_key_is_the_longest_honoured():
+    """MH-PRICE-013: A model key of up to 128 characters takes an override; a longer one is ignored alone."""
+
+    at_limit, over = "m" * 128, "n" * 129
+    table = _table({"models": {at_limit: {"input": 1, "output": 2}, over: {"input": 3, "output": 4}}})
+    assert table.price(at_limit).input == 1
+    assert table.price(over) is None
+
+
 @pytest.mark.parametrize(
     ("today", "renewal_day", "expected"),
     [

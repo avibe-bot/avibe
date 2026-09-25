@@ -34,6 +34,7 @@ CURRENCY: Final = "USD"
 _MAX_PRICE_PER_MTOK: Final = 100_000.0
 _MAX_FEE_USD: Final = 100_000.0
 _MAX_KEY_CHARS: Final = 128
+_MAX_INT_DIGITS: Final = 400  # below Python's lowest settable int-to-str digit limit (640)
 # An alias may point at another alias, but not forever.
 _MAX_ALIAS_HOPS: Final = 4
 # One-hour cache writes cost twice the input price where the table says nothing.
@@ -104,13 +105,22 @@ class ModelPrice:
     charges_cache_writes: bool = False
 
 
-def _price(value: object) -> Optional[float]:
+def _bounded(value: object, ceiling: float) -> Optional[float]:
+    """A number in [0, ceiling], or None. An int too large for a float is out of range, not an error."""
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
-    if not math.isfinite(number) or number < 0 or number > _MAX_PRICE_PER_MTOK:
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0 or number > ceiling:
         return None
     return number
+
+
+def _price(value: object) -> Optional[float]:
+    return _bounded(value, _MAX_PRICE_PER_MTOK)
 
 
 def model_price(cost: object) -> Optional[ModelPrice]:
@@ -223,17 +233,12 @@ class PriceTable:
         self._fees = dict(PLAN_FEES_USD)
         plans = overrides.get("plans")
         if isinstance(plans, Mapping):
-            for key, entry in plans.items():
-                fee = entry.get("fee_usd") if isinstance(entry, Mapping) else None
-                if (
-                    isinstance(key, str)
-                    and 0 < len(key) <= 64
-                    and not isinstance(fee, bool)
-                    and isinstance(fee, (int, float))
-                    and math.isfinite(fee)
-                    and 0 <= fee <= _MAX_FEE_USD
-                ):
-                    self._fees[key] = float(fee)
+            # Keys are trimmed like a Source's `plan`; an exact key wins over a padded one.
+            for key, entry in sorted(plans.items(), key=lambda item: isinstance(item[0], str) and item[0] == item[0].strip()):
+                key = key.strip() if isinstance(key, str) else None
+                fee = _bounded(entry.get("fee_usd"), _MAX_FEE_USD) if isinstance(entry, Mapping) else None
+                if key and len(key) <= 64 and fee is not None:
+                    self._fees[key] = fee
         self._sources: dict[str, SourcePlan] = {}
         sources = overrides.get("sources")
         if isinstance(sources, Mapping):
@@ -241,9 +246,10 @@ class PriceTable:
                 if not isinstance(source_id, str) or not isinstance(entry, Mapping):
                     continue
                 plan = entry.get("plan")
+                plan = plan.strip()[:64] if isinstance(plan, str) else None
                 day = entry.get("renewal_day")
                 self._sources[source_id] = SourcePlan(
-                    plan=plan[:64] if isinstance(plan, str) and plan.strip() else None,
+                    plan=plan or None,
                     renewal_day=(
                         day
                         if isinstance(day, int) and not isinstance(day, bool) and 1 <= day <= 31
@@ -380,9 +386,21 @@ def billing_period(today: date, renewal_day: Optional[int]) -> tuple[str, date, 
     return "billing_cycle", start, renews
 
 
+def _parse_int(digits: str) -> int | float:
+    # Any integer that cannot convert, whatever the interpreter's digit limit, is out of range.
+    if len(digits) > _MAX_INT_DIGITS:
+        return math.inf
+    try:
+        return int(digits)
+    except ValueError:
+        return math.inf
+
+
 def _read_overrides(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        # An integer too long for the parser's digit limit becomes an out-of-range
+        # number, so only its entry is rejected rather than the whole file.
+        payload = json.loads(path.read_text(encoding="utf-8"), parse_int=_parse_int)
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, RecursionError) as exc:

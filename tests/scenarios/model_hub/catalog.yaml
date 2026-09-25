@@ -1036,6 +1036,12 @@ scenarios:
     kind: safety
     layer: unit
     test: tests/test_model_hub_pricing.py::test_no_aggregate_over_an_unknown_part_is_published_as_exact
+  - id: MH-PRICE-013
+    name: An invalid price override entry (huge, non-finite, or an over-long model key) is ignored alone, and a Source plan is whitespace-trimmed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_an_invalid_override_entry_is_ignored_and_the_rest_still_apply
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
