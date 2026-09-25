@@ -7,6 +7,8 @@ const entry = (name: string, size = 100) => ({ kind: 'file', name, size });
 describe('File Browser open classification', () => {
   it.each([
     ['photo.png', 'image'],
+    ['voice.wav', 'audio'],
+    ['clip.mp4', 'video'],
     ['document.pdf', 'pdf'],
     ['document.docx', 'docx'],
     ['notes.md', 'markdown'],
@@ -59,6 +61,20 @@ describe('audio / video preview classification', () => {
     ['audio/silk', null],
   ])('classifies a label-only chat link by content type %s', (mime, kind) => {
     expect(previewRenderKind('Listen here', mime)).toBe(kind);
+  });
+
+  it.each([
+    ['clip.ogg', null, 'audio'],
+    ['clip.ogg', 'video/ogg', 'video'],
+    ['clip.webm', null, 'video'],
+    ['clip.webm', 'audio/webm', 'audio'],
+  ])('lets an explicit content type pick the track kind of container %s (%s)', (name, mime, kind) => {
+    expect(previewRenderKind(name, mime)).toBe(kind);
+  });
+
+  it('routes media within the content cap to read-only preview and oversized media to download', () => {
+    expect(previewOverlayKind(entry('voice.wav'))).toBe('audio');
+    expect(previewOverlayKind(entry('clip.mov', 25 * 1024 * 1024 + 1))).toBeNull();
   });
 
   it('trusts the server ext over a misleading label suffix', () => {

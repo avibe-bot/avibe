@@ -191,10 +191,25 @@ def test_agent_download_and_metadata_preserve_real_filename(
     engine.dispose()
 
 
-@pytest.mark.parametrize("filename", ["voice.wav", "voice.m4a", "voice.aac", "voice.flac", "voice.opus"])
-def test_agent_audio_serves_inline_with_range_for_the_web_player(tmp_path, monkeypatch, filename, sqlite_schema_db_factory):
-    """An agent-sent audio file must stream inline (not force-download) so the chat's native
-    <audio> player can load and seek it, whatever alias ``mimetypes`` guessed for the type."""
+@pytest.mark.parametrize(
+    ("filename", "content_type"),
+    [
+        ("voice.wav", None),
+        ("voice.m4a", None),
+        ("voice.aac", None),
+        ("voice.flac", None),
+        ("voice.opus", None),
+        ("upload.wav", "audio/vnd.wave"),
+        ("upload.mp3", "audio/mp3"),
+        ("upload.m4v", "video/x-m4v"),
+    ],
+)
+def test_media_serves_inline_with_range_for_the_web_player(
+    tmp_path, monkeypatch, filename, content_type, sqlite_schema_db_factory,
+):
+    """Media the Web UI offers a player for must stream inline (not force-download) so the native
+    <audio>/<video> element can load and seek it — whatever alias ``mimetypes`` guessed for an agent
+    file or the browser reported for an upload."""
     from tests.ui_server_test_helpers import _save_config
     from vibe import ui_server
 
@@ -207,13 +222,19 @@ def test_agent_audio_serves_inline_with_range_for_the_web_player(tmp_path, monke
     audio.write_bytes(bytes(range(256)))
     with engine.begin() as conn:
         scope_id = _seed_scope_and_session(conn)
-        rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=f"[memo]({audio.as_uri()})")
-        token = conn.execute(select(media_objects.c.token)).scalar_one()
+        if content_type:
+            token = media_service.register(
+                conn, scope_id=scope_id, session_id="sess_x", kind="file", source="user_upload",
+                local_path=str(audio.resolve()), file_name=filename, content_type=content_type,
+            )
+        else:
+            rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=f"[memo]({audio.as_uri()})")
+            token = conn.execute(select(media_objects.c.token)).scalar_one()
 
     client = ui_server.app.test_client()
     response = client.get(f"/api/media/{token}")
     assert response.status_code == 200
-    assert response.headers["Content-Type"].startswith("audio/")
+    assert response.headers["Content-Type"].split("/", 1)[0] in {"audio", "video"}
     disposition = Message()
     disposition["Content-Disposition"] = response.headers["Content-Disposition"]
     assert disposition.get_content_disposition() == "inline"

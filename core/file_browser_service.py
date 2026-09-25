@@ -53,6 +53,17 @@ INLINE_SAFE_CONTENT_TYPES = {
     "audio/webm",
     "audio/flac",
     "audio/x-m4a",
+    # Aliases Python's ``mimetypes`` and browsers report for common audio/video; keep in sync with
+    # the Web UI player allowlist (ui/src/lib/filePreview.ts ``mediaKind``).
+    "audio/x-wav",
+    "audio/wave",
+    "audio/vnd.wave",
+    "audio/mp3",
+    "audio/mp4a-latm",
+    "audio/x-aac",
+    "audio/x-flac",
+    "audio/opus",
+    "video/x-m4v",
     "video/mp4",
     "video/webm",
     "video/ogg",

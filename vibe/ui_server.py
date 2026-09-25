@@ -10413,6 +10413,36 @@ async def files_meta(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+def _parse_single_byte_range(header: str | None, total: int) -> tuple[int, int] | bool | None:
+    """Resolve a single ``Range: bytes=`` spec against ``total`` bytes.
+
+    Returns ``(start, end)`` (inclusive) for a satisfiable range, ``False`` when it is
+    unsatisfiable (416), and ``None`` to serve the whole body (no header, multi-range,
+    or a malformed spec — RFC 9110 lets a server ignore those). Native ``<audio>`` /
+    ``<video>`` players (Safari requires it) seek through these requests.
+    """
+    if not header:
+        return None
+    unit, _, spec = header.partition("=")
+    if unit.strip().lower() != "bytes" or "," in spec:
+        return None
+    first, sep, last = spec.strip().partition("-")
+    if not sep or not (first.isdigit() or last.isdigit()) or (first and not first.isdigit()) or (last and not last.isdigit()):
+        return None
+    if not first:
+        suffix = int(last)
+        if suffix == 0 or total == 0:
+            return False
+        return max(total - suffix, 0), total - 1
+    start = int(first)
+    end = min(int(last), total - 1) if last else total - 1
+    if last and int(last) < start:
+        return None
+    if start >= total:
+        return False
+    return start, end
+
+
 @app.get("/api/files/content", include_in_schema=False)
 async def files_content(starlette_request: FastAPIRequest):
     async def handler():
@@ -10426,16 +10456,23 @@ async def files_content(starlette_request: FastAPIRequest):
             )
         except Exception as exc:
             return _file_browser_error_response(exc)
-        return FastAPIResponse(
-            content=content.data,
-            media_type=content.mime,
-            headers={
-                "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer",
-                "Cache-Control": "private, no-store",
-                "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
-            },
-        )
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
+            "Accept-Ranges": "bytes",
+        }
+        total = len(content.data)
+        byte_range = _parse_single_byte_range(starlette_request.headers.get("range"), total)
+        if byte_range is None:
+            return FastAPIResponse(content=content.data, media_type=content.mime, headers=headers)
+        if byte_range is False:
+            headers["Content-Range"] = f"bytes */{total}"
+            return FastAPIResponse(status_code=416, headers=headers)
+        start, end = byte_range
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        return FastAPIResponse(content=content.data[start : end + 1], status_code=206, media_type=content.mime, headers=headers)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -10816,13 +10853,17 @@ _INLINE_SAFE_MEDIA_TYPES = {
     "audio/webm",
     "audio/flac",
     "audio/x-m4a",
-    # Aliases Python's ``mimetypes`` guesses for common audio (.wav/.m4a/.aac/.flac).
+    # Aliases Python's ``mimetypes`` and browsers report for common audio/video; keep in sync with
+    # the Web UI player allowlist (ui/src/lib/filePreview.ts ``mediaKind``).
     "audio/x-wav",
     "audio/wave",
+    "audio/vnd.wave",
+    "audio/mp3",
     "audio/mp4a-latm",
     "audio/x-aac",
     "audio/x-flac",
     "audio/opus",
+    "video/x-m4v",
     "video/mp4",
     "video/webm",
     "video/ogg",
