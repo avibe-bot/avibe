@@ -174,3 +174,39 @@ These are hermetic adapter/service/dispatcher consumers, not real Web/IM or SDK
 end-to-end tests. The ledger is process-local recovery across client generations;
 restart tests cover the existing durable Activity receipt/snapshot store, not a
 new durable outbox for never-accepted unsolicited text.
+
+## Bounded persistence/EOF correction and ancestry integration (2026-09-26)
+
+The orchestrator authorized one combined pass after the terminal review of
+`d0b3f86e78c6`: integrate master `6d464094b2a7`, retain its behavioral
+cross-backend Stop test with the Claude synthetic-owner fixture initialized,
+and correct two existing boundaries. This does not extend the recovery ledger
+or reset the cumulative breaker (eleven findings-bearing reviewed heads).
+
+- A provenance retry describes a failed write, not lifecycle authority. At
+  retry time the registry derives the phase from the current owner: active,
+  queued/claimed output, or terminal snapshot. A later successful write or
+  deletion supersedes that retry evidence, including atomic multi-Activity
+  batch binding. Failed writes retain evidence. Neither stale diagnostics nor
+  retries may downgrade an output receipt to active or resurrect a deleted row.
+- Buffered failure replay distinguishes a diagnostic replay exception from an
+  accepted terminal failure. At EOF, a request still owned after failed replay
+  follows the existing no-result settlement before releasing its service gate.
+  If replay already consumed the owner, EOF cannot emit another terminal.
+  Receiver errors use the same ownership rule; a retired receiver cannot
+  replay against a successor's client, request, or token.
+
+Consumer coverage uses a real SQLite Activity store with injected single/batch
+write failures, transitions from active to completed/failed/stopped/killed,
+queued and claimed receipts, terminal acknowledgement, and registry restart.
+The receiver/service matrix covers EOF/error, failure before emission and after
+owner consumption, successful authoritative replay, repeated cleanup, and
+Stop/replacement with an admitted successor. Gate acquisition/release is real
+AgentService behavior; outbound acceptance is recorded by a test double, not
+claimed as native SDK, durable Run, or Web/IM end-to-end verification. Existing
+dispatcher/durable-receipt consumer suites remain part of the focused gate.
+
+No review-thread operations, manual review trigger, PR merge, deployment,
+service restart, or Watch/cursor changes are part of this pass. Fresh exact-head
+automatic review and repository CI remain required after the single push;
+local green tests are not acceptance.

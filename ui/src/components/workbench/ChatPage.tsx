@@ -60,6 +60,7 @@ import {
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
+import { FailureDetails } from './FailureDetails';
 import { FailureRetry } from './FailureRetry';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
@@ -3668,7 +3669,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
     // hairline bottom border separating it from the scrolling transcript.
     // No project-id pill and no override banner — both were noise the user
     // flagged (regression feedback #1/#3).
-    <div className="shrink-0 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur md:px-8">
+    <div className="shrink-0 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur md:px-8 md:pt-[max(0.625rem,var(--shell-titlebar-inset))]">
       <div className="mx-auto flex w-full max-w-[1080px] items-center gap-3">
         <Button
           type="button"
@@ -4860,14 +4861,17 @@ export const MessageRow = memo(function MessageRow({
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
           <div className="inline-flex w-fit max-w-full items-start gap-1.5 rounded-2xl rounded-tl-md border border-gold/30 bg-gold/[0.08] px-3 py-1.5 text-[12px] text-gold-ink">
             <Bell className="mt-px size-3 shrink-0" />
-            <span className="min-w-0 break-words">
-              <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
-              {vaultStatusKey && (
-                <span className="font-normal text-gold-ink/80"> · {t(vaultStatusKey)}</span>
-              )}
-              {resultPresentation.body && (
-                <span className="font-normal text-gold-ink/80"> · {resultPresentation.body}</span>
-              )}
+            <span className="flex min-w-0 flex-col">
+              <span className="min-w-0 break-words">
+                <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
+                {vaultStatusKey && (
+                  <span className="font-normal text-gold-ink/80"> · {t(vaultStatusKey)}</span>
+                )}
+                {resultPresentation.body && (
+                  <span className="font-normal text-gold-ink/80"> · {resultPresentation.body}</span>
+                )}
+              </span>
+              <FailureDetails message={message} />
             </span>
           </div>
           {onFailureRetry && (

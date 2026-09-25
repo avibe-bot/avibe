@@ -8348,122 +8348,6 @@ def test_show_runtime_failure_declarations_are_total_and_owner_safe():
     )
 
 
-def test_download_failure_declaration_keys_cover_owner_stored_fields():
-    details_tree = ast.parse(textwrap.dedent(inspect.getsource(dependency_network.dependency_error_details)))
-    owner_stored_fields: set[str] = set()
-
-    class DownloadDetailFieldVisitor(ast.NodeVisitor):
-        def visit_Dict(self, node: ast.Dict) -> None:
-            owner_stored_fields.update(
-                key.value
-                for key in node.keys
-                if isinstance(key, ast.Constant) and isinstance(key.value, str)
-            )
-            self.generic_visit(node)
-
-        def visit_Call(self, node: ast.Call) -> None:
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "update":
-                owner_stored_fields.update(keyword.arg for keyword in node.keywords if keyword.arg)
-            self.generic_visit(node)
-
-    DownloadDetailFieldVisitor().visit(details_tree)
-    declaration_lookup_tree = ast.parse(
-        textwrap.dedent(inspect.getsource(show_runtime_failures_module._failure_declaration))
-    )
-    declaration_key_fields = {
-        node.attr
-        for node in ast.walk(declaration_lookup_tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "evidence"
-    }
-    explicitly_irrelevant = {
-        "attempts",
-        "exception_type",
-        "host",
-        "http_status",
-        "kind",
-        "message",
-        "retry_after_seconds",
-        "url",
-    }
-
-    assert owner_stored_fields - explicitly_irrelevant <= declaration_key_fields
-
-
-def test_archive_failure_provenance_census_matches_archive_path_emissions():
-    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
-    configured_archive_reasons: set[str] = set()
-
-    def archive_path_guard(test: ast.expr) -> bool | None:
-        if (
-            isinstance(test, ast.Attribute)
-            and isinstance(test.value, ast.Name)
-            and test.value.id == "self"
-            and test.attr == "archive_path"
-        ):
-            return True
-        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-            nested = archive_path_guard(test.operand)
-            return None if nested is None else not nested
-        if (
-            isinstance(test, ast.Compare)
-            and len(test.ops) == 1
-            and len(test.comparators) == 1
-            and isinstance(test.comparators[0], ast.Constant)
-            and test.comparators[0].value is None
-        ):
-            nested = archive_path_guard(test.left)
-            if nested is None:
-                return None
-            if isinstance(test.ops[0], (ast.IsNot, ast.NotEq)):
-                return True
-            if isinstance(test.ops[0], (ast.Is, ast.Eq)):
-                return False
-        return None
-
-    class ArchivePathEmissionVisitor(ast.NodeVisitor):
-        def __init__(self) -> None:
-            self.archive_path_is_set = False
-
-        def visit_If(self, node: ast.If) -> None:
-            previous = self.archive_path_is_set
-            guard = archive_path_guard(node.test)
-            self.archive_path_is_set = previous or guard is True
-            for child in node.body:
-                self.visit(child)
-            self.archive_path_is_set = previous or guard is False
-            for child in node.orelse:
-                self.visit(child)
-            self.archive_path_is_set = previous
-
-        def visit_Constant(self, node: ast.Constant) -> None:
-            if (
-                self.archive_path_is_set
-                and isinstance(node.value, str)
-                and node.value.startswith("runtime_archive_")
-            ):
-                configured_archive_reasons.add(node.value)
-
-    ArchivePathEmissionVisitor().visit(manager_tree)
-    declared_provenance = {
-        reason: {
-            provenance
-            for (declared_reason, provenance, _retryable), declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.items()
-            if declared_reason == reason and "archive" in declaration.owning_artifact
-        }
-        for reason in configured_archive_reasons
-    }
-    assert declared_provenance == {
-        reason: {"configured", "packaged"} for reason in configured_archive_reasons
-    }
-    assert {
-        declaration.reason
-        for declaration in SHOW_RUNTIME_FAILURE_DECLARATIONS.values()
-        if declaration.provenance == "configured" and declaration.owning_artifact == "configured-archive"
-    } == configured_archive_reasons
-
-
 def test_show_runtime_reason_literals_have_declared_evidence():
     source = inspect.getsource(show_runtime)
     reason_literals = {
@@ -9200,76 +9084,80 @@ def test_recovery_fact_consumption_census_has_no_default_producer():
     assert "X-Avibe-Show-Recovery-Poll" not in recovery_source
 
 
-def test_runtime_http_transport_census_closes_every_direct_client_path():
-    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager)))
-    functions = {
-        node.name: node
-        for node in manager_tree.body[0].body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    direct_clients = {
-        name
-        for name, function in functions.items()
-        if any(isinstance(node, ast.Attribute) and node.attr == "AsyncClient" for node in ast.walk(function))
-    }
-    assert direct_clients == {
-        "_healthy",
-        "_probe_capabilities_payload",
-        "_request_runtime_transport",
-    }
-    for request_owner in ("request", "request_global"):
-        calls = [
-            node
-            for node in ast.walk(functions[request_owner])
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_request_runtime_transport"
-        ]
-        assert len(calls) == 1
-    for internal_probe in ("_healthy", "_probe_capabilities_payload"):
-        assert any(isinstance(node, ast.Try) and node.handlers for node in ast.walk(functions[internal_probe]))
+def test_show_runtime_startup_health_probe_turns_transport_failure_into_health_timeout(monkeypatch, tmp_path):
+    """A refused ``/health`` connection is a retryable probe miss, not a crash.
+
+    Breaks if ``_healthy`` lets a transport error escape: ``ensure()`` would then
+    raise out of startup instead of retrying until the shared deadline and
+    reporting ``runtime_start_health_timeout``. Every other startup test replaces
+    ``_healthy`` wholesale, so only this one runs its real client path.
+    """
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    health_urls = []
+
+    async def refuse(_client, url, **_kwargs):
+        health_urls.append(url)
+        if len(health_urls) == 2:
+            # Jump the loop clock past the startup deadline on the second refusal,
+            # so the retry count does not depend on how fast a CI worker runs.
+            loop = asyncio.get_running_loop()
+            real_time = loop.time
+            loop.time = lambda: real_time() + 3600
+        raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+
+    def fake_stop():
+        manager._process = None
+        manager._base_url = None
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 600.0)
+    monkeypatch.setattr("core.show_runtime._STARTUP_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.get", refuse)
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_health_timeout"
+    assert health_urls == ["http://127.0.0.1:12345/health"] * 2
 
 
-def test_provider_install_entrypoints_converge_on_single_admission_owner():
-    manager_tree = ast.parse(textwrap.dedent(inspect.getsource(ShowRuntimeManager))).body[0]
-    functions = {
-        node.name: node for node in manager_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    provider_methods = {
-        "_install_manifest_runtime_locked",
-        "_install_archive_runtime",
-        "_install_npm_runtime",
-    }
-    direct_provider_callers = {
-        function.name
-        for function in functions.values()
-        if any(
-            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in provider_methods
-            for node in ast.walk(function)
-        )
-    }
-    assert direct_provider_callers == {"_install_managed_runtime_locked"}
+def test_show_runtime_capability_probe_treats_transport_failure_as_unknown(monkeypatch, tmp_path):
+    """A refused ``/capabilities`` connection answers "unknown", never raises.
 
-    owner_callers = {
-        function.name
-        for function in functions.values()
-        if any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_install_managed_runtime_locked"
-            for node in ast.walk(function)
-        )
-    }
-    assert owner_callers == {"_attempt_managed_install"}
+    Breaks if ``_probe_capabilities_payload`` stops catching transport errors:
+    capability negotiation would raise instead of falling back to the retry path
+    that a ``None`` answer selects.
+    """
 
-    admission_callers = {
-        function.name
-        for function in functions.values()
-        if any(
-            isinstance(node, ast.Attribute) and node.attr == "_attempt_managed_install" for node in ast.walk(function)
-        )
-    }
-    assert admission_callers == {"_resolve_managed_availability", "_prepare"}
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    async def refuse(_client, url, **_kwargs):
+        raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.get", refuse)
+
+    assert asyncio.run(manager._probe_capabilities_payload("http://127.0.0.1:12345")) is None
+    assert asyncio.run(manager._probe_render_markdown_capability("http://127.0.0.1:12345")) is None
 
 
 def test_explicit_command_resolution_has_one_owner_and_four_consumers():

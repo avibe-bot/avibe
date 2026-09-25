@@ -388,6 +388,7 @@ jobs:
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/*.whl)"
           pytest \
             tests/test_upgrade_flow.py \
+            tests/test_install_generation_retirement.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
@@ -431,6 +432,23 @@ jobs:
 
           if (-not (Select-String -Path install-output.log -Pattern 'avibe-os installed successfully \(from custom package spec\)' -Quiet)) {
             throw "Installer output missing custom package success message"
+          }
+
+          # Exercise retirement through the real hardlink/copy launcher on
+          # Windows, not just mocked link fallbacks in the Python unit suite.
+          1..3 | ForEach-Object {
+            & .\install.ps1
+            if ($LASTEXITCODE -ne 0) { throw "Repeated installer failed" }
+            $generations = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations" -Directory)
+            if ($generations.Count -ne 1) {
+              $names = ($generations | ForEach-Object { $_.Name }) -join ", "
+              $logPath = Join-Path $env:USERPROFILE ".avibe\logs\vibe_remote.log"
+              if (Test-Path -LiteralPath $logPath) {
+                Write-Host "Retention log tail:"
+                Get-Content -LiteralPath $logPath -Tail 120
+              }
+              throw "Expected one selected generation, found $($generations.Count): $names"
+            }
           }
 
       - name: Verify vibe in fresh PowerShell session

@@ -129,9 +129,11 @@ export const BackendModelEditorDialog: React.FC<{
   /** Effort values this backend's other rows already use. Suggestions, never a
    *  vocabulary — every effort is sent verbatim and any string is equally valid. */
   effortSuggestions: readonly string[];
+  /** A committed answer is being written; the editor holds still until it settles. */
+  busy?: boolean;
   onCancel: () => void;
   onCommit: (model: BackendModel) => void;
-}> = ({ open, backend, model, seedId, takenIds, effortSuggestions, onCancel, onCommit }) => {
+}> = ({ open, backend, model, seedId, takenIds, effortSuggestions, busy = false, onCancel, onCommit }) => {
   const { t } = useTranslation();
   const creating = model === null;
   const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
@@ -401,8 +403,10 @@ export const BackendModelEditorDialog: React.FC<{
   const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
+    <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
+        onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
+        onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
         className="model-hub-model-editor flex h-[min(660px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
@@ -707,10 +711,10 @@ export const BackendModelEditorDialog: React.FC<{
         </div>
 
         <DialogFooter className="model-hub-model-editor-foot shrink-0 items-center border-t border-border sm:justify-end">
-          <Button type="button" variant="outline" className="model-hub-model-control rounded-md px-5 text-[12.5px] font-semibold" onClick={onCancel}>
+          <Button type="button" variant="outline" className="model-hub-model-control rounded-md px-5 text-[12.5px] font-semibold" disabled={busy} onClick={onCancel}>
             {t('settings.models.gateway.modelEditor.cancel')}
           </Button>
-          <Button type="button" variant="brand" className="model-hub-model-control rounded-md px-5 text-[12.5px] font-semibold" onClick={commit}>
+          <Button type="button" variant="brand" className="model-hub-model-control rounded-md px-5 text-[12.5px] font-semibold" disabled={busy} onClick={commit}>
             {t(creating ? 'settings.models.gateway.modelEditor.add' : 'settings.models.gateway.modelEditor.apply')}
           </Button>
         </DialogFooter>

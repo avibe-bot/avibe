@@ -458,6 +458,17 @@ uv_tool_install() {
         return 1
     fi
     mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
+    # Publish before the source snapshot. Collection in another activation
+    # retains this installer's entire handoff while the shell is still alive.
+    # The marker protects staging even after uv has finished its tool receipt.
+    local installer_marker="$generation_root/.avibe-installing"
+    local installer_marker_temporary="$installer_marker.new"
+    if ! printf '%s\n' "$$" > "$installer_marker_temporary" ||
+        ! mv -f -- "$installer_marker_temporary" "$installer_marker"; then
+        warn "Could not protect the installer handoff"
+        rm -rf -- "$generation_root"
+        return 1
+    fi
     if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
         previous_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
         local current_protocol=""
@@ -477,7 +488,8 @@ uv_tool_install() {
         fi
     fi
 
-    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@"; then
+    # Suppress package-manager progress only, not activation/retention diagnostics.
+    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" 2>/dev/null; then
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
         if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
             warn "uv completed but the candidate vibe launcher was not created"
@@ -548,6 +560,7 @@ uv_tool_install() {
         fi
         VIBE_TOOL_BIN_DIR="$stable_bin_dir"
         VIBE_BIN_PATH="$stable_bin_dir/vibe"
+        rm -f -- "$generation_root/.avibe-installing" || warn "Could not remove the completed installer marker"
         return 0
     fi
     rm -rf -- "$generation_root"
@@ -559,9 +572,9 @@ install_package_candidate() {
     shift
 
     if [ "$package_spec" = "$PACKAGE_NAME" ]; then
-        uv_tool_install "$package_spec" --force --refresh "$@" 2>/dev/null
+        uv_tool_install "$package_spec" --force --refresh "$@"
     else
-        uv_tool_install "$package_spec" --force "$@" 2>/dev/null
+        uv_tool_install "$package_spec" --force "$@"
     fi
 }
 

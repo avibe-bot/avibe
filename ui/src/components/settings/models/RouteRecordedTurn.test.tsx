@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { modelsApi } from './modelsApi';
 import { RouteRecordedTurn } from './RouteRecordedTurn';
@@ -18,6 +21,13 @@ const view = (modelId = 'requested-model') => <I18nextProvider i18n={i18n}><Rout
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('recorded turn error', () => {
+  it('reads every contract version a released build persisted', () => {
+    const schema = JSON.parse(readFileSync(resolve(
+      dirname(fileURLToPath(import.meta.url)), '../../../../..', 'docs/plans/model-hub-contracts/turn-provenance.schema.json',
+    ), 'utf8'));
+    expect([...PERSISTED_TURN_CONTRACT_VERSIONS]).toEqual(schema.properties.contract_version.enum);
+    expectTypeOf<TurnProvenance['contract_version']>().toEqualTypeOf<(typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number]>();
+  });
   it('renders exact historical identity and opens that same structured record', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(record);

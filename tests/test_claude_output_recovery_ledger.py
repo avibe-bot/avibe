@@ -242,6 +242,339 @@ def activity_store(tmp_path):
     engine.dispose()
 
 
+@pytest.mark.parametrize("status", ["completed", "failed", "stopped", "killed"])
+def test_later_completion_retires_failed_active_provenance_write(
+    activity_store, monkeypatch, status,
+):
+    registry = SessionActivityRegistry(activity_store)
+    key = "provenance-lifecycle"
+    registry.start(
+        backend="claude", runtime_key=key, session_id="ses-1",
+        activity_id="task-one", kind="background_task",
+        metadata={"provenance_pending": True},
+    )
+    original = activity_store.upsert_activity
+    fault = "classification"
+
+    def persist(activity, *, phase):
+        if fault == "classification" and activity["metadata"].get("provenance_human"):
+            raise RuntimeError("classification unavailable")
+        if fault == "binding" and activity["metadata"].get("output_batch_id"):
+            raise RuntimeError("binding unavailable")
+        original(activity, phase=phase)
+
+    monkeypatch.setattr(activity_store, "upsert_activity", persist)
+    registry.classify_provisional_provenance(
+        "claude", key, activity_ids={"task-one"}, parent_activity_ids=set(),
+        turn_id="human-turn", run_ids=["human-run"], detached=False,
+    )
+    assert registry.provenance_persistence_recovery("claude", key)
+    fault = ""
+    registry.complete(
+        backend="claude", runtime_key=key, activity_id="task-one", status=status,
+        expects_output=status == "completed", retain_terminal_snapshot=True,
+    )
+    assert registry.provenance_persistence_recovery("claude", key) == {}
+    expected_phase = "awaiting_output" if status == "completed" else "terminal"
+    assert activity_store.list_activities()[0]["phase"] == expected_phase
+    if status == "completed":
+        fault = "binding"
+        with pytest.raises(RuntimeError, match="binding unavailable"):
+            registry.claim_completed_output_batch("claude", key)
+        assert activity_store.list_activities()[0]["phase"] == "awaiting_output"
+    fault = ""
+    restarted = SessionActivityRegistry(activity_store)
+    if status == "completed":
+        restored = restarted.claim_completed_output_batch("claude", key)
+        assert [item.id for item in restored] == ["task-one"]
+        output = activity_completion_output(
+            restored[0], activities=restored, detached=True, completes_turn=False,
+        )
+        assert restarted.settle_completed_output_batch(output, accepted_message_exists=True)
+    else:
+        restored = restarted.drain_recovered_terminals()
+        assert [item.status for item in restored] == [status]
+        restarted.ack_recovered_terminal(restored[0])
+    assert activity_store.list_activities() == []
+
+
+@pytest.mark.parametrize("owner", ["active", "queued", "claimed", "terminal"])
+def test_provenance_retry_phase_comes_from_current_owner_not_error_text(
+    activity_store, owner,
+):
+    registry = SessionActivityRegistry(activity_store)
+    key = "provenance-owner"
+    activity = registry.start(
+        backend="claude", runtime_key=key, session_id="ses-1",
+        activity_id="task-one", kind="background_task",
+    )
+    if owner != "active":
+        activity = registry.complete(
+            backend="claude", runtime_key=key, activity_id=activity.id,
+            status="failed" if owner == "terminal" else "completed",
+            expects_output=owner != "terminal", retain_terminal_snapshot=True,
+        )
+    if owner == "claimed":
+        activity = registry.claim_completed_output_batch("claude", key)[0]
+    # A recorded attempt is diagnostic evidence, never lifecycle authority.
+    registry._record_provenance_persistence_recovery(
+        activity, phase="active", error=RuntimeError("older attempt"),
+    )
+    registry.classify_provisional_provenance(
+        "claude", key, activity_ids=set(), parent_activity_ids=set(), detached=False,
+    )
+    expected = {
+        "active": "active", "queued": "awaiting_output",
+        "claimed": "awaiting_output", "terminal": "terminal",
+    }[owner]
+    assert activity_store.list_activities()[0]["phase"] == expected
+    assert registry.provenance_persistence_recovery("claude", key) == {}
+
+
+@pytest.mark.parametrize("owner", ["active", "claimed", "terminal"])
+def test_authoritative_deletion_clears_provenance_retry_without_resurrection(
+    activity_store, monkeypatch, owner,
+):
+    registry = SessionActivityRegistry(activity_store)
+    key = "provenance-delete"
+    registry.start(
+        backend="claude", runtime_key=key, session_id="ses-1",
+        activity_id="task-one", kind="background_task",
+        metadata={"provenance_pending": True},
+    )
+    if owner != "active":
+        registry.complete(
+            backend="claude", runtime_key=key, activity_id="task-one",
+            status="failed" if owner == "terminal" else "completed",
+            expects_output=owner == "claimed", retain_terminal_snapshot=True,
+        )
+    if owner == "claimed":
+        registry.claim_completed_output_batch("claude", key)
+    original = activity_store.upsert_activity
+
+    def fail_classification(activity, *, phase):
+        if activity["metadata"].get("provenance_human"):
+            raise RuntimeError("classification unavailable")
+        original(activity, phase=phase)
+
+    monkeypatch.setattr(activity_store, "upsert_activity", fail_classification)
+    classified = registry.classify_provisional_provenance(
+        "claude", key, activity_ids={"task-one"}, parent_activity_ids=set(),
+        turn_id="human-turn", run_ids=["human-run"], detached=False,
+    )[0]
+    assert registry.provenance_persistence_recovery("claude", key)
+    if owner == "active":
+        registry.complete(
+            backend="claude", runtime_key=key, activity_id=classified.id,
+            status="killed",
+        )
+    elif owner == "terminal":
+        registry.ack_recovered_terminal(classified)
+    else:
+        output = activity_completion_output(
+            classified, activities=[classified], detached=True, completes_turn=False,
+        )
+        assert registry.settle_completed_output_batch(output, accepted_message_exists=True)
+    assert registry.provenance_persistence_recovery("claude", key) == {}
+    monkeypatch.setattr(activity_store, "upsert_activity", original)
+    assert registry.terminal_snapshots_for_runtime("claude", key) == []
+    assert activity_store.list_activities() == []
+    assert not SessionActivityRegistry(activity_store).has_backend_work("claude")
+
+
+def test_atomic_batch_binding_supersedes_only_successful_provenance_retries(
+    activity_store, monkeypatch,
+):
+    registry = SessionActivityRegistry(activity_store)
+    key = "provenance-batch"
+    for activity_id in ("one", "two"):
+        registry.start(
+            backend="claude", runtime_key=key, session_id="ses-1",
+            activity_id=activity_id, kind="background_task",
+            metadata={"provenance_pending": True},
+        )
+        registry.complete(
+            backend="claude", runtime_key=key, activity_id=activity_id,
+            status="completed", expects_output=True,
+        )
+    original_one = activity_store.upsert_activity
+    original_batch = activity_store.upsert_activities
+
+    def failed_one(*_args, **_kwargs):
+        raise RuntimeError("single write failed")
+
+    monkeypatch.setattr(activity_store, "upsert_activity", failed_one)
+    registry.classify_provisional_provenance(
+        "claude", key, activity_ids={"one", "two"}, parent_activity_ids=set(),
+        turn_id="human-turn", run_ids=["human-run"], detached=False,
+    )
+    assert set(registry.provenance_persistence_recovery("claude", key)) == {"one", "two"}
+
+    def failed_batch(*_args, **_kwargs):
+        raise RuntimeError("batch failed")
+
+    monkeypatch.setattr(activity_store, "upsert_activities", failed_batch)
+    with pytest.raises(RuntimeError, match="batch failed"):
+        registry.claim_completed_output_batch("claude", key)
+    assert set(registry.provenance_persistence_recovery("claude", key)) == {"one", "two"}
+    monkeypatch.setattr(activity_store, "upsert_activities", original_batch)
+    batch = registry.claim_completed_output_batch("claude", key)
+    assert [item.id for item in batch] == ["one", "two"]
+    assert registry.provenance_persistence_recovery("claude", key) == {}
+    monkeypatch.setattr(activity_store, "upsert_activity", original_one)
+    restarted = SessionActivityRegistry(activity_store)
+    restored = restarted.claim_completed_output_batch("claude", key)
+    assert [item.id for item in restored] == ["one", "two"]
+    assert {item.run_id for item in restored} == {"human-run"}
+    assert {item.metadata["output_batch_id"] for item in restored} == {
+        batch[0].metadata["output_batch_id"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["eof", "error"])
+@pytest.mark.parametrize("fault", ["before_emit", "after_pop", "none"])
+async def test_buffered_failure_replay_settles_owned_turn_once_before_release(ending, fault):
+    from tests.test_claude_result_provenance import TaskStartedMessage, _failure_assistant
+
+    agent, service = _build_agent()
+    key = f"failure-replay-{ending}-{fault}:/tmp/work"
+    context = context_for(key)
+    assert await service.begin_agent_initiated_turn("claude", context, key)
+    request = SimpleNamespace(context=context, output=None, output_activities=[])
+    agent._pending_requests[key] = [request]
+    agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+    agent._handle_assistant_terminal_failure = (
+        ClaudeAgent._handle_assistant_terminal_failure.__get__(agent)
+    )
+    agent.controller.agent_auth_service = SimpleNamespace(
+        maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
+    )
+    agent.session_handler.handle_session_error = AsyncMock(return_value=True)
+    agent.session_handler.cleanup_session = AsyncMock()
+    agent.record_model_hub_native_failure = AsyncMock(
+        side_effect=[RuntimeError("record failed"), None]
+        if fault == "before_emit" else None,
+    )
+    agent._remove_ack_reaction = AsyncMock(
+        side_effect=[RuntimeError("reaction failed"), None]
+        if fault == "after_pop" else None,
+    )
+    terminal = []
+
+    async def accepted(ctx, kind, text, **kwargs):
+        if kind == "result" and kwargs["output"].completes_turn:
+            terminal.append((ctx.platform_specific.copy(), kwargs))
+            assert service.runtime_turn_active(key)
+            service.release_runtime_turn(ctx)
+        return "accepted-output"
+
+    agent.controller.emit_agent_message = AsyncMock(side_effect=accepted)
+
+    class Client:
+        def receive_messages(self):
+            async def frames():
+                yield TaskStartedMessage("competing-task")
+                yield _failure_assistant("backend exploded")
+                if ending == "error":
+                    raise RuntimeError("receiver disconnected")
+            return frames()
+
+    client = Client()
+    agent.claude_sessions[key] = client
+    await agent._receive_messages(
+        client, "failure-replay", "/tmp/work", context, composite_key=key,
+    )
+    assert len(terminal) == 1
+    assert terminal[0][0]["agent_runtime_turn_token"] == context.platform_specific[
+        "agent_runtime_turn_token"
+    ]
+    assert terminal[0][1]["is_error"]
+    assert not agent._has_pending_requests(key)
+    assert not service.runtime_turn_active(key)
+    # Repeated EOF cleanup has no terminal owner left and cannot emit again.
+    await agent._handle_receiver_eof(key, context)
+    assert len(terminal) == 1
+    successor = context_for(key)
+    assert await service.begin_agent_initiated_turn("claude", successor, key)
+    service.release_runtime_turn(successor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement", ["stop", "replacement"])
+async def test_retired_receiver_cannot_replay_buffered_failure_against_successor(retirement):
+    from tests.test_claude_result_provenance import TaskStartedMessage, _failure_assistant
+
+    agent, service = _build_agent()
+    key = f"replay-retired-{retirement}:/tmp/work"
+    context = context_for(key)
+    assert await service.begin_agent_initiated_turn("claude", context, key)
+    request = AgentRequest(
+        context=context, message="human", user_message="human", working_path="/tmp/work",
+        base_session_id="replay-retired", composite_session_id=key, session_key="session-key",
+    )
+    agent._pending_requests[key] = [request]
+    agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+    agent._process_assistant_terminal_frame = AsyncMock(
+        wraps=agent._process_assistant_terminal_frame,
+    )
+    waiting, finish = asyncio.Event(), asyncio.Event()
+    terminals = []
+
+    async def accepted(ctx, kind, text, **kwargs):
+        if kind == "result" and kwargs["output"].completes_turn:
+            terminals.append(kwargs["output"])
+            service.release_runtime_turn(ctx)
+        return "accepted-output"
+
+    agent.controller.emit_agent_message = AsyncMock(side_effect=accepted)
+
+    class Client:
+        interrupt = AsyncMock()
+        disconnect = AsyncMock()
+
+        def receive_messages(self):
+            async def frames():
+                yield TaskStartedMessage("competing-task")
+                yield _failure_assistant("obsolete backend failure")
+                waiting.set()
+                await finish.wait()
+            return frames()
+
+    old = Client()
+    agent.claude_sessions[key] = old
+    receiver = asyncio.create_task(
+        agent._receive_messages(old, "replay-retired", "/tmp/work", context, composite_key=key)
+    )
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        assert agent._buffered_assistant_messages[key]
+        if retirement == "stop":
+            assert await service.handle_stop("claude", request)
+            assert len(terminals) == 1
+        else:
+            service.release_runtime_turn(context)
+        successor_context = context_for(key)
+        assert await service.begin_agent_initiated_turn("claude", successor_context, key)
+        successor = SimpleNamespace(context=successor_context)
+        new_client = SimpleNamespace()
+        agent.claude_sessions[key] = new_client
+        agent._pending_requests[key] = [successor]
+        token = service._get_turn_gate(key).token
+        finish.set()
+        await asyncio.wait_for(receiver, timeout=1)
+        assert agent.claude_sessions[key] is new_client
+        assert agent._pending_requests[key] == [successor]
+        assert service.runtime_turn_active(key)
+        assert service._get_turn_gate(key).token == token
+        assert len(terminals) == (1 if retirement == "stop" else 0)
+        agent._process_assistant_terminal_frame.assert_not_awaited()
+        service.release_runtime_turn(successor_context)
+    finally:
+        receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
+
+
 def test_classification_run_ack_does_not_remove_output_receipt_across_restart(activity_store):
     settled = []
     service = AgentService(

@@ -405,13 +405,23 @@ class SessionActivityRegistry:
 
     def _persist_activity(self, activity: SessionActivity, *, phase: str) -> None:
         upsert = getattr(self._store, "upsert_activity", None)
-        if not callable(upsert):
-            return
-        try:
-            upsert(activity.to_dict(), phase=phase)
-        except Exception:
-            logger.warning("Failed to persist Activity %s", activity.id, exc_info=True)
-            raise
+        if callable(upsert):
+            try:
+                upsert(activity.to_dict(), phase=phase)
+            except Exception:
+                logger.warning("Failed to persist Activity %s", activity.id, exc_info=True)
+                raise
+        # Any successful later write supersedes an older failed provenance
+        # attempt, including a transition to output or terminal ownership.
+        self._clear_provenance_persistence_recovery(activity)
+
+    def _clear_provenance_persistence_recovery(self, activity: SessionActivity) -> None:
+        key = (activity.backend, activity.runtime_key)
+        pending = self._provenance_persistence_recovery.get(key)
+        if pending is not None:
+            pending.pop(activity.id, None)
+            if not pending:
+                self._provenance_persistence_recovery.pop(key, None)
 
     def _record_provenance_persistence_recovery(
         self,
@@ -448,44 +458,42 @@ class SessionActivityRegistry:
         if not pending:
             return
 
-        activities: dict[str, SessionActivity] = {}
+        # A diagnostic describes a past attempt, not the current durable phase.
+        # Read lifecycle authority from the same containers that own the object.
+        activities: dict[str, tuple[SessionActivity, str]] = {}
         for activity_key, activity in self._active.items():
             if activity_key[:2] == key and activity.id in pending:
-                activities[activity.id] = activity
+                activities[activity.id] = (activity, "active")
         for entry in self._completed_outputs.get(key) or ():
             if entry.activity.id in pending:
-                activities[entry.activity.id] = entry.activity
+                activities[entry.activity.id] = (entry.activity, "awaiting_output")
         for claimed in self._claimed_completed_outputs.values():
             activity = claimed.entry.activity
             if (activity.backend, activity.runtime_key) == key and activity.id in pending:
-                activities[activity.id] = activity
+                activities[activity.id] = (activity, "awaiting_output")
         for activity in self._terminal_snapshots.get(key, {}).values():
             if activity.id in pending:
-                activities[activity.id] = activity
+                activities[activity.id] = (activity, TERMINAL_SNAPSHOT_PHASE)
 
-        for activity_id, activity in activities.items():
-            phase = pending.get(activity_id, "awaiting_output").split(":", 1)[0]
+        for activity, phase in activities.values():
             try:
                 self._persist_activity(activity, phase=phase)
             except Exception:
                 continue
-            pending.pop(activity_id, None)
-        if not pending:
-            self._provenance_persistence_recovery.pop(key, None)
 
     def _delete_activity(self, activity: SessionActivity) -> None:
         delete = getattr(self._store, "delete_activity", None)
-        if not callable(delete):
-            return
-        try:
-            delete(
-                backend=activity.backend,
-                runtime_key=activity.runtime_key,
-                activity_id=activity.id,
-            )
-        except Exception:
-            logger.warning("Failed to delete Activity snapshot %s", activity.id, exc_info=True)
-            raise
+        if callable(delete):
+            try:
+                delete(
+                    backend=activity.backend,
+                    runtime_key=activity.runtime_key,
+                    activity_id=activity.id,
+                )
+            except Exception:
+                logger.warning("Failed to delete Activity snapshot %s", activity.id, exc_info=True)
+                raise
+        self._clear_provenance_persistence_recovery(activity)
 
     def _persist_connection(
         self,
@@ -947,10 +955,6 @@ class SessionActivityRegistry:
         snapshots[finalized.id] = finalized
         try:
             self._persist_activity(finalized, phase=TERMINAL_SNAPSHOT_PHASE)
-            self._provenance_persistence_recovery.get(key, {}).pop(
-                finalized.id,
-                None,
-            )
         except Exception as error:
             self._record_provenance_persistence_recovery(
                 finalized,
@@ -1233,10 +1237,6 @@ class SessionActivityRegistry:
                 self._active[activity_key] = updated
                 try:
                     self._persist_activity(updated, phase="active")
-                    self._provenance_persistence_recovery.get(key, {}).pop(
-                        updated.id,
-                        None,
-                    )
                 except Exception as error:
                     self._record_provenance_persistence_recovery(
                         updated,
@@ -1254,10 +1254,6 @@ class SessionActivityRegistry:
                         entry = replace(entry, activity=updated)
                         try:
                             self._persist_activity(updated, phase="awaiting_output")
-                            self._provenance_persistence_recovery.get(key, {}).pop(
-                                updated.id,
-                                None,
-                            )
                         except Exception as error:
                             self._record_provenance_persistence_recovery(
                                 updated,
@@ -1279,10 +1275,6 @@ class SessionActivityRegistry:
                 )
                 try:
                     self._persist_activity(updated, phase="awaiting_output")
-                    self._provenance_persistence_recovery.get(key, {}).pop(
-                        updated.id,
-                        None,
-                    )
                 except Exception as error:
                     self._record_provenance_persistence_recovery(
                         updated,
@@ -1299,10 +1291,6 @@ class SessionActivityRegistry:
                     snapshots[activity_id] = updated
                     try:
                         self._persist_activity(updated, phase=TERMINAL_SNAPSHOT_PHASE)
-                        self._provenance_persistence_recovery.get(key, {}).pop(
-                            updated.id,
-                            None,
-                        )
                     except Exception as error:
                         self._record_provenance_persistence_recovery(
                             updated,
@@ -1520,6 +1508,8 @@ class SessionActivityRegistry:
                         raise RuntimeError(
                             "Durable Activity store cannot atomically bind an output batch"
                         )
+                    for _activity_key, updated in updates:
+                        self._clear_provenance_persistence_recovery(updated)
 
             published_updates = []
             for activity_key, updated in updates:

@@ -57,7 +57,9 @@ INVOKE_CONTRACT = ROOT / "core/handlers/model_hub/adapter.py"
 # forbid reaching it the easy way for one reason -- the read blocks on the lock
 # the writers hold across an fsync -- so the rule is declared once here instead
 # of restated in each loop's scan, where a second reader would escape both.
-LEDGER_READ_NAMES = frozenset({"usage_summary"})
+# `_quota_values` prices the quota page from the same ledger; it is reached only
+# through `asyncio.to_thread` inside the service, which the guard below checks.
+LEDGER_READ_NAMES = frozenset({"usage_summary", "_quota_values"})
 LEDGER_TOUCH_NAMES = LEDGER_READ_NAMES | {"usage"}
 PRODUCT_PACKAGES = ("core", "config", "modules", "vibe")
 FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
@@ -921,6 +923,15 @@ def test_the_ledger_read_is_the_whole_of_what_both_loops_are_told_to_watch() -> 
         name for name, fn in _functions(_tree(SERVICE)).items() if any(map(_reaches_the_ledger, ast.walk(fn)))
     }
     assert readers == set(LEDGER_READ_NAMES)
+    # The quota valuation is a service-internal reader: every reference to it is
+    # handed to `to_thread`, never called on the loop.
+    tree = _tree(SERVICE)
+    parents = _parents(tree)
+    uses = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "_quota_values"]
+    assert uses
+    for use in uses:
+        call = parents.get(use)
+        assert isinstance(call, ast.Call) and _call_name(call) == "to_thread" and use in call.args
 
 
 def test_the_ledger_read_reaches_the_web_ui_awaited_and_off_the_compat_surface() -> None:

@@ -958,7 +958,7 @@ def test_claude_mcp_only_keychain_and_file_oauth_complete_real_consumer_flow(
     [row] = service.migration_scan()["items"]
     assert row["proposed_action"] == "import"
     assert fake_keychain.read_calls == []
-    assert asyncio.run(service.migration_apply([row["id"]]))["applied"] == 1
+    assert asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     assert service.migration_journal.load() is None
     for name in filenames:
@@ -969,7 +969,7 @@ def test_claude_mcp_only_keychain_and_file_oauth_complete_real_consumer_flow(
     assert service.migration_journal.completed()["clean_native_stores"]["claude"]
     assert service.migration_scan()["items"] == []
     assert fake_keychain.read_calls == reads
-    assert asyncio.run(service.migration_apply([row["id"]]))["applied"] == 1
+    assert asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     fake_keychain.items[locator] = (raw, "fixture-new-login")
     fake_keychain.mdates[locator] += 1
@@ -1011,7 +1011,7 @@ def test_completed_metadata_revision_does_not_prove_no_prior_oauth(
                '{"provider":{"openai":{"options":{"apiKey":"fixture-other"}}}}')
     service, config_store, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
-    asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert "claude" in service.migration_journal.completed()["clean_native_stores"]
     provisions = len(adapter.oauth_provisioned)
     fake_keychain.items[locator] = (oauth, "fixture-restored")
@@ -1021,14 +1021,14 @@ def test_completed_metadata_revision_does_not_prove_no_prior_oauth(
     if first_grant or other_source:
         # A mixed bundle cannot prove that this opaque container was empty.
         with pytest.raises(ModelHubError) as failure:
-            asyncio.run(service.migration_apply([row["id"] for row in rows]))
+            asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
         assert failure.value.code == "migration_reauthorization_required"
         assert len(adapter.oauth_provisioned) == provisions
         assert fake_keychain.items[locator] == (oauth, "fixture-restored")
         assert config_store.config.to_payload() == before
     else:
         # An entirely source-free confirmation transferred no old OAuth.
-        asyncio.run(service.migration_apply([row["id"] for row in rows]))
+        asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
         assert len(adapter.oauth_provisioned) == 1
     assert service.migration_journal.load() is None
 
@@ -2044,3 +2044,20 @@ def test_apply_is_idempotent_after_keychain_cleanup(
 def test_keychain_backend_has_no_security_cli_secret_path() -> None:
     assert not hasattr(store, "_run_security")
     assert "security" not in store.__dict__
+
+
+def test_codex_edit_keeping_api_key_withdraws_only_the_login():
+    login = {"OPENAI_API_KEY": "fixture-key", "auth_mode": "chatgpt", "tokens": {"refresh_token": "fixture"}}
+    key_only = {"OPENAI_API_KEY": "fixture-key"}
+    edit = {"version": 1, "backend": "codex", "operations": [
+        {"kind": "keychain", "service": "fixture", "account": "a",
+         "before": {"exists": True, "value": json.dumps(login)}, "after": {"exists": False}},
+        {"kind": "keychain", "service": "fixture", "account": "b",
+         "before": {"exists": True, "value": json.dumps(key_only)}, "after": {"exists": False}},
+    ]}
+    kept = store.codex_edit_keeping_api_key(edit)
+    first, second = kept["operations"]
+    assert json.loads(first["after"]["value"]) == key_only
+    # A key-only item becomes a compare-only guard, not a missing check.
+    assert second["after"] == second["before"]
+    assert edit["operations"][0]["after"] == {"exists": False}

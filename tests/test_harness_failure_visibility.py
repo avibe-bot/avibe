@@ -5465,86 +5465,40 @@ def test_every_ladder_target_class_declares_its_acknowledgement_source() -> None
     )
 
 
-def test_every_registry_platform_declares_its_kind_explicitly() -> None:
-    """Subordinate to HFR-075/079 — the ack policy's permissive row rests on a default.
+def test_a_platform_descriptor_cannot_inherit_the_im_kind() -> None:
+    """Subordinate to HFR-075/079 — the ack policy's permissive row must be claimed.
 
-    The test above proves ``LADDER_ACK_SOURCES`` is TOTAL over the axes; it cannot
-    prove the axis value is right, and for ``kind`` that value is the whole trust
-    boundary. ``("im", channel|user)`` are the permissive rows — a notice sent there
-    acks on the id the send returned — and the premise is that such an id was minted
-    by a platform that reached a person. ``PlatformDescriptor.kind`` DEFAULTS to
-    ``"im"``, so a transport added to the registry without stating its kind inherits
-    the permissive answer, and the totality test above stays green because no new
-    kind appeared. If that transport mints its own id the way ``AvibeBot.send_message``
-    does, every defect in this class reopens with nothing failing.
-
-    Checked in the SOURCE rather than at runtime because at runtime the two cases are
-    indistinguishable: a defaulted ``kind`` and an explicit ``kind="im"`` produce the
-    same object. The registry is a module-level dict literal of direct constructor
-    calls, so the AST answers the question exactly — and the assertion that the
-    parsed ids equal ``PLATFORM_REGISTRY``'s own keys is what keeps this honest if
-    that ever stops being true: a registry the AST can no longer read fails here
-    instead of silently passing over nothing.
+    ``("im", channel|user)`` are ``LADDER_ACK_SOURCES``' permissive rows: a notice sent
+    there acks on the id the send returned, on the premise that a platform which
+    reached a person minted it. The totality test above cannot check that premise,
+    because a new transport that silently took ``kind="im"`` adds no new axis value.
+    Breaks if ``PlatformDescriptor.kind`` regains a default, which would let a
+    transport that mints its own id (as ``AvibeBot.send_message`` does) inherit the
+    permissive rows with nothing failing.
     """
 
-    import ast
-    import dataclasses
-    import inspect
-
-    from config import platform_registry
     from config.platform_registry import PLATFORM_REGISTRY, PlatformDescriptor
 
-    # The default is real — this test is not asserting a hypothetical.
-    kind_field = next(
-        field for field in dataclasses.fields(PlatformDescriptor) if field.name == "kind"
-    )
-    assert kind_field.default == "im", (
-        "if kind is mandatory now, this test is obsolete rather than merely passing"
-    )
-
-    tree = ast.parse(inspect.getsource(platform_registry))
-    registry_literal = None
-    for node in ast.walk(tree):
-        # The registry is an annotated assignment today; accept both spellings so a
-        # dropped annotation does not read as a missing registry.
-        targets = (
-            [node.target]
-            if isinstance(node, ast.AnnAssign)
-            else node.targets
-            if isinstance(node, ast.Assign)
-            else []
+    workbench = PLATFORM_REGISTRY["avibe"]
+    fields = {
+        name: getattr(workbench, name)
+        for name in (
+            "id",
+            "config_key",
+            "config_module",
+            "config_class",
+            "client_module",
+            "client_class",
+            "formatter_module",
+            "formatter_class",
+            "credential_fields",
+            "capabilities",
         )
-        if any(
-            isinstance(target, ast.Name) and target.id == "PLATFORM_REGISTRY"
-            for target in targets
-        ):
-            registry_literal = node.value
-    assert isinstance(registry_literal, ast.Dict), (
-        "PLATFORM_REGISTRY is no longer a dict literal; this guard must be rewritten "
-        "rather than deleted — the kind axis is still a trust boundary"
-    )
-
-    undeclared: list[str] = []
-    parsed_ids: list[str] = []
-    for key, value in zip(registry_literal.keys, registry_literal.values):
-        assert isinstance(key, ast.Constant), "every registry key must be a literal id"
-        parsed_ids.append(str(key.value))
-        assert isinstance(value, ast.Call) and getattr(value.func, "id", "") == (
-            "PlatformDescriptor"
-        ), f"{key.value} is not a direct PlatformDescriptor(...) call; rewrite this guard"
-        if not any(keyword.arg == "kind" for keyword in value.keywords):
-            undeclared.append(str(key.value))
-
-    assert set(parsed_ids) == set(PLATFORM_REGISTRY), (
-        "the AST did not read the live registry, so it proves nothing: parsed "
-        f"{sorted(set(parsed_ids))}, registered {sorted(PLATFORM_REGISTRY)}"
-    )
-    assert not undeclared, (
-        f"{undeclared} inherit PlatformDescriptor.kind's default of 'im', which grants "
-        "them LADDER_ACK_SOURCES' permissive rows — a failure notice may be marked "
-        "delivered on the id their send returns. State kind= explicitly, and if the "
-        "transport mints that id itself, it is not 'im'."
-    )
+    }
+    with pytest.raises(TypeError, match="kind"):
+        PlatformDescriptor(**fields)
+    assert workbench.kind == "workbench"
+    assert {PLATFORM_REGISTRY[pid].kind for pid in ("slack", "discord", "telegram", "lark", "wechat")} == {"im"}
 
 
 def test_a_replayed_notice_does_not_finalize_a_live_unrelated_turn(tmp_path: Path) -> None:

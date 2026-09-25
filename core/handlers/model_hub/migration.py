@@ -6,11 +6,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
     ModelHubConfig,
@@ -33,6 +34,7 @@ from core.handlers.model_hub.migration_files import (
     codex_config_paths,
     env_reference,
     env_references,
+    native_store_items,
     opencode_auth_path,
     opencode_config_paths,
     plan_native_cleanup,
@@ -231,6 +233,8 @@ class NativeMigrationItem:
     # A metadata-only OS-store row represents one selected credential
     # container. Its API-key/OAuth components are resolved after consent.
     native_store_placeholder: bool = False
+    # Codex routing (provider, URL, wire API) the store's credential feeds.
+    native_store_routing: Optional[str] = field(default=None, repr=False)
     source_paths: tuple[str, ...] = ()
     required_backends: tuple[str, ...] = ()
     shell_variables: tuple[str, ...] = field(default=(), repr=False)
@@ -239,6 +243,12 @@ class NativeMigrationItem:
     file_snapshots: tuple[NativeFileEdit, ...] = field(default=(), repr=False)
     auth_scheme: str | None = field(default=None, repr=False)
     receipt_identity: str | None = field(default=None, repr=False)
+    # The native config file itself cannot be parsed, so the CLI fails before
+    # any Hub override applies; this row blocks Hub mode, not just import.
+    config_blocker: bool = field(default=False, repr=False)
+    # The settings ``env`` field a Claude credential came from; cleanup
+    # consent is bound to it, not to equal bytes held in another field.
+    native_field: str | None = field(default=None, repr=False)
 
     def to_payload(self) -> dict[str, object]:
         # Presentation metadata is additive: `vendor` and `display_name` let a
@@ -259,12 +269,46 @@ class NativeMigrationItem:
             "masked_credential": self.masked_credential,
             "source_paths": list(self.source_paths),
             "required_backends": list(self.required_backends),
+            # The backend's native config cannot be parsed, so Hub mode would
+            # fail every launch: the whole group is blocked, not just this row.
+            "config_blocker": self.config_blocker,
+            # An opaque store resolves only after consent and may hold a key.
+            "may_hold_api_key": self.kind != "oauth_native" or (
+                self.native_store_placeholder and self.backend == "codex"
+            ),
         }
 
 
 def _stable_suffix(*parts: str) -> str:
     identity = "\0".join(parts).encode("utf-8")
     return hashlib.sha256(identity).hexdigest()[:16]
+
+
+def _retained_key_identity(item: NativeMigrationItem) -> str:
+    """Name a copied static key independently of the store revision holding it."""
+    return "key_" + _stable_suffix(
+        item.backend, item.vendor, item.protocol, item.auth_scheme or "",
+        item.native_provider_id or "", item.secret or "", item.base_url or "",
+    )
+
+
+def _retained_key_fingerprint(item: NativeMigrationItem) -> str:
+    """Name a copied static key by backend and material alone, across routes."""
+    return "keymat_" + _stable_suffix(item.backend, (item.secret or "").strip())
+
+
+def _retained_copy_live(copy: Mapping[str, str] | None, live_credentials: Mapping[str, object]) -> bool:
+    """A kept native key is shadowed only while Hub still holds its exact copy."""
+    return copy is not None and live_credentials.get(copy["source_id"], None) == copy["credential_ref"]
+
+
+def _receipt_sources_intact(host: MigrationHost, record: Mapping[str, Any]) -> bool:
+    """Whether every Source a completed batch created still holds its credential."""
+    current = {source.id: source.credential_ref for source in host.store.load().sources}
+    return all(
+        source_id in current and current[source_id] == record.get("source_credentials", {}).get(source_id)
+        for source_id in record["source_ids"]
+    )
 
 
 def _ids(
@@ -490,6 +534,12 @@ def _native_store_items(
             native_store_revision=snapshot.revision,
             native_store_placeholder=placeholder,
             source_paths=source_paths,
+            # Codex reads its own auth.json before any Hub routing applies,
+            # so one it cannot read or parse fails every launch.
+            config_blocker=(
+                backend == "codex" and payload.get("store") == "file"
+                and payload.get("status") in {"invalid", "permission_needed"}
+            ),
         ))
     if secret:
         base_url = _oauth_text(state, "base_url")
@@ -515,7 +565,13 @@ def _native_store_items(
             _oauth_text(state, "wire_api") or "",
             _oauth_text(state, "active_provider_id") or "",
         )
-        items = [replace(item, id=f"mig_{_stable_suffix(item.id, routing_revision)}") for item in items]
+        items = [
+            replace(
+                item, id=f"mig_{_stable_suffix(item.id, routing_revision)}",
+                native_store_routing=routing_revision,
+            )
+            for item in items
+        ]
     return items
 
 
@@ -524,6 +580,7 @@ def _blocked_item(
     source_paths: tuple[str, ...] = (),
     shell_variables: tuple[str, ...] = (),
     shell_auth_variables: tuple[str, ...] = (),
+    config_blocker: bool = False,
 ) -> NativeMigrationItem:
     item_id, source_id = _ids(backend, "api_key", identity, "reauth")
     return NativeMigrationItem(
@@ -534,7 +591,7 @@ def _blocked_item(
         protocol="anthropic" if backend == "claude" else "openai_responses",
         display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
         source_paths=source_paths, shell_variables=shell_variables,
-        shell_auth_variables=shell_auth_variables,
+        shell_auth_variables=shell_auth_variables, config_blocker=config_blocker,
     )
 
 
@@ -559,6 +616,7 @@ def _claude_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "claude", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -566,7 +624,9 @@ def _claude_items(
             continue
         env = config.get("env", {})
         if not isinstance(env, dict):
-            items.append(_blocked_item("claude", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "claude", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         base_url = _oauth_text(env, "ANTHROPIC_BASE_URL")
         api_key = _oauth_text(env, "ANTHROPIC_API_KEY")
@@ -582,7 +642,7 @@ def _claude_items(
                 notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
                 vendor="anthropic", protocol="anthropic", display_name="Anthropic",
                 base_url=base_url, secret=api_key, masked_credential=detail,
-                source_paths=(str(path),),
+                source_paths=(str(path),), native_field="ANTHROPIC_API_KEY",
             ))
         if config.get("apiKeyHelper"):
             items.append(_blocked_item(
@@ -608,6 +668,7 @@ def _claude_items(
                     notes_key=_CUSTOM_ENDPOINT_NOTE, vendor="anthropic", protocol="anthropic",
                     display_name="Anthropic", base_url=base_url, secret=token,
                     masked_credential=masked, source_paths=(str(path),), auth_scheme=scheme,
+                    native_field="ANTHROPIC_AUTH_TOKEN",
                 ))
         if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
             items.append(_blocked_item(
@@ -639,17 +700,29 @@ def _codex_items(
         if path in persisted.problems:
             items.append(_blocked_item(
                 "codex", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
         if config is None:
             continue
         providers = config.get("model_providers", {})
+        # Only the provider map migration reads and rewrites is checked here.
+        # The rest of the file belongs to the installed CLI, whose accepted
+        # shapes differ by version, and fails in direct mode alike.
         if not isinstance(providers, dict):
-            items.append(_blocked_item("codex", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "codex", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         for provider_id, provider in providers.items():
-            if not isinstance(provider, dict):
+            if not _codex_provider_well_typed(provider):
+                # Codex deserializes the whole provider map before any Hub
+                # override applies, so one malformed entry fails every launch.
+                items.append(_blocked_item(
+                    "codex", f"{path}:{provider_id}", source_paths=(str(path),),
+                    config_blocker=True,
+                ))
                 continue
             key = _oauth_text(provider, "experimental_bearer_token")
             env_key = _oauth_text(provider, "env_key")
@@ -748,6 +821,192 @@ def _opencode_protocol(
     return None
 
 
+# Every field of Codex's `ModelProviderInfo` (codex-rs/core/config.schema.json),
+# by declared type. Codex ignores unknown keys but rejects a known one of the
+# wrong type, so the whole table is checked rather than fields one at a time.
+_CODEX_PROVIDER_FIELDS: dict[str, str] = {
+    **dict.fromkeys((
+        "name", "base_url", "env_key", "env_key_instructions",
+        "experimental_bearer_token", "model_catalog_url",
+    ), "text"),
+    **dict.fromkeys(("http_headers", "env_http_headers", "query_params"), "text_map"),
+    **{field: field for field in ("auth", "aws", "gateway_oauth")},
+    **dict.fromkeys((
+        "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms",
+        "websocket_connect_timeout_ms",
+    ), "count"),
+    **dict.fromkeys((
+        "requires_openai_auth", "supports_websockets", "supports_standalone_web_search",
+    ), "flag"),
+    "wire_api": "wire_api",
+}
+
+
+# The nested tables Codex deserializes (required keys present, known ones of
+# their declared type), from the same schema. Unknown keys are ignored: only
+# `--strict-config`, which launches never pass, rejects them. A value is a kind name, a
+# nested spec, or a tuple of alternative specs (a tagged enum).
+_CodexSpec = dict[str, object]
+_COMMAND_SPEC: _CodexSpec = {"command": "text", "args": "texts", "timeout_ms": "positive_count"}
+_CODEX_NESTED_SPECS: dict[str, tuple[_CodexSpec, frozenset[str]]] = {
+    "auth": ({
+        "command": "text", "args": "texts", "cwd": "text",
+        "refresh_interval_ms": "count", "timeout_ms": "positive_count",
+    }, frozenset({"command"})),
+    "aws": ({
+        "profile": "text", "region": "text",
+        "auth_refresh": (_COMMAND_SPEC, frozenset({"command"})),
+        "credential_export": (_COMMAND_SPEC, frozenset({"command"})),
+    }, frozenset()),
+    "gateway_oauth": ({
+        "authorization_url": "text", "client_id": "text", "token_url": "text",
+        "resource": "text", "scopes": "texts", "redirect_port": "port",
+        "delivery": (
+            ({"kind": ("header",), "name": "text", "scheme": "text"}, frozenset({"kind", "name"})),
+            ({"kind": ("cookie",), "name": "text"}, frozenset({"kind", "name"})),
+        ),
+    }, frozenset({"authorization_url", "client_id", "delivery", "token_url"})),
+}
+
+
+def _text_map(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    )
+
+
+def _codex_field_well_typed(kind: str, value: object) -> bool:
+    if kind == "text":
+        return isinstance(value, str)
+    if kind == "text_map":
+        return _text_map(value)
+    if kind == "count":
+        # TOML integers are signed 64-bit; Codex rejects anything wider.
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**63
+    if kind == "flag":
+        return isinstance(value, bool)
+    if kind in _CODEX_NESTED_SPECS:
+        return _codex_table_well_typed(_CODEX_NESTED_SPECS[kind], value)
+    # An unknown variant fails deserialization. `chat` stays accepted: older
+    # CLIs still run it, and migration carries it as openai_chat.
+    return value in ("chat", "responses")
+
+
+def _codex_table_well_typed(spec: object, value: object) -> bool:
+    if isinstance(spec, str):
+        if spec == "texts":
+            return isinstance(value, list) and all(isinstance(item, str) for item in value)
+        if spec in ("positive_count", "port"):
+            limit = 2**16 if spec == "port" else 2**63
+            minimum = 1 if spec == "positive_count" else 0
+            return isinstance(value, int) and not isinstance(value, bool) and minimum <= value < limit
+        return _codex_field_well_typed(spec, value)
+    if isinstance(spec, tuple) and spec and isinstance(spec[0], tuple):
+        # A tagged enum: exactly one variant has to accept the table.
+        return any(_codex_table_well_typed(variant, value) for variant in spec)
+    if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[0], dict):
+        fields, required = spec
+        return (
+            isinstance(value, dict)
+            and required <= value.keys()
+            and all(_codex_table_well_typed(fields[key], item) for key, item in value.items() if key in fields)
+        )
+    # A literal-choice tuple, such as a variant tag.
+    return value in spec
+
+
+def _codex_provider_well_typed(provider: object) -> bool:
+    """Whether Codex can deserialize this ``model_providers`` entry.
+
+    A field of the wrong type fails the whole config before any Hub override
+    applies, so only an absent field or one of its declared type is safe.
+    """
+    return isinstance(provider, dict) and all(
+        _codex_field_well_typed(kind, provider[field])
+        for field, kind in _CODEX_PROVIDER_FIELDS.items() if field in provider
+    )
+
+
+_OPENCODE_COST = ({
+    "input": "finite", "output": "finite", "cache_read": "finite", "cache_write": "finite",
+}, frozenset({"input", "output"}))
+_OPENCODE_MODALITIES = ("modality", "text", "audio", "image", "video", "pdf")
+_OPENCODE_MODEL = ({
+    "id": "text", "name": "text", "family": "text", "release_date": "text",
+    "attachment": "flag", "reasoning": "flag", "temperature": "flag", "tool_call": "flag",
+    "experimental": "flag",
+    "interleaved": ("any", "flag", "text", ({"field": "text"}, frozenset({"field"}))),
+    "cost": ({**_OPENCODE_COST[0], "context_over_200k": _OPENCODE_COST}, _OPENCODE_COST[1]),
+    "limit": ({"context": "finite", "input": "finite", "output": "finite"}, frozenset({"context", "output"})),
+    "modalities": ({"input": _OPENCODE_MODALITIES, "output": _OPENCODE_MODALITIES}, frozenset()),
+    "status": ("choice", "alpha", "beta", "deprecated", "active"),
+    "provider": ({"npm": "text", "api": "text"}, frozenset()),
+    "options": "record",
+    "headers": "text_map",
+    "variants": ("values", ({"disabled": "flag"}, frozenset())),
+}, frozenset())
+_OPENCODE_TIMEOUT = ("any", "positive_count", ("choice", False))
+_OPENCODE_PROVIDER = ({
+    "api": "text", "name": "text", "id": "text", "npm": "text",
+    "env": "texts", "whitelist": "texts", "blacklist": "texts",
+    "options": ({
+        "apiKey": "text", "baseURL": "text", "enterpriseUrl": "text", "setCacheKey": "flag",
+        "timeout": _OPENCODE_TIMEOUT, "headerTimeout": _OPENCODE_TIMEOUT,
+        "chunkTimeout": _OPENCODE_TIMEOUT,
+    }, frozenset()),
+    "models": ("values", _OPENCODE_MODEL),
+}, frozenset())
+
+
+def _opencode_value_well_typed(spec: object, value: object) -> bool:
+    """Check ``value`` against OpenCode's ``ProviderConfig`` schema.
+
+    Effect structs drop unknown keys, so only declared fields are checked.
+    """
+    if spec == "text":
+        return isinstance(value, str)
+    if spec == "flag":
+        return isinstance(value, bool)
+    if spec == "texts":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if spec == "text_map":
+        return _text_map(value)
+    if spec == "record":
+        return isinstance(value, dict)
+    if spec == "finite":
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if spec == "positive_count":
+        # JSON has one number type; `1.0` is the integer 1 to OpenCode.
+        return (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value == int(value) and value > 0
+        )
+    kind = spec[0] if isinstance(spec, tuple) else None
+    if kind == "any":
+        return any(_opencode_value_well_typed(variant, value) for variant in spec[1:])
+    if kind == "choice":
+        return any(value is choice or (type(value) is type(choice) and value == choice) for choice in spec[1:])
+    if kind == "modality":
+        return isinstance(value, list) and all(item in spec[1:] for item in value)
+    if kind == "values":
+        return isinstance(value, dict) and all(_opencode_value_well_typed(spec[1], item) for item in value.values())
+    fields, required = cast(tuple[dict[str, object], frozenset[str]], spec)
+    return (
+        isinstance(value, dict)
+        and required <= value.keys()
+        and all(_opencode_value_well_typed(fields[key], item) for key, item in value.items() if key in fields)
+    )
+
+
+def _opencode_provider_well_typed(provider: object) -> bool:
+    """Whether OpenCode's config schema accepts this ``provider`` entry.
+
+    OpenCode validates the whole file on start, so a malformed typed field
+    fails every launch, Hub-owned or not.
+    """
+    return _opencode_value_well_typed(_OPENCODE_PROVIDER, provider)
+
+
 def _opencode_manual_models(
     provider_config: dict[str, Any],
 ) -> tuple[NativeManualModel, ...]:
@@ -792,16 +1051,20 @@ def _opencode_items(
     try:
         auth_entries = read_native_config(opencode_auth_path(home)) or {}
     except (TakeoverStateError, OSError):
-        return [_blocked_item(
+        # Hub mode cannot prove what an unreadable auth map would shadow, so
+        # it blocks; config layers still surface their own rows beside it.
+        auth_entries = {}
+        items.append(_blocked_item(
             "opencode", "auth-file", "unreadable",
-            source_paths=(str(opencode_auth_path(home)),),
-        )]
+            source_paths=(str(opencode_auth_path(home)),), config_blocker=True,
+        ))
     provider_catalog = _load_opencode_provider_catalog(persisted)
     seen_providers: set[str] = set()
     for path in opencode_config_paths(home, project_roots):
         if path in persisted.problems:
             items.append(_blocked_item(
                 "opencode", str(path), persisted.problems[path], source_paths=(str(path),),
+                config_blocker=True,
             ))
             continue
         config = persisted.documents[path]
@@ -809,7 +1072,9 @@ def _opencode_items(
             continue
         provider_configs = config.get("provider", {})
         if not isinstance(provider_configs, dict):
-            items.append(_blocked_item("opencode", str(path), source_paths=(str(path),)))
+            items.append(_blocked_item(
+                "opencode", str(path), source_paths=(str(path),), config_blocker=True,
+            ))
             continue
         seen_providers.update(provider_configs)
         relevant_auth = {key: value for key, value in auth_entries.items() if key in provider_configs}
@@ -837,10 +1102,12 @@ def _opencode_candidates(
         names: tuple[str, ...] = ()
         auth_names: tuple[str, ...] = ()
 
-        def blocked(identity: str, reason: str = "config") -> NativeMigrationItem:
+        def blocked(
+            identity: str, reason: str = "config", *, config_blocker: bool = False,
+        ) -> NativeMigrationItem:
             return _blocked_item(
                 "opencode", identity, reason, source_paths=paths, shell_variables=names,
-                shell_auth_variables=auth_names,
+                shell_auth_variables=auth_names, config_blocker=config_blocker,
             )
 
         if (
@@ -853,8 +1120,10 @@ def _opencode_candidates(
             items.append(blocked(f"{locator}:invalid-provider"))
             continue
         provider_config = provider_configs.get(provider_id, {})
-        if not isinstance(provider_config, dict):
-            items.append(blocked(f"{locator}:{provider_id}"))
+        if not _opencode_provider_well_typed(provider_config):
+            # OpenCode validates the whole provider map before any Hub
+            # override applies, so one malformed entry fails every launch.
+            items.append(blocked(f"{locator}:{provider_id}", config_blocker=True))
             continue
         options = provider_config.get("options")
         if not isinstance(options, dict):
@@ -1060,46 +1329,6 @@ def _shell_items(
     return items
 
 
-def _surface_surviving_auth_references(
-    items: list[NativeMigrationItem], *, home: Path | None,
-    project_roots: tuple[Path, ...],
-) -> list[NativeMigrationItem]:
-    """Preview the same native after images used by the cleanup transaction."""
-    selected = [item for item in items if item.proposed_action == "import"]
-    auth_names = {
-        name for item in selected for name, _ in item.shell_values
-        if name in item.shell_auth_variables
-    }
-    if not auth_names:
-        return items
-    try:
-        edits = {
-            edit.path: edit for edit in plan_native_cleanup(
-                selected, home=home, project_roots=project_roots, _include_shell=False,
-            )
-        }
-        references = planned_native_references(edits, home=home, project_roots=project_roots)
-    except (OSError, TakeoverStateError):
-        # Store permissions and unsupported credentials have their own rows.
-        # A preview cannot replace the consent-time native-store resolution.
-        return items
-    return [
-        replace(
-            item, proposed_action="reauth", selected=False,
-            notes_key="settings.models.migration.blocked.reference",
-            source_paths=tuple(dict.fromkeys([
-                *item.source_paths,
-                *(path for name in item.shell_auth_variables if name in references
-                  for path in references[name]),
-            ])),
-        ) if (
-            item.proposed_action == "import"
-            and set(item.shell_auth_variables) & auth_names & references.keys()
-        ) else item
-        for item in items
-    ]
-
-
 def _bind_persisted_inventory(
     items: list[NativeMigrationItem], persisted: PersistedInventory,
 ) -> list[NativeMigrationItem]:
@@ -1224,6 +1453,23 @@ def _require_native_api_key_transport(
         raise MigrationConflictError from None
 
 
+def _bearer_transport(item: NativeMigrationItem) -> NativeMigrationItem | None:
+    """Carry a custom-endpoint Anthropic key over as the Bearer the engine sends.
+
+    The pinned engine sends ``x-api-key`` only to the official origin. Custom
+    endpoints get Bearer, so migration proves and provisions exactly that header;
+    an endpoint that refuses it fails proof and the native files stay untouched.
+    """
+    if item.kind == "oauth_native" or item.protocol != "anthropic" or item.auth_scheme is not None:
+        return None
+    candidate = replace(item, auth_scheme="bearer")
+    try:
+        _require_native_api_key_transport(candidate)
+    except MigrationConflictError:
+        return None
+    return candidate
+
+
 def scan_native_configs(
     config: ModelHubConfig,
     *,
@@ -1234,6 +1480,7 @@ def scan_native_configs(
     secret_backends: tuple[str, ...] = (),
     project_roots: tuple[Path, ...] = (),
     clean_native_stores: Mapping[str, str] | None = None,
+    retained_native_ids: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[NativeMigrationItem]:
     """Read native stores without modifying or deleting any path."""
 
@@ -1301,7 +1548,7 @@ def scan_native_configs(
             try:
                 _require_native_api_key_transport(item)
             except MigrationConflictError:
-                item = replace(
+                item = _bearer_transport(item) or replace(
                     item, proposed_action="reauth", selected=False,
                     notes_key="settings.models.migration.blocked.transport",
                 )
@@ -1313,6 +1560,7 @@ def scan_native_configs(
         for source in config.sources
         if source.kind == "subscription" and source.supply_channel == "native_cli"
     }
+    live_credentials = {source.id: source.credential_ref for source in config.sources}
     candidates: list[NativeMigrationItem] = []
     for item in items:
         # Keep the credential/target identity independent of both consent's
@@ -1328,6 +1576,25 @@ def scan_native_configs(
             # only unrelated native data (e.g. MCP OAuth). Do not read it again
             # merely to rediscover the absence of subscription credentials.
             continue
+        if item.native_store_placeholder and any(
+            copy.get("store_backend") == item.backend
+            and copy.get("store_routing", "") == (item.native_store_routing or "")
+            and copy.get("store_revision") == item.native_store_revision
+            and _retained_copy_live(copy, live_credentials)
+            for copy in (retained_native_ids or {}).values()
+        ):
+            # An opaque store whose only credential is a kept, copied key. Its
+            # metadata revision was recorded at completion; any change re-offers.
+            continue
+        if (
+            item.kind != "oauth_native" and item.secret
+            and _retained_copy_live(
+                (retained_native_ids or {}).get(_retained_key_identity(item)), live_credentials,
+            )
+        ):
+            # A completed takeover copied this exact static key and left it
+            # native by choice. It is shadowed by the Hub launch, not pending.
+            continue
         native_source = existing_native_sources.get(item.vendor)
         if item.kind == "oauth_native" and native_source is not None:
             candidates.append(replace(
@@ -1337,9 +1604,6 @@ def scan_native_configs(
             ))
             continue
         candidates.append(item)
-    candidates = _surface_surviving_auth_references(
-        candidates, home=home, project_roots=project_roots,
-    )
     return _bind_persisted_inventory(candidates, persisted)
 
 
@@ -1442,22 +1706,33 @@ async def _prepare_takeover(
     retained_source_ids: tuple[str, ...] | None = None,
     retained_item_ids: frozenset[str] = frozenset(),
     clean_native_stores: Mapping[str, str] | None = None,
+    clean_api_keys: bool = False,
+    retained_keys: tuple[NativeMigrationItem, ...] = (),
 ) -> dict[str, Any]:
-    """Stage all grants and durable before/after images, still native-owned."""
+    """Stage all grants and durable before/after images, still native-owned.
+
+    ``retained_keys`` are keys an earlier copy-only batch already copied; a
+    cleanup batch withdraws them natively without provisioning them again.
+    """
     for item in selected:
         # Recheck before cleanup planning, reuse, proof or credential custody.
         _require_native_api_key_transport(item)
     clean_native_stores = dict(clean_native_stores or {})
     cleanup_items = [
         *selected,
+        *retained_keys,
         *(item for item in (consented or []) if (
             item.native_store_placeholder and item.backend in clean_native_stores
         )),
     ]
-    edits = plan_native_cleanup(cleanup_items, home=host.migration_home, project_roots=project_roots)
+    edits = plan_native_cleanup(
+        cleanup_items, home=host.migration_home, project_roots=project_roots,
+        clean_api_keys=clean_api_keys,
+    )
     updated = host._clone_config(previous)
     provisioned: list[dict[str, str]] = []
     source_ids: list[str] = list(retained_source_ids or ())
+    item_sources: dict[str, dict[str, str]] = {}
     catalog = bundled_catalog_reasoning_efforts_by_model()
     handoff_attempted = False
     try:
@@ -1465,7 +1740,9 @@ async def _prepare_takeover(
         # reintroduced by an external writer. Its current Hub refs are already
         # authoritative; never provision that old OAuth snapshot again.
         for item in selected:
-            if item.id in retained_item_ids:
+            # A static key reuses its existing Source below, which also
+            # records the copy's receipt; only a login is never re-provisioned.
+            if item.id in retained_item_ids and item.kind == "oauth_native":
                 continue
             protocol = item.protocol
             auth_options = {"auth_scheme": item.auth_scheme} if item.auth_scheme is not None else {}
@@ -1499,12 +1776,21 @@ async def _prepare_takeover(
                         _require_native_api_key_transport(item, observed_protocol=reuse_observation.protocol)
                         _ensure_takeover_placement(updated, candidate, item.backend)
                         source_ids.append(candidate.id)
+                        item_sources[_retained_key_identity(item)] = {
+                            "source_id": candidate.id, "credential_ref": candidate.credential_ref,
+                            "key_fingerprint": _retained_key_fingerprint(item),
+                            **({
+                        "store_backend": item.backend, "store_routing": item.native_store_routing or "",
+                    } if item.native_store_revision else {}),
+                        }
                         break
                 else:
                     observation = await host._require_proven_source_payload({
                         "vendor": item.vendor,
                         "base_url": validate_base_url(item.base_url),
                         "key": item.secret,
+                        # Bearer exists only on the Anthropic interface.
+                        **({"protocol": "anthropic"} if item.auth_scheme == "bearer" else {}),
                     }, on_reserved=lambda ref: host.revocations.add("observation", ref), **auth_options)
                     protocol = cast(Any, observation.protocol)
                     _require_native_api_key_transport(item, observed_protocol=protocol)
@@ -1577,9 +1863,30 @@ async def _prepare_takeover(
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
             source_ids.append(source.id)
-        backends = sorted({item.backend for item in (consented or selected)})
+            if item.kind != "oauth_native":
+                item_sources[_retained_key_identity(item)] = {
+                    "source_id": source.id, "credential_ref": source.credential_ref,
+                    "key_fingerprint": _retained_key_fingerprint(item),
+                    **({
+                        "store_backend": item.backend, "store_routing": item.native_store_routing or "",
+                    } if item.native_store_revision else {}),
+                }
+        backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
-        credential_backends = {item.backend for item in selected}
+        # Copy-only keeps the Avibe-saved native key; Hub launches shadow it.
+        # Cleanup clears the Avibe-saved key only when this batch carries it; an
+        # excluded key (e.g. an unimportable endpoint) keeps its Direct config.
+        carried = {
+            (item.backend, item.secret, item.base_url)
+            for item in [*selected, *retained_keys] if item.secret
+        }
+        credential_backends = {
+            backend for backend in {item.backend for item in [*selected, *retained_keys]}
+            if not native_before.get(backend, {}).get("api_key")
+            or (
+                backend, native_before[backend]["api_key"], native_before[backend].get("base_url"),
+            ) in carried
+        } if clean_api_keys else set()
         native_after = {
             backend: ({
                 name: ("oauth" if name == "auth_mode" else True if name == "auth_mode_set" else None)
@@ -1604,9 +1911,22 @@ async def _prepare_takeover(
             "native_before": native_before, "native_after": native_after,
             "keychain": [],
             "clean_native_stores": clean_native_stores,
+            # Each copied key stays hidden only while its Hub Source exists.
+            "clean_api_keys": clean_api_keys,
+            "retained_native_ids": {} if clean_api_keys else {
+                identity: copy for identity, copy in item_sources.items()
+            },
+            # A cleanup batch withdraws these kept keys, retiring their receipts.
+            # Identities and material fingerprints both retire: a receipt
+            # written under an earlier route still names this withdrawn key.
+            "withdrawn_native_ids": sorted({
+                name for item in [*selected, *retained_keys]
+                if clean_api_keys and item.kind != "oauth_native"
+                for name in (_retained_key_identity(item), _retained_key_fingerprint(item))
+            }),
         }
         seen_stores: set[str] = set()
-        for item in selected:
+        for item in native_store_items([*selected, *retained_keys], clean_api_keys=clean_api_keys):
             edit = item.native_store_edit
             if not edit or item.native_store_revision in seen_stores:
                 continue
@@ -1669,6 +1989,26 @@ async def _verify_clean_native_stores(host: MigrationHost, record: Mapping[str, 
             or (snapshot.payload or {}).get("status") != "metadata_only"
         ):
             raise MigrationConflictError
+
+
+async def _record_retained_store_revisions(host: MigrationHost, record: dict[str, Any]) -> None:
+    """Bind each kept key held in an opaque store to that store's final revision."""
+    for copy in record.get("retained_native_ids", {}).values():
+        backend = copy.get("store_backend")
+        if backend is None:
+            continue
+        # The store still holds this key, so it is not verified clean: it stays
+        # hidden only while the copied Hub source is live.
+        record.get("clean_native_stores", {}).pop(backend, None)
+        snapshot = await asyncio.to_thread(read_native_oauth, backend, home=host.migration_home)
+        verified = record.get("verified_store_revisions", {}).get(backend)
+        # Bind only the revision verified against our post-edit image; a later
+        # external write stays unbound, so its store is offered again.
+        if (
+            snapshot is not None and (snapshot.payload or {}).get("status") == "metadata_only"
+            and (verified is None or snapshot.revision == verified)
+        ):
+            copy["store_revision"] = snapshot.revision
 
 
 async def _resume_takeover(
@@ -1763,10 +2103,14 @@ async def _resume_takeover(
                 # Bind the public metadata revision to the verified private
                 # post-state. A detected intervening login prevents completion.
                 await asyncio.to_thread(check_keychain_edit, edit, applied=True)
+                if snapshot is not None:
+                    record.setdefault("verified_store_revisions", {})[edit["backend"]] = snapshot.revision
                 if snapshot and (snapshot.payload or {}).get("status") == "metadata_only":
                     record["clean_native_stores"][edit["backend"]] = snapshot.revision
         await verify_idle()
         if terminal:
+            # Every terminal path binds kept keys before its receipt.
+            await _record_retained_store_revisions(host, record)
             return _finish_rejected_takeover(host, record)
         for credential in record["credentials"]:
             if credential["kind"] == "oauth":
@@ -1810,6 +2154,7 @@ async def _resume_takeover(
             # Persist the terminal decision before its config write. A crash
             # between either write and the receipt must finish custody, never
             # restore the original grant or repeat a rejected refresh.
+            await _record_retained_store_revisions(host, record)
             record["terminal"] = {
                 "invalid_source_ids": invalid_source_ids,
                 "config": terminal_config.to_payload(),
@@ -1817,6 +2162,7 @@ async def _resume_takeover(
             host.migration_journal.save(record)
             return _finish_rejected_takeover(host, record)
         host._reconcile_native_auth(tuple(record["backends"]))
+        await _record_retained_store_revisions(host, record)
         host.migration_journal.complete(record)
         host.migration_blocked_backends.difference_update(record["backends"])
         return len(record["items"]), [
@@ -1844,8 +2190,12 @@ async def apply_native_migration(
     *,
     mask_credential: Callable[[str], str],
     validate_base_url: Callable[[object], Optional[str]],
+    clean_api_keys: bool = False,
 ) -> tuple[int, list[dict]]:
-    """Own a takeover from consent through cleanup; callers shield cancellation."""
+    """Own a takeover from consent through cleanup; callers shield cancellation.
+
+    Static API keys are copied and left native unless ``clean_api_keys``.
+    """
     if (
         not isinstance(item_ids, list)
         or not all(isinstance(value, str) and value for value in item_ids)
@@ -1857,11 +2207,28 @@ async def apply_native_migration(
     async with host._migration_lock:
         completed_record = None
         record = host.migration_journal.load() or host.migration_journal.completed()
+        # A copy-only batch whose Sources were deleted or re-keyed no longer
+        # holds its still-native keys; the same rows then migrate afresh. A
+        # cleanup receipt keeps guarding the material it withdrew.
+        replayable = record is not None and (
+            record["phase"] != "complete" or record.get("clean_api_keys", True)
+            or _receipt_sources_intact(host, record)
+        )
         if record is not None:
             same_selection = {item["id"] for item in record["items"]} == set(item_ids)
             if record["phase"] != "complete" and not same_selection:
                 raise MigrationConflictError
-            if same_selection:
+            # Receipts predating the option always cleaned native keys. A
+            # pending journal from before it already staged that decision and
+            # resumes as staged. A completed batch is replayed only with its
+            # own choice; with another one the rows migrate afresh, which
+            # requires the native credentials to be present again.
+            option_changed = replayable and same_selection and (
+                "clean_api_keys" in record or record["phase"] == "complete"
+            ) and record.get("clean_api_keys", True) != clean_api_keys
+            if option_changed and record["phase"] != "complete":
+                raise MigrationConflictError
+            if same_selection and replayable and not option_changed:
                 if record["phase"] == "complete":
                     async with host.migration_guard(tuple(record["backends"])) as verify_idle:
                         async with host._mutation_lock:
@@ -1874,8 +2241,13 @@ async def apply_native_migration(
                                 legacy_auth=_native_auth_snapshot(host, tuple(record["backends"])),
                                 project_roots=host.migration_project_roots(),
                                 clean_native_stores=record.get("clean_native_stores"),
+                                retained_native_ids=record.get("retained_native_ids"),
                             )
-                            if not any(item.backend in record["backends"] for item in residual):
+                            if not any(
+                                item.backend in record["backends"]
+                                and (item.proposed_action == "import" or item.config_blocker)
+                                for item in residual
+                            ):
                                 return result
                             completed_record = record
                 else:
@@ -1889,6 +2261,7 @@ async def apply_native_migration(
             legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
             project_roots=host.migration_project_roots(),
             clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
+            retained_native_ids=(host.migration_journal.completed() or {}).get("retained_native_ids"),
         )
         selected = [item for item in available if item.id in item_ids]
         if len(selected) != len(item_ids) or any(item.proposed_action != "import" for item in selected):
@@ -1896,14 +2269,51 @@ async def apply_native_migration(
         backends = tuple(sorted({item.backend for item in selected}))
         if any(set(item.required_backends) - set(backends) for item in selected):
             raise MigrationConflictError
-        # A CLI takeover cannot leave an unselected credential maintaining its
-        # original authentication. Selection is therefore grouped by backend.
-        if any(item.backend in backends and item.id not in item_ids for item in available):
+        # A takeover moves every credential the Hub can carry, so selection is
+        # grouped by backend. Rows it cannot carry stay native: a Hub launch
+        # pins its own connection above them, so they are shadowed, not used.
+        if any(
+            item.backend in backends and item.proposed_action == "import" and item.id not in item_ids
+            for item in available
+        ):
             raise MigrationConflictError
+        # Hub mode over a native config the CLI cannot parse fails every launch.
+        if any(item.backend in backends and item.config_blocker for item in available):
+            raise MigrationConflictError
+        if clean_api_keys:
+            # Cleanup also withdraws keys a copy-only batch kept. Such a key
+            # may be shared with another backend (e.g. one shell variable);
+            # joint cleanup then spans that backend's kept keys as well.
+            hidden = [
+                item for item in await asyncio.to_thread(
+                    scan_native_configs, host.store.load(), mask_credential=mask_credential,
+                    home=host.migration_home, validate_base_url=validate_base_url,
+                    legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
+                    project_roots=host.migration_project_roots(),
+                    clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
+                )
+                if item.kind != "oauth_native" and item.proposed_action == "import"
+                and item.id not in {row.id for row in available}
+            ]
+            scope = set(backends)
+            while True:
+                grown = scope | {
+                    backend for item in hidden if item.backend in scope for backend in item.required_backends
+                }
+                if grown == scope:
+                    break
+                scope = grown
+            if any(
+                item.backend in scope - set(backends) and item.proposed_action == "import"
+                for item in available
+            ):
+                # A linked backend still has credentials awaiting consent.
+                raise MigrationConflictError
+            backends = tuple(sorted(scope))
         retained_inventory_ids = (
             set(record.get("inventory_ids", [item["id"] for item in record["items"]]))
             & {item.receipt_identity or item.id for item in selected}
-            if record is not None and record["phase"] == "complete" else set()
+            if replayable and record["phase"] == "complete" else set()
         )
         previous_oauth_backends = (
             host.migration_journal.oauth_custody_backends(record)
@@ -1933,6 +2343,7 @@ async def apply_native_migration(
                     secret_backends=backends,
                     project_roots=project_roots,
                     clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
+                    retained_native_ids=(host.migration_journal.completed() or {}).get("retained_native_ids"),
                 )
                 consented = selected
                 selected = []
@@ -1996,8 +2407,32 @@ async def apply_native_migration(
                     selected.extend(item for item in resolved if item not in selected)
                     if (original.receipt_identity or original.id) in retained_inventory_ids:
                         retained_item_ids.update(item.id for item in resolved)
-                if any(item.backend in backends and item not in selected for item in rescanned):
+                if any(
+                    item.backend in backends and (
+                        (item.proposed_action == "import" and item not in selected)
+                        or item.config_blocker
+                    )
+                    for item in rescanned
+                ):
                     raise MigrationConflictError
+                retained_keys: tuple[NativeMigrationItem, ...] = ()
+                if clean_api_keys:
+                    # Keys a copy-only batch kept are hidden from consent while
+                    # their Hub copy lives, yet cleanup must withdraw them too
+                    # or they read as unselected native credentials.
+                    shown = {item.id for item in rescanned}
+                    unfiltered = await asyncio.to_thread(
+                        scan_native_configs, previous, mask_credential=mask_credential,
+                        home=host.migration_home, validate_base_url=validate_base_url,
+                        legacy_auth=_native_auth_snapshot(host, backends),
+                        secret_backends=backends, project_roots=project_roots,
+                        clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
+                    )
+                    retained_keys = tuple(
+                        item for item in unfiltered
+                        if item.backend in backends and item.id not in shown
+                        and item.kind != "oauth_native" and item.proposed_action == "import" and item.secret
+                    )
                 record = await _prepare_takeover(
                     host, previous, selected, mask_credential=mask_credential,
                     validate_base_url=validate_base_url,
@@ -2009,6 +2444,8 @@ async def apply_native_migration(
                     ),
                     retained_item_ids=frozenset(retained_item_ids),
                     clean_native_stores=clean_native_stores,
+                    clean_api_keys=clean_api_keys,
+                    retained_keys=retained_keys,
                 )
                 return await _resume_takeover(host, record, verify_idle)
 

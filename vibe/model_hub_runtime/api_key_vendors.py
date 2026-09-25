@@ -55,8 +55,10 @@ def validate_api_key_auth_scheme(
 
     A missing protocol is only for an unbound observation credential. A missing
     secret is only for the credentialless contrast of an already validated
-    transport. The pinned CPA sends ordinary custom Claude keys as Bearer, but
-    interprets ``sk-ant-oat`` anywhere in a key as OAuth independently of kind.
+    transport. Bearer is the Anthropic interface's custom-origin header, for any
+    vendor not pinned to another protocol. The pinned CPA sends ordinary custom
+    Claude keys as Bearer, but interprets ``sk-ant-oat`` anywhere in a key as
+    OAuth independently of kind.
     """
     if auth_scheme is None:
         return None
@@ -64,7 +66,9 @@ def validate_api_key_auth_scheme(
         if (
             auth_scheme != "bearer"
             or not isinstance(vendor, str)
-            or vendor.strip().lower() != "anthropic"
+            or not vendor.strip()
+            # Any Anthropic interface: custom relays and Anthropic-pinned vendors.
+            or pinned_api_key_protocol(vendor) not in (None, "anthropic")
             or protocol not in (None, "anthropic")
         ):
             raise ValueError

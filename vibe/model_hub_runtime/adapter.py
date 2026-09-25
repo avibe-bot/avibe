@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import logging
+import math
 import re
 import secrets
 import threading
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -23,6 +26,7 @@ from core.handlers.model_hub.adapter import (
     ObservationDiscovery,
     ObservationOutcome,
     OAuthFlowState,
+    OAuthSubmissionRejectedError,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
@@ -35,6 +39,13 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
+from core.handlers.model_hub.quota import (
+    CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
+    QUOTA_FETCH_TIMEOUT_SECONDS,
+    SubscriptionQuotaError,
+    parse_claude_plan,
+    parse_subscription_quota,
+)
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -85,6 +96,7 @@ _OAUTH_ENDPOINTS = {
     "kimi": ("/kimi-auth-url", "kimi", "kimi"),
     "xai": ("/xai-auth-url", "xai", "xai"),
 }
+
 
 # The local surface the pinned engine serves a hub-held subscription on.
 #
@@ -537,9 +549,9 @@ def _anthropic_wrapperless_error_kind(
     if _request_error_rejects_credential(status, error):
         return "rejected"
     identifiers = _error_identifiers(error)
-    if status in _REQUEST_ERROR_STATUSES and not (
-        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
-    ).isdisjoint(identifiers):
+    if status in _REQUEST_ERROR_STATUSES and not (_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS).isdisjoint(
+        identifiers
+    ):
         return "accepted"
     if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
         return "rejected"
@@ -559,9 +571,9 @@ def _openai_wrapperless_error_kind(
     identifiers = _payload_identifiers(payload)
     if not identifiers:
         return None
-    if status in _REQUEST_ERROR_STATUSES and not (
-        _REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS
-    ).isdisjoint(identifiers):
+    if status in _REQUEST_ERROR_STATUSES and not (_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS).isdisjoint(
+        identifiers
+    ):
         return "accepted"
     if status in _AUTHENTICATION_ERROR_STATUSES and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(identifiers):
         return "rejected"
@@ -643,8 +655,7 @@ def _parse_protocol_authenticated_evidence(
     top_level_identifiers = _payload_identifiers(payload)
     if (
         not oauth
-        and
-        status in _AUTHENTICATION_ERROR_STATUSES
+        and status in _AUTHENTICATION_ERROR_STATUSES
         and not _AUTHENTICATION_ERROR_IDENTIFIERS.isdisjoint(top_level_identifiers)
     ):
         return evidence(
@@ -752,6 +763,7 @@ async def _probe_protocol_response(
             headers.pop("Authorization")
             headers["x-api-key"] = secret
     client_timeout = aiohttp.ClientTimeout(total=timeout)
+
     async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.post(
@@ -762,7 +774,11 @@ async def _probe_protocol_response(
             ) as response:
                 body = await response.content.read(64 * 1024)
                 return _parse_protocol_authenticated_evidence(
-                    protocol, response.status, body, vendor=vendor, request_root=root,
+                    protocol,
+                    response.status,
+                    body,
+                    vendor=vendor,
+                    request_root=root,
                 )
 
     try:
@@ -798,9 +814,7 @@ def _response_shape_proves_protocol(
     if protocol == "anthropic":
         error = body.get("error")
         return body.get("type") == "message" or (
-            body.get("type") == "error"
-            and isinstance(error, dict)
-            and isinstance(error.get("type"), str)
+            body.get("type") == "error" and isinstance(error, dict) and isinstance(error.get("type"), str)
         )
     error = body.get("error")
     if protocol == "openai_responses":
@@ -833,9 +847,9 @@ def _openai_family_elimination_proof(
     exclusion. Transient upstream failures do not qualify.
     """
 
-    if not {
-        protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS
-    }.issubset(ruled_out_protocols):
+    if not {protocol for protocol in considered_protocols if protocol not in _OPENAI_FAMILY_PROTOCOLS}.issubset(
+        ruled_out_protocols
+    ):
         return None
 
     candidate = responses.get("openai_responses")
@@ -1075,6 +1089,7 @@ def _probe_oauth_protocol_response(
             status_code=404,
         )
     headers["Authorization"] = "Bearer $TOKEN$"
+
     def request(probe_headers: dict[str, str]) -> _ProtocolEvidence:
         payload = client.management_request(
             "POST",
@@ -1140,18 +1155,8 @@ def _parse_oauth_control_plane_witness(
     return False
 
 
-def _probe_oauth_control_plane_witness(
-    *,
-    client: EngineClient,
-    auth: _AuthRecord,
-    vendor: str,
-) -> None:
-    """Use CPA's current auth record for a bodyless control-plane GET."""
-
-    normalized_vendor = vendor.strip().lower()
-    url = _OAUTH_CONTROL_PLANE_URLS.get(normalized_vendor)
-    if url is None:
-        raise EngineClientError("unsupported OAuth control-plane witness")
+def _oauth_account_call_headers(auth: _AuthRecord, normalized_vendor: str) -> dict[str, str]:
+    """Headers for a model-free account GET; CPA substitutes ``$TOKEN$``."""
 
     headers = {
         "Accept": "application/json",
@@ -1169,7 +1174,52 @@ def _probe_oauth_control_plane_witness(
         headers["User-Agent"] = "codex-cli"
         if auth.account_id:
             headers["ChatGPT-Account-ID"] = auth.account_id
+    return headers
 
+
+# The vendors' own quota reports: the same endpoints their CLIs read for
+# `/usage` and `/status`. Anthropic gates its report behind the OAuth beta.
+_SUBSCRIPTION_QUOTA_URLS = {
+    "anthropic": "https://api.anthropic.com/api/oauth/usage",
+    "openai": "https://chatgpt.com/backend-api/wham/usage",
+    "codex": "https://chatgpt.com/backend-api/wham/usage",
+}
+
+
+def _retry_after_seconds(headers: object) -> float | None:
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if not isinstance(key, str) or key.lower() != "retry-after":
+            continue
+        raw = str(value[0] if isinstance(value, list) and value else value).strip()
+        try:
+            seconds = float(raw)
+        except ValueError:
+            # RFC 9110 also allows an HTTP-date.
+            try:
+                moment = email.utils.parsedate_to_datetime(raw)
+            except (TypeError, ValueError, IndexError):
+                return None
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+        return seconds if math.isfinite(seconds) and seconds > 0 else None
+    return None
+
+
+def _fetch_subscription_quota(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+) -> dict[str, Any]:
+    """Read one grant's quota report and keep only the parsed windows."""
+
+    url = _SUBSCRIPTION_QUOTA_URLS[vendor]
+    headers = _oauth_account_call_headers(auth, vendor)
+    if vendor == "anthropic":
+        headers["anthropic-beta"] = "oauth-2025-04-20"
     payload = client.management_request(
         "POST",
         "/api-call",
@@ -1178,6 +1228,69 @@ def _probe_oauth_control_plane_witness(
             "method": "GET",
             "url": url,
             "header": headers,
+        },
+        timeout=QUOTA_FETCH_TIMEOUT_SECONDS,
+    )
+    status = payload.get("status_code")
+    if status in {401, 403}:
+        raise SubscriptionQuotaError("auth_expired")
+    if status == 429:
+        raise SubscriptionQuotaError(
+            "rate_limited",
+            retry_after_seconds=_retry_after_seconds(payload.get("header")),
+        )
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        raise SubscriptionQuotaError("unavailable")
+    parsed = parse_subscription_quota(vendor, payload.get("body"))
+    if vendor == "anthropic" and parsed.get("plan") is None:
+        parsed["plan"] = _fetch_claude_plan(client=client, auth=auth)
+    return parsed
+
+
+def _fetch_claude_plan(*, client: EngineClient, auth: _AuthRecord) -> str | None:
+    """Claude's usage report names no plan; read it from the profile, best effort."""
+
+    try:
+        payload = client.management_request(
+            "POST",
+            "/api-call",
+            payload={
+                "auth_index": auth.auth_index,
+                "method": "GET",
+                "url": _OAUTH_CONTROL_PLANE_URLS["anthropic"],
+                "header": _oauth_account_call_headers(auth, "anthropic"),
+            },
+            timeout=CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
+        )
+    except (EngineClientError, OSError):
+        return None
+    status = payload.get("status_code")
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        return None
+    return parse_claude_plan(payload.get("body"))
+
+
+def _probe_oauth_control_plane_witness(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+) -> None:
+    """Use CPA's current auth record for a bodyless control-plane GET."""
+
+    normalized_vendor = vendor.strip().lower()
+    url = _OAUTH_CONTROL_PLANE_URLS.get(normalized_vendor)
+    if url is None:
+        raise EngineClientError("unsupported OAuth control-plane witness")
+
+    payload = client.management_request(
+        "POST",
+        "/api-call",
+        payload={
+            "auth_index": auth.auth_index,
+            "method": "GET",
+            "url": url,
+            "header": _oauth_account_call_headers(auth, normalized_vendor),
         },
     )
     if not _parse_oauth_control_plane_witness(
@@ -1394,9 +1507,7 @@ class CLIProxyEngineAdapter:
         loop = asyncio.get_running_loop()
         recovery_deadline: float | None = None
         recovery_delay = _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS
-        claimed_target: dict[str, str] | None = (
-            dict(expected_target) if expected_target is not None else None
-        )
+        claimed_target: dict[str, str] | None = dict(expected_target) if expected_target is not None else None
 
         def persist_claim(target: dict[str, str]) -> None:
             nonlocal claim_owned, claimed_target
@@ -1431,10 +1542,7 @@ class CLIProxyEngineAdapter:
                     )
                     break
                 except EngineUnavailableError as exc:
-                    if (
-                        expected_target is None
-                        or exc.reason != INSTALL_ALREADY_RUNNING_REASON
-                    ):
+                    if expected_target is None or exc.reason != INSTALL_ALREADY_RUNNING_REASON:
                         raise
                     if self._installation_stopping:
                         await self._abandon_install_claim(
@@ -1451,9 +1559,7 @@ class CLIProxyEngineAdapter:
                         )
                     remaining = recovery_deadline - now
                     if remaining <= 0:
-                        logger.error(
-                            "Model Hub runtime recovery gave up waiting for the shared install lock"
-                        )
+                        logger.error("Model Hub runtime recovery gave up waiting for the shared install lock")
                         raise EngineUnavailableError(
                             "models.engine.install_failed",
                             reason=INSTALL_RECOVERY_TIMEOUT_REASON,
@@ -1564,11 +1670,7 @@ class CLIProxyEngineAdapter:
         on_resolved: Callable[[dict[str, str]], None] | None = None,
     ) -> EngineEnsureResult:
         async with self._routing_lock:
-            installer = (
-                self.supervisor.installer.offline_copy()
-                if offline
-                else self.supervisor.installer
-            )
+            installer = self.supervisor.installer.offline_copy() if offline else self.supervisor.installer
             if expected_target is None and on_resolved is None:
                 if force:
                     install = await asyncio.to_thread(
@@ -1623,10 +1725,7 @@ class CLIProxyEngineAdapter:
             if status.health is EngineHealth.INSTALLING:
                 return status
             start_after_install_task = self._start_after_install_task
-            if (
-                start_after_install_task is not None
-                and not start_after_install_task.done()
-            ):
+            if start_after_install_task is not None and not start_after_install_task.done():
                 start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
             return await self.status()
@@ -1797,6 +1896,7 @@ class CLIProxyEngineAdapter:
 
         async with self._routing_lock:
             await self._transports_idle.wait()
+
             def publish_grant(running: EngineClient | None):
                 return (*self.state_store.activate_oauth_auth_file(credential_ref), running)
 
@@ -1817,14 +1917,8 @@ class CLIProxyEngineAdapter:
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError(
-                    "OAuth activation could not inspect the engine"
-                ) from exc
-            matching = [
-                auth
-                for auth in inventory.values()
-                if auth.name == auth_name or auth.identity == auth_name
-            ]
+                raise EngineStateError("OAuth activation could not inspect the engine") from exc
+            matching = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matching) > 1:
                 raise EngineStateError("OAuth activation auth record is ambiguous")
             if matching:
@@ -1854,14 +1948,8 @@ class CLIProxyEngineAdapter:
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError(
-                    "OAuth activation could not inspect the engine"
-                ) from exc
-            matching = [
-                auth
-                for auth in inventory.values()
-                if auth.name == auth_name or auth.identity == auth_name
-            ]
+                raise EngineStateError("OAuth activation could not inspect the engine") from exc
+            matching = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matching) > 1:
                 raise EngineStateError("OAuth activation auth record is ambiguous")
             if not matching:
@@ -1899,9 +1987,7 @@ class CLIProxyEngineAdapter:
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
-                raise EngineStateError(
-                    "OAuth credential validation could not inspect the engine"
-                ) from exc
+                raise EngineStateError("OAuth credential validation could not inspect the engine") from exc
             auth_name = str(metadata.get("auth_name") or "")
             matches = [
                 auth
@@ -1967,11 +2053,7 @@ class CLIProxyEngineAdapter:
         if isinstance(prefix, str) and prefix:
             return prefix
         record = next(
-            (
-                source
-                for source in self.state_store.list_sources()
-                if source.credential_ref == credential_ref
-            ),
+            (source for source in self.state_store.list_sources() if source.credential_ref == credential_ref),
             None,
         )
         return record.prefix if record is not None and record.prefix else None
@@ -2027,7 +2109,7 @@ class CLIProxyEngineAdapter:
 
         The observation seam determines protocol from upstream responses, so the
         legacy temporary record uses a neutral engine-store protocol marker.
-        Explicit Bearer is restricted to the Anthropic interface. Neither marker
+        Explicit Bearer is restricted to Anthropic interfaces. Neither marker
         supplies authentication evidence; observation still needs upstream proof.
         """
 
@@ -2057,11 +2139,7 @@ class CLIProxyEngineAdapter:
             self.state_store.credential_metadata_if_present,
             credential_ref,
         )
-        auth_name = (
-            metadata.get("auth_name")
-            if metadata is not None and metadata.get("kind") == "oauth"
-            else None
-        )
+        auth_name = metadata.get("auth_name") if metadata is not None and metadata.get("kind") == "oauth" else None
         if auth_name:
             if metadata.get("activation_state") != "staged":
 
@@ -2224,7 +2302,11 @@ class CLIProxyEngineAdapter:
             if auth_scheme is not None:
                 for protocol in protocol_order:
                     validate_api_key_auth_scheme(
-                        normalized_vendor, protocol, base_url, secret, auth_scheme,
+                        normalized_vendor,
+                        protocol,
+                        base_url,
+                        secret,
+                        auth_scheme,
                     )
         elif credential_kind == "oauth":
             if normalized_base_url is not None:
@@ -2546,6 +2628,52 @@ class CLIProxyEngineAdapter:
             credential_ref, source_id=source_id, vendor=vendor, auth_provider=endpoint[2],
         )
 
+    async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
+        """Read the bound grant's rate-limit windows without starting the engine."""
+
+        normalized_vendor = vendor.strip().lower()
+        endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
+        if endpoint is None or normalized_vendor not in _SUBSCRIPTION_QUOTA_URLS:
+            raise SubscriptionQuotaError("unsupported")
+        try:
+            metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+        except (EngineStateError, OSError, ValueError):
+            raise SubscriptionQuotaError("unavailable") from None
+        if (
+            metadata.get("kind") != "oauth"
+            or metadata.get("source_id") not in {None, source_id}
+            or str(metadata.get("vendor") or "").strip().lower() != normalized_vendor
+            or metadata.get("activation_state") not in {None, "active"}
+        ):
+            raise SubscriptionQuotaError("unavailable")
+        # A presentation read never starts, repairs, or restarts the engine.
+        client = await asyncio.to_thread(self.supervisor.client_if_running)
+        if client is None:
+            raise SubscriptionQuotaError("unavailable")
+        try:
+            inventory = await run_owned_in_thread(_auth_inventory, client)
+        except (EngineClientError, OSError):
+            raise SubscriptionQuotaError("unavailable") from None
+        auth_name = str(metadata.get("auth_name") or "")
+        matches = [
+            auth
+            for auth in inventory.values()
+            if (auth.name == auth_name or auth.identity == auth_name)
+            and auth.provider == endpoint[2]
+            and auth.auth_index
+        ]
+        if len(matches) != 1:
+            raise SubscriptionQuotaError("unavailable")
+        try:
+            return await run_owned_in_thread(
+                _fetch_subscription_quota,
+                client=client,
+                auth=matches[0],
+                vendor=normalized_vendor,
+            )
+        except (EngineClientError, OSError):
+            raise SubscriptionQuotaError("unavailable") from None
+
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
@@ -2582,14 +2710,31 @@ class CLIProxyEngineAdapter:
             submitted = value.strip()
             if not submitted:
                 raise EngineStateError("OAuth submission is empty")
-            # A transport failure after submission begins cannot prove whether
-            # the engine wrote grant material.
+            is_redirect = submitted.startswith(("http://", "https://"))
+            if is_redirect and not any(
+                answer.strip()
+                for key, answer in urllib.parse.parse_qsl(urllib.parse.urlsplit(submitted).query)
+                if key in {"code", "error", "error_description"}
+            ):
+                # The one rejection that provably writes nothing and leaves the
+                # session waiting: an address carrying no answer at all, which
+                # the engine would refuse before reading its session. Decided
+                # here, where the value is known, not from an engine status
+                # that several different refusals share.
+                logger.info(
+                    "OAuth submission carries no code: flow=%s provider=%s",
+                    flow.flow_id,
+                    flow.callback_provider,
+                )
+                raise OAuthSubmissionRejectedError(flow_id)
+            # Any failure after submission begins cannot prove whether the
+            # engine wrote grant material.
             flow.grant_write_possible = True
             payload: dict[str, str] = {
                 "provider": flow.callback_provider,
                 "state": flow.engine_state,
             }
-            if submitted.startswith(("http://", "https://")):
+            if is_redirect:
                 payload["redirect_url"] = submitted
             else:
                 payload["code"] = submitted
@@ -2601,7 +2746,10 @@ class CLIProxyEngineAdapter:
                     "/oauth-callback",
                     payload=payload,
                 )
-            except (EngineClientError, EngineUnavailableError):
+            except EngineClientError:
+                self._fail_flow(flow, "models.oauth.submission_failed")
+                return flow.snapshot()
+            except EngineUnavailableError:
                 self._fail_flow(flow, "models.oauth.submission_failed")
                 return flow.snapshot()
             flow.state = "verifying"
@@ -2691,13 +2839,32 @@ class CLIProxyEngineAdapter:
         flow.grant_write_possible = True
         inventory = await asyncio.to_thread(_auth_inventory, client)
         provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
-        candidates = [
+        try:
+            foreign = await asyncio.to_thread(self._foreign_bound_identities, provider_records, flow.source_id)
+        except EngineStateError:
+            self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            self._fail_flow(flow, "models.oauth.binding_failed")
+            return
+        changed = [
             record
             for record in provider_records
             if flow.before_auth_fingerprints.get(record.identity) != record.fingerprint
         ]
-        if not candidates and len(provider_records) == 1:
+        # A record that did not exist before this flow is the login it produced.
+        # Accounts other Sources already hold keep changing in the background
+        # (refresh, status), so they only count when nothing new appeared: then
+        # the login rewrote an existing file, which is either this Source's own
+        # account (re-auth) or an account another Source already owns.
+        fresh = [record for record in changed if record.identity not in flow.before_auth_fingerprints]
+        candidates = fresh or [record for record in changed if record.identity not in foreign]
+        if not fresh and candidates and len(candidates) != len(changed):
+            # Existing records of this and another Source both changed: the
+            # login may have rewritten either, so neither can be named.
+            candidates = changed
+        if not candidates and not changed and len(provider_records) == 1:
             candidates = provider_records
+        if not candidates and changed:
+            candidates = changed
         if len(candidates) != 1:
             if not candidates:
                 flow.state = "verifying"
@@ -2706,6 +2873,21 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
+        foreign_accounts = {
+            record.account_id for record in provider_records if record.identity in foreign and record.account_id
+        }
+        if auth.identity in foreign or (auth.account_id and auth.account_id in foreign_accounts):
+            # The same account is already a Source. A new file for it is this
+            # flow's own material and is removed; an existing one belongs to the
+            # other Source and is never touched.
+            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
+                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
+            elif auth.identity in foreign:
+                self._set_retained_material(flow, RetainedMaterialDisposition.FOREIGN_SOURCE_REF)
+            else:
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            self._fail_flow(flow, "models.oauth.account_already_added")
+            return
         try:
             existing_credential_ref = await asyncio.to_thread(
                 self.state_store.oauth_credential_ref,
@@ -2814,6 +2996,34 @@ class CLIProxyEngineAdapter:
         )
         flow.state = "success"
         self._release_provider(flow)
+
+    def _foreign_bound_identities(self, records: Sequence[_AuthRecord], source_id: str) -> set[str]:
+        """Identities of auth records another Source's credential is bound to."""
+        foreign: set[str] = set()
+        for record in records:
+            credential_ref = self.state_store.oauth_credential_ref(record.name)
+            if credential_ref is None:
+                continue
+            owner = self.state_store.credential_metadata(credential_ref).get("source_id")
+            if owner and owner != source_id:
+                foreign.add(record.identity)
+        return foreign
+
+    async def _delete_auth_files(self, auth_name: str) -> bool:
+        def remove(client: EngineClient | None) -> bool:
+            try:
+                if client is not None:
+                    client.management_request("DELETE", "/auth-files", query={"name": auth_name})
+                self.state_store.delete_oauth_auth_file(auth_name)
+            except (EngineClientError, EngineStateError):
+                return False
+            return True
+
+        # Atomic with the engine lifecycle, like ``_cleanup_oauth_material``.
+        try:
+            return await asyncio.to_thread(self.supervisor.with_engine_excluded, remove)
+        except EngineUnavailableError:
+            return False
 
     async def _cleanup_oauth_material(self, auth_name: str, credential_ref: str) -> bool:
         def remove_grant(client: EngineClient | None) -> bool:
@@ -3011,8 +3221,7 @@ def _discovered_models(
             continue
         coalesced[value] = tuple(dict.fromkeys(held + supported_parameters))
     return tuple(
-        DiscoveredModel(id=model_id, supported_parameters=parameters)
-        for model_id, parameters in coalesced.items()
+        DiscoveredModel(id=model_id, supported_parameters=parameters) for model_id, parameters in coalesced.items()
     )
 
 

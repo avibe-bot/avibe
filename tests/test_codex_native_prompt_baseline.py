@@ -158,7 +158,7 @@ async def test_fork_sets_target_baseline_but_inherits_source_history_identity():
     marker = {}
     agent = _agent(marker)
     agent._fork_source_prompt_state = Mock(return_value=("fallback", agent._prompt_fingerprint(PROMPT_A), PROMPT_A))
-    agent._should_rollback_forked_running_turn = AsyncMock(return_value=False)
+    agent._should_trim_forked_running_turn = AsyncMock(return_value=False)
     agent._inject_forked_session_correction = AsyncMock()
     agent._mark_fork_correction_pending = Mock()
     agent._clear_fork_correction_pending = Mock()

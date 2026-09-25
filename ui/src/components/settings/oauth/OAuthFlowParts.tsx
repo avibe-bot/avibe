@@ -4,23 +4,18 @@
 // rows instead of forking near-duplicate markup (reuse ladder: promote the
 // repeated pattern to a shared home).
 //
-// These are presentation-only and i18n-agnostic: callers pass already-
-// translated strings and own the copy handler (which is where the defensive
-// stopPropagation for the iOS radio-bounce bug lives — see BackendOAuthPanel).
+// Copying is not one of those caller concerns: every caller wanted the same
+// clipboard call, the same stopPropagation, and the same confirmation, so the
+// row hands the value to the shared `CopyButton` and no caller owns a handler.
 import * as React from 'react';
-import { Copy, ExternalLink } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { CopyButton } from '@/components/ui/copy-button';
 import { Input } from '@/components/ui/input';
 
-type CopyProps = {
-  /** Receives the click event so the caller can stop propagation. */
-  onCopy: (e: React.MouseEvent) => void;
-  copyLabel: string;
-};
-
 /** Auth URL as a cyan link chip + a copy button (remote/phone operation). */
-export const OAuthLinkRow: React.FC<{ url: string } & CopyProps> = ({ url, onCopy, copyLabel }) => (
+export const OAuthLinkRow: React.FC<{ url: string }> = ({ url }) => (
   <div className="flex flex-wrap items-center gap-2">
     <a
       href={url}
@@ -31,23 +26,17 @@ export const OAuthLinkRow: React.FC<{ url: string } & CopyProps> = ({ url, onCop
       <ExternalLink className="size-3 shrink-0" />
       <span className="break-all">{url}</span>
     </a>
-    <Button type="button" variant="secondary" size="xs" onClick={onCopy}>
-      <Copy className="size-3" />
-      {copyLabel}
-    </Button>
+    <CopyButton value={url} />
   </div>
 );
 
 /** Device code as a spaced mono chip + a copy button. */
-export const OAuthDeviceCodeRow: React.FC<{ code: string } & CopyProps> = ({ code, onCopy, copyLabel }) => (
+export const OAuthDeviceCodeRow: React.FC<{ code: string }> = ({ code }) => (
   <div className="flex flex-wrap items-center gap-2">
     <code className="rounded-md bg-cyan-soft/40 px-2.5 py-1 font-mono text-[14px] font-semibold tracking-[0.18em] text-cyan-ink">
       {code}
     </code>
-    <Button type="button" variant="secondary" size="xs" onClick={onCopy}>
-      <Copy className="size-3" />
-      {copyLabel}
-    </Button>
+    <CopyButton value={code} />
   </div>
 );
 
@@ -61,27 +50,41 @@ export const OAuthSubmitRow: React.FC<{
   placeholder?: string;
   submitLabel: string;
   submittingLabel: string;
-}> = ({ id, value, onChange, onSubmit, submitting, placeholder, submitLabel, submittingLabel }) => (
-  <div className="flex gap-2">
-    <Input
-      id={id}
-      type="text"
-      autoComplete="off"
-      spellCheck={false}
-      placeholder={placeholder}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="font-mono"
-      disabled={submitting}
-    />
-    <Button
-      type="button"
-      variant="brand"
-      size="sm"
-      onClick={onSubmit}
-      disabled={submitting || !value.trim()}
-    >
-      {submitting ? submittingLabel : submitLabel}
-    </Button>
-  </div>
-);
+  /** Why the last submission was refused; the value stays editable for another try. */
+  error?: string;
+}> = ({ id, value, onChange, onSubmit, submitting, placeholder, submitLabel, submittingLabel, error }) => {
+  const errorId = React.useId();
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex gap-2">
+        <Input
+          id={id}
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="font-mono"
+          disabled={submitting}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+        />
+        <Button
+          type="button"
+          variant="brand"
+          size="sm"
+          onClick={onSubmit}
+          disabled={submitting || !value.trim()}
+        >
+          {submitting ? submittingLabel : submitLabel}
+        </Button>
+      </div>
+      {error && (
+        <p id={errorId} role="alert" className="text-[12px] leading-relaxed text-destructive-ink">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+};

@@ -11,7 +11,6 @@ silent result — a turn that ends with no trace at all.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -25,8 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.v2_sessions import ActivePollInfo
 from core.native_dispatch_phase import mark_prewrite_user_stop
 from core.processing_indicator import STOPPED_REACTION_EMOJI, ProcessingIndicatorService
+from modules.agents.base import AgentRequest
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
+from modules.agents.opencode.session import OpenCodeSessionManager
+from modules.im.base import MessageContext
 
 
 def _agent():
@@ -320,35 +322,158 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._user_stopped_sessions, set())
 
 
-class OpenCodeStopReceiptTests(unittest.TestCase):
-    """The intent is only useful if the cancellation branch actually spends it.
+class _StubOpenCodeServer:
+    def __init__(self, *, block_start: bool = False):
+        self.block_start = block_start
+        self.start_entered = asyncio.Event()
+        self.aborted: list[tuple[str, str]] = []
 
-    ``_process_message`` is a several-hundred-line coroutine whose cancellation
-    branch sits behind server startup, session creation and the poll loop, so
-    driving it here would mostly be a test of the stubs. Pin the coupling
-    instead: the branch must read the intent set and ask for the receipt.
+    async def ensure_running(self):
+        if self.block_start:
+            self.start_entered.set()
+            await asyncio.Event().wait()
+
+    async def list_messages(self, **_kwargs):
+        return []
+
+    async def prompt_async(self, **_kwargs):
+        return None
+
+    async def mark_run_active(self, _session_id):
+        return None
+
+    async def mark_run_inactive(self, _session_id):
+        return None
+
+    async def abort_session(self, session_id, directory):
+        self.aborted.append((session_id, directory))
+
+    def get_default_agent_from_config(self):
+        return None
+
+    def get_agent_reasoning_effort_from_config(self, _agent):
+        return None
+
+
+class _BlockingPollLoop:
+    def __init__(self):
+        self.entered = asyncio.Event()
+
+    async def run_prompt_poll(self, *_args, **_kwargs):
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+class _StubSessionManager(OpenCodeSessionManager):
+    async def ensure_working_dir(self, _path):
+        return None
+
+    async def get_or_create_session_id(self, _request, _server):
+        return "oc-session"
+
+
+def _process_message_agent(server, poll_loop=None):
+    """An OpenCode agent whose real ``handle_message``/``handle_stop`` pair
+    drives the real ``_process_message`` against a stub server."""
+
+    polls: dict[str, object] = {}
+    sessions = SimpleNamespace(
+        add_active_poll=lambda **kwargs: polls.__setitem__(kwargs["opencode_session_id"], kwargs),
+        remove_active_poll=lambda session_id: polls.pop(session_id, None),
+        get_all_active_polls=lambda: dict(polls),
+    )
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = SimpleNamespace(
+        config=SimpleNamespace(platform="slack", reply_enhancements=False, remote_access=None, language="en"),
+        processing_indicator=SimpleNamespace(snapshot_request=lambda _request: {}),
+        get_opencode_overrides=lambda _context: (None, None, None),
+        emit_agent_message=AsyncMock(),
+    )
+    agent.config = agent.controller.config
+    agent.sessions = sessions
+    agent.opencode_config = SimpleNamespace(error_retry_limit=0)
+    agent._session_manager = _StubSessionManager(None, "opencode")
+    agent._poll_loop = poll_loop or _BlockingPollLoop()
+    agent._steering_states = {}
+    agent._active_requests = {}
+    agent._user_stopped_sessions = set()
+    agent._delete_ack = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+
+    async def _get_server():
+        return server
+
+    agent._get_server = _get_server
+    return agent
+
+
+def _process_message_request():
+    return AgentRequest(
+        context=MessageContext(
+            user_id="u",
+            channel_id="c",
+            platform="slack",
+            platform_specific={"agent_session_id": "ses_test"},
+        ),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+        vibe_agent_model="fixture-provider/fixture-model",
+    )
+
+
+class OpenCodeProcessMessageStopReceiptTests(unittest.IsolatedAsyncioTestCase):
+    """A /stop must reach the request coroutine's own cancellation branch.
+
+    ``handle_stop`` only publishes the intent; ``_process_message`` owns the 👀
+    and is the only place that trades it for the ⏹️ receipt, whether the stop
+    lands before the server has started or while the poll loop is running.
     """
 
-    def test_cancellation_branch_reads_the_intent(self):
-        source = inspect.getsource(OpenCodeAgent._process_message)
-        cleanup = inspect.getsource(OpenCodeAgent._finish_prestart_cancellation)
-        claim = inspect.getsource(OpenCodeAgent._claim_user_stop_receipt)
+    async def _stop_while(self, agent, server, entered: asyncio.Event):
+        request = _process_message_request()
+        message_task = asyncio.create_task(agent.handle_message(request))
+        await asyncio.wait(
+            {message_task, asyncio.create_task(entered.wait())},
+            timeout=5,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        self.assertTrue(entered.is_set(), "the request never reached the stop point")
 
-        self.assertIn("_finish_prestart_cancellation", source)
-        self.assertIn("_claim_user_stop_receipt", cleanup)
-        self.assertIn("consume_user_stop_intent", claim)
-        self.assertIn("prewrite_user_stop_requested", claim)
-        self.assertIn("STOPPED_REACTION_EMOJI", cleanup)
+        self.assertTrue(await agent.handle_stop(_process_message_request()))
+        await message_task
+        return request
 
-    def test_restored_cancellation_branch_reads_the_intent(self):
-        source = inspect.getsource(OpenCodePollLoop.run_restored_poll_loop)
-        _, _, after = source.partition("except asyncio.CancelledError:")
-        branch = after.partition("raise")[0]
+    async def test_stop_during_the_poll_loop_leaves_the_stopped_receipt(self):
+        server = _StubOpenCodeServer()
+        poll_loop = _BlockingPollLoop()
+        agent = _process_message_agent(server, poll_loop)
 
-        self.assertTrue(branch, "run_restored_poll_loop no longer handles cancellation")
-        self.assertIn("consume_user_stop_intent", branch)
-        self.assertIn("STOPPED_REACTION_EMOJI", branch)
-        self.assertIn("restored_request", branch)
+        request = await self._stop_while(agent, server, poll_loop.entered)
+
+        agent._remove_ack_reaction.assert_awaited_once_with(
+            request,
+            terminal_emoji=STOPPED_REACTION_EMOJI,
+        )
+        self.assertEqual(server.aborted, [("oc-session", "/tmp/work")])
+        self.assertEqual(agent.sessions.get_all_active_polls(), {})
+        self.assertEqual(agent._user_stopped_sessions, set())
+
+    async def test_stop_before_the_server_starts_leaves_the_stopped_receipt(self):
+        server = _StubOpenCodeServer(block_start=True)
+        agent = _process_message_agent(server)
+
+        request = await self._stop_while(agent, server, server.start_entered)
+
+        agent._remove_ack_reaction.assert_awaited_once_with(
+            request,
+            terminal_emoji=STOPPED_REACTION_EMOJI,
+        )
+        self.assertEqual(server.aborted, [])
+        self.assertEqual(agent._user_stopped_sessions, set())
 
 
 if __name__ == "__main__":

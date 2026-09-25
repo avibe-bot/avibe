@@ -61,12 +61,14 @@ export const AgentationToggle = () => {
 
   if (!enabled) return null;
   return (
-    <Suspense fallback={null}>
-      <Agentation
-        copyToClipboard={false}
-        onCopy={copyText}
-        onSubmit={(output) => copyText(output)}
-      />
-    </Suspense>
+    <div data-settings-interaction-owner="true">
+      <Suspense fallback={null}>
+        <Agentation
+          copyToClipboard={false}
+          onCopy={copyText}
+          onSubmit={(output) => copyText(output)}
+        />
+      </Suspense>
+    </div>
   );
 };

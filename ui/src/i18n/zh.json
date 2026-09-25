@@ -896,6 +896,7 @@
         },
         "tab": {
           "hub": "供应商与路由",
+          "quota": "订阅额度",
           "usage": "用量",
           "logs": "日志"
         }
@@ -924,13 +925,13 @@
           "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
-          "title": "切换到模型网关，你会多出三件事",
+          "title": "切换到模型网关，有三大益处",
           "1": "额度用尽不断线",
           "1.detail": "Claude 订阅用满时，自动切换到下一个供应商，对话继续。",
           "2": "一个 Key 用于多个后端",
           "2.detail": "同一个 API Key 可以同时给 Claude Code、Codex、OpenCode 用。",
-          "3": "按后端、按模型自己定",
-          "3.detail": "哪个后端的哪个模型使用哪个供应商，都可以逐条指定。"
+          "3": "模型搭配随心所欲",
+          "3.detail": "哪个后端使用哪个供应商的哪个模型，都可以任意搭配。"
         },
         "note": {
           "perBackend": "逐个后端切换，互不影响——其余后端保持直连。切换后随时可以切换回直连。"
@@ -976,8 +977,8 @@
           "summary_one": "{{count}} 个 Agent 需关注",
           "summary_other": "{{count}} 个 Agent 需关注",
           "modelMissing": "未选择模型",
-          "routeMissing": "此模型未配置路由",
-          "degraded": "模型供应已降级",
+          "routeMissing": "{{model}} 模型名不存在，请修改此 agent 的模型名或添加 {{model}} 模型的路由",
+          "degraded": "部分供应商不可用，请求已自动切换到其他供应商",
           "waiting": "等待供应商恢复",
           "interrupted": "此模型没有可用供应商"
         },
@@ -1021,6 +1022,7 @@
           "remove": "移除 {{model}}",
           "reorder": "调整 {{model}} 的顺序",
           "removeConfirm": "移除",
+          "removeTitle": "移除 {{model}}？",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
@@ -1036,7 +1038,8 @@
           "saveConflict": "编辑期间该列表在别处发生了变更。你的改动已重放到新列表上，请确认后重新保存。",
           "saveIdInvalid": "列表中有模型 ID 不适用于这个后端。请移除该模型后重新添加。",
           "saveDuplicate": "列表中有两个模型使用了相同的 ID，请移除其中一个后重新保存。",
-          "saveLocked": "该列表与服务端自有的模型不一致。已重新读取服务器上的列表，请确认后重新保存。",
+          "saveLocked": "列表中有模型被标记为该后端内置，但这个后端并不提供它。已重新读取服务器上的列表，请移除该模型后重新添加。",
+          "saveOriginImmutable": "这个模型已经在列表里了，不能作为新模型重新添加。已重新读取服务器上的列表，请直接编辑已有的那一项。",
           "saveInvalid": "列表中某个模型的字段值不被这个后端接受，请检查后重新保存。",
           "grabbed_one": "已抓起 {{model}}，第 {{position}} / {{count}} 位。",
           "grabbed_other": "已抓起 {{model}}，第 {{position}} / {{count}} 位。",
@@ -1245,6 +1248,7 @@
           "passthrough": "透传",
           "unconfigured": "未配置"
         },
+        "originNow": "当前",
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
@@ -1326,15 +1330,159 @@
         "needs_action": "需要处理",
         "error": "需要处理"
       },
+      "quota": {
+        "title": "订阅额度",
+        "header_one": "{{count}} 个已登录的订阅账号",
+        "header_other": "{{count}} 个已登录的订阅账号",
+        "autoRefresh": "每 5 分钟自动刷新",
+        "refresh": "立即刷新",
+        "refreshing": "刷新中…",
+        "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
+        "left": "剩余",
+        "window": {
+          "session": "5 小时额度",
+          "weekly": "每周额度",
+          "model": "{{model}} 每周额度"
+        },
+        "hint": {
+          "shared": "所有模型共用",
+          "model": "只算 {{model}} 的用量"
+        },
+        "scoped": {
+          "title": "单独计算的模型额度",
+          "note": "这些模型也会同时扣每周额度，任一项用完就会暂停"
+        },
+        "pace": {
+          "ok": "够用到重置",
+          "slightlyFast": "稍快，仍够用到重置",
+          "fast": "用得偏快，预计 {{duration}}后用完",
+          "exhausted": "已用完，{{duration}}后恢复",
+          "exhaustedUnknown": "已用完",
+          "paused": "暂停更新",
+          "reset": "已重置"
+        },
+        "reset": {
+          "in": "{{duration}}后重置",
+          "done": "已重置，等待刷新"
+        },
+        "meter": "{{label}} 已用 {{pct}}%",
+        "status": {
+          "ok": "可用",
+          "exhausted": "{{label}}已用完",
+          "reauth": "需重新登录",
+          "paused": "暂停更新"
+        },
+        "stale": {
+          "authExpired": "登录已过期，下面是 {{ago}}的数据",
+          "retained": "暂时读不到最新额度，下面是 {{ago}}的数据",
+          "reauth": "重新登录"
+        },
+        "unread": {
+          "auth_expired": "登录已过期，读不到额度",
+          "unsupported": "这个订阅不提供额度数据",
+          "error": "暂时读不到额度，稍后会自动重试"
+        },
+        "ago": {
+          "minutes_one": "{{count}} 分钟前",
+          "minutes_other": "{{count}} 分钟前",
+          "long": "{{duration}}前"
+        },
+        "duration": {
+          "days": "{{days}} 天 {{hours}} 小时",
+          "daysOnly": "{{days}} 天",
+          "hours": "{{hours}} 小时 {{minutes}} 分",
+          "hoursOnly": "{{hours}} 小时",
+          "minutes": "{{minutes}} 分钟"
+        },
+        "stat": {
+          "tightest": "余量最少的额度",
+          "tightestAllSpent": "所有额度都已用完",
+          "tightestUnread": "暂时没有可读的额度",
+          "exhausted": "已用完",
+          "exhaustedUnit": "项额度",
+          "exhaustedNone": "所有账号都能正常使用",
+          "exhaustedNoneObserved": "已读到的额度都没用完",
+          "exhaustedNote": "{{name}} · {{duration}}后恢复",
+          "resetsIn": "{{duration}}后重置",
+          "weekValue": "近 7 天按 API 价格",
+          "weekValueNote": "所有订阅账号的用量，按官方 API 标价计算",
+          "payback": "本期回本",
+          "paybackMultiple": "{{multiple}} 倍",
+          "paybackUnit": "月费",
+          "paybackPaid": "已回本，多薅了 {{amount}}",
+          "paybackShort": "还差 {{amount}} 回本",
+          "paybackShortUnknown": "部分用量暂无价格，差额暂不显示",
+          "paybackRolling": "未设续费日的账号按近 30 天计",
+          "paybackPartial_one": "{{count}} 个账号套餐未知，未计入",
+          "paybackPartial_other": "{{count}} 个账号套餐未知，未计入",
+          "paybackUnknown": "套餐未知，暂不计算回本"
+        },
+        "upcoming": "即将重置",
+        "footnote": "进度条是已用的部分，细竖线是这个周期已经过去的时间：进度条超过竖线，就是用得比时间快。",
+        "pending": "正在读取额度…",
+        "footnoteValue": "“按 API 价格”指同样的用量按官方 API 标价要花多少钱，用来看订阅值不值，不是实际扣费。",
+        "priceTableDate": "价格表日期 {{date}}。",
+        "priceTableUnknown": "暂无价格表日期。",
+        "value": {
+          "week": "近 7 天按 API 价格",
+          "period": {
+            "billing_cycle": "本期按 API 价格",
+            "rolling_30d": "近 30 天按 API 价格"
+          },
+          "noPrice": "暂无价格",
+          "paid": "回本 {{multiple}} 倍",
+          "even": "刚好回本",
+          "short": "还差 {{amount}} 回本",
+          "shortUnknown": "部分用量暂无价格，差额暂不显示",
+          "renews": "距下次续费",
+          "renewsIn_one": "{{count}} 天",
+          "renewsIn_other": "{{count}} 天",
+          "excluded": "{{tokens}} tokens 暂无价格，未计入"
+        },
+        "plan": {
+          "openai": {
+            "free": "Free",
+            "go": "Go",
+            "plus": "Plus",
+            "pro": "Pro",
+            "prolite": "Pro 5x",
+            "pro_5x": "Pro 5x",
+            "team": "Team",
+            "business": "Business",
+            "enterprise": "Enterprise",
+            "edu": "Edu"
+          },
+          "anthropic": {
+            "pro": "Pro",
+            "max_5x": "Max 5x",
+            "max_20x": "Max 20x",
+            "team": "Team",
+            "enterprise": "Enterprise"
+          }
+        }
+      },
       "usage": {
         "title": "用量",
         "detail": "模型网关代理的对话所计量的 token，按本地日期汇总。",
         "window": {
           "label": "区间",
-          "option": "{{days}} 天"
+          "option": "{{days}} 天",
+          "24h": "24 小时",
+          "7d": "7 天",
+          "30d": "30 天",
+          "60d": "60 天"
         },
         "range": "{{from}} – {{to}} · 近 {{days}} 天",
-        "empty": "还没有计量数据。模型网关完成请求后，这里就会有内容。",
+        "empty": {
+          "report": {
+            "title": "这个区间没有用量",
+            "body": "模型网关在所选时间范围内还没有记录请求。"
+          },
+          "filter": {
+            "title": "没有符合条件的用量",
+            "body": "试试其他供应商或模型，或重置筛选。"
+          }
+        },
         "blank": "—",
         "tokens": {
           "label": "Tokens",
@@ -1343,6 +1491,7 @@
         },
         "requests": {
           "label": "请求数",
+          "unit": "次请求",
           "reported": "每次请求都回报了 token",
           "shortfall_one": "{{count}} 次请求没有回报 token",
           "shortfall_other": "{{count}} 次请求没有回报 token"
@@ -1376,6 +1525,135 @@
           "quiet": "这个区间没有任何一天有计量数据",
           "unreported": "有请求，但没有任何一天回报了 token",
           "zero": "有回报 token 的日子，回报的都是 0"
+        },
+        "metric": {
+          "label": "指标",
+          "tokens": "全部 Tokens",
+          "input": "输入（含缓存）",
+          "output": "输出",
+          "cache": "缓存读取",
+          "requests": "请求数",
+          "cost": "折合 API 价格"
+        },
+        "filters": {
+          "source": "供应商",
+          "model": "模型",
+          "all": "全部{{label}}",
+          "selected_one": "{{label}} · 已选 {{count}} 个",
+          "selected_other": "{{label}} · 已选 {{count}} 个",
+          "search": "搜索{{label}}",
+          "noMatch": "没有匹配项",
+          "hint": "多选会同步更新整份报表",
+          "reset": "重置筛选",
+          "allSources": "全部供应商",
+          "allModels": "全部模型",
+          "sourceCount_one": "{{count}} 个供应商",
+          "sourceCount_other": "{{count}} 个供应商",
+          "modelCount_one": "{{count}} 个模型",
+          "modelCount_other": "{{count}} 个模型"
+        },
+        "stats": {
+          "tokens": "全部 Tokens",
+          "requests": "请求数",
+          "cached": "输入缓存占比",
+          "tokenSplit": "输入 {{input}} · 输出 {{output}}",
+          "shortfall_one": "{{count}} 次请求没有回报 token",
+          "shortfall_other": "{{count}} 次请求没有回报 token",
+          "allReported": "每次请求都回报了 token",
+          "cacheUnknown": "暂无已知输入 token",
+          "cacheSplit": "输入 {{input}} 中有 {{cached}} 来自缓存",
+          "cost": "折合 API 价格"
+        },
+        "unknownTokens": "部分请求没有回报 token，相关 token 数值不可用",
+        "partialHistory": "部分时间桶的历史记录不完整",
+        "historicalHourly": "含无具体小时记录的历史用量",
+        "unknownModel": "未知模型",
+        "granularity": {
+          "hour": "按小时",
+          "day": "按天"
+        },
+        "group": {
+          "label": "分组",
+          "total": "总量",
+          "type": "Token 类型",
+          "model": "模型",
+          "source": "供应商"
+        },
+        "series": {
+          "input": "输入（非缓存）",
+          "cache": "缓存读取",
+          "output": "输出",
+          "requests": "请求数"
+        },
+        "chart": {
+          "title": "用量趋势",
+          "subtitle": "按所选时间桶显示精确数量",
+          "aria": "{{kind}}用量趋势",
+          "lines": "折线",
+          "bars": "堆叠柱状图",
+          "bucket": "用量时间桶 {{bucket}}",
+          "detail": "时间桶用量详情",
+          "legend": "图表图例",
+          "pin": "固定这个时间桶",
+          "unpin": "取消固定时间桶",
+          "pinned": "已固定",
+          "currentPartial": "当前小时未结束",
+          "complete": "历史完整",
+          "partial": "历史不完整",
+          "points_one": "{{count}} 个{{granularity}}数据点",
+          "points_other": "{{count}} 个{{granularity}}数据点",
+          "legendOnly": "图例显隐只影响图表",
+          "interaction": "悬停或聚焦时间桶 · 点击查看详情"
+        },
+        "table": {
+          "title": "精确用量明细",
+          "range": "明细表与图表使用相同筛选条件",
+          "bucket": "正在显示 {{bucket}}",
+          "allBuckets": "查看全部时间桶",
+          "group": "明细分组",
+          "byModel": "按模型",
+          "bySource": "按供应商",
+          "export": "导出 CSV",
+          "identity": "模型 / 供应商",
+          "requests": "请求数",
+          "input": "输入",
+          "nonCache": "非缓存输入",
+          "cache": "缓存读取",
+          "output": "输出",
+          "tokens": "全部 Tokens",
+          "share": "占比",
+          "sortAscending": "{{metric}}：升序排列",
+          "sortDescending": "{{metric}}：降序排列",
+          "total": "合计",
+          "empty": "没有符合条件的用量",
+          "accounting": "全部 Tokens = 输入 + 输出。缓存读取已包含在输入中，同时单独列出。"
+        },
+        "csv": {
+          "bucketKey": "时间桶键",
+          "startAt": "开始时间",
+          "endAt": "结束时间",
+          "historyComplete": "历史完整",
+          "sourceId": "供应商 ID",
+          "modelId": "模型 ID",
+          "ledgerKey": "内部账本键",
+          "sourceLabel": "供应商",
+          "modelLabel": "模型",
+          "tokenReports": "Token 报告数",
+          "inputTokens": "输入 token",
+          "nonCachedInputTokens": "非缓存输入 token",
+          "cachedInputTokens": "缓存输入 token",
+          "outputTokens": "输出 token",
+          "totalTokens": "总 token"
+        },
+        "failure": "暂时没能读取用量报表。",
+        "retry": "重试",
+        "cost": {
+          "notBilled": "按官方 API 标价折算，不是实际扣费",
+          "noPrice": "暂无价格",
+          "excluded_one": "{{tokens}} tokens 暂无价格，未计入",
+          "excluded_other": "{{tokens}} tokens 暂无价格，未计入",
+          "tableDate": "价格表日期 {{date}}",
+          "tableDateUnknown": "暂无价格表日期"
         }
       },
       "supplyTooltip": {
@@ -1461,6 +1739,8 @@
           "confirm": "替换",
           "replaced": "已替换第 {{position}} 个路由项。"
         },
+        "editModel": "编辑模型",
+        "removeModel": "删除模型",
         "sourceMissing": "供应商不存在",
         "invalidAfterRefresh": "这个路由项在刷新后的供应商中不可用。替换或移除后再保存。",
         "reorder": {
@@ -1591,8 +1871,7 @@
           "native": {
             "label": "由 Agent 管理",
             "desc": {
-              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。",
-              "chatgpt": "Codex 直接用这个 ChatGPT 账号登录。"
+              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。"
             }
           },
           "hub": {
@@ -1605,15 +1884,13 @@
         },
         "badge": {
           "recommended": "推荐",
-          "secondary": "次选",
-          "supportedNotRecommended": "支持，不推荐"
+          "secondary": "次选"
         },
         "tos": {
           "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
         },
         "hint": {
-          "claude": "两条都要也可以，分两次添加。",
-          "chatgpt": "额度用完不会自动切换，也看不到用量。"
+          "claude": "两条都要也可以，分两次添加。"
         },
         "signIn": "去登录",
         "cancel": "取消",
@@ -1646,7 +1923,8 @@
           "hint": "登录同意后，把页面给的授权码粘贴回来"
         },
         "callback": {
-          "hint": "登录后，把浏览器最终停留的回调地址粘贴回来"
+          "hint": "登录后，把浏览器最终停留的回调地址粘贴回来",
+          "rejected": "这不是授权完成后的回调地址。请粘贴登录同意后浏览器地址栏里的完整网址（包含 code=），改好后重新提交。"
         },
         "deviceCode": {
           "hint": "在那个页面输入设备码，这里会自动继续"
@@ -1707,24 +1985,26 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证，不读取运行中的环境变量。迁移后，所选认证由模型网关管理。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。",
+        "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
+        "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
         "sharedFiles": "这些后端共用文件中保存的认证，需要一起迁移：{{backends}}。勾选或取消其中一个，会同时更新全部关联后端。",
         "scanFailed": "扫描 Agent 配置失败，请重试",
         "applyFailed": "迁移失败，请重试",
         "blocked": {
-          "config": "请检查此 CLI 已保存的配置，再重新扫描。",
-          "environment": "暂时无法导入此环境变量认证。请将密钥保存到受支持的配置文件，再重新扫描。",
-          "credential": "无法读取此凭据，或其认证形式暂不受支持。请检查凭据访问权限和已保存的认证格式，再重新扫描。",
-          "dynamic_shell": "此文件通过表达式或命令设置认证，无法安全读取。请将需要迁移的认证以固定值保存到受支持的配置文件，再重新扫描。迁移不会执行 Shell 代码。",
-          "ambiguous_shell": "列出的文件中存在互相冲突的赋值。请确认应使用的固定值，统一相关配置后重新扫描。",
-          "unreadable": "无法读取此配置文件。请检查文件是否存在，以及 Avibe 是否有读取权限，再重新扫描。",
-          "reference": "引用的变量没有明确的已保存固定值。请在列出的配置文件或 Shell 启动文件中配置并保存对应的密钥，再重新扫描。",
-          "helper": "无法导入由命令提供的凭据。请将凭据保存为受支持的静态配置，或在模型网关中手动添加供应商。",
-          "token": "此登录令牌或认证格式暂不支持导入。请在模型网关中添加供应商，或为该供应商重新登录。",
-          "headers": "暂不支持导入自定义认证请求头。请使用受支持的认证方式，或在模型网关中手动添加供应商。",
-          "transport": "模型网关暂不支持这里的认证方式，已跳过，原文件未改动。可以改用供应商的标准 API Key 重新添加。",
-          "fallback": "暂时无法导入此认证，请使用模型网关现有的添加流程手动添加供应商。"
+          "config": "配置文件格式有误。",
+          "environment": "环境变量里的密钥暂不支持迁移。",
+          "credential": "不支持这种认证方式。",
+          "dynamic_shell": "密钥由命令生成，无法读取。",
+          "ambiguous_shell": "多个文件里的密钥不一致。",
+          "unreadable": "没有读取这个文件的权限。",
+          "reference": "引用的变量找不到值。",
+          "helper": "密钥由脚本生成，无法读取。",
+          "token": "不支持这种登录令牌。",
+          "headers": "不支持自定义请求头。",
+          "transport": "网关无法按这种方式发送密钥。",
+          "fallback": "暂不支持迁移，请手动添加。"
         },
         "applying": "迁移中…",
         "errors": {
@@ -1900,7 +2180,6 @@
           "position": "顺序 #{{n}}"
         },
         "hint": {
-          "safe": "这些模型还有其他供应商可用。",
           "interrupt": "有模型会因此没有可用供应商。"
         },
         "gap": {
@@ -1912,7 +2191,6 @@
           "label": "已移除的路由项",
           "gapLabel": "已经没有可用供应商的模型",
           "hint": {
-            "safe": "这些模型仍有其他供应商可用。",
             "interrupt": "有模型现在没有可用供应商。"
           }
         },
@@ -2092,6 +2370,7 @@
       "submission_failed": "粘贴的内容没能提交，请重试",
       "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
       "binding_failed": "该账号已被另一个供应商使用",
+      "account_already_added": "这个账号已经添加过了，不能重复添加。要添加另一个订阅，请登录其他账号。",
       "expired": "授权超时，请重新连接"
     },
     "probe": {
@@ -2118,6 +2397,15 @@
       },
       "error": {
         "unclassified": "未知错误，暂时不可用"
+      }
+    },
+    "quota": {
+      "error": {
+        "auth_expired": "登录已过期",
+        "rate_limited": "服务商暂时限制了额度查询",
+        "unsupported": "这个订阅不提供额度数据",
+        "unavailable": "暂时读不到额度",
+        "malformed": "服务商返回的额度数据读不懂"
       }
     }
   },
@@ -4187,6 +4475,7 @@
     "olderLoadFailed": "加载更早的消息失败，点击重试",
     "organizationNotice": "这是一个组织会话，消息会显示发送者。",
     "senderUnknown": "未知发送者",
+    "senderYou": "你",
     "forkedEmptyTitle": "复刻会话已创建",
     "forkedEmptyBody": "已从原会话上下文复刻，当前对话记录从空白开始，原会话上下文已保留，继续对话即可",
     "forkedFromPrefix": "复刻自",
@@ -4376,6 +4665,44 @@
         "more": "+{{count}}",
         "showMore": "显示其余 {{count}} 个附件",
         "collapse": "收起附件"
+      }
+    },
+    "failureDetails": {
+      "show": "查看详情",
+      "hide": "收起详情",
+      "outcome": {
+        "served": "{{model}} 最终已成功响应。",
+        "exhausted": "{{model}} 的所有供应商在上游都失败了。",
+        "failed_terminal": "上游 API 拒绝了 {{model}} 的请求。",
+        "failed_local": "{{model}} 的请求失败了，原因见下方。",
+        "no_candidate": "请求时没有可以提供 {{model}} 的供应商。",
+        "canceled": "{{model}} 的请求已取消。"
+      },
+      "httpStatus": "HTTP 状态码",
+      "errorCode": "错误码",
+      "reasonLabel": "原因",
+      "blockers": "当时不可用的供应商",
+      "upstreamNote": "以上状态码与错误码均由上游供应商的 API 返回。Avibe 会保留状态码和错误码，但不会保存供应商返回的原始报文，因为其中可能包含凭据。",
+      "copyRecord": "复制记录",
+      "reason": {
+        "quota_exhausted": "额度用尽",
+        "cooldown": "冷却中",
+        "rate_limited": "触发限流",
+        "server_error": "上游服务器错误",
+        "network": "网络错误",
+        "recovery": "恢复中",
+        "manual": "手动切换",
+        "credential_expired": "凭据已过期",
+        "credential_revoked": "凭据已吊销",
+        "balance_exhausted": "余额不足",
+        "account_banned": "账号被封禁",
+        "permission_denied": "无权限",
+        "unclassified_error": "未分类的上游错误",
+        "no_enabled_source": "没有已启用的供应商",
+        "no_eligible_source": "没有能提供该模型的供应商",
+        "route_unconfigured": "尚未配置路由",
+        "source_missing": "供应商已不存在",
+        "model_unsupported": "该供应商不提供此模型"
       }
     }
   },
@@ -5031,7 +5358,7 @@
     },
     "import": {
       "title": "迁移到模型网关",
-      "description": "迁移后，这些助手改用模型网关连接模型，原配置文件里对应的 Key 会被移除，其他设置不变。",
+      "description": "迁移后，这些助手改用模型网关连接模型。原配置文件里的 Key 默认保留，这些助手不再使用它们，其他设置不变。",
       "action_one": "查看选中的 {{count}} 项",
       "action_other": "查看选中的 {{count}} 项",
       "scopeNote": "这里只迁移 API Key。订阅登录和无法迁移的配置，请到设置中处理。",
@@ -5041,7 +5368,7 @@
       "progressDetail": "正在迁移认证并更新关联助手的连接",
       "done_one": "已迁移 {{count}} 项配置",
       "done_other": "已迁移 {{count}} 项配置",
-      "doneDetail": "迁移和原生认证清理已完成。请确认助手的模型路由。",
+      "doneDetail": "迁移已完成。请确认助手的模型路由。",
       "remaining_one": "还有 {{count}} 项需要查看，可随时继续",
       "remaining_other": "还有 {{count}} 项需要查看，可随时继续",
       "remainingAction": "继续选择",

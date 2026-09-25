@@ -35,6 +35,17 @@
   --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
 }
 
+/* Height of the desktop shell's overlay title bar. On macOS the shell draws the
+   page under its title bar, with the window controls floating over the top
+   strip and a native drag area laid over it that no page control can receive
+   clicks through. The shell's init script sets the real height on the document
+   element before any page script runs; everywhere else — browsers, the PWA,
+   other desktop platforms — it stays 0. Every surface anchored to the top of the
+   viewport pads its own top by this, so nothing interactive sits in the strip. */
+:root {
+  --shell-titlebar-inset: 0px;
+}
+
 /* Width of the desktop shell sidebar. The sidebar itself, every md+ content
    offset and the Settings overlay's left edge read this one value, so dragging
    the divider moves all of them together — including the overlay, which lives in

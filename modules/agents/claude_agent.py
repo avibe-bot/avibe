@@ -2938,7 +2938,11 @@ class ClaudeAgent(BaseAgent):
         # The receiver context may belong to an earlier turn. Adopt the FIFO
         # owner's identity before any visible or durable failure output.
         self._adopt_pending_turn_token(context, pending_request)
-        terminal_error = "Claude receiver ended without a terminal result"
+        terminal_error = (
+            buffered_failure.diagnostic
+            if buffered_failure is not None and buffered_failure.replay_failed
+            else "Claude receiver ended without a terminal result"
+        )
         client = self.claude_sessions.get(composite_key)
         returncode = get_claude_client_returncode(client)
         auth_handled = False
@@ -2949,7 +2953,9 @@ class ClaudeAgent(BaseAgent):
         # the default has to be "not contained": an unclassified EOF is a real
         # failure and must keep saying so.
         contained = False
-        if buffered_failure is not None:
+        # A failed replay is only a diagnostic. The still-owned request needs
+        # the ordinary no-result settlement below, before releasing its gate.
+        if buffered_failure is not None and not buffered_failure.replay_failed:
             if buffered_failure.auth_handled:
                 self._retire_failed_auth_turn(
                     composite_key,

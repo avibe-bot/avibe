@@ -468,6 +468,13 @@ export type MigrationItem = {
   /** Server-computed transitive closure of backends sharing persisted shell
    *  assignments. They must migrate together. Missing/empty means this backend. */
   required_backends?: AgentBackend[];
+  /** The backend's native config cannot be parsed, so Hub mode would fail every
+   *  launch: the row blocks its whole consent group. Optional for older servers. */
+  config_blocker?: boolean;
+  /** Whether applying this row may copy a native API key, including an
+   *  opaque credential store that resolves only after consent. Older servers
+   *  omit it; then only non-subscription rows hold keys. */
+  may_hold_api_key?: boolean;
 };
 
 export type MigrationScan = { items: MigrationItem[] };
@@ -593,7 +600,7 @@ export type TurnProvenance = {
   agent: AgentBackend;
   requested_model_id: string;
   outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
-  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason }>;
+  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null }>;
   served: RecordedAttempt | null;
   canceled_attempt: RecordedAttempt | null;
   terminal_error: {
@@ -770,9 +777,37 @@ export type UsageCounters = {
   /** Subset of `input_tokens` served from cache. */
   cached_input_tokens: number;
   output_tokens: number;
+  /** Subset of `input_tokens` written to the prompt cache, disjoint from cached
+   *  input. Codex reports none. Absent on a server that predates the field. */
+  cache_write_input_tokens?: number;
+  /** Subset of `cache_write_input_tokens` written with the one-hour lifetime. */
+  cache_write_1h_input_tokens?: number;
+  /** Token reports that could not carry cache writes (metered before they were
+   *  captured, or on a protocol without them). */
+  cache_write_uncaptured_reports?: number;
+} & Partial<PricedUsage>;
+
+/** API-price valuation of one span: what it would have cost at list API
+ *  prices. A valuation, never an amount charged. */
+export type PricedUsage = {
+  api_cost_usd: number;
+  /** input + output tokens of models with no known price, left out of the cost. */
+  excluded_tokens: number;
+  /** True when part of the cost predates cache-write capture on a model that
+   *  charges for it, so the figure understates. */
+  api_cost_lower_bound: boolean;
+};
+
+export type UsagePricing = {
+  currency: 'USD';
+  /** Local date the price table was fetched; null when only overrides priced. */
+  price_table_date: string | null;
 };
 
 export type UsageByModel = UsageCounters & {
+  /** False when no price is known for the model: its tokens are in
+   *  `excluded_tokens`. Present exactly when the report is priced. */
+  priced?: boolean;
   /** Ledger key, which for a long identifier is a head plus a digest rather
    *  than the identifier itself — a string nobody typed. Display `label`,
    *  never this. `usageProjection.modelIdentity` is the only reader. */
@@ -809,6 +844,32 @@ export type UsageSummary = {
   /** One entry per local day carrying a metered turn, oldest first — a trend
    *  series, so a day with no turn is ABSENT rather than reported as zero. */
   days: UsageByDay[];
+  /** Present when the server priced the report. */
+  pricing?: UsagePricing;
+};
+
+export type UsageWindowKey = '24h' | '7d' | '30d' | '60d';
+
+export type UsageBucketRow = UsageCounters & {
+  source_id: string;
+  model_id: string;
+};
+
+export type UsageBucket = {
+  key: string;
+  start_at: string;
+  end_at: string;
+  history_complete: boolean;
+  rows: UsageBucketRow[];
+};
+
+/** The modern temporal report consumed by the Model Hub analytics surface. */
+export type UsageReport = UsageSummary & {
+  window_key: UsageWindowKey;
+  granularity: 'hour' | 'day';
+  from_at: string;
+  to_at: string;
+  buckets: UsageBucket[];
 };
 
 /** `window_days` bounds from the schema. The offered options live in
@@ -816,6 +877,72 @@ export type UsageSummary = {
 export const USAGE_WINDOW_MIN_DAYS = 1 as const;
 export const USAGE_WINDOW_MAX_DAYS = 62 as const;
 export const USAGE_DEFAULT_WINDOW_DAYS = 30 as const;
+export const USAGE_DEFAULT_WINDOW: UsageWindowKey = '24h';
+
+/** `quota-summary.schema.json` — a subscription's own rate-limit windows, and
+ *  what its metered usage would have cost at API prices. A report, like usage:
+ *  nothing in routing reads it. */
+export type QuotaWindowKind = 'session' | 'weekly' | 'model_weekly' | 'other';
+
+export type QuotaWindow = {
+  id: string;
+  kind: QuotaWindowKind;
+  /** The upstream name. Views compose their own copy for `session`/`weekly`. */
+  label: string;
+  /** Present on `model_weekly`: the model the window alone counts. */
+  scope_model?: string;
+  used_pct: number;
+  window_seconds: number | null;
+  resets_at: string | null;
+};
+
+export type QuotaSourceState = 'ok' | 'stale' | 'auth_expired' | 'unsupported' | 'error';
+
+export type SourceQuota = {
+  source_id: string;
+  vendor: string;
+  display_name: string;
+  account_label: string | null;
+  plan: string | null;
+  fetched_at: string | null;
+  state: QuotaSourceState;
+  error_key?: string;
+  windows: QuotaWindow[];
+  /** Absent means "not reported", never zero. */
+  value?: SourceQuotaValue;
+};
+
+export type QuotaValuePeriod = PricedUsage & {
+  /** billing_cycle from a configured renewal day, else the trailing 30 days. */
+  basis: 'billing_cycle' | 'rolling_30d';
+  from_day: string;
+  to_day: string;
+  renews_on: string | null;
+};
+
+export type SourceQuotaValue = UsagePricing & {
+  /** Fee-table key; null when the plan is unknown, and then no payback shows. */
+  plan_key: string | null;
+  fee_usd: number | null;
+  /** period.api_cost_usd / fee_usd; null exactly when the fee is unknown. */
+  multiple: number | null;
+  week: PricedUsage;
+  period: QuotaValuePeriod;
+};
+
+export type QuotaValueTotals = UsagePricing & {
+  week: PricedUsage;
+  /** Only the Sources with a known fee; null when none has one. */
+  period: (PricedUsage & { sources: number; fee_usd: number; multiple: number }) | null;
+};
+
+export type QuotaSummary = {
+  refresh_interval_seconds: number;
+  sources: SourceQuota[];
+  /** Sources whose read is still running past the page deadline; re-read soon. */
+  pending?: string[];
+  value?: QuotaValueTotals;
+};
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;

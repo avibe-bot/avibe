@@ -1645,6 +1645,7 @@ def source_hides() -> tuple[str, ...]:
         "/.bot.pid",
         "/.gstack",
         "/.tmp",
+        "/desktop/target",
         "/vibe/_version.py",
         "/vibe/show_runtime_manifest.json",
     )

@@ -72,7 +72,7 @@ export const MenuDrawer: React.FC<{
           <header
             className={cn(
               'flex items-start gap-3 border-b border-border px-4 py-4 sm:px-6 sm:py-5',
-              !isMobile && 'pt-[calc(1rem+env(safe-area-inset-top))] sm:pt-5',
+              !isMobile && 'pt-[calc(1rem+env(safe-area-inset-top))] sm:pt-[calc(1.25rem+var(--shell-titlebar-inset))]',
             )}
           >
             <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-[12px] sm:size-11', ACCENT_TILE[accent])}>

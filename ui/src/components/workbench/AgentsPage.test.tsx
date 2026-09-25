@@ -152,12 +152,14 @@ function renderPage(
     instanceRole = 'owner' as InstanceRole,
     canManageAgents = false,
     capabilities,
+    entry = '/agents',
   }: {
     remote?: boolean;
     instanceKind?: 'organization' | 'personal' | null;
     instanceRole?: InstanceRole;
     canManageAgents?: boolean;
     capabilities?: InstanceCapabilities;
+    entry?: string;
   } = {},
 ) {
   apiRef.current = api;
@@ -166,7 +168,7 @@ function renderPage(
     <InstanceAuthorizationContext.Provider
       value={{ remote, instanceKind, instanceRole, capabilities: effectiveCapabilities }}
     >
-      <MemoryRouter initialEntries={['/agents']}>
+      <MemoryRouter initialEntries={[entry]}>
         <AgentsPage />
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
@@ -210,6 +212,34 @@ describe('AgentsPage load requests follow the rank that can serve them', () => {
     });
 
     await waitFor(() => expect(api.getVibeAgentOnboarding).toHaveBeenCalled());
+    view.unmount();
+  });
+});
+
+describe('AgentsPage contextual selection', () => {
+  it('opens the Agent named by ?agent= instead of the default one', async () => {
+    const agentA = brief('agent-a', 'A');
+    const agentB = brief('agent-b', 'B');
+    const getVibeAgent = vi.fn().mockImplementation((name: string) =>
+      Promise.resolve(fullAgent(name === 'agent-b' ? agentB : agentA, `${name} loaded`)));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([agentA, agentB])), getVibeAgent);
+    const view = renderPage(api, { entry: '/agents?agent=agent-b' });
+
+    await waitFor(() => expect(screen.getByDisplayValue('B')).toBeTruthy());
+    // The default selection never runs: a read for `agent-a` would be spent on
+    // a panel the param immediately replaces.
+    expect(getVibeAgent.mock.calls.map(([name]) => name)).toEqual(['agent-b']);
+    view.unmount();
+  });
+
+  it('leaves the default selection alone when ?agent= names an Agent the list does not have', async () => {
+    const agentA = brief('agent-a', 'A');
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(agentA, 'A loaded'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([agentA])), getVibeAgent);
+    const view = renderPage(api, { entry: '/agents?agent=agent-gone' });
+
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    expect(getVibeAgent.mock.calls.map(([name]) => name)).toEqual(['agent-a']);
     view.unmount();
   });
 });

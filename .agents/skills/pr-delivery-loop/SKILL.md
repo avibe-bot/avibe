@@ -82,11 +82,11 @@ do not load them routinely. They introduce no additional delivery gates.
   seed/arm before any subsequent push or explicit trigger. Never reseed, rotate,
   or replace the cursor between rounds. Recovery from an actual Watch failure
   is separate from routine delivery; retain evidence and follow the dependency.
-- Keep that Watch live while pushing, replying, and resolving. At each round's
-  end, use management commands to verify exactly one live Watch for this owner,
-  PR, and concern, not merely a remembered ID. An independent orchestrator gate
-  Watch is required for delegated work and has its own state; it is not a
-  duplicate lane Watch. Verify the lane's observation is live too.
+- Keep that Watch live while pushing, replying, and resolving. During review,
+  use management commands at each round's end to verify exactly one live Watch
+  for this owner, PR, and concern, not merely a remembered ID. An independent
+  orchestrator gate Watch is required for delegated work and has its own state;
+  it is not a duplicate lane Watch. Verify the lane's observation is live too.
 - Match every distinct Actions run ID for each required workflow at the current
   head and branch. Another matching run still pending or failed blocks CI, even
   if one run succeeded. Verify workflow names against actual runs. `DIRTY` plus
@@ -132,10 +132,11 @@ do not load them routinely. They introduce no additional delivery gates.
   without a clean pass also stop the loop, even for unrelated findings.
 - A lane delivers the full inventory and waits for its orchestrator's decision.
   The orchestrator diagnoses the whole class, records the scope decision, and
-  continues when the smallest complete fix is clear, reversible, and preserves
-  contracts. Escalate to the user only under the ownership criteria above.
-  The breaker stops blind patching; it neither proves a design rewrite necessary
-  nor transfers the decision automatically to the user.
+  continues with the smallest complete fix that is clear, reversible, and
+  contract-preserving; otherwise it escalates under the ownership rules above.
+  The breaker stops blind patching,
+  not the work: it does not prove a rewrite necessary, and no turn ends tripped
+  without a next action or a delivered report.
 - Fix actionable findings, reply, then resolve each addressed thread. If another
   person's pending review prevents a reply, never delete/dismiss it: preserve
   their drafts, report the blocker, keep observation live, and continue safe
@@ -143,9 +144,9 @@ do not load them routinely. They introduce no additional delivery gates.
 - Internal round reports identify PR/head, findings addressed, and remaining
   gates in one or two lines. Do not add redundant round-summary PR comments.
 
-## 4. Deliver, then close out
+## 4. Complete delivery
 
-All close-out gates must hold together:
+Before closing out, verify all review gates together:
 
 1. A valid current-head Codex pass with no real findings.
 2. Unless the repository explicitly defines no CI, the full expected check set
@@ -153,19 +154,22 @@ All close-out gates must hold together:
    Missing, pending, failed, cancelled, timed-out, action-required, or unreadable
    evidence blocks the gate.
 3. Zero unresolved threads across the entire PR, including older/outdated heads.
-4. A delivered final report naming repository, PR URL, reviewed head, changes,
-   validation layers, and residual manual/E2E work.
+
+The final report names the repository, PR URL, reviewed head, changes,
+validation layers, and residual manual/E2E work.
+
+In a user-started orchestrator session, close out in the current turn: verify
+the gates, remove the Watch, then send the final report to the user. Do not
+create a follow-up solely to sequence report delivery and cleanup.
 
 Delegated run finals are callback reports with a stable PR/head or Run ID, not
 scratch text. A watch-triggered lane must explicitly deliver its report or
 escalation to the orchestrator using `vibe agent run --session-id <orchestrator>
 --message-file <report> --no-callback` and verify the send. The orchestrator also
 sends circuit-breaker decisions back explicitly; a GitHub Watch cannot observe
-Session decisions. In a user-started orchestrator session, deliver to the user.
-
-Keep the Watch until the report is delivered, then remove it. This order also
-applies when the gates were already green when the turn started. If delivery
-fails, observation remains available for recovery.
+Session decisions. Keep a delegated lane's Watch until its report is delivered
+to the orchestrator, then remove it. If delivery fails, keep observation
+available for recovery.
 
 **Do not merge without explicit user/orchestrator authorization.** Such an
 instruction is final review authority, not permission to skip mechanical gates

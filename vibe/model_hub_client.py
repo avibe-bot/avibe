@@ -273,11 +273,26 @@ class ModelHubRemoteService:
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         return _rpc_sync("list_events", {"limit": limit, "before": before})
 
-    async def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+    async def usage_summary(
+        self,
+        *,
+        days: Optional[int] = None,
+        window: Optional[str] = None,
+    ) -> dict:
         # Async, unlike the other reads here: this one blocks on the lock the
         # ledger's writers hold across an fsync, so a sync call would hold a UI
         # worker for as long as the disk takes. See `usage.BoundedUsageLedger`.
-        return await _rpc("usage_summary", {"days": days})
+        payload: dict[str, Any] = {}
+        if days is not None:
+            payload["days"] = days
+        if window is not None:
+            payload["window"] = window
+        if not payload:
+            payload["days"] = USAGE_DEFAULT_WINDOW_DAYS
+        return await _rpc("usage_summary", payload)
+
+    async def quota_summary(self, *, force: bool = False) -> dict:
+        return await _rpc("quota_summary", {"force": force})
 
     def agent_chain(self, backend: str, model_id: str) -> dict:
         return _rpc_sync(
@@ -322,8 +337,8 @@ class ModelHubRemoteService:
     def migration_scan(self) -> dict:
         return _rpc_sync("migration_scan")
 
-    async def migration_apply(self, item_ids: object) -> dict:
-        return await _rpc("migration_apply", {"item_ids": item_ids})
+    async def migration_apply(self, item_ids: object, clean_api_keys: object = False) -> dict:
+        return await _rpc("migration_apply", {"item_ids": item_ids, "clean_api_keys": clean_api_keys})
 
     async def runtime_status(self) -> dict:
         return await _rpc("runtime_status")

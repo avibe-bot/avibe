@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { AlertTriangle, CheckCircle, XCircle, X } from 'lucide-react';
 
 import { ToastContext, type ToastType } from './ToastContext';
@@ -34,6 +34,28 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Ref so dedupe lookups don't rerender. Maps message -> {id, expiresAt}
   // for currently-visible toasts; we evict on auto-dismiss.
   const recentRef = useRef<Map<string, RecentToast>>(new Map());
+  const timersRef = useRef<Set<ToastTimer>>(new Set());
+
+  const scheduleTimer = useCallback((callback: () => void, delay: number): ToastTimer => {
+    let timer = 0;
+    timer = window.setTimeout(() => {
+      timersRef.current.delete(timer);
+      callback();
+    }, delay);
+    timersRef.current.add(timer);
+    return timer;
+  }, []);
+
+  const cancelTimer = useCallback((timer: ToastTimer) => {
+    window.clearTimeout(timer);
+    timersRef.current.delete(timer);
+  }, []);
+
+  useEffect(() => () => {
+    for (const timer of timersRef.current) window.clearTimeout(timer);
+    timersRef.current.clear();
+    recentRef.current.clear();
+  }, []);
 
   const showToast = useCallback(
     (message: string, type: ToastType = 'success', action?: ToastAction) => {
@@ -44,11 +66,11 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const now = Date.now();
       const existing = recentRef.current.get(message);
       if (shouldCoalesceToast(!!action, existing, now)) {
-        window.clearTimeout(existing!.timer);
+        cancelTimer(existing!.timer);
         setToasts((prev) =>
           prev.map((t) => (t.id === existing!.id ? { ...t, repeats: t.repeats + 1, type } : t)),
         );
-        const timer = window.setTimeout(() => {
+        const timer = scheduleTimer(() => {
           setToasts((prev) => prev.filter((t) => t.id !== existing!.id));
           const tracked = recentRef.current.get(message);
           if (tracked && tracked.id === existing!.id) recentRef.current.delete(message);
@@ -65,7 +87,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setToasts((prev) => [...prev, { id, message, type, repeats: 0, action }]);
 
       // Auto dismiss (longer for actionable toasts so undo is reachable).
-      const timer = window.setTimeout(() => {
+      const timer = scheduleTimer(() => {
         setToasts((prev) => prev.filter((t) => t.id !== id));
         // Best-effort cleanup of the dedupe map — the entry may have been
         // re-issued under a different id during the window.
@@ -78,18 +100,18 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         timer,
       });
     },
-    [],
+    [cancelTimer, scheduleTimer],
   );
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
     for (const [message, tracked] of recentRef.current) {
       if (tracked.id !== id) continue;
-      window.clearTimeout(tracked.timer);
+      cancelTimer(tracked.timer);
       recentRef.current.delete(message);
       break;
     }
-  }, []);
+  }, [cancelTimer]);
 
   // Stable value identity so the ~34 consumers of useToast don't re-render every
   // time a toast is added/removed/auto-dismissed (which re-renders this provider):
@@ -99,8 +121,14 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {/* Toast container - fixed at bottom right; lifted above mobile bottom nav */}
-      <div className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] right-4 z-50 flex flex-col gap-2 md:bottom-4">
+      {/* Toast container - fixed at bottom right; lifted above mobile bottom nav.
+          Above z-50 on purpose: Radix portals its dialog overlay/content to
+          document.body at z-50, and a later sibling of #root wins a z-index tie,
+          so a toast raised from inside a modal painted behind the overlay. */}
+      <div
+        data-settings-interaction-owner="true"
+        className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] right-4 z-[100] flex flex-col gap-2 md:bottom-4"
+      >
         {toasts.map((toast) => (
           <div
             key={toast.id}

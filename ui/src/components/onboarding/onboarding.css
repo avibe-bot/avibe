@@ -160,7 +160,8 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  padding: 0;
+  /* Clears the desktop shell's overlay title bar (0 elsewhere). */
+  padding: var(--shell-titlebar-inset) 0 0;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) .onboarding-shell { --ob-theme: light; }

@@ -118,7 +118,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 276
+    assert len(endpoints) == 278
     # Additive read-only backend projection inherits native backend-management
     # authorization; it does not grant lower-tier credential-management access.
     assert ("GET", "/api/backend/{name}/connection") in endpoints

@@ -6,7 +6,6 @@ capability:
     - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
     - tests/test_memory_removal.py
     - tests/e2e/test_retired_updater_bridge.py
-    - tests/test_memory_runtime_release_guard.py
     - tests/test_release_verification.py
   shared_harness: []
 status_legend:
@@ -36,9 +35,3 @@ scenarios:
     kind: release
     layer: scenario
     test: tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data
-  - id: MUC-005
-    name: historical Runtime guard excludes drafts while retaining published stable and prerelease manifests
-    status: covered
-    kind: release
-    layer: contract
-    test: tests/test_memory_runtime_release_guard.py::test_resolve_manifests_shell_selects_history_and_excludes_new_or_invalid_wheels

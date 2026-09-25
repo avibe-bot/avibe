@@ -612,3 +612,25 @@ def test_selected_source_probe_does_not_claim_or_schedule_recovery(tmp_path, kin
         assert service.store.load().to_payload() == before
         assert service.events.list() == []
     asyncio.run(run())
+
+
+def test_routing_blocker_drops_the_blocked_grants_quota_reading(tmp_path):
+    """MH-QUOTA-018: A grant routing marks needs_action is re-read, not shown with its pre-block quota."""
+
+    async def run():
+        service, _clock = clock_service(tmp_path)
+        source = service.store.config.sources[0]
+        source.kind, source.billing = "subscription", "monthly"
+        reads = []
+
+        async def subscription_quota(source_id, vendor, credential_ref):
+            reads.append(source_id)
+            return {"plan": None, "windows": []}
+
+        service.adapter.subscription_quota = subscription_quota
+        assert (await service.quota_summary())["sources"][0]["state"] == "ok"
+        await fail(service, service.store.load().sources[0], "credential_revoked")
+        assert service.store.load().sources[0].state.status == "needs_action"
+        await service.quota_summary()
+        assert reads == [source.id, source.id]
+    asyncio.run(run())

@@ -183,7 +183,7 @@ def test_real_guard_blocks_wrapped_cli_before_takeover(monkeypatch, tmp_path, ba
     assert rows and all(row["proposed_action"] == "import" for row in rows)
     ids = [row["id"] for row in rows]
     with pytest.raises(ModelHubError) as error:
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert error.value.code == "migration_native_busy"
     assert len(calls) == (1 if boundary == "entry" else 2)
     assert paths.get_config_path().read_bytes() == before

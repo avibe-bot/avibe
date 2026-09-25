@@ -897,6 +897,18 @@ def test_the_runtime_repairs_a_stored_address_before_the_engine_sees_it(tmp_path
     assert adapter.synced[-1][0].model_ids == ("gpt-5.5", "x-ai/grok-4.6-latest")
 
 
+def test_a_repair_on_an_already_synced_engine_resyncs_the_projection(tmp_path) -> None:
+    """A repaired id is a projection change even when the engine was up to date."""
+
+    service, store, adapter = _addressed_service(tmp_path, {"cred_fixture123": ADDRESS})
+    service._engine_synced = True
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert len(adapter.synced) == 1
+    assert adapter.synced[0][0].model_ids == ("gpt-5.5", "x-ai/grok-4.6-latest")
+
+
 def test_the_runtime_leaves_an_id_alone_when_the_address_is_unprovable(tmp_path) -> None:
     """No proof, no rename — the file is left exactly as the last release left it.
 

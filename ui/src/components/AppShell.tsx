@@ -148,7 +148,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
   if (!config?.config_recovery?.required) return null;
 
   return (
-    <div className="fixed inset-x-2 top-2 z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-lg border border-gold/45 bg-surface px-3 py-2.5 shadow-xl" role="alert">
+    <div className="fixed inset-x-2 top-[calc(0.5rem+var(--shell-titlebar-inset))] z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-lg border border-gold/45 bg-surface px-3 py-2.5 shadow-xl" role="alert">
       <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold-ink" />
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-semibold text-foreground">{t('configRecovery.title')}</p>
@@ -464,7 +464,7 @@ export const AppShell: React.FC = () => {
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pt-2.5 pb-4 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pt-[calc(0.625rem+var(--shell-titlebar-inset))] pb-4 md:flex',
           settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >

@@ -57,6 +57,7 @@ from .adapter import (
     InvokeCancelledError,
     InvokeHandle,
     OAuthFlowState,
+    OAuthSubmissionRejectedError,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
@@ -114,6 +115,8 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
+from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
@@ -143,7 +146,14 @@ from .resolver import (
 )
 from .revocations import CredentialRevocationJournal
 from .retry import RECOVERY_EXHAUSTED_CODE, RecoveryPolicy, RecoveryRequest, RETRY_DELAYS, source_identity
-from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
+from .usage import (
+    USAGE_DEFAULT_WINDOW_DAYS,
+    USAGE_WINDOW_KEYS,
+    BoundedUsageLedger,
+    SourceIdentity,
+    UsageWriter,
+    local_usage_day,
+)
 
 CONTRACT_VERSION = 10
 
@@ -445,6 +455,9 @@ class UnavailableEngineAdapter:
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         return None
+
+    async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
+        raise SubscriptionQuotaError("unavailable")
 
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
@@ -887,6 +900,7 @@ class ModelHubService:
         ] = None,
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
+        price_table: Callable[[], PriceTable] | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -919,7 +933,7 @@ class ModelHubService:
         self.migration_reconcile_auth = migration_reconcile_auth
         self._migration_lock = asyncio.Lock()
         self._migration_task: asyncio.Task | None = None
-        self._migration_item_ids: tuple[str, ...] | None = None
+        self._migration_item_ids: tuple[tuple[str, ...], bool] | None = None
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
@@ -948,6 +962,11 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
+        self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
+        # Read per report: the override file is hand-edited and the catalog refreshes itself.
+        self.price_table: Callable[[], PriceTable] = price_table or (
+            lambda: load_price_table(paths.get_state_dir())
+        )
 
     @staticmethod
     @asynccontextmanager
@@ -1066,6 +1085,8 @@ class ModelHubService:
                 status=409,
                 detail="modelHub.errors.native_login_in_progress",
             ) from None
+        except OAuthSubmissionRejectedError:
+            raise ModelHubError("submission_rejected", status=422) from None
         except ModelHubError:
             raise
         except Exception:
@@ -1996,6 +2017,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source_id)
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -2191,12 +2213,55 @@ class ModelHubService:
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
     ) -> None:
-        """Add a new Source to eligible backend defaults without editing overrides."""
+        """Add a new Source to eligible backend defaults without editing overrides.
+
+        A subscription serves a fixed catalog, so it joins only the backends whose
+        menu that catalog serves (OpenCode reaches every vendor), ahead of the API
+        keys there. API keys stay open to every eligible backend, appended.
+        """
 
         for backend in MODEL_HUB_BACKENDS:
             agent = config.agents[backend]
-            if self._eligible_for_agent(source, backend) and source.id not in agent.sources.order:
+            if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
+                continue
+            if source.kind != "subscription":
                 agent.sources.order.append(source.id)
+                continue
+            if not self._subscription_serves_backend(agent, source, backend):
+                continue
+            by_id = {item.id: item for item in config.sources}
+            position = next(
+                (
+                    index
+                    for index, source_id in enumerate(agent.sources.order)
+                    if (existing := by_id.get(source_id)) is not None and existing.kind != "subscription"
+                ),
+                len(agent.sources.order),
+            )
+            agent.sources.order.insert(position, source.id)
+
+    @staticmethod
+    def _subscription_serves_backend(
+        agent: ModelHubAgentSupplyConfig,
+        source: ModelHubSourceConfig,
+        backend: BackendName,
+    ) -> bool:
+        if backend == "opencode" or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend:
+            # The vendor's own Agent serves its subscription even when the
+            # catalog is ahead of the backend's menu.
+            return True
+        if not agent.models or not any(not model.retired for model in source.models):
+            return False
+        # Another backend serves it only where the catalogs overlap.
+        return any(
+            _matching_v1_model_id(
+                backend=backend,
+                requested_model=model.id,
+                source=source,
+                include_manual=True,
+            ) is not None
+            for model in agent.models
+        )
 
     def _matching_menu_model_hops(
         self,
@@ -2787,6 +2852,7 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
+                self.quota.forget(source.id)
                 self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
                     flow_id,
@@ -2926,6 +2992,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source.id)
         return config
 
     async def _materialize_failed_hub_reauth(
@@ -4620,8 +4687,19 @@ class ModelHubService:
                                 clean_native_stores=(
                                     self.migration_journal.completed() or {}
                                 ).get("clean_native_stores"),
+                                retained_native_ids=(
+                                    self.migration_journal.completed() or {}
+                                ).get("retained_native_ids"),
                             )
-                            if any(item.backend == backend for item in available):
+                            # Retained auth stays native beside the Hub, but a
+                            # config the CLI cannot parse fails every launch.
+                            if any(
+                                item.backend == backend and (
+                                    item.proposed_action == "import"
+                                    or item.config_blocker
+                                )
+                                for item in available
+                            ):
                                 raise ModelHubError("mode_switch_blocked", status=409)
                             config = self._clone_config(previous)
                             self._agent(config, backend).mode = "hub"
@@ -5007,17 +5085,26 @@ class ModelHubService:
                 )
                 if admission_error == "backend_model_id_invalid":
                     raise ModelHubError(admission_error)
+            # Two different refusals, and they are separate codes because they
+            # name different next steps. Forging `builtin` is a claim about a
+            # model this backend publishes, and the way out is to drop the row.
+            # Rewriting a saved row's origin is a claim about a row that already
+            # exists, and the way out is to EDIT that row instead of removing it
+            # and adding it again — advice the built-in wording cannot carry, and
+            # which the merged code left unsayable on a backend like OpenCode
+            # whose built-in snapshot is empty by construction.
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
-                if (
-                    (
-                        trusted is None
-                        and desired.origin == "builtin"
-                        and model_id not in builtin_ids
+                if trusted is None:
+                    if desired.origin == "builtin" and model_id not in builtin_ids:
+                        raise ModelHubError("backend_model_locked", status=409)
+                elif desired.origin != trusted.origin:
+                    # `origin` records how a row was FIRST created, so a saved
+                    # row keeps its own answer however often it is re-filled.
+                    raise ModelHubError(
+                        "backend_model_origin_immutable",
+                        status=409,
                     )
-                    or (trusted is not None and desired.origin != trusted.origin)
-                ):
-                    raise ModelHubError("backend_model_locked", status=409)
             for model_id in desired_by_id.keys() - current_by_id.keys():
                 admission_error = self._backend_model_admission_error(
                     agent_backend,
@@ -5370,7 +5457,12 @@ class ModelHubService:
                 "interrupted": would_interrupt,
             }
 
-    def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+    def usage_summary(
+        self,
+        *,
+        days: Optional[int] = None,
+        window: Optional[str] = None,
+    ) -> dict:
         """Report metered token usage, labelled from current Source config.
 
         Config is what this method owns: which identities exist right now and what
@@ -5386,18 +5478,106 @@ class ModelHubService:
         Source an ID came from, and answers for one Source with another's models.
         """
 
+        if window is not None and days is not None:
+            raise ModelHubError("invalid_parameter", status=400)
+        if window is not None and window not in USAGE_WINDOW_KEYS:
+            raise ModelHubError("invalid_parameter", status=400)
+
         config = self.store.load()
+        identities = [
+            SourceIdentity(
+                source_id=source.id,
+                label=source.display_name,
+                model_ids=[model.id for model in source.models],
+            )
+            for source in config.sources
+        ]
+        now = self.now()
+        prices = self.price_table()
+        if window is not None:
+            return self.usage.report(window=window, now=now, identities=identities, prices=prices)
         return self.usage.summary(
-            days=days,
-            now=self.now(),
-            identities=[
-                SourceIdentity(
+            days=USAGE_DEFAULT_WINDOW_DAYS if days is None else days,
+            now=now,
+            identities=identities,
+            prices=prices,
+        )
+
+    async def _fetch_subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> Mapping[str, Any]:
+        reader = getattr(self.adapter, "subscription_quota", None)
+        if not callable(reader):
+            raise SubscriptionQuotaError("unavailable")
+        return await reader(source_id, vendor, credential_ref)
+
+    def _quota_sources(self) -> list[QuotaSourceRef]:
+        config = self.store.load()
+        refs = []
+        for source in config.sources:
+            if source.kind != "subscription" or source.supply_channel != "hub" or not source.credential_ref:
+                continue
+            payload = self._source_account_payload(
+                {
+                    "id": source.id,
+                    "kind": source.kind,
+                    "vendor": source.vendor,
+                    "supply_channel": source.supply_channel,
+                    "credential_ref": source.credential_ref,
+                    "account_label": source.account_label,
+                }
+            )
+            refs.append(
+                QuotaSourceRef(
                     source_id=source.id,
-                    label=source.display_name,
-                    model_ids=[model.id for model in source.models],
+                    vendor=source.vendor.strip().lower(),
+                    credential_ref=source.credential_ref,
+                    display_name=source.display_name,
+                    account_label=payload.get("account_label"),
                 )
-                for source in config.sources
-            ],
+            )
+        return refs
+
+    async def quota_summary(self, *, force: bool = False) -> dict:
+        """Report each hub-held subscription's rate-limit windows.
+
+        A report only, like usage metering: nothing in resolution reads it. The
+        cache re-reads a Source at most every five minutes, or every thirty
+        seconds when forced, and keeps the last good snapshot across failures.
+        """
+
+        sources = await asyncio.to_thread(self._quota_sources)
+        summary = await self.quota.summary(sources, force=force)
+        try:
+            summary["value"] = await asyncio.to_thread(self._quota_values, summary["sources"])
+        except Exception:  # noqa: BLE001 - the valuation is optional; the windows are not
+            logger.warning("Model Hub quota valuation failed", exc_info=True)
+            for source in summary["sources"]:
+                source.pop("value", None)
+        return summary
+
+    def _quota_values(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
+        config = self.store.load()
+        wanted = {source["source_id"] for source in sources}
+        identities = [
+            SourceIdentity(
+                source_id=source.id,
+                label=source.display_name,
+                model_ids=[model.id for model in source.models],
+            )
+            for source in config.sources
+            if source.id in wanted
+        ]
+        prices = self.price_table()
+        now = self.now()
+        return quota_values(
+            sources,
+            daily_costs=self.usage.daily_costs(
+                days=VALUE_WINDOW_DAYS,
+                now=now,
+                identities=identities,
+                prices=prices,
+            ),
+            prices=prices,
+            today=local_usage_day(now),
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
@@ -5808,6 +5988,9 @@ class ModelHubService:
             detail_key=detail_key,
         )
         persisted = self._save_runtime_config(previous, config)
+        if persisted:
+            # A blocked grant must not keep reporting the windows it had while usable.
+            self.quota.forget(source.id)
         if persisted and emit_event:
             self._record_event(
                 agent=cast(EventAgent, backend),
@@ -6273,8 +6456,8 @@ class ModelHubService:
         # the native-slot read used to be one — strands the tuple until restart:
         # the retry finds a pending claim with no task and gets ``engine_down``,
         # and a cancelled owner never reaches the release at all.
-        # ``test_oauth_start_keeps_every_owner_await_inside_the_installed_task``
-        # holds the shape so the next pre-check cannot re-open the window.
+        # ``test_nonce_oauth_start_retry_arriving_at_the_claim_joins_the_owner``
+        # retries at the claim so the next pre-check cannot re-open the window.
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()
             flow: OAuthFlowState | None = None
@@ -6625,6 +6808,7 @@ class ModelHubService:
                     validate_base_url=_validated_base_url,
                     project_roots=self.migration_project_roots(),
                     clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
+                    retained_native_ids=(self.migration_journal.completed() or {}).get("retained_native_ids"),
                     legacy_auth=(
                         self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
                         if isinstance(self.store, V2ModelHubConfigStore) else None
@@ -6633,13 +6817,15 @@ class ModelHubService:
             ]
         }
 
-    async def migration_apply(self, item_ids: object) -> dict:
+    async def migration_apply(self, item_ids: object, clean_api_keys: object = False) -> dict:
         from core.backend_restart import NativeMigrationBlockedError
         from vibe.native_oauth_store import NativeOAuthError, NativeOAuthPermissionError
 
         try:
+            if not isinstance(clean_api_keys, bool):
+                raise MigrationConflictError
             selection = (
-                tuple(sorted(item_ids))
+                (tuple(sorted(item_ids)), clean_api_keys)
                 if isinstance(item_ids, list) and all(isinstance(value, str) for value in item_ids)
                 else None
             )
@@ -6651,6 +6837,7 @@ class ModelHubService:
                 task = asyncio.create_task(apply_native_migration(
                     self, item_ids, mask_credential=_mask_credential,
                     validate_base_url=_validated_base_url,
+                    clean_api_keys=clean_api_keys,
                 ), name="model-hub-native-takeover")
                 self._migration_task = task
                 self._migration_item_ids = selection

@@ -2804,6 +2804,7 @@ def test_turn_state_projects_a_restored_durable_owner_without_in_flight(
     assert state["in_flight"] is True
     assert state["foreground"] == "running"
     assert state["native_turn_started"] is True
+    assert state["native_turn_id"] == f"native:{turn_id}"
     assert state["backend"] == "opencode"
     assert state["owner"]["runtime_key"] == f"runtime:{session['id']}"
     assert state["owner"]["native_turn_started"] is True

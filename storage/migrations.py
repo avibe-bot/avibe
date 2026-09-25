@@ -223,10 +223,24 @@ def alembic_dir() -> Path:
     return Path(__file__).resolve().parent / "alembic"
 
 
+def set_literal_main_option(cfg: Config, name: str, value: str) -> None:
+    """Store `value` in Alembic's config so it reads back unchanged.
+
+    Alembic keeps main options in a ConfigParser with `%` interpolation, so a raw
+    `%` is rejected on write, or, shaped like `%(here)s`, silently replaced on
+    read with a different path. Paths reach here verbatim: a directory can contain a
+    literal `%`, and SQLAlchemy 2.1 percent-encodes every non-ASCII character when
+    rendering a URL, so a state directory under a Chinese user name became
+    `%E9%...` and migrations failed before they started. Escaping is the
+    documented way to pass a literal through; interpolation undoes it on read.
+    """
+    cfg.set_main_option(name, value.replace("%", "%%"))
+
+
 def alembic_config(db_path: Path | None = None) -> Config:
     cfg = Config()
-    cfg.set_main_option("script_location", str(alembic_dir()))
-    cfg.set_main_option("sqlalchemy.url", sqlite_url(db_path or paths.get_sqlite_state_path()))
+    set_literal_main_option(cfg, "script_location", str(alembic_dir()))
+    set_literal_main_option(cfg, "sqlalchemy.url", sqlite_url(db_path or paths.get_sqlite_state_path()))
     return cfg
 
 

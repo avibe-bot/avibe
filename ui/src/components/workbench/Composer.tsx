@@ -513,7 +513,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
   const focusNextVoiceControlRef = useRef(false);
-  const voiceEditorFocusReturnRef = useRef<HTMLElement | null>(null);
+  const voiceEditorFocusReturnRef = useRef<{
+    target: HTMLElement;
+    previousFocus: Element | null;
+  } | null>(null);
   const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
@@ -1358,18 +1361,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [voiceControlMode]);
 
-  useLayoutEffect(() => {
+  // Wait for MentionEditor's editable effect before returning keyboard focus.
+  useEffect(() => {
     if (voiceDraftReadOnly || voiceEditorFocusReturnRef.current === null) return;
-    const target = voiceEditorFocusReturnRef.current;
+    const { target, previousFocus } = voiceEditorFocusReturnRef.current;
     voiceEditorFocusReturnRef.current = null;
     const activeElement = document.activeElement;
     if (
-      target.isConnected
-      && (activeElement === null || activeElement === document.body || !activeElement.isConnected)
+      !disabled
+      && target.isConnected
+      && (
+        activeElement === previousFocus
+        || activeElement === null
+        || activeElement === document.body
+        || !activeElement.isConnected
+      )
     ) {
       target.focus({ preventScroll: true });
     }
-  }, [voiceDraftReadOnly]);
+  }, [disabled, voiceDraftReadOnly]);
 
   const handleVoiceShortcut = useCallback((event: KeyboardEvent, allowStart: boolean): boolean => {
     if (
@@ -1387,8 +1397,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ) return false;
 
     event.preventDefault();
-    if (voiceControlMode === 'finish') stopRecording();
-    else {
+    if (voiceControlMode === 'finish') {
+      const target = textareaRef.current
+        ?? composerRootRef.current?.querySelector<HTMLElement>('[role="textbox"]');
+      if (target && !inForegroundSurface(event.target as Element | null)) {
+        // Finishing from anywhere on Chat should leave the draft ready for Enter,
+        // unless the user moves focus elsewhere while transcription is pending.
+        voiceEditorFocusReturnRef.current = { target, previousFocus: document.activeElement };
+      }
+      stopRecording();
+    } else {
       const activeElement = document.activeElement;
       const editorFocus = (
         activeElement === textareaRef.current
@@ -1398,7 +1416,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           && composerRootRef.current?.contains(activeElement)
         )
       ) ? activeElement as HTMLElement : null;
-      voiceEditorFocusReturnRef.current = editorFocus;
+      voiceEditorFocusReturnRef.current = editorFocus
+        ? { target: editorFocus, previousFocus: editorFocus }
+        : null;
       // Keep the page's current focus when the shortcut started outside the
       // editor. Editor starts still move to Finish, then restore the caret.
       focusNextVoiceControlRef.current = editorFocus !== null;

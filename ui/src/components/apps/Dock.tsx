@@ -180,7 +180,7 @@ export const Dock: React.FC = () => {
   };
 
   return (
-    <div className="relative">
+    <div className="relative" data-settings-interaction-owner="true">
       {/* Bound the panel to the viewport and scroll horizontally: with many pinned
           apps the resident row would otherwise run off-screen (the popover sits at
           the bottom-left), leaving later tiles unreachable for open/reorder/unpin. */}
