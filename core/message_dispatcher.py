@@ -279,6 +279,12 @@ _WECHAT_CONSOLIDATED_SPLIT_THRESHOLD = 1700
 # normal fast step stays a clean label. This is the always-moving "still running"
 # signal that the heartbeat keeps ticking even when no new emit arrives.
 _ACTION_TIME_HINT_S = 10.0
+# An intermediate assistant message this substantial is also shown in the Web
+# transcript as a muted ``interim`` bubble, so the user sees it without opening
+# the Activity log. Either bound qualifies: three non-empty lines, or a single
+# long paragraph (CJK prose often carries a whole thought on one line).
+_INTERIM_MIN_LINES = 3
+_INTERIM_MIN_CHARS = 150
 # Name the result attachment gets when a platform has no native Markdown upload
 # and the full text has to ride its ordinary file path instead.
 _RESULT_DOCUMENT_NAME = "result.md"
@@ -2554,6 +2560,13 @@ class ConsolidatedMessageDispatcher:
         while len(self._harness_prompt_echo_order) > HARNESS_PROMPT_ECHO_MEMORY:
             self._harness_prompt_echo_keys.discard(self._harness_prompt_echo_order.pop(0))
 
+    @staticmethod
+    def _is_interim_worthy(text: Optional[str]) -> bool:
+        body = (text or "").strip()
+        if len(body) >= _INTERIM_MIN_CHARS:
+            return True
+        return sum(1 for line in body.splitlines() if line.strip()) >= _INTERIM_MIN_LINES
+
     async def emit_agent_message(
         self,
         context: MessageContext,
@@ -2589,6 +2602,8 @@ class ConsolidatedMessageDispatcher:
         type says what role the message plays (and drives the dot + unread); the
         level says whether the user should SEE it:
         - ``"normal"`` (default): delivered / persisted / streamed as usual.
+        - ``"process"``: an intermediate ``assistant`` row that stays in the
+          process log only and is never promoted to a Web ``interim`` bubble.
         - ``"silent"``: settles the dot + releases the SSE waiter for a terminal
           ``result``, then returns WITHOUT delivering, persisting, or streaming.
           Used when lifecycle settlement must not add another visible bubble,
@@ -3606,6 +3621,18 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+        # Web only: the same text additionally lands as a transcript-visible
+        # ``interim`` row. Every backend emits ``assistant`` only once later output
+        # has proved the text is not the Turn's final answer, so this never
+        # duplicates the result. ``level="process"`` keeps a row log-only (for
+        # example reasoning summaries).
+        if (
+            canonical_type == "assistant"
+            and level != "process"
+            and target_context.platform == "avibe"
+            and self._is_interim_worthy(persist_text)
+        ):
+            persist_agent_message(target_context, "interim", persist_text, citations=citations)
 
         # The row above is the only copy of an intermediate message that carries a
         # sidecar. Everything left below is what the channel is shown - the concise

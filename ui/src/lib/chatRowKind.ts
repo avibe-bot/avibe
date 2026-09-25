@@ -20,6 +20,7 @@
 // typed row is that type.
 import { isBoundaryMessage, isNotifyMessageType } from './chatMessageTypes';
 import { readAnnotationView, type AnnotationView } from './annotationView';
+import { specFor } from './messageTypes';
 
 // A row typed ``annotation`` whose display record is unreadable. Every writer of
 // the type emits one, and the migration backfills ``direction: "agent"`` onto the
@@ -54,7 +55,9 @@ export function chatRowKind(message: ChatRowFields): ChatRowKind {
   if (message.type === 'annotation') {
     return { kind: 'annotation', annotation: readAnnotationView(message.content) ?? UNREADABLE_ANNOTATION };
   }
-  if (isBoundaryMessage(message)) return { kind: 'boundary' };
+  // A phase boundary and an ``interim`` narration share the muted Agent bubble:
+  // both are the agent's words that do not end the Turn.
+  if (isBoundaryMessage(message) || specFor(message.type).render === 'muted') return { kind: 'boundary' };
   // Runtime notifications and legacy error rows are compact status pills, not
   // Agent-authored answers.
   if (isNotifyMessageType(message.type)) return { kind: 'notify' };

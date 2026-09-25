@@ -1092,6 +1092,25 @@ class OpenCodePollLoop:
 
                             await self._agent.controller.emit_agent_message(context, "tool_call", tool_summary)
 
+                    if (
+                        info.get("time", {}).get("completed")
+                        and message_id not in emitted_assistant_messages
+                        and info.get("finish") == "tool-calls"
+                    ):
+                        text = self._agent._extract_response_text(message)
+                        if text:
+                            await self._agent.controller.emit_agent_message(
+                                context,
+                                "assistant",
+                                text,
+                                parse_mode="markdown",
+                            )
+                        emitted_assistant_messages.add(message_id)
+                        poll_info.emitted_assistant_messages = sorted(emitted_assistant_messages)
+                        self._persist_emitted_assistant_messages(
+                            session_id, emitted_assistant_messages
+                        )
+
                 if messages:
                     remaining = deadline - time.monotonic()
                     awaiting_after_ids = getattr(

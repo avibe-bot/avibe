@@ -1209,7 +1209,8 @@ def test_background_standalone_persists_full_turn_without_realtime_delivery(isol
     assert {row["scope_id"] for row in rows} == {None}
 
 
-def test_background_standalone_rewrites_agent_file_links(isolated_state, tmp_path):
+@pytest.mark.parametrize("canonical_type", ["result", "interim"])
+def test_background_standalone_rewrites_agent_file_links(isolated_state, tmp_path, canonical_type):
     local_file = tmp_path / "report.txt"
     local_file.write_text("standalone artifact", encoding="utf-8")
     engine = create_sqlite_engine()
@@ -1241,7 +1242,7 @@ def test_background_standalone_rewrites_agent_file_links(isolated_state, tmp_pat
             "suppress_delivery": True,
         },
     )
-    persist_agent_message(context, "result", f"[report]({local_file.as_uri()})")
+    persist_agent_message(context, canonical_type, f"[report]({local_file.as_uri()})")
 
     with engine.connect() as conn:
         message = conn.execute(
