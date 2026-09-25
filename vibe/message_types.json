@@ -108,7 +108,6 @@
     "interim": {
       "transcript": true,
       "searchable": true,
-      "inboxActivity": true,
       "render": "muted"
     }
   }

@@ -124,7 +124,6 @@ def test_inbox_activity_types_match_current_constant() -> None:
         "vault",
         "error",
         "assistant",
-        "interim",
     )
     assert types_with("inboxActivity") == expected
     assert messages_service.INBOX_ACTIVITY_TYPES == expected
