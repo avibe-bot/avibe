@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import { atLeast, formatCost, formatCount, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue } from './types';
+import { TimeHint } from './TimeHint';
 import { VendorGlyph } from './vendorGlyph';
 import {
   DAY_MS,
@@ -28,7 +29,9 @@ import {
   quotaIsLive,
   quotaIsRetained,
   quotaPayback,
+  quotaPlanId,
   sourceStatus,
+  titleCasePlan,
   tightestWindow,
   upcomingResets,
   windowIsExhausted,
@@ -46,20 +49,39 @@ const useQuotaText = (now: number) => {
   const { t, i18n } = useTranslation();
   const duration = React.useCallback((ms: number) => {
     const d = quotaDuration(ms);
-    if (d.unit === 'days') return t('settings.models.quota.duration.days', { days: d.days, hours: d.hours }) as string;
-    if (d.unit === 'hours') return t('settings.models.quota.duration.hours', { hours: d.hours, minutes: d.minutes }) as string;
+    // A zero second part says nothing: 「5 天」, not 「5 天 0 小时」.
+    if (d.unit === 'days') {
+      return d.hours
+        ? t('settings.models.quota.duration.days', { days: d.days, hours: d.hours }) as string
+        : t('settings.models.quota.duration.daysOnly', { days: d.days }) as string;
+    }
+    if (d.unit === 'hours') {
+      return d.minutes
+        ? t('settings.models.quota.duration.hours', { hours: d.hours, minutes: d.minutes }) as string
+        : t('settings.models.quota.duration.hoursOnly', { hours: d.hours }) as string;
+    }
     return t('settings.models.quota.duration.minutes', { minutes: d.minutes }) as string;
   }, [t]);
-  const clock = React.useCallback((at: number) => {
-    const time = new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
-    const startOfDay = (ms: number) => { const day = new Date(ms); day.setHours(0, 0, 0, 0); return day.getTime(); };
-    const dayDiff = Math.round((startOfDay(at) - startOfDay(now)) / DAY_MS);
-    if (dayDiff === 0) return t('settings.models.quota.clock.today', { time }) as string;
-    if (dayDiff === 1) return t('settings.models.quota.clock.tomorrow', { time }) as string;
-    return new Intl.DateTimeFormat(i18n.language, {
-      weekday: 'short', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  /** The exact local moment, weekday included, for the tooltip behind a countdown. */
+  const exact = React.useCallback((at: number) => new Intl.DateTimeFormat(i18n.language, {
+    weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(at), [i18n.language]);
+  /** A host-calendar day (`YYYY-MM-DD`) with its weekday, read as that day wherever the browser is. */
+  const exactDay = React.useCallback((day: string) => {
+    const at = Date.parse(`${day}T00:00:00Z`);
+    return Number.isNaN(at) ? day : new Intl.DateTimeFormat(i18n.language, {
+      weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC',
     }).format(at);
-  }, [i18n.language, now, t]);
+  }, [i18n.language]);
+  /**
+   * A plan's display name. The badge sits beside the account's own name, which
+   * already says whose plan it is, so the name is the tier alone (「Pro 5x」).
+   */
+  const planLabel = React.useCallback((vendor: string, plan: string) => {
+    const { family, id } = quotaPlanId(vendor, plan);
+    const key = family ? `settings.models.quota.plan.${family}.${id}` : null;
+    return key && i18n.exists(key) ? t(key as never) as string : titleCasePlan(id);
+  }, [i18n, t]);
   const ago = React.useCallback((at: number) => {
     const ms = Math.max(0, now - at);
     return ms < HOUR_MS
@@ -85,11 +107,11 @@ const useQuotaText = (now: number) => {
       case 'exhausted': return pace.remainingMs !== null
         ? t('settings.models.quota.pace.exhausted', { duration: duration(pace.remainingMs) }) as string
         : t('settings.models.quota.pace.exhaustedUnknown') as string;
-      case 'fast': return t('settings.models.quota.pace.fast', { time: clock(pace.runsOutAt) }) as string;
+      case 'fast': return t('settings.models.quota.pace.fast', { duration: duration(Math.max(0, pace.runsOutAt - now)) }) as string;
       case 'slightly_fast': return t('settings.models.quota.pace.slightlyFast') as string;
       default: return t('settings.models.quota.pace.ok') as string;
     }
-  }, [clock, duration, t]);
+  }, [duration, now, t]);
   /** Plain dollars, for a figure only shown when its period is exact (a shortfall). */
   const dollars = React.useCallback((amount: number) => formatUsd(amount, i18n.language), [i18n.language]);
   /** A priced figure, 「≥」 whenever the server marks it a floor. */
@@ -101,7 +123,7 @@ const useQuotaText = (now: number) => {
   const multiple = React.useCallback((value: number) => new Intl.NumberFormat(i18n.language, {
     minimumFractionDigits: 1, maximumFractionDigits: 1,
   }).format(Math.floor(value * 10) / 10), [i18n.language]);
-  return { duration, clock, ago, windowLabel, windowHint, paceText, dollars, usd, tokens, multiple };
+  return { duration, exact, exactDay, planLabel, ago, windowLabel, windowHint, paceText, dollars, usd, tokens, multiple };
 };
 
 type QuotaText = ReturnType<typeof useQuotaText>;
@@ -146,13 +168,15 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
       <div className="model-hub-quota-row-foot">
         <span className={cn('model-hub-quota-pace flex items-center gap-[5px]', toneClass(reading.tone))}>
           {alarm ? <AlertTriangle className="size-[11px]" aria-hidden /> : <span className="model-hub-quota-dot" aria-hidden />}
-          {text.paceText(reading.pace)}
+          {reading.pace.kind === 'fast'
+            ? <TimeHint text={text.paceText(reading.pace)} exact={text.exact(reading.pace.runsOutAt)} />
+            : text.paceText(reading.pace)}
         </span>
         {untilReset !== null && (
           <span className="model-hub-quota-reset flex items-center gap-[5px]">
             <TimerReset className="size-[11px]" aria-hidden />
             {untilReset > 0
-              ? <>{t('settings.models.quota.reset.in', { duration: text.duration(untilReset) })}<em>{text.clock(resetAt as number)}</em></>
+              ? <TimeHint text={t('settings.models.quota.reset.in', { duration: text.duration(untilReset) }) as string} exact={text.exact(resetAt as number)} />
               : t('settings.models.quota.reset.done')}
           </span>
         )}
@@ -216,8 +240,7 @@ const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ va
           <div>
             <span>{t('settings.models.quota.value.renews')}</span>
             <b>
-              {t('settings.models.quota.value.renewsIn', { count: Math.max(0, renewsIn) })}
-              <em>{value.period.renews_on}</em>
+              <TimeHint text={t('settings.models.quota.value.renewsIn', { count: Math.max(0, renewsIn) }) as string} exact={text.exactDay(value.period.renews_on as string)} />
             </b>
           </div>
         )}
@@ -259,7 +282,7 @@ const AccountCard: React.FC<{
         <div className="min-w-0 flex-1">
           <strong className="model-hub-quota-account flex min-w-0 items-center gap-2 font-semibold text-foreground">
             <span className="truncate">{source.display_name}</span>
-            {source.plan && <span className="model-hub-quota-plan shrink-0">{source.plan}</span>}
+            {source.plan && <span className="model-hub-quota-plan shrink-0">{text.planLabel(source.vendor, source.plan)}</span>}
           </strong>
           {source.account_label && <small className="model-hub-quota-account-label block truncate">{source.account_label}</small>}
         </div>
@@ -271,7 +294,10 @@ const AccountCard: React.FC<{
         <div className="model-hub-quota-stale flex items-center gap-2" role="status">
           <AlertTriangle className="size-[13px] shrink-0" aria-hidden />
           <span className="min-w-0 flex-1">
-            {t(expired ? 'settings.models.quota.stale.authExpired' : 'settings.models.quota.stale.retained', { ago: text.ago(fetchedAt) })}
+            <TimeHint
+              text={t(expired ? 'settings.models.quota.stale.authExpired' : 'settings.models.quota.stale.retained', { ago: text.ago(fetchedAt) }) as string}
+              exact={text.exact(fetchedAt)}
+            />
           </span>
           {expired && onRequestReauth && (
             <Button variant="outline" size="sm" className="shrink-0" onClick={() => onRequestReauth(source.source_id)}>
@@ -408,11 +434,10 @@ export const QuotaTab: React.FC<{
                   note={tightest
                     ? (() => {
                         const resetAt = windowResetAt(tightest.window);
-                        return [
-                          tightest.source.display_name,
-                          text.windowLabel(tightest.window),
-                          resetAt !== null && resetAt > now ? t('settings.models.quota.stat.resetsIn', { duration: text.duration(resetAt - now) }) : null,
-                        ].filter(Boolean).join(' · ');
+                        const named = `${tightest.source.display_name} · ${text.windowLabel(tightest.window)}`;
+                        return resetAt !== null && resetAt > now
+                          ? <>{named} · <TimeHint text={t('settings.models.quota.stat.resetsIn', { duration: text.duration(resetAt - now) }) as string} exact={text.exact(resetAt)} /></>
+                          : named;
                       })()
                     // Like 「every account is usable」 below, 「every limit is used up」 is a
                     // claim about all accounts: make it only when each has a current reading.
@@ -425,8 +450,11 @@ export const QuotaTab: React.FC<{
                   note={exhausted.length
                     ? (() => {
                         const resetAt = windowResetAt(exhausted[0].window);
-                        return resetAt !== null
-                          ? t('settings.models.quota.stat.exhaustedNote', { name: exhausted[0].source.display_name, time: text.clock(resetAt) })
+                        return resetAt !== null && resetAt > now
+                          ? <TimeHint
+                              text={t('settings.models.quota.stat.exhaustedNote', { name: exhausted[0].source.display_name, duration: text.duration(resetAt - now) }) as string}
+                              exact={text.exact(resetAt)}
+                            />
                           : exhausted[0].source.display_name;
                       })()
                     // 「every account is usable」 is a claim about accounts; make it only
@@ -474,7 +502,9 @@ export const QuotaTab: React.FC<{
                   <span className="model-hub-quota-timeline-title flex items-center gap-1.5"><TimerReset className="size-[13px]" aria-hidden />{t('settings.models.quota.upcoming')}</span>
                   {upcoming.map(({ source, window }) => (
                     <span key={`${source.source_id}:${window.id}`} className={cn('model-hub-quota-chip flex min-w-0 max-w-full items-baseline gap-1.5', windowIsExhausted(window, now) && toneClass('danger'))}>
-                      <b className="shrink-0 whitespace-nowrap">{text.duration((windowResetAt(window) as number) - now)}</b>
+                      <b className="shrink-0 whitespace-nowrap">
+                        <TimeHint text={text.duration((windowResetAt(window) as number) - now)} exact={text.exact(windowResetAt(window) as number)} />
+                      </b>
                       <span className="min-w-0 truncate" title={`${source.display_name} · ${text.windowLabel(window)}`}>{source.display_name} · {text.windowLabel(window)}</span>
                     </span>
                   ))}

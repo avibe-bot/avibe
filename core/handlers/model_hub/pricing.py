@@ -59,12 +59,18 @@ MODEL_ALIASES: Final[Mapping[str, str]] = {
     "haiku": "claude-haiku-4-5",
 }
 
-# Monthly fee per plan, USD. Keys are what `plan_key` publishes.
+# Monthly fee per plan, USD, at the vendors' published individual monthly prices.
+# Keys are what `plan_key` publishes. Sources:
+# - Claude: https://claude.com/pricing (Pro $20, Max 5x $100, Max 20x $200).
+# - ChatGPT: https://learn.chatgpt.com/docs/pricing (Plus $20, Pro "from $100/month"
+#   with 5x or 20x Plus usage); the $100 tier is Pro 5x and $200 remains Pro 20x
+#   (https://techcrunch.com/2026/04/09/chatgpt-pro-plan-100-month-codex/).
 PLAN_FEES_USD: Final[Mapping[str, float]] = {
     "claude_pro": 20.0,
     "claude_max_5x": 100.0,
     "claude_max_20x": 200.0,
     "chatgpt_plus": 20.0,
+    "chatgpt_pro_5x": 100.0,
     "chatgpt_pro": 200.0,
 }
 
@@ -80,6 +86,9 @@ _PLAN_KEYS: Final[Mapping[tuple[str, str], str]] = {
     ("openai", "chatgpt_plus"): "chatgpt_plus",
     ("openai", "pro"): "chatgpt_pro",
     ("openai", "chatgpt_pro"): "chatgpt_pro",
+    # Codex reports the $100 Pro 5x tier as `prolite` (openai/codex#17419).
+    ("openai", "prolite"): "chatgpt_pro_5x",
+    ("openai", "chatgpt_pro_5x"): "chatgpt_pro_5x",
 }
 
 # Vendors whose subscriptions have built-in plan names. Any other vendor's plan

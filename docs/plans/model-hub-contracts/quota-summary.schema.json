@@ -331,7 +331,7 @@
           ]
         },
         "plan_key": {
-          "description": "Fee-table key the plan resolved to (built-in: claude_pro, claude_max_5x, claude_max_20x, chatgpt_plus, chatgpt_pro; or a key the local override file defines), or null when the plan is unknown.",
+          "description": "Fee-table key the plan resolved to (built-in: claude_pro, claude_max_5x, claude_max_20x, chatgpt_plus, chatgpt_pro_5x, chatgpt_pro; or a key the local override file defines), or null when the plan is unknown.",
           "type": [
             "string",
             "null"

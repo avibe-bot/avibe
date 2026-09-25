@@ -1355,7 +1355,7 @@
         "pace": {
           "ok": "Lasts until reset",
           "slightlyFast": "A little fast, still lasts until reset",
-          "fast": "Running fast, expected to run out {{time}}",
+          "fast": "Running fast, expected to run out in {{duration}}",
           "exhausted": "Used up, back in {{duration}}",
           "exhaustedUnknown": "Used up",
           "paused": "Updates paused",
@@ -1389,12 +1389,10 @@
         },
         "duration": {
           "days": "{{days}}d {{hours}}h",
+          "daysOnly": "{{days}}d",
           "hours": "{{hours}}h {{minutes}}m",
+          "hoursOnly": "{{hours}}h",
           "minutes": "{{minutes}}m"
-        },
-        "clock": {
-          "today": "today {{time}}",
-          "tomorrow": "tomorrow {{time}}"
         },
         "stat": {
           "tightest": "Lowest remaining limit",
@@ -1404,7 +1402,7 @@
           "exhaustedUnit": "limits",
           "exhaustedNone": "Every account is usable",
           "exhaustedNoneObserved": "None used up in current readings",
-          "exhaustedNote": "{{name}} · back {{time}}",
+          "exhaustedNote": "{{name}} · back in {{duration}}",
           "resetsIn": "resets in {{duration}}",
           "weekValue": "Last 7 days at API price",
           "weekValueNote": "All subscription use, at the vendors’ published API prices",
@@ -1440,6 +1438,27 @@
           "renewsIn_one": "in {{count}} day",
           "renewsIn_other": "in {{count}} days",
           "excluded": "{{tokens}} tokens have no price and are left out"
+        },
+        "plan": {
+          "openai": {
+            "free": "Free",
+            "go": "Go",
+            "plus": "Plus",
+            "pro": "Pro",
+            "prolite": "Pro 5x",
+            "pro_5x": "Pro 5x",
+            "team": "Team",
+            "business": "Business",
+            "enterprise": "Enterprise",
+            "edu": "Edu"
+          },
+          "anthropic": {
+            "pro": "Pro",
+            "max_5x": "Max 5x",
+            "max_20x": "Max 20x",
+            "team": "Team",
+            "enterprise": "Enterprise"
+          }
         }
       },
       "usage": {

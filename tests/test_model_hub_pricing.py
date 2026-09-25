@@ -281,6 +281,8 @@ def test_rows_written_before_cache_writes_read_as_uncaptured(tmp_path):
         ("anthropic", "pro", "claude_pro"),
         ("openai", "plus", "chatgpt_plus"),
         ("openai", "pro", "chatgpt_pro"),
+        ("openai", "prolite", "chatgpt_pro_5x"),
+        ("codex", "ProLite", "chatgpt_pro_5x"),
         ("openai", "team", None),
         ("codex", "pro", "chatgpt_pro"),
         ("gemini", "pro", None),
@@ -292,6 +294,14 @@ def test_reported_plans_resolve_to_fee_table_keys(vendor, reported, key):
     """MH-PRICE-008: Known plans resolve to the built-in fee table; anything else is no plan."""
 
     assert plan_key(vendor, reported) == key
+
+
+def test_pro_5x_is_priced_apart_from_pro():
+    """MH-PRICE-008: `prolite` is the $100 Pro 5x tier; `pro` stays the $200 tier."""
+
+    table = _table()
+    assert table.fee(plan_key("openai", "prolite")) == 100.0
+    assert table.fee(plan_key("openai", "pro")) == 200.0
 
 
 def test_override_file_sets_a_sources_plan_fee_and_renewal_day():

@@ -42,14 +42,14 @@ const sources: SourceQuota[] = [
     }),
   },
   {
-    source_id: 'src_codex', vendor: 'openai', display_name: 'ChatGPT Pro', account_label: null,
-    plan: 'pro', fetched_at: iso(NOW - 60_000), state: 'ok',
+    source_id: 'src_codex', vendor: 'openai', display_name: 'ChatGPT', account_label: null,
+    plan: 'prolite', fetched_at: iso(NOW - 60_000), state: 'ok',
     windows: [
       limit({ id: 'primary_window', label: 'primary_window', used_pct: 70, resets_at: iso(NOW + 47 * 60_000) }),
       limit({ id: 'secondary_window', label: 'secondary_window', used_pct: 45, ...weekly }),
     ],
     value: valued({
-      plan_key: 'chatgpt_pro', fee_usd: 200, multiple: 0.6125, week: priced(38.2, 12_400),
+      plan_key: 'chatgpt_pro_5x', fee_usd: 100, multiple: 1.225, week: priced(38.2, 12_400),
       period: { basis: 'rolling_30d', from_day: '2026-08-27', to_day: '2026-09-25', renews_on: null, ...priced(122.5, 12_400) },
     }),
   },
@@ -57,7 +57,7 @@ const sources: SourceQuota[] = [
 
 const value: QuotaValueTotals = {
   currency: 'USD', price_table_date: '2026-09-23', week: priced(450.57, 12_400),
-  period: { sources: 2, fee_usd: 400, multiple: 3.5163, ...priced(1406.52, 12_400) },
+  period: { sources: 2, fee_usd: 300, multiple: 4.6884, ...priced(1406.52, 12_400) },
 };
 
 export function QuotaFixture() {

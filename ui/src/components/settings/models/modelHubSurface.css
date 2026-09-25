@@ -3113,10 +3113,22 @@
 .model-hub-quota-pace.model-hub-quota-tone--warn,
 .model-hub-quota-pace.model-hub-quota-tone--danger { color: var(--model-hub-quota-tone); }
 .model-hub-quota-reset { white-space: nowrap; }
-.model-hub-quota-reset em {
-  margin-left: 6px;
-  color: var(--model-hub-usage-note-ink);
-  font-style: normal;
+/* A countdown whose exact moment opens on hover, focus, or tap. */
+.model-hub-quota-time {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline dotted color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+.model-hub-quota-time:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 .model-hub-quota-scoped {
   margin: 2px 0 -4px;
