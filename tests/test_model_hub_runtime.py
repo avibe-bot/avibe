@@ -1597,6 +1597,84 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("operation", ["revoke", "cleanup"])
+def test_online_oauth_mutation_fails_closed_on_duplicate_claude_files(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if (method, path) == ("GET", "/auth-files"):
+                return {
+                    "files": [
+                        {
+                            "id": "claude-legacy.json",
+                            "name": "claude-legacy.json",
+                            "provider": "claude",
+                        },
+                        {
+                            "id": "claude-hash.json",
+                            "name": "claude-hash.json",
+                            "provider": "claude",
+                        },
+                    ]
+                }
+            if (method, path) == ("DELETE", "/auth-files"):
+                self.deleted.append(str((query or {})["name"]))
+                return {"status": "ok"}
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self.client = client
+
+        def with_engine_excluded(self, operation):
+            return operation(self.client)
+
+        def invalidate_configs(self) -> None:
+            return None
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        old_name = "claude-legacy.json"
+        duplicate_name = "claude-hash.json"
+        ref = store.bind_oauth_credential("src_fixture123", "anthropic", old_name)
+        prefix = store.credential_metadata(ref)["prefix"]
+        payload = {
+            "type": "claude",
+            "prefix": prefix,
+            "email": "user@example.com",
+            "account_uuid": "account-a",
+            "organization_uuid": "organization-a",
+            "access_token": "private-access-fixture",
+        }
+        store.write_oauth_auth_file(old_name, payload)
+        store.write_oauth_auth_file(duplicate_name, payload)
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        if operation == "revoke":
+            with pytest.raises(EngineStateError, match="binding is ambiguous"):
+                await adapter.revoke_credential(ref)
+        else:
+            assert await adapter.cleanup_orphaned_oauth_material(ref) is False
+
+        assert store.credential_metadata_if_present(ref) is not None
+        assert (store.auth_dir / old_name).is_file()
+        assert (store.auth_dir / duplicate_name).is_file()
+        assert client.deleted == []
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
     [

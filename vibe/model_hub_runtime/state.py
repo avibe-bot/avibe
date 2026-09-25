@@ -1066,6 +1066,8 @@ class EngineStateStore:
                 payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
                 if not stored_prefix or payload_prefix != stored_prefix:
                     raise EngineStateError("OAuth auth record prefix conflicts")
+                if len(self._oauth_auth_names_for_prefix(stored_prefix, normalized_provider)) > 1:
+                    raise EngineStateError("OAuth auth record binding is ambiguous")
                 stored_identity = _oauth_identity_from_metadata(metadata)
                 if (
                     stored_identity
@@ -1102,6 +1104,8 @@ class EngineStateStore:
                     raise EngineStateError("OAuth auth record prefix is ambiguous")
                 if prefix_matches:
                     credential_ref, metadata = prefix_matches[0]
+                    if len(self._oauth_auth_names_for_prefix(payload_prefix, normalized_provider)) > 1:
+                        raise EngineStateError("OAuth auth record binding is ambiguous")
                     stored_identity = _oauth_identity_from_metadata(metadata)
                     if (
                         stored_identity
@@ -1152,6 +1156,17 @@ class EngineStateStore:
                     updated,
                 )
             return credential_ref
+
+    def _oauth_auth_names_for_prefix(self, prefix: str, provider: str) -> list[str]:
+        matches: list[str] = []
+        for path in self.auth_dir.glob("*.json"):
+            payload = self._decode_oauth_payload(path)
+            if (
+                str(payload.get("type") or "").strip().lower() == provider
+                and str(payload.get("prefix") or "").strip().strip("/") == prefix
+            ):
+                matches.append(path.name)
+        return matches
 
     def reconcile_oauth_credential(
         self,

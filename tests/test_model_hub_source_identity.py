@@ -135,7 +135,7 @@ def test_claude_filename_migration_preserves_ref_source_and_prefix(tmp_path):
     stored = store.credential_metadata(ref)
     assert stored["oauth_identity"]["organization_uuid"] == "organization-a"
 
-    store.write_oauth_auth_file(new_name, identity)
+    (store.auth_dir / old_name).rename(store.auth_dir / new_name)
     assert store.reconcile_oauth_auth_file(new_name, auth_provider="claude") == ref
     migrated = store.credential_metadata(ref)
     assert migrated["auth_name"] == new_name
@@ -192,7 +192,7 @@ def test_claude_filename_migration_rejects_cross_source_rebind(tmp_path):
     }
     store.write_oauth_auth_file(old_name, identity)
     store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
-    store.write_oauth_auth_file(new_name, identity)
+    (store.auth_dir / old_name).rename(store.auth_dir / new_name)
 
     assert store.reconcile_oauth_auth_file(new_name, auth_provider="claude") == ref
     with pytest.raises(EngineStateError, match="already bound"):
