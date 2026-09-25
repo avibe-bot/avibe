@@ -239,9 +239,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "avibe-runtime-host",
+ "block2",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "sys-locale",

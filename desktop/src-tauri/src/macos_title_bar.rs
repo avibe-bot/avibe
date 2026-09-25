@@ -14,12 +14,27 @@
 //!   over the strip, above the WebView: a drag there moves the window and a
 //!   double-click does what the system title bar would, with no page script
 //!   involved and no capability widened.
+//!
+//! Both only hold for a page that knows the inset. The shell can adopt a
+//! Runtime it did not ship, whose older Workbench still puts controls in the top
+//! 28 points, so every loaded page is asked, natively and without IPC, whether
+//! it declares `<meta name="avibe-shell-titlebar-inset">`. A page that does keeps the overlay; any other
+//! page, or a page that cannot answer, gets the standard title bar back with the
+//! strip hidden and the inset reset to zero.
 
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSEvent, NSResponder, NSView, NSWindow, NSWindowOrderingMode};
-use objc2_foundation::{ns_string, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSUserDefaults};
-use tauri::WebviewWindow;
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSEvent, NSResponder, NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTitleVisibility,
+};
+use objc2_foundation::{
+    ns_string, NSError, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
+};
+use objc2_web_kit::WKWebView;
+use tauri::{Webview, WebviewWindow};
 
 /// Height, in points, of the strip the overlay title bar occupies: the standard
 /// macOS title bar of a window without a toolbar, where the traffic lights sit.
@@ -31,6 +46,16 @@ pub const TITLE_BAR_INSET: f64 = 28.0;
 /// Workbench window that hosts it.
 pub const INSET_SCRIPT: &str = "if (window.self === window.top) \
      document.documentElement.style.setProperty('--shell-titlebar-inset', '28px');";
+
+/// Answers whether the loaded top-level page declares
+/// `<meta name="avibe-shell-titlebar-inset">`, and makes the published inset
+/// agree with that answer. The Workbench (`ui/index.html`) and the bootstrap
+/// page (`index.html`) both declare it; a Workbench from before the overlay
+/// title bar does not.
+const SUPPORT_PROBE: &str = "(function () { \
+     var supported = document.querySelector('meta[name=\"avibe-shell-titlebar-inset\"]') !== null; \
+     document.documentElement.style.setProperty('--shell-titlebar-inset', supported ? '28px' : '0px'); \
+     return supported ? 'supported' : 'unsupported'; })()";
 
 define_class!(
     #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -117,6 +142,58 @@ pub fn install(window: &WebviewWindow) {
     });
 }
 
+/// Keeps the overlay title bar only while the loaded page declares support
+/// (see [`SUPPORT_PROBE`]). Called for every finished main-window page load; a later
+/// load re-decides, so a stale answer never outlives the page that gave it.
+pub fn sync(webview: &Webview) {
+    let _ = webview.with_webview(|platform| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        // SAFETY: Tauri hands out the live WKWebView and its NSWindow, on the
+        // main thread, for the duration of this closure; retaining them keeps
+        // both alive until the completion handler has run.
+        let (Some(web_view), Some(window)) = (
+            unsafe { Retained::retain(platform.inner().cast::<WKWebView>()) },
+            unsafe { Retained::retain(platform.ns_window().cast::<NSWindow>()) },
+        ) else {
+            return;
+        };
+        let handler = RcBlock::new(move |result: *mut AnyObject, _error: *mut NSError| {
+            // SAFETY: WebKit passes the script's result, or null, as a live object.
+            let supported = unsafe { result.as_ref() }
+                .and_then(|result| result.downcast_ref::<NSString>())
+                .is_some_and(|answer| answer.to_string() == "supported");
+            set_overlay(&window, supported, mtm);
+        });
+        // SAFETY: called on the main thread with a live WKWebView; WebKit calls
+        // the handler once, on the main thread.
+        unsafe { web_view.evaluateJavaScript_completionHandler(&NSString::from_str(SUPPORT_PROBE), Some(&handler)) };
+    });
+}
+
+/// Switches between the overlay title bar with the drag strip and the standard
+/// title bar with the window title, the only two frames the shell draws.
+fn set_overlay(window: &NSWindow, overlay: bool, _mtm: MainThreadMarker) {
+    let mut mask = window.styleMask();
+    mask.set(NSWindowStyleMask::FullSizeContentView, overlay);
+    window.setStyleMask(mask);
+    window.setTitlebarAppearsTransparent(overlay);
+    window.setTitleVisibility(if overlay {
+        NSWindowTitleVisibility::Hidden
+    } else {
+        NSWindowTitleVisibility::Visible
+    });
+    let Some(content) = window.contentView() else {
+        return;
+    };
+    for view in content.subviews().iter() {
+        if view.isKindOfClass(TitleBarDragStrip::class()) {
+            view.setHidden(!overlay);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +202,11 @@ mod tests {
     fn the_published_inset_is_the_strip_height() {
         assert!(INSET_SCRIPT.contains(&format!("'{}px'", TITLE_BAR_INSET)));
         assert!(INSET_SCRIPT.starts_with("if (window.self === window.top)"));
+    }
+
+    #[test]
+    fn the_support_probe_reads_the_declared_meta_and_resets_the_inset() {
+        assert!(SUPPORT_PROBE.contains("meta[name=\"avibe-shell-titlebar-inset\"]"));
+        assert!(SUPPORT_PROBE.contains(&format!("'{}px' : '0px'", TITLE_BAR_INSET)));
     }
 }
