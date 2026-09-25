@@ -112,9 +112,9 @@ select id, run_type, status, model, created_at
 from agent_runs
 where session_id = '<session>'
   and run_type in ('agent_run','scheduled','watch','webhook','task_escalation')
-  and (status in ('failed','canceled')
-       or (status in ('succeeded','completed') and exit_code is null
-           and coalesce(trim(result_text),'') = ''))
+  and exit_code is null  -- command-backed Tasks record an exit code instead
+  and (status in ('failed','canceled','cancelled')
+       or (status in ('succeeded','completed') and coalesce(trim(result_text),'') = ''))
 order by created_at desc;
 ```
 
