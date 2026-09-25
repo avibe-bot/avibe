@@ -72,7 +72,7 @@ Verify against the current machine; these are starting points.
 
 | Layer | Where | How it changes |
 | --- | --- | --- |
-| Avibe runtime prompt | `vibe debug prompt export --format json` (source history in the Avibe repo `core/prompts/`, if checked out) | Proposal to the Avibe repository |
+| Avibe runtime prompt | `vibe debug prompt export --format json` lists every source; add `--context-file` with the target's backend to see what was actually composed (history in the Avibe repo `core/prompts/`, if checked out) | Proposal to the Avibe repository |
 | Global rules | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, … | Edit the source if the file is generated or imports others |
 | Project rules | nearest `AGENTS.md` / `CLAUDE.md` chain | The repository's own delivery process |
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
