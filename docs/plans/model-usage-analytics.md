@@ -285,6 +285,36 @@ root-cause report. Readiness requires an exact-head clean review or only
 owner-approved follow-up dispositions, zero unresolved threads, full green CI,
 and a clean merge state. The coordinating owner alone performs the merge.
 
+Parent review of the local envelope implementation found that a fresh component
+timestamp still became an unjustified bound on older unlocated mass. A fixed-time
+merge repair did not close the lifecycle: a delayed call's timestamp could age
+out before the unknown historical usage, and read selection discarded the row
+before its envelope reached projection. Selection, retention, and projection
+therefore still had competing owners of temporal evidence.
+
+The coordinating owner approved a final structural attempt on September 25:
+one row-level evidence resolver is the only owner of what a timestamp proves.
+Hourly read selection, write retention, capacity ranking, and uncertainty
+windows consume its unresolved mass/conservative envelope and exact known
+slices, with no independent horizon pre-filter. Audit direct timestamp and
+owner-day reads in those paths; parsing and ordinary daily calendar presentation
+do not become alternate evidence authorities.
+
+The consuming invariant is that adding an exact call never turns unrelated
+unknown in-horizon mass into complete zero or shrinks its incomplete-bucket set.
+Exercise fixed and advancing report times, delayed writes, reopened ledgers,
+retention with room, capacity one, both duplicate-row orders, both timezone
+directions, and actual expiry. Tests explicitly select and restore their timezone.
+
+This is the last attempt at hourly precision for timestamp-less legacy mass.
+If the class recurs in local or remote review, stop precision patches and use the
+owner-authorized conservative contract: exclude that mass from hourly series,
+mark every bucket intersecting its conservative owner-day envelope incomplete,
+and disclose that historical usage lacks hourly timestamps. Daily totals stay
+exact. The coordinating owner pre-authorized this fallback without another
+approval round. No new persisted metadata, storage rewrite, or pending-queue
+policy change is allowed; review, CI, thread, and merge-authority gates remain.
+
 ## Known by design
 
 - This is metered gateway usage, not native subscription quota or monetary cost.
