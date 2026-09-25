@@ -14,6 +14,7 @@ import { GatewayFixture } from './gatewayFixture';
 import { QuotaFixture } from './quotaFixture';
 import { RouteFixture } from './routeFixture';
 import { TokenScopeFixture } from './tokenScopeFixture';
+import { UsageFixture } from './usageFixture';
 
 const params = new URLSearchParams(location.search);
 const backend = params.get('backend') as AgentBackend;
@@ -69,6 +70,8 @@ createRoot(document.getElementById('root')!).render(params.get('view') === 'gate
   ? <I18nextProvider i18n={language}><GatewayFixture /></I18nextProvider>
   : params.get('view') === 'route'
   ? <I18nextProvider i18n={language}><RouteFixture /></I18nextProvider>
+  : params.get('view') === 'usage'
+  ? <I18nextProvider i18n={language}><UsageFixture /></I18nextProvider>
   : params.get('view') === 'quota'
   ? <I18nextProvider i18n={language}><QuotaFixture /></I18nextProvider>
   : <Fixture />);

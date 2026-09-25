@@ -73,11 +73,20 @@ import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
-import { USAGE_DEFAULT_WINDOW_DAYS, type AgentBackend, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageSummary } from './types';
-import type { UsageWindowOption } from './usageProjection';
+import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
+type ModelsTranslate = (key: string, options?: Record<string, unknown>) => string;
+
+const useModelsTranslation = () => {
+  const translation = useTranslation();
+  return {
+    ...translation,
+    t: translation.t as unknown as ModelsTranslate,
+  };
+};
+
 type RouteTarget = {
   agent: AgentSupply;
   modelId: string;
@@ -181,7 +190,7 @@ export const RuntimePill: React.FC<{
   stopping?: boolean;
   directCount?: number;
 }> = ({ read, starting, stopping = false, directCount }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
     loading: () => null,
     ready: (runtime) => ({ runtime, authoritative: true }),
@@ -232,7 +241,7 @@ const RuntimeClosedState: React.FC<{
   starting: boolean;
   stopping: boolean;
 }> = ({ read, runtime, starting, stopping }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   const health = runtime?.status.health ?? null;
   const key = stopping
     ? 'stopping'
@@ -264,7 +273,7 @@ const RuntimeClosedState: React.FC<{
 };
 
 const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, children, rootRef }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   return (
     <div ref={rootRef} className="model-hub-shell">
       <header className="model-hub-shell-head">
@@ -293,7 +302,7 @@ const focusQuotaOpener = (opener: HTMLElement) =>
 type HubTab = 'sources' | 'quota' | 'usage' | 'logs';
 
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   return (
     <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
       {(['sources', 'quota', 'usage', 'logs'] as const).map((id) => (
@@ -307,7 +316,7 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
 };
 
 const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSupply) => void }> = ({ agents, onSwitch }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   if (agents.length === 0) {
     return <section className="model-hub-direct-empty"><h2>{t('settings.models.direct.empty.title')}</h2><p>{t('settings.models.direct.empty.body')}</p><span>{t('settings.models.direct.empty.install')}</span></section>;
   }
@@ -348,13 +357,13 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
 };
 
 const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   if (count === 0) return null;
   return <span className="model-hub-takeover-pill"><span className="model-hub-runtime-dot" />{t('settings.models.takeover.pill', { count })}</span>;
 };
 
 export const SettingsModelsPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   const { showToast } = useToast();
   const navigate = useNavigate();
   // An Agent named in the warning list is a destination, not a label: the page
@@ -375,10 +384,10 @@ export const SettingsModelsPage: React.FC = () => {
   const [eventsRead, setEventsRead] = React.useState<RegionRead<EventFeed>>(loadingRegion);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [tab, setTab] = React.useState<HubTab>('sources');
-  const [usageRead, setUsageRead] = React.useState<RegionRead<UsageSummary>>(loadingRegion);
+  const [usageRead, setUsageRead] = React.useState<RegionRead<UsageReport>>(loadingRegion);
+  const [usageWindow, setUsageWindow] = React.useState<UsageWindowKey>(USAGE_DEFAULT_WINDOW);
   const [quotaRead, setQuotaRead] = React.useState<RegionRead<QuotaSummary>>(loadingRegion);
   const [refreshingQuota, setRefreshingQuota] = React.useState(false);
-  const [usageWindow, setUsageWindow] = React.useState<UsageWindowOption>(USAGE_DEFAULT_WINDOW_DAYS);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
@@ -649,14 +658,14 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }));
 
-  const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageSummary>>((incoming) => {
+  const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageReport>>((incoming) => {
     if (!aliveRef.current) return;
     setUsageRead((previous) => settleRegionRead(previous, incoming));
   }));
 
-  const refreshUsage = React.useCallback(async (days: UsageWindowOption) => {
+  const refreshUsage = React.useCallback(async (window: UsageWindowKey) => {
     setUsageRead(beginRegionRead);
-    await usageReadAuthority.run(() => readRegion(() => modelsApi.getUsageSummary(days)));
+    await usageReadAuthority.run(() => readRegion(() => modelsApi.getUsageSummary(window)));
   }, [usageReadAuthority]);
 
   /**
@@ -1508,7 +1517,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
-                    : tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
+                    : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedAgents} onSwitch={switchToGateway} />
                     : <div className="model-hub-overview">

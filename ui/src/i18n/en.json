@@ -1415,7 +1415,11 @@
         "detail": "Metered tokens from the turns the gateway proxied, by local day.",
         "window": {
           "label": "Window",
-          "option": "{{days}}d"
+          "option": "{{days}}d",
+          "24h": "24 hours",
+          "7d": "7 days",
+          "30d": "30 days",
+          "60d": "60 days"
         },
         "range": "{{from}} – {{to}} · trailing {{days}} days",
         "empty": "Nothing metered yet. A window fills once a gateway source serves a request.",
@@ -1427,6 +1431,7 @@
         },
         "requests": {
           "label": "Requests",
+          "unit": "requests",
           "reported": "Every request reported its tokens",
           "shortfall_one": "{{count}} request came back with no token report",
           "shortfall_other": "{{count}} requests came back with no token report"
@@ -1460,7 +1465,136 @@
           "quiet": "No day in this window carried a metered turn",
           "unreported": "Requests ran, but no day reported its tokens",
           "zero": "Every day that reported its tokens reported zero"
-        }
+        },
+        "metric": {
+          "label": "Metric",
+          "tokens": "All tokens",
+          "input": "Input (including cache)",
+          "output": "Output",
+          "cache": "Cache reads",
+          "requests": "Requests"
+        },
+        "filters": {
+          "source": "Source",
+          "model": "Model",
+          "all": "All {{label}}",
+          "selected_one": "{{label}} · {{count}} selected",
+          "selected_other": "{{label}} · {{count}} selected",
+          "search": "Search {{label}}",
+          "noMatch": "No matching options",
+          "hint": "Multi-select updates the report",
+          "reset": "Reset filters",
+          "allSources": "All sources",
+          "allModels": "All models",
+          "sourceCount_one": "{{count}} source",
+          "sourceCount_other": "{{count}} sources",
+          "modelCount_one": "{{count}} model",
+          "modelCount_other": "{{count}} models"
+        },
+        "stats": {
+          "tokens": "All tokens",
+          "requests": "Requests",
+          "cached": "Cached input share",
+          "tokenSplit": "{{input}} input · {{output}} output",
+          "shortfall_one": "{{count}} request has no token report",
+          "shortfall_other": "{{count}} requests have no token report",
+          "allReported": "Every request reported tokens",
+          "cacheUnknown": "No measured input available",
+          "cacheSplit": "{{cached}} cached of {{input}} input"
+        },
+        "unknownTokens": "Some requests have no token report; token values are unavailable",
+        "partialHistory": "Some buckets have incomplete history",
+        "historicalHourly": "Includes historical usage without hourly time",
+        "unknownModel": "Unknown model",
+        "granularity": {
+          "hour": "hourly",
+          "day": "daily"
+        },
+        "group": {
+          "label": "Group",
+          "total": "Total",
+          "type": "Token type",
+          "model": "Model",
+          "source": "Source"
+        },
+        "series": {
+          "input": "Input (non-cache)",
+          "cache": "Cache reads",
+          "output": "Output",
+          "requests": "Requests"
+        },
+        "chart": {
+          "title": "Usage trend",
+          "subtitle": "Exact counts by the selected time bucket",
+          "aria": "{{kind}} usage trend",
+          "lines": "line",
+          "bars": "stacked bar",
+          "bucket": "Usage bucket {{bucket}}",
+          "detail": "Usage bucket details",
+          "legend": "Chart legend",
+          "pin": "Pin this bucket",
+          "unpin": "Unpin this bucket",
+          "pinned": "Pinned",
+          "currentPartial": "Current partial hour",
+          "complete": "History complete",
+          "partial": "Partial history",
+          "points_one": "{{count}} {{granularity}} point",
+          "points_other": "{{count}} {{granularity}} points",
+          "legendOnly": "Legend visibility only changes the chart",
+          "interaction": "Hover or focus a bucket · click for details"
+        },
+        "table": {
+          "title": "Exact usage details",
+          "range": "The table uses the same filters as the chart",
+          "bucket": "Showing {{bucket}}",
+          "allBuckets": "View all buckets",
+          "group": "Table grouping",
+          "byModel": "By model",
+          "bySource": "By source",
+          "export": "Export CSV",
+          "identity": "Model / source",
+          "requests": "Requests",
+          "input": "Input",
+          "nonCache": "Non-cache input",
+          "cache": "Cache reads",
+          "output": "Output",
+          "tokens": "All tokens",
+          "share": "Share",
+          "sortAscending": "{{metric}}: Sorted ascending",
+          "sortDescending": "{{metric}}: Sorted descending",
+          "total": "Total",
+          "empty": "No matching usage",
+          "accounting": "All tokens = input + output. Cache reads are included in input and shown separately."
+        },
+        "csv": {
+          "bucketKey": "Bucket key",
+          "startAt": "Start at",
+          "endAt": "End at",
+          "historyComplete": "History complete",
+          "sourceId": "Source ID",
+          "modelId": "Model ID",
+          "ledgerKey": "Internal ledger key",
+          "sourceLabel": "Source",
+          "modelLabel": "Model",
+          "tokenReports": "Token reports",
+          "inputTokens": "Input tokens",
+          "nonCachedInputTokens": "Non-cache input tokens",
+          "cachedInputTokens": "Cached input tokens",
+          "outputTokens": "Output tokens",
+          "totalTokens": "Total tokens"
+        },
+        "empty": {
+          "report": {
+            "title": "No usage in this window",
+            "body": "The gateway has not recorded a request in the selected time range."
+          },
+          "filter": {
+            "title": "No matching usage",
+            "body": "Try another Source or model, or reset the filters."
+          }
+        },
+        "failure": "The usage report could not be read.",
+        "retry": "Retry"
       },
       "supplyTooltip": {
         "label": "Supplies: "

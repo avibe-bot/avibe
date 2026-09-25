@@ -23,6 +23,7 @@ capability:
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
+    - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
     - ui/src/components/settings/models/QuotaTab.test.tsx
     - tests/test_local_deps.py
@@ -680,6 +681,68 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-027
+  - id: MH-USAGE-BACKEND-001
+    name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_modern_hourly_report_is_dense_and_keeps_source_model_identity
+  - id: MH-USAGE-BACKEND-002
+    name: UsageWriter preserves temporal identity when a flush spans different hours
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_usage_writer_never_coalesces_different_hours_before_persistence
+  - id: MH-USAGE-BACKEND-003
+    name: Released daily-only usage remains available while hourly history stays unavailable
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour
+  - id: MH-USAGE-BACKEND-004
+    name: Corrupt nested hourly slices cannot duplicate or exceed their daily owner
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_corrupt_nested_hours_are_deduplicated_bounded_and_marked_unavailable
+  - id: MH-USAGE-BACKEND-005
+    name: Modern usage selector reaches the controller RPC and rejects invalid query combinations
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_ui_server_fastapi.py::test_the_usage_route_forwards_a_modern_window_and_rejects_selector_conflicts
+  - id: MH-USAGE-BACKEND-006
+    name: Fractional-offset and DST hourly reports join every local-day owner across midnight
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_hourly_report_joins_every_local_day_owner_across_midnight
+    related_tests:
+      - tests/test_model_hub_usage.py::test_legacy_usage_after_local_midnight_marks_the_overlapping_hour_incomplete
+  - id: MH-USAGE-BACKEND-007
+    name: Queued same-hour calls preserve their distinct local-day owners through persistence
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_usage_writer_preserves_daily_owners_inside_one_utc_hour
+  - id: MH-USAGE-BACKEND-008
+    name: Read and write boundaries exclude future hourly evidence without claiming complete zero usage
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write
+  - id: MH-USAGE-E2E-001
+    name: Measured hourly and daily reports reconcile through HTTP and IPC after a controller restart
+    status: covered
+    kind: persistence
+    layer: e2e
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_usage_reports_reconcile_across_http_ipc_and_restart
+  - id: MH-USAGE-E2E-002
+    name: The real usage API preserves released daily history without inventing hourly counts
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_daily_only_history_is_not_invented_as_hourly_usage
   - id: MH-QUOTA-001
     name: Claude's fixed quota windows parse and null or app-only windows are skipped
     status: covered

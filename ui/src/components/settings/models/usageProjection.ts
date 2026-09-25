@@ -1,223 +1,442 @@
-// Pure projections over `usage-summary.schema.json` for the 用量 tab.
-//
-// Everything here is a derivation the tab could get WRONG, kept out of JSX so it
-// can be asserted as a property: what the window spans, what a row is allowed to
-// display, and how a sparse trend becomes a dense one. Layout and copy stay in
-// the component; this module never translates.
-//
-// It owns the trailing local-day window — `YYYY-MM-DD` labels in and out.
-// `localCalendar.ts` answers a different question (is this INSTANT today?) over a
-// different input type, so the two are deliberately not merged: an instant needs
-// a timezone to become a day, and these strings already are days.
-import { USAGE_WINDOW_MAX_DAYS, USAGE_WINDOW_MIN_DAYS, type UsageByDay, type UsageByModel, type UsageBySource, type UsageCounters, type UsageSummary } from './types';
+import type {
+  UsageBucket,
+  UsageBucketRow,
+  UsageCounters,
+  UsageReport,
+  UsageWindowKey,
+} from './types';
 
-/**
- * The windows the tab offers.
- *
- * Bounded by the schema rather than by the design, which offers 7/30/90: the
- * server clamps `days` to retention and answers with what it served, so a 「90
- * 天」 option would put a number on screen the report never covered. The gate is
- * mechanical — `usageProjection.test.ts` fails if an option leaves the contract
- * bounds — so the next person to add one cannot reintroduce the lie by hand.
- */
-export const USAGE_WINDOW_OPTIONS = [7, 30, 60] as const;
-export type UsageWindowOption = (typeof USAGE_WINDOW_OPTIONS)[number];
+export const USAGE_WINDOW_OPTIONS = ['24h', '7d', '30d', '60d'] as const satisfies readonly UsageWindowKey[];
+export type UsageWindowOption = UsageWindowKey;
 
-const DAY_MS = 86_400_000;
-const LOCAL_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+export type UsageMetric = 'tokens' | 'input' | 'output' | 'cache' | 'requests';
+export type UsageGroup = 'total' | 'type' | 'model' | 'source';
+export type UsageFilter = {
+  sourceIds: readonly string[];
+  modelKeys: readonly string[];
+};
 
-const toLocalDay = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+export type UsageIdentity = {
+  sourceId: string;
+  modelId: string;
+  sourceLabel: string;
+  modelLabel: string | null;
+  key: string;
+};
 
-/**
- * A `LocalDay` as the UTC instant of its midnight, or null when it is not one.
- *
- * UTC is the arithmetic frame on purpose. The string is already a local calendar
- * day, so re-deriving it through the host's zone would let a DST boundary or an
- * offset change move a labelled day by one; stepping in fixed 86 400 s units and
- * reading the label straight back cannot.
- *
- * The pattern alone does not decide it. `Date.parse` rolls an out-of-range day
- * FORWARD rather than refusing it — `2026-02-30` becomes March 2 — and a rolled
- * day silently stops matching the label it was keyed by. Reading the day back out
- * and requiring it unchanged is a check against our own output, so no calendar
- * quirk of the host parser can pass through it.
- */
-export function parseLocalDay(day: string): number | null {
-  if (!LOCAL_DAY_PATTERN.test(day)) return null;
-  const ms = Date.parse(`${day}T00:00:00Z`);
-  return Number.isNaN(ms) || toLocalDay(ms) !== day ? null : ms;
+export type UsageLabelContext = {
+  sourceCollisionLabels: ReadonlySet<string>;
+  sourceDisplayLabels: ReadonlyMap<string, string>;
+  identityCollisionLabels: ReadonlySet<string>;
+  identityModelCollisionKeys: ReadonlySet<string>;
+  identityDisplayLabels: ReadonlyMap<string, string>;
+};
+
+export type UsageSeries = {
+  key: string;
+  label: string;
+  colorIndex: number;
+  values: Array<number | null>;
+};
+
+export const PAIR_SEPARATOR = '\u0000';
+
+export const pairKey = (sourceId: string, modelId: string): string =>
+  `${sourceId}${PAIR_SEPARATOR}${modelId}`;
+
+export const emptyCounters = (): UsageCounters => ({
+  requests: 0,
+  token_reports: 0,
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  output_tokens: 0,
+});
+
+export function aggregateCounters(rows: readonly UsageCounters[]): UsageCounters {
+  return rows.reduce((total, row) => ({
+    requests: total.requests + row.requests,
+    token_reports: total.token_reports + row.token_reports,
+    input_tokens: total.input_tokens + row.input_tokens,
+    cached_input_tokens: total.cached_input_tokens + row.cached_input_tokens,
+    output_tokens: total.output_tokens + row.output_tokens,
+  }), emptyCounters());
 }
 
-/** A `LocalDay` in the reader's own date order — 「2026年7月20日」/「Jul 20, 2026」.
- *  Formatted in UTC for the same reason the arithmetic is: the label must survive
- *  the round trip unshifted. Unparseable input renders verbatim rather than as an
- *  invented date. */
-export function formatLocalDay(day: string, locale: string): string {
-  const ms = parseLocalDay(day);
-  if (ms === null) return day;
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeZone: 'UTC' }).format(ms);
-}
-
-/** Tokens the window actually moved. Cache is NOT subtracted: a cached input
- *  token was still composed into the request, and `cached_input_tokens` is a
- *  subset of `input_tokens` reported separately so a view can qualify the total
- *  without double-counting it. */
 export function usageTotalTokens(counters: UsageCounters): number {
   return counters.input_tokens + counters.output_tokens;
 }
 
-/**
- * Requests whose upstream response carried no token report.
- *
- * The schema guarantees `token_reports <= requests`, and this floors at zero
- * anyway: both numbers arrive over the wire, and a view that renders 「-3 次未回
- * 报」 has turned a payload bug into a claim about the user's usage. The honest
- * reading of a shortfall is missing reports, never unused capacity — which is
- * why the caller's copy says so.
- */
+export function usageNonCachedInput(counters: UsageCounters): number {
+  return Math.max(0, counters.input_tokens - counters.cached_input_tokens);
+}
+
 export function usageReportShortfall(counters: UsageCounters): number {
   return Math.max(0, counters.requests - counters.token_reports);
 }
 
-/**
- * Whether an upstream said what anything in this bucket cost.
- *
- * Three independent facts share one payload, and only one counter answers each:
- * `requests` says calls happened, `token_reports` says an upstream told us what
- * they cost, and the token counts say how much. A total of zero is therefore
- * several different readings, and only this counter can find the one where a cost
- * was actually reported — which is the only reading allowed to speak for the
- * report, as a peak or as a claim about what the reports said.
- */
+export function usageTokensAreKnown(counters: Pick<UsageCounters, 'requests' | 'token_reports'>): boolean {
+  return counters.token_reports > 0 || counters.requests === 0;
+}
+
 export function usageTokensAreReported(counters: Pick<UsageCounters, 'token_reports'>): boolean {
   return counters.token_reports > 0;
 }
 
-/**
- * Whether the token counts are a measurement, and so printable as a number.
- *
- * Wider than `usageTokensAreReported` by exactly one case, and it is not a
- * concession: a bucket where nothing ran cost nothing, and that zero is measured
- * by our own request counter rather than promised by an upstream. Blanking it
- * would trade the defect this answers — an unreported cost read as free — for its
- * mirror image, an idle day read as unknowable.
- *
- * So the two questions stay apart. Every token figure the tab prints asks this
- * one; whether the report itself has anything to say about tokens is the other.
- */
-export function usageTokensAreKnown(counters: Pick<UsageCounters, 'requests' | 'token_reports'>): boolean {
-  return usageTokensAreReported(counters) || counters.requests === 0;
+export function usageMetricValue(counters: UsageCounters, metric: UsageMetric): number | null {
+  if (metric === 'requests') return counters.requests;
+  if (!usageTokensAreKnown(counters)) return null;
+  if (metric === 'tokens') return usageTotalTokens(counters);
+  if (metric === 'input') return counters.input_tokens;
+  if (metric === 'output') return counters.output_tokens;
+  return counters.cached_input_tokens;
 }
 
-/** Share of input tokens served from cache, or null when there is no input to
- *  take a share of. Clamped to [0, 1] because the subset relation is the
- *  server's promise, not something this view can verify. */
 export function usageCachedInputShare(counters: UsageCounters): number | null {
-  if (counters.input_tokens <= 0) return null;
+  if (counters.input_tokens <= 0 || !usageTokensAreKnown(counters)) return null;
   return Math.min(1, Math.max(0, counters.cached_input_tokens / counters.input_tokens));
 }
 
-/** Nothing was metered in the window. `sources` is the gate because it is what
- *  the table renders, and a Source enters it only once it has a metered turn. */
-export function usageIsEmpty(summary: UsageSummary): boolean {
-  return summary.sources.length === 0;
+export function usageIsEmpty(report: UsageReport): boolean {
+  return report.buckets.every((bucket) => bucket.history_complete && bucket.rows.length === 0);
 }
 
-export type UsageDayColumn = {
-  day: string;
-  /** Calls metered on this day, whether or not their tokens came back. */
-  requests: number;
-  /** Calls whose upstream said what they cost — what makes `tokens` a measurement. */
-  token_reports: number;
-  tokens: number;
-  /** Height against the busiest rendered day, in [0, 1]. */
-  ratio: number;
-};
-
-/**
- * Whether a day carried a metered call at all.
- *
- * A day's activity is its request counter, never its token total. An upstream
- * that answered without a token report still served a call the user made, so a
- * day of those is a day that ran — and drawing it at zero height, or folding it
- * into 「没有任何一天有计量数据」, reports our own missing evidence as the user's
- * idleness. That is the rule the requests card states as a shortfall, applied per
- * day, and it lives here so the series has one place to ask rather than one
- * `tokens > 0` per thing it draws.
- */
-export function usageDayIsMetered(column: UsageDayColumn): boolean {
-  return column.requests > 0;
+export function formatRfc3339(value: string, locale: string, includeOffset = false): string {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!match) return value;
+  const [, year, month, day, hour, minute] = match;
+  const suffix = includeOffset ? ` ${formatOffset(value)}` : '';
+  if (locale.startsWith('zh')) return `${year}年${Number(month)}月${Number(day)}日 ${hour}:${minute}${suffix}`;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  const monthLabel = new Intl.DateTimeFormat(locale, { month: 'short', timeZone: 'UTC' }).format(date);
+  return `${monthLabel} ${Number(day)}, ${year}, ${hour}:${minute}${suffix}`;
 }
 
-/**
- * Every day of the window, oldest first, with the days that carried no turn
- * filled in at zero.
- *
- * `days[]` is sparse by contract — a quiet day is absent, not reported as zero —
- * and a chart drawn straight from it would silently close the gaps and read as
- * continuous traffic. Densifying from `from_day`/`to_day` is what makes an idle
- * stretch visible as an idle stretch.
- *
- * The span comes from the dates rather than from `window_days` so a payload
- * whose two disagree still plots its real dates, and it is refused outright past
- * the contract's own maximum: the bound is ours, measured against the schema, so
- * a `from_day` far in the past cannot ask this for a million columns. A refused
- * span falls back to exactly the days reported — fewer bars, no invention.
- */
-export function usageDayColumns(summary: UsageSummary): UsageDayColumn[] {
-  const reportedByDay = new Map(summary.days.map((day: UsageByDay) => [day.day, day]));
-  const span = windowSpan(summary.from_day, summary.to_day);
-  const days = span ?? summary.days.map((day) => day.day);
-  // All three counters travel, because tokens alone cannot tell a day nobody
-  // used from a day whose upstream never said what it cost — nor either of those
-  // from a day that really did cost nothing. Dropping `token_reports` here is
-  // what made a rendered 0 ambiguous no matter how carefully the copy was worded.
-  const counted = days.map((day) => {
-    const reported = reportedByDay.get(day);
+export function formatOffset(value: string): string {
+  const match = value.match(/(Z|[+-]\d{2}:\d{2})$/);
+  if (!match || match[1] === 'Z') return 'UTC';
+  return `UTC${match[1]}`;
+}
+
+export function formatBucketLabel(bucket: UsageBucket, locale: string): string {
+  if (bucket.key.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [year, month, day] = bucket.key.split('-').map(Number);
+    if (locale.startsWith('zh')) return `${year}年${month}月${day}日`;
+    return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+      .format(new Date(Date.UTC(year, month - 1, day)));
+  }
+  return formatRfc3339(bucket.start_at, locale);
+}
+
+export function formatBucketAxisLabel(bucket: UsageBucket, locale: string): string {
+  if (bucket.key.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [year, month, day] = bucket.key.split('-').map(Number);
+    return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+      .format(new Date(Date.UTC(year, month - 1, day)));
+  }
+  const match = bucket.start_at.match(/T\d{2}:(\d{2})/);
+  if (match) {
+    const hour = bucket.start_at.slice(11, 13);
+    return `${hour}:${match[1]}`;
+  }
+  return formatBucketLabel(bucket, locale);
+}
+
+export function formatBucketRange(bucket: UsageBucket, locale: string, includeOffsets = false): string {
+  return `${formatRfc3339(bucket.start_at, locale, includeOffsets)} – ${formatRfc3339(bucket.end_at, locale, includeOffsets)}`;
+}
+
+export function sourceLabel(report: UsageReport, sourceId: string): string {
+  const source = report.sources.find((candidate) => candidate.source_id === sourceId);
+  return source?.label?.trim() || sourceId;
+}
+
+export function modelLabel(report: UsageReport, sourceId: string, modelId: string): string | null {
+  const source = report.sources.find((candidate) => candidate.source_id === sourceId);
+  const model = source?.models.find((candidate) => candidate.model_id === modelId);
+  return model?.label?.trim() || null;
+}
+
+export function usageIdentities(report: UsageReport, rows: readonly UsageBucketRow[]): UsageIdentity[] {
+  const keys = new Set(rows.map((row) => pairKey(row.source_id, row.model_id)));
+  return [...keys].map((key) => {
+    const separator = key.indexOf(PAIR_SEPARATOR);
+    const sourceId = key.slice(0, separator);
+    const modelId = key.slice(separator + 1);
     return {
-      day,
-      requests: reported?.requests ?? 0,
-      token_reports: reported?.token_reports ?? 0,
-      tokens: reported ? usageTotalTokens(reported) : 0,
+      key,
+      sourceId,
+      modelId,
+      sourceLabel: sourceLabel(report, sourceId),
+      modelLabel: modelLabel(report, sourceId, modelId),
     };
   });
-  // Scaled against the days on screen, not every day reported: a stray row
-  // outside the window would otherwise flatten every bar the user can see.
-  const peak = counted.reduce((max, column) => Math.max(max, column.tokens), 0);
-  return counted.map((column) => ({ ...column, ratio: peak > 0 ? column.tokens / peak : 0 }));
 }
 
-const windowSpan = (fromDay: string, toDay: string): string[] | null => {
-  const from = parseLocalDay(fromDay);
-  const to = parseLocalDay(toDay);
-  if (from === null || to === null || to < from) return null;
-  const length = (to - from) / DAY_MS + 1;
-  if (!Number.isInteger(length) || length < USAGE_WINDOW_MIN_DAYS || length > USAGE_WINDOW_MAX_DAYS) return null;
-  return Array.from({ length }, (_, index) => toLocalDay(from + index * DAY_MS));
-};
-
-/**
- * What a usage row may put on screen for its own identity.
- *
- * `gone` carries an id only where one is safe to show. A Source keeps its
- * canonical `src_*` id, which is a string the user could have seen elsewhere. A
- * model's ledger key is a head plus a digest for any long identifier — a string
- * nobody typed — so a vanished model has NO displayable identity and gets a bare
- * marker. That asymmetry is the reason both live behind one type instead of two
- * `label ?? id` expressions in JSX.
- */
-export type UsageIdentity = { kind: 'label'; text: string } | { kind: 'gone'; id: string | null };
-
-const identify = (label: string | null, fallbackId: string | null): UsageIdentity => {
-  const text = label?.trim();
-  // A blank label is as unrenderable as a missing one, and the schema permits it.
-  return text ? { kind: 'label', text } : { kind: 'gone', id: fallbackId };
-};
-
-export function sourceIdentity(source: UsageBySource): UsageIdentity {
-  return identify(source.label, source.source_id);
+export function identityLabel(identity: UsageIdentity, unknownModelLabel: string): string {
+  const model = identity.modelLabel || unknownModelLabel;
+  return `${identity.sourceLabel} · ${model}`;
 }
 
-export function modelIdentity(model: UsageByModel): UsageIdentity {
-  return identify(model.label, null);
+export function usageLabelContext(
+  report: UsageReport,
+  rows: readonly UsageBucketRow[],
+  unknownModelLabel: string,
+): UsageLabelContext {
+  const sourceIds = [...new Set([
+    ...report.sources.map((source) => source.source_id),
+    ...rows.map((row) => row.source_id),
+  ])];
+  const sourceLabels = new Map(
+    sourceIds.map((sourceId) => [sourceId, sourceLabel(report, sourceId)] as const),
+  );
+  const sourceLabelCounts = new Map<string, number>();
+  for (const label of sourceLabels.values()) {
+    sourceLabelCounts.set(label, (sourceLabelCounts.get(label) ?? 0) + 1);
+  }
+  const sourceCollisionLabels = new Set(
+    [...sourceLabelCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([label]) => label),
+  );
+  const sourceDisplayLabels = new Map(
+    [...sourceLabels.entries()].map(([sourceId, label]) => [
+      sourceId,
+      sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label,
+    ]),
+  );
+  for (;;) {
+    const displayCounts = new Map<string, number>();
+    for (const label of sourceDisplayLabels.values()) {
+      displayCounts.set(label, (displayCounts.get(label) ?? 0) + 1);
+    }
+    const collisions = [...displayCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([label]) => label);
+    if (collisions.length === 0) break;
+    for (const [sourceId, label] of sourceDisplayLabels) {
+      if (collisions.includes(label)) {
+        sourceDisplayLabels.set(sourceId, `${label} · ${sourceId}`);
+      }
+    }
+  }
+
+  const identityLabelCounts = new Map<string, number>();
+  const identities = usageIdentities(report, rows);
+  for (const identity of identities) {
+    const label = identityLabel(identity, unknownModelLabel);
+    identityLabelCounts.set(label, (identityLabelCounts.get(label) ?? 0) + 1);
+  }
+  const sourceQualifiedIdentityCounts = new Map<string, number>();
+  for (const identity of identities) {
+    const label = identityLabel(identity, unknownModelLabel);
+    if (identityLabelCounts.get(label) === 1) continue;
+    const qualifiedLabel = `${label} · ${identity.sourceId}`;
+    sourceQualifiedIdentityCounts.set(qualifiedLabel, (sourceQualifiedIdentityCounts.get(qualifiedLabel) ?? 0) + 1);
+  }
+
+  const identityCollisionLabels = new Set(
+    [...identityLabelCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([label]) => label),
+  );
+  const identityByKey = new Map(identities.map((identity) => [identity.key, identity] as const));
+  const identityCandidates = new Map(
+    identities.map((identity) => {
+      const label = identityLabel(identity, unknownModelLabel);
+      const modelSuffix = (
+        (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1
+      ) ? ` · ${identity.modelId}` : '';
+      const candidate = identityCollisionLabels.has(label)
+        ? `${label} · ${identity.sourceId}${modelSuffix}`
+        : label;
+      return [identity.key, candidate] as const;
+    }),
+  );
+  const identityDisplayLabels = new Map<string, string>();
+  const usedIdentityLabels = new Set<string>();
+  for (const [key, candidate] of identityCandidates) {
+    const identity = identityByKey.get(key)!;
+    let displayLabel = candidate;
+    let suffix = 0;
+    while (usedIdentityLabels.has(displayLabel)) {
+      suffix += 1;
+      const identitySuffix = ` · ${identity.sourceId} · ${identity.modelId}`;
+      displayLabel = `${candidate}${identitySuffix}${suffix > 1 ? ` (${suffix})` : ''}`;
+    }
+    usedIdentityLabels.add(displayLabel);
+    identityDisplayLabels.set(key, displayLabel);
+  }
+  return {
+    sourceCollisionLabels,
+    sourceDisplayLabels,
+    identityCollisionLabels,
+    identityModelCollisionKeys: new Set(
+      identities
+        .filter((identity) => {
+          const label = identityLabel(identity, unknownModelLabel);
+          return identityCollisionLabels.has(label)
+            && (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1;
+        })
+        .map((identity) => identity.key),
+    ),
+    identityDisplayLabels,
+  };
+}
+
+export function sourceIdentityLabel(
+  report: UsageReport,
+  sourceId: string,
+  context: UsageLabelContext,
+): string {
+  const label = sourceLabel(report, sourceId);
+  return context.sourceDisplayLabels.get(sourceId)
+    ?? (context.sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label);
+}
+
+export function identityDisplayLabel(
+  identity: UsageIdentity,
+  unknownModelLabel: string,
+  context?: UsageLabelContext,
+): string {
+  const displayLabel = context?.identityDisplayLabels.get(identity.key);
+  if (displayLabel) return displayLabel;
+  const label = identityLabel(identity, unknownModelLabel);
+  if (!context?.identityCollisionLabels.has(label)) return label;
+  const modelSuffix = context.identityModelCollisionKeys.has(identity.key) ? ` · ${identity.modelId}` : '';
+  return `${label} · ${identity.sourceId}${modelSuffix}`;
+}
+
+export function filterBucketRows(bucket: UsageBucket, filter: UsageFilter): UsageBucketRow[] {
+  return bucket.rows.filter((row) => (
+    (filter.sourceIds.length === 0 || filter.sourceIds.includes(row.source_id))
+    && (filter.modelKeys.length === 0 || filter.modelKeys.includes(pairKey(row.source_id, row.model_id)))
+  ));
+}
+
+export function filteredRows(report: UsageReport, filter: UsageFilter): UsageBucketRow[] {
+  return report.buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
+}
+
+const typeSeries = (
+  rows: UsageBucketRow[],
+  metric: UsageMetric,
+  historyComplete: boolean,
+): Array<[string, number | null]> => {
+  if (!historyComplete && rows.length === 0) {
+    if (metric === 'requests') return [['requests', null]];
+    if (metric === 'output') return [['output', null]];
+    if (metric === 'cache') return [['cache', null]];
+    if (metric === 'input') return [['input', null], ['cache', null]];
+    return [['input', null], ['cache', null], ['output', null]];
+  }
+  const counters = aggregateCounters(rows);
+  if (metric === 'requests') return [['requests', counters.requests]];
+  if (!usageTokensAreKnown(counters)) return metric === 'output'
+    ? [['output', null]]
+    : metric === 'cache'
+      ? [['cache', null]]
+      : metric === 'input'
+        ? [['input', null], ['cache', null]]
+        : [['input', null], ['cache', null], ['output', null]];
+  if (metric === 'output') return [['output', counters.output_tokens]];
+  if (metric === 'cache') return [['cache', counters.cached_input_tokens]];
+  if (metric === 'input') return [['input', usageNonCachedInput(counters)], ['cache', counters.cached_input_tokens]];
+  return [
+    ['input', usageNonCachedInput(counters)],
+    ['cache', counters.cached_input_tokens],
+    ['output', counters.output_tokens],
+  ];
+};
+
+const bucketMetricValue = (
+  bucket: UsageBucket,
+  rows: UsageBucketRow[],
+  metric: UsageMetric,
+): number | null => {
+  if (!bucket.history_complete && rows.length === 0) return null;
+  return usageMetricValue(aggregateCounters(rows), metric);
+};
+
+export function seriesFor(
+  report: UsageReport,
+  filter: UsageFilter,
+  group: UsageGroup,
+  metric: UsageMetric,
+  unknownModelLabel: string,
+): UsageSeries[] {
+  const rows = filteredRows(report, filter);
+  if (group === 'type') {
+    const valuesByKey = new Map<string, Array<number | null>>();
+    for (const bucket of report.buckets) {
+      for (const [key, value] of typeSeries(filterBucketRows(bucket, filter), metric, bucket.history_complete)) {
+        valuesByKey.set(key, [...(valuesByKey.get(key) ?? []), value]);
+      }
+    }
+    const labels: Record<string, string> = {
+      input: 'Input (non-cache)',
+      cache: 'Cache reads',
+      output: 'Output',
+      requests: 'Requests',
+    };
+    return [...valuesByKey.entries()].map(([key, values], index) => ({
+      key,
+      label: labels[key],
+      colorIndex: index,
+      values,
+    }));
+  }
+
+  if (group === 'total') {
+    return [{
+      key: 'total',
+      label: metric,
+      colorIndex: 0,
+      values: report.buckets.map((bucket) => bucketMetricValue(
+        bucket,
+        filterBucketRows(bucket, filter),
+        metric,
+      )),
+    }];
+  }
+
+  if (group === 'source') {
+    const labelContext = usageLabelContext(report, rows, unknownModelLabel);
+    const sourceIds = [...new Set(rows.map((row) => row.source_id))];
+    return sourceIds.map((sourceId, index) => ({
+      key: sourceId,
+      label: sourceIdentityLabel(report, sourceId, labelContext),
+      colorIndex: index,
+      values: report.buckets.map((bucket) => {
+        const rowsForSource = filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId);
+        return bucketMetricValue(bucket, rowsForSource, metric);
+      }),
+    }));
+  }
+
+  const identities = usageIdentities(report, rows);
+  const labelContext = usageLabelContext(report, rows, unknownModelLabel);
+  return identities.map((identity, index) => ({
+    key: identity.key,
+    label: identityDisplayLabel(identity, unknownModelLabel, labelContext),
+    colorIndex: index,
+    values: report.buckets.map((bucket) => {
+      const rowsForIdentity = filterBucketRows(bucket, filter).filter((row) => (
+        row.source_id === identity.sourceId && row.model_id === identity.modelId
+      ));
+      return bucketMetricValue(bucket, rowsForIdentity, metric);
+    }),
+  }));
+}
+
+export function reportHasPartialHistory(report: UsageReport, filter: UsageFilter): boolean {
+  void filter;
+  return report.buckets.some((bucket) => !bucket.history_complete);
+}
+
+export function reportHasUnknownTokens(report: UsageReport, filter: UsageFilter): boolean {
+  return report.buckets.some((bucket) => {
+    const rows = filterBucketRows(bucket, filter);
+    const counters = aggregateCounters(rows);
+    return rows.length > 0 && !usageTokensAreKnown(counters);
+  });
 }

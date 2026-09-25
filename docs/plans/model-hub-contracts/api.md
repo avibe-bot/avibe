@@ -61,7 +61,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
-| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary}` | Bounded metered token report over a trailing local-day window. `days` is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. |
+| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
@@ -80,6 +80,37 @@ The removed product-global route `PUT /api/models/priority` has no replacement. 
 PUT and compatibility chains/reorder share backend-default semantics and effective guards,
 preserving all manual arrays. Exact manual order is saved through the chain resource;
 DELETE restores automatic and POST preview evaluates the draft without a write.
+
+### Usage report windows
+
+`GET /api/models/usage?days=<n>` keeps the released daily-only response shape.
+`days` remains the only selector in that compatibility form; malformed values keep
+the released defaulting behavior.
+
+`GET /api/models/usage?window=<key>` is the modern form. Its `window` is one of
+`24h`, `7d`, `30d`, or `60d`, and it is mutually exclusive with `days`. The response
+rejects invalid or conflicting repeated `window` values with HTTP 400; identical
+valid repeats are equivalent to one selector. The successful response
+keeps the legacy `UsageSummary` fields and adds `window_key`, `granularity`,
+`from_at`, `to_at`, and a dense chronological `buckets` matrix. The 24-hour report
+has 24 actual consecutive hourly buckets, including the current partial hour. The
+daily reports have one bucket per server-local calendar day.
+
+Hourly persistence, queue coalescing, and interval identity use UTC hour boundaries.
+The returned `key`, `start_at`, and `end_at` render those boundaries in the server-local
+offset, so fractional-offset zones may show `:30` or `:45`, and a DST transition may
+change the displayed wall-clock span while each interval remains one actual hour.
+An hourly interval can overlap two local-day storage owners; both contributions
+are joined into the same source/model row. Hourly `days` totals follow the bucket
+start date, while daily reports retain local-calendar accounting. `from_day`,
+`to_day`, and `window_days` cover every local date touched, including the report's
+current date; around a DST transition the 24-hour view can touch three dates.
+
+Each bucket carries `history_complete` independently of `token_reports`. A legacy
+daily-only ledger can therefore contribute to daily reports while leaving affected
+hourly buckets incomplete; its daily count is never assigned to an hour using
+`last_metered_at`. Bucket rows are sparse `(source_id, model_id)` pairs, and the
+`totals`, `sources`, and `days` fields aggregate those same measured bucket rows.
 
 ### Native migration terminal recovery
 
@@ -1407,7 +1438,8 @@ so one model is one row rather than one row per spelling.
 
 Days are local-calendar days on the Avibe host. `from_day` and `to_day` bound the
 requested window even when no turn fell inside it; `days[]` contains only days that
-carry a metered turn. `label` is joined from current Source config, so it is `null`
+carry a metered turn (grouped by bucket start date for hourly reports, as described
+under usage report windows). `label` is joined from current Source config, so it is `null`
 for a Source that has since been removed and follows a rename immediately.
 
 ## Runtime installation and host support

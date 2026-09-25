@@ -1,457 +1,1181 @@
-import type { TranslationKey } from '@/i18n/types';
-// 用量 — the metered-token report over a trailing local-day window
-// (`usage-summary.schema.json`).
-//
-// It is a report and only a report: nothing on this tab feeds resolution,
-// admission, or cooldown, and the span it names is the `window_days` the server
-// answered with rather than the number the user asked for. The two are the same
-// for every option offered here, which is a property `usageProjection.test.ts`
-// enforces rather than a coincidence to rely on.
-//
-// The 額度 half the tab label used to promise is absent on purpose. `cycle_used_pct`
-// has exactly one production writer and it writes `None`, so a quota reading would
-// be an invention; the tab is named for what it can actually show.
-//
-// Drawn against `design.pen MS/ConfigPanel → cp-usage-body`. No frame exists for
-// this tab on the local surface, so the geometry follows the source table's own
-// vocabulary — 12px card radius, 18px gutter, 11px column labels — instead of
-// importing a second panel's spacing into the middle of this one. Two deliberate
-// departures from that frame: the day series is a column chart because the day
-// count is a window parameter and not a fixed five, and the panels stack instead
-// of splitting because the table carries nested rows and a trend reads wide.
 import * as React from 'react';
+import {
+  ArrowDown,
+  ArrowDownToLine,
+  ChevronDown,
+  CircleHelp,
+  Cpu,
+  Filter,
+  LoaderCircle,
+  Network,
+  Pin,
+  PinOff,
+  Search,
+  X,
+  Zap,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio } from '@/components/ui/segmented';
-import { formatCount, formatDayTime, formatPercent } from './format';
+import { cn } from '@/lib/utils';
+import { formatPercent } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import type { UsageByModel, UsageBySource, UsageCounters, UsageSummary } from './types';
+import type { UsageCounters, UsageReport, UsageWindowKey } from './types';
 import {
-  USAGE_WINDOW_OPTIONS,
-  formatLocalDay,
-  modelIdentity,
-  sourceIdentity,
+  aggregateCounters,
+  filterBucketRows,
+  filteredRows,
+  formatBucketAxisLabel,
+  formatBucketLabel,
+  formatBucketRange,
+  identityDisplayLabel,
+  modelLabel,
+  pairKey,
+  reportHasPartialHistory,
+  reportHasUnknownTokens,
+  seriesFor,
+  sourceIdentityLabel,
+  sourceLabel,
+  usageLabelContext,
   usageCachedInputShare,
-  usageDayColumns,
-  usageDayIsMetered,
   usageIsEmpty,
+  usageMetricValue,
+  usageNonCachedInput,
   usageReportShortfall,
   usageTokensAreKnown,
-  usageTokensAreReported,
-  usageTotalTokens,
-  type UsageDayColumn,
+  type UsageFilter,
+  type UsageGroup,
   type UsageIdentity,
-  type UsageWindowOption,
+  type UsageMetric,
+  type UsageSeries,
 } from './usageProjection';
+import { USAGE_WINDOW_OPTIONS } from './usageProjection';
+import { buildUsageCsv } from './usageCsv';
+import './modelHubSurface.css';
 
-/** A number that reads against a vendor's own console: grouped, never compacted. */
+const SERIES_COLORS = [
+  'var(--mint)',
+  'var(--violet)',
+  'var(--cyan)',
+  'var(--gold)',
+  'var(--destructive)',
+  'var(--primary)',
+] as const;
+
+type FilterOption = { key: string; label: string; detail?: string };
+type UsageTranslate = (key: string, options?: Record<string, unknown>) => string;
+
+const metricKeys: UsageMetric[] = ['tokens', 'input', 'output', 'cache', 'requests'];
+const groupKeys: UsageGroup[] = ['total', 'type', 'model', 'source'];
+
+const useUsageTranslation = () => {
+  const translation = useTranslation();
+  return {
+    ...translation,
+    t: translation.t as unknown as UsageTranslate,
+  };
+};
+
 const useCount = () => {
   const { i18n } = useTranslation();
-  return (value: number) => formatCount(value, i18n.language);
+  return React.useCallback((value: number) => new Intl.NumberFormat(i18n.language).format(value), [i18n.language]);
 };
 
-/** Anything a token figure is derived from: a totals bucket, a row, or a day. */
-type TokenCoverage = Pick<UsageCounters, 'requests' | 'token_reports'>;
+const tokenText = (
+  counters: UsageCounters,
+  metric: UsageMetric,
+  count: (value: number) => string,
+  blank: string,
+): string => {
+  const value = usageMetricValue(counters, metric);
+  return value === null ? blank : count(value);
+};
 
-/**
- * The one way this tab turns a token count into text.
- *
- * A rendered `0` cannot say which of three things it means — a cost reported as
- * nothing, a cost nobody reported, or nothing having run at all — and every panel
- * this tab draws states token figures, so wording any single one of them correctly
- * leaves all the others to be found one review round at a time. The figure asks
- * its own bucket first: for calls that no upstream ever costed there is no
- * measurement to print, and the blank marker the cached share and the metering
- * timestamp already use says exactly that.
- *
- * Coverage travels with the value rather than being checked by the caller, so a
- * new token figure cannot be written without naming the counters it came from.
- */
-const useTokenText = () => {
-  const { t } = useTranslation();
+const metricLabel = (metric: UsageMetric, t: UsageTranslate): string =>
+  t(`settings.models.usage.metric.${metric}`);
+
+function MultiFilter({
+  label,
+  icon,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  options: FilterOption[];
+  selected: readonly string[];
+  onChange: (next: string[]) => void;
+}) {
+  const { t } = useUsageTranslation();
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState('');
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  const visibleOptions = options.filter((option) => (
+    option.label.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+      || option.detail?.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+  ));
+  const buttonLabel = selected.length === 0
+    ? t('settings.models.usage.filters.all', { label })
+    : selected.length === 1
+      ? options.find((option) => option.key === selected[0])?.label ?? label
+      : t('settings.models.usage.filters.selected', { label, count: selected.length });
+
+  const toggle = (key: string) => {
+    onChange(selected.includes(key) ? selected.filter((item) => item !== key) : [...selected, key]);
+  };
+
+  return (
+    <div className="model-hub-usage-filter" ref={rootRef}>
+      <Button
+        ref={triggerRef}
+        type="button"
+        variant="outline"
+        size="sm"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className={cn('model-hub-usage-filter-trigger', selected.length > 0 && 'is-filtered')}
+        onClick={() => { setOpen((value) => !value); setQuery(''); }}
+      >
+        {icon}
+        <span className="truncate">{buttonLabel}</span>
+        <ChevronDown aria-hidden className="size-3 shrink-0" />
+      </Button>
+      {open && (
+        <div className="model-hub-usage-filter-menu" role="listbox" aria-label={label} aria-multiselectable="true">
+          <div className="model-hub-usage-filter-search">
+            <Search aria-hidden className="size-3.5 shrink-0" />
+            <input
+              autoFocus
+              value={query}
+              aria-label={t('settings.models.usage.filters.search', { label }) as string}
+              placeholder={t('settings.models.usage.filters.search', { label }) as string}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            role="option"
+            aria-selected={selected.length === 0}
+            className="model-hub-usage-filter-option"
+            onClick={() => onChange([])}
+          >
+            <Checkbox checked={selected.length === 0} presentational />
+            {t('settings.models.usage.filters.all', { label })}
+          </button>
+          <div className="model-hub-usage-filter-divider" />
+          {visibleOptions.map((option) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={selected.includes(option.key)}
+              className="model-hub-usage-filter-option"
+              key={option.key}
+              onClick={() => toggle(option.key)}
+            >
+              <Checkbox checked={selected.includes(option.key)} presentational />
+              <span className="min-w-0 truncate">
+                <span className="block truncate">{option.label}</span>
+                {option.detail && <span className="block truncate text-[10px] text-muted">{option.detail}</span>}
+              </span>
+            </button>
+          ))}
+          {visibleOptions.length === 0 && <p className="model-hub-usage-filter-empty">{t('settings.models.usage.filters.noMatch')}</p>}
+          <p className="model-hub-usage-filter-foot">{t('settings.models.usage.filters.hint')}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ChartLegend: React.FC<{
+  series: UsageSeries[];
+  hidden: readonly string[];
+  onToggle: (key: string) => void;
+  labels: Map<string, string>;
+  count: (value: number) => string;
+  blank: string;
+  ariaLabel: string;
+}> = ({ series, hidden, onToggle, labels, count, blank, ariaLabel }) => (
+  <div className="model-hub-usage-legend" aria-label={ariaLabel}>
+    {series.map((item) => {
+      const values = item.values.filter((value): value is number => value !== null);
+      const total = values.reduce((sum, value) => sum + value, 0);
+      const isHidden = hidden.includes(item.key);
+      return (
+        <button
+          type="button"
+          key={item.key}
+          aria-pressed={!isHidden}
+          className={cn('model-hub-usage-legend-item', isHidden && 'is-hidden')}
+          onClick={() => onToggle(item.key)}
+        >
+          <span className="model-hub-usage-legend-swatch" style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />
+          <span>{labels.get(item.key) ?? item.label}</span>
+          <strong>{values.length === 0 ? blank : count(total)}</strong>
+        </button>
+      );
+    })}
+  </div>
+);
+
+function UsageChart({
+  report,
+  filter,
+  metric,
+  group,
+  pinnedKey,
+  scopeKey,
+  onPin,
+}: {
+  report: UsageReport;
+  filter: UsageFilter;
+  metric: UsageMetric;
+  group: UsageGroup;
+  pinnedKey: string | null;
+  scopeKey: string;
+  onPin: (key: string | null) => void;
+}) {
+  const { t, i18n } = useUsageTranslation();
   const count = useCount();
-  return (counters: TokenCoverage, value: number) =>
-    usageTokensAreKnown(counters) ? count(value) : (t('settings.models.usage.blank') as string);
-};
+  const [hovered, setHovered] = React.useState<number | null>(null);
+  const [inspected, setInspected] = React.useState<number | null>(null);
+  const [dismissed, setDismissed] = React.useState(false);
+  const [hidden, setHidden] = React.useState<string[]>([]);
+  const [width, setWidth] = React.useState(920);
+  const [keyboardActivation, setKeyboardActivation] = React.useState(0);
+  const hostRef = React.useRef<HTMLDivElement>(null);
+  const pinButtonRef = React.useRef<HTMLButtonElement>(null);
+  const bucketButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
+  const invokingBucketKeyRef = React.useRef<string | null>(null);
+  const suppressNextBucketFocusRef = React.useRef(false);
+  const focusPinAfterOpenRef = React.useRef(false);
+  const previousUsageInputRef = React.useRef({ report, scopeKey, group, metric });
+  const hoverClearTimer = React.useRef<number | null>(null);
+  const pendingHoverTimer = React.useRef<number | null>(null);
+  const [escapeDismissed, setEscapeDismissed] = React.useState(false);
+  const pinnedIndex = pinnedKey === null ? -1 : report.buckets.findIndex((bucket) => bucket.key === pinnedKey);
+  const requestedIndex = dismissed || escapeDismissed
+    ? null
+    : pinnedIndex >= 0 ? pinnedIndex : inspected ?? hovered;
+  const activeIndex = requestedIndex !== null
+    && requestedIndex >= 0
+    && requestedIndex < report.buckets.length
+    ? requestedIndex
+    : null;
+  const bars = report.window_key === '30d' || report.window_key === '60d';
+  const unknownModelLabel = t('settings.models.usage.unknownModel');
+  const series = React.useMemo(() => seriesFor(report, filter, group, metric, unknownModelLabel), [filter, group, metric, unknownModelLabel, report]);
+  const labels = React.useMemo(() => new Map(series.map((item) => [
+    item.key,
+    item.key === 'total'
+      ? metricLabel(metric, t)
+      : item.key === 'input'
+        ? t('settings.models.usage.series.input')
+        : item.key === 'cache'
+          ? t('settings.models.usage.series.cache')
+          : item.key === 'output'
+            ? t('settings.models.usage.series.output')
+            : item.key === 'requests'
+              ? t('settings.models.usage.series.requests')
+              : item.label,
+  ])), [metric, series, t]);
+  const visibleSeries = series.filter((item) => !hidden.includes(item.key));
+  const narrow = width < 560;
+  const height = narrow ? 236 : 292;
+  const left = narrow ? 40 : 54;
+  const right = 16;
+  const top = 18;
+  const bottom = 38;
+  const plotWidth = Math.max(1, width - left - right);
+  const plotHeight = Math.max(1, height - top - bottom);
+  const lineHitWidth = Math.min(28, Math.max(8, plotWidth / Math.max(1, report.buckets.length - 1) * 0.82));
+  const values = report.buckets.map((_, index) => bars
+    ? visibleSeries.reduce((sum, item) => sum + (item.values[index] ?? 0), 0)
+    : Math.max(0, ...visibleSeries.map((item) => item.values[index] ?? 0)));
+  const rawMax = Math.max(1, ...values);
+  const scale = 10 ** Math.floor(Math.log10(rawMax));
+  const max = Math.ceil(rawMax / scale / 0.5) * scale * 0.5;
+  const x = (index: number) => left + (bars
+    ? (index + 0.5) / report.buckets.length
+    : index / Math.max(1, report.buckets.length - 1)) * plotWidth;
+  const y = (value: number) => top + plotHeight * (1 - value / max);
+  const bucket = activeIndex === null || activeIndex < 0 ? null : report.buckets[activeIndex];
+  const bucketRows = bucket === null ? [] : filterBucketRows(bucket, filter);
+  const bucketTotals = aggregateCounters(bucketRows);
+  const activeValue = bucket && !bucket.history_complete && bucketRows.length === 0
+    ? null
+    : usageMetricValue(bucketTotals, metric);
+  const currentPartialHour = bucket !== null
+    && report.window_key === '24h'
+    && activeIndex === report.buckets.length - 1
+    && Date.parse(bucket.end_at) - Date.parse(bucket.start_at) < 60 * 60 * 1000;
+  const tickIndexes = report.buckets.length <= 7
+    ? report.buckets.map((_, index) => index)
+    : [...new Set([0, Math.floor((report.buckets.length - 1) / 2), report.buckets.length - 1])];
 
-/**
- * A token figure standing on its own, as a cell or a card value.
- *
- * `data-usage-token` is not styling: it is what lets a test enumerate every token
- * figure on screen and assert they all went through the door, which is a claim
- * about completeness that a per-site test cannot make. A figure interpolated into
- * a translated sentence has no element of its own and uses `useTokenText`
- * directly; its sentence is then the asserted unit.
- */
-const TokenFigure: React.FC<{ counters: TokenCoverage; value: number }> = ({ counters, value }) => {
-  const tokenText = useTokenText();
-  return <span data-usage-token="">{tokenText(counters, value)}</span>;
-};
+  const cancelPendingHover = () => {
+    if (pendingHoverTimer.current !== null) {
+      window.clearTimeout(pendingHoverTimer.current);
+      pendingHoverTimer.current = null;
+    }
+  };
+  const cancelHoverClear = () => {
+    if (hoverClearTimer.current !== null) {
+      window.clearTimeout(hoverClearTimer.current);
+      hoverClearTimer.current = null;
+    }
+  };
+  const handleEscape = React.useCallback(() => {
+    if (pendingHoverTimer.current !== null) {
+      window.clearTimeout(pendingHoverTimer.current);
+      pendingHoverTimer.current = null;
+    }
+    if (hoverClearTimer.current !== null) {
+      window.clearTimeout(hoverClearTimer.current);
+      hoverClearTimer.current = null;
+    }
+    const invokingButton = invokingBucketKeyRef.current === null
+      ? null
+      : bucketButtonRefs.current.get(invokingBucketKeyRef.current) ?? null;
+    if (pinnedKey !== null) {
+      onPin(null);
+    }
+    setEscapeDismissed(true);
+    setHovered(null);
+    setInspected(null);
+    setDismissed(true);
+    focusPinAfterOpenRef.current = false;
+    invokingBucketKeyRef.current = null;
+    if (activeIndex !== null && invokingButton !== null
+      && hostRef.current?.contains(document.activeElement)) {
+      suppressNextBucketFocusRef.current = true;
+      invokingButton.focus();
+    }
+  }, [activeIndex, onPin, pinnedKey]);
 
-/**
- * A row's own name, or the honest absence of one.
- *
- * A Source that has left the inventory keeps its canonical id, so the reader can
- * still tell which line of the report is which. A model has no displayable
- * identity at all once its label is gone — its ledger key is a digest — so the
- * row says so in words instead of printing the key.
- */
-const RowIdentity: React.FC<{ identity: UsageIdentity; goneKey: TranslationKey }> = ({ identity, goneKey }) => {
-  const { t } = useTranslation();
-  if (identity.kind === 'label') return <span className="truncate" title={identity.text}>{identity.text}</span>;
+  React.useEffect(() => {
+    const previousInput = previousUsageInputRef.current;
+    const inputChanged = previousInput.report !== report
+      || previousInput.scopeKey !== scopeKey
+      || previousInput.group !== group
+      || previousInput.metric !== metric;
+    if (!inputChanged) return;
+    const scopeChanged = previousInput.scopeKey !== scopeKey;
+    previousUsageInputRef.current = { report, scopeKey, group, metric };
+    const invokingKey = invokingBucketKeyRef.current;
+    const invokingDetailSurvives = !scopeChanged
+      && pinnedKey !== null
+      && invokingKey !== null
+      && report.buckets.some((currentBucket) => currentBucket.key === invokingKey);
+    setHovered(null);
+    setInspected(null);
+    setDismissed(false);
+    setEscapeDismissed(false);
+    setHidden([]);
+    if (!invokingDetailSurvives) invokingBucketKeyRef.current = null;
+    suppressNextBucketFocusRef.current = false;
+    focusPinAfterOpenRef.current = false;
+  }, [group, metric, pinnedKey, report, scopeKey]);
+
+  React.useEffect(() => {
+    if (!focusPinAfterOpenRef.current || activeIndex === null) return;
+    focusPinAfterOpenRef.current = false;
+    pinButtonRef.current?.focus();
+  }, [activeIndex, keyboardActivation]);
+
+  React.useEffect(() => {
+    if (!hostRef.current || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver((entries) => {
+      setWidth(Math.max(280, entries[0]?.contentRect.width ?? 920));
+    });
+    observer.observe(hostRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  React.useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (pinnedKey !== null || hostRef.current?.contains(event.target as Node)) return;
+      setHovered(null);
+      setInspected(null);
+      setDismissed(true);
+      invokingBucketKeyRef.current = null;
+      focusPinAfterOpenRef.current = false;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      handleEscape();
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [handleEscape, pinnedKey]);
+
+  React.useEffect(() => () => {
+    if (hoverClearTimer.current !== null) window.clearTimeout(hoverClearTimer.current);
+    if (pendingHoverTimer.current !== null) window.clearTimeout(pendingHoverTimer.current);
+  }, []);
+
+  const scheduleHoverClear = () => {
+    if (pinnedKey !== null || inspected !== null) return;
+    cancelPendingHover();
+    cancelHoverClear();
+    hoverClearTimer.current = window.setTimeout(() => {
+      hoverClearTimer.current = null;
+      setHovered(null);
+    }, 100);
+  };
+
+  const setHover = (index: number, reopenAfterEscape = false) => {
+    if ((escapeDismissed && !reopenAfterEscape) || pinnedKey !== null || inspected !== null) return;
+    cancelPendingHover();
+    cancelHoverClear();
+    const next = Math.max(0, Math.min(report.buckets.length - 1, index));
+    if (reopenAfterEscape) setEscapeDismissed(false);
+    setDismissed(false);
+    if (hovered === null || hovered === next) {
+      setHovered(next);
+      return;
+    }
+    pendingHoverTimer.current = window.setTimeout(() => {
+      pendingHoverTimer.current = null;
+      if (escapeDismissed && !reopenAfterEscape) return;
+      setHovered(next);
+    }, 100);
+  };
+  const openDetail = (index: number) => {
+    if (pinnedKey !== null) return;
+    invokingBucketKeyRef.current = null;
+    focusPinAfterOpenRef.current = false;
+    setEscapeDismissed(false);
+    setDismissed(false);
+    setInspected(index);
+    setHovered(null);
+  };
+  const openKeyboardDetail = (index: number) => {
+    if (pinnedKey !== null) return;
+    invokingBucketKeyRef.current = report.buckets[index]?.key ?? null;
+    focusPinAfterOpenRef.current = true;
+    setKeyboardActivation((value) => value + 1);
+    setEscapeDismissed(false);
+    setDismissed(false);
+    setInspected(index);
+    setHovered(null);
+  };
+  const handleBucketFocus = (index: number) => {
+    if (suppressNextBucketFocusRef.current) {
+      suppressNextBucketFocusRef.current = false;
+      return;
+    }
+    setHover(index, true);
+  };
+  const toggleHidden = (key: string) => {
+    setHidden((current) => {
+      if (current.includes(key)) return current.filter((item) => item !== key);
+      if (current.length >= series.length - 1) return current;
+      return [...current, key];
+    });
+  };
+  const svgIndexFromPointer = (event: React.PointerEvent<SVGSVGElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = ((event.clientX - bounds.left) / bounds.width) * width;
+    const index = bars
+      ? Math.floor((position - left) / plotWidth * report.buckets.length)
+      : Math.round((position - left) / plotWidth * (report.buckets.length - 1));
+    return Math.max(0, Math.min(report.buckets.length - 1, index));
+  };
+  const pinLabel = pinnedKey !== null
+    ? t('settings.models.usage.chart.unpin')
+    : t('settings.models.usage.chart.pin');
+
   return (
-    <span className="flex min-w-0 items-baseline gap-1.5">
-      {identity.id !== null && <span className="truncate font-mono" title={identity.id}>{identity.id}</span>}
-      <span className="model-hub-usage-gone shrink-0">{t(goneKey)}</span>
-    </span>
+    <div className="model-hub-usage-chart-content">
+      <ChartLegend
+        series={series}
+        hidden={hidden}
+        onToggle={toggleHidden}
+        labels={labels}
+        count={count}
+        blank={t('settings.models.usage.blank') as string}
+        ariaLabel={t('settings.models.usage.chart.legend') as string}
+      />
+      <div className="model-hub-usage-chart-wrap" ref={hostRef}>
+        <svg
+          className="model-hub-usage-svg"
+          viewBox={`0 0 ${width} ${height}`}
+          aria-hidden="true"
+          onPointerMove={(event) => {
+            if (event.pointerType !== 'touch') setHover(svgIndexFromPointer(event), true);
+          }}
+          onPointerLeave={scheduleHoverClear}
+        >
+          <defs>
+            <pattern id="usage-unknown-pattern" width="6" height="6" patternUnits="userSpaceOnUse">
+              <path d="M-1,1 l2,-2 M0,6 L6,0 M5,7 l2,-2" stroke="var(--model-hub-usage-unknown)" strokeWidth="1" />
+            </pattern>
+          </defs>
+          {[0, 1, 2, 3, 4].map((step) => (
+            <g key={step}>
+              <line x1={left} x2={width - right} y1={y(max * step / 4)} y2={y(max * step / 4)} className="model-hub-usage-grid" strokeDasharray={step === 0 ? undefined : '3 5'} />
+              <text x={left - 10} y={y(max * step / 4) + 4} textAnchor="end" className="model-hub-usage-tick">{count(max * step / 4)}</text>
+            </g>
+          ))}
+          {activeIndex !== null && activeIndex >= 0 && (
+            <rect
+              x={x(activeIndex) - (bars ? plotWidth / report.buckets.length / 2 : 18)}
+              y={top}
+              width={bars ? plotWidth / report.buckets.length : 36}
+              height={plotHeight}
+              className="model-hub-usage-highlight"
+              rx="4"
+            />
+          )}
+          {bars
+            ? report.buckets.map((currentBucket, index) => {
+              let offset = 0;
+              return (
+                <g key={currentBucket.key}>
+                  {visibleSeries.map((item) => {
+                    const value = item.values[index];
+                    const start = offset;
+                    offset += value ?? 0;
+                    return (
+                      <rect
+                        key={item.key}
+                        x={x(index) - plotWidth / report.buckets.length * 0.32}
+                        y={y(offset)}
+                        width={plotWidth / report.buckets.length * 0.64}
+                        height={value === null ? 4 : Math.max(0, y(start) - y(offset))}
+                        fill={value === null ? 'url(#usage-unknown-pattern)' : SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]}
+                        opacity={activeIndex !== null && activeIndex !== index ? 0.48 : 0.88}
+                        rx="2"
+                      />
+                    );
+                  })}
+                </g>
+              );
+            })
+            : visibleSeries.map((item) => {
+              const path = item.values.reduce<string[]>((segments, value, index) => {
+                if (value === null) return segments;
+                const previous = item.values[index - 1];
+                const command = previous === null || previous === undefined ? 'M' : 'L';
+                segments.push(`${command}${x(index)},${y(value)}`);
+                return segments;
+              }, []).join(' ');
+              return (
+                <g key={item.key}>
+                  <path d={path} fill="none" stroke={SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  {item.values.map((value, index) => value === null
+                    ? <circle key={index} cx={x(index)} cy={y(0)} r="3" className="model-hub-usage-unknown-point" />
+                    : <circle key={index} cx={x(index)} cy={y(value)} r={activeIndex === index ? 4.5 : 2.5} fill={SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]} stroke="var(--background)" strokeWidth="1.5" />)}
+                </g>
+              );
+            })}
+          {activeIndex !== null && activeIndex >= 0 && (
+            <line x1={x(activeIndex)} x2={x(activeIndex)} y1={top} y2={top + plotHeight} className="model-hub-usage-crosshair" />
+          )}
+          {report.buckets.map((currentBucket, index) => (
+            <rect
+              key={`hit-${currentBucket.key}`}
+              className="model-hub-usage-hit-area"
+              x={bars ? x(index) - plotWidth / report.buckets.length / 2 : x(index) - lineHitWidth / 2}
+              y={top}
+              width={bars ? plotWidth / report.buckets.length : lineHitWidth}
+              height={plotHeight}
+              onPointerEnter={() => {
+                // Removing a dismissed tooltip can expose a stationary pointer.
+                // Only a real move, focus, or activation should reopen it.
+                setHover(index);
+              }}
+              onClick={() => openDetail(index)}
+            />
+          ))}
+          {tickIndexes.map((index) => (
+            <text
+              key={`tick-${report.buckets[index].key}`}
+              x={x(index)}
+              y={height - 12}
+              textAnchor={index === 0 ? 'start' : index === report.buckets.length - 1 ? 'end' : 'middle'}
+              className="model-hub-usage-tick"
+            >
+              {formatBucketAxisLabel(report.buckets[index], i18n.language)}
+            </text>
+          ))}
+        </svg>
+        <div
+          className="sr-only"
+          role="group"
+          aria-label={t('settings.models.usage.chart.detail') as string}
+        >
+          {report.buckets.map((currentBucket, index) => (
+            <button
+              type="button"
+              key={`accessible-${currentBucket.key}`}
+              ref={(element) => {
+                if (element) bucketButtonRefs.current.set(currentBucket.key, element);
+                else bucketButtonRefs.current.delete(currentBucket.key);
+              }}
+              aria-label={t('settings.models.usage.chart.bucket', {
+                bucket: formatBucketRange(currentBucket, i18n.language, true),
+              }) as string}
+              onPointerEnter={() => {
+                setHover(index);
+              }}
+              onFocus={() => handleBucketFocus(index)}
+              onClick={() => openKeyboardDetail(index)}
+            >
+              {formatBucketRange(currentBucket, i18n.language, true)}
+            </button>
+          ))}
+        </div>
+        {bucket && (
+          <div
+            className={cn('model-hub-usage-tooltip', pinnedKey !== null && 'is-pinned')}
+            role="dialog"
+            aria-label={t('settings.models.usage.chart.detail') as string}
+            data-pinned={pinnedKey !== null ? 'true' : 'false'}
+            onPointerEnter={() => {
+              cancelPendingHover();
+              cancelHoverClear();
+            }}
+            onPointerLeave={scheduleHoverClear}
+            onKeyDownCapture={(event) => {
+              if (event.key !== 'Escape') return;
+              event.stopPropagation();
+              handleEscape();
+            }}
+          >
+            <div className="model-hub-usage-tooltip-head">
+              <span>{formatBucketRange(bucket, i18n.language, true)}</span>
+              <div className="model-hub-usage-tooltip-actions">
+                {pinnedKey !== null && <span>{t('settings.models.usage.chart.pinned')}</span>}
+                <button
+                  type="button"
+                  ref={pinButtonRef}
+                  className="model-hub-usage-pin"
+                  aria-label={pinLabel as string}
+                  aria-pressed={pinnedKey !== null}
+                  title={pinLabel as string}
+                  onClick={() => onPin(pinnedKey !== null ? null : bucket.key)}
+                >
+                  {pinnedKey !== null ? <PinOff aria-hidden className="size-3.5" /> : <Pin aria-hidden className="size-3.5" />}
+                </button>
+              </div>
+            </div>
+            <div className="model-hub-usage-tooltip-total">
+              <strong>{activeValue === null ? t('settings.models.usage.blank') : count(activeValue)}</strong>
+              <span>{metricLabel(metric, t)}</span>
+            </div>
+            <div className="model-hub-usage-tooltip-lines">
+              {visibleSeries.map((item) => (
+                <div key={item.key}>
+                  <span><i style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />{labels.get(item.key) ?? item.label}</span>
+                  <b>{item.values[activeIndex as number] === null ? t('settings.models.usage.blank') : count(item.values[activeIndex as number] ?? 0)}</b>
+                </div>
+              ))}
+            </div>
+            <div className="model-hub-usage-tooltip-foot">
+              <span>
+                {bucket.history_complete || bucketRows.length > 0 ? count(bucketTotals.requests) : t('settings.models.usage.blank')}
+                {' '}
+                {t('settings.models.usage.requests.unit')}
+              </span>
+              {currentPartialHour && <span>{t('settings.models.usage.chart.currentPartial')}</span>}
+              <span>{bucket.history_complete ? t('settings.models.usage.chart.complete') : t('settings.models.usage.chart.partial')}</span>
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="model-hub-usage-chart-foot">
+        <span>{t('settings.models.usage.chart.points', { count: report.buckets.length, granularity: t(`settings.models.usage.granularity.${report.granularity}`) })}</span>
+        <span>{hidden.length > 0 ? t('settings.models.usage.chart.legendOnly') : t('settings.models.usage.chart.interaction')}</span>
+      </div>
+    </div>
   );
+}
+
+type TableRow = {
+  key: string;
+  label: string;
+  detail: string;
+  counters: UsageCounters;
 };
 
-/**
- * The by-source table's columns, in the order the rows state them.
- *
- * One list, read by the header row and by every cell's own label, so the two
- * cannot come to name a column differently.
- */
-const SOURCE_COLUMNS = ['source', 'tokens', 'requests', 'cached', 'lastMetered'] as const;
+function tableRows(
+  report: UsageReport,
+  filter: UsageFilter,
+  group: 'model' | 'source',
+  pinnedKey: string | null,
+  unknownModelLabel: string,
+): TableRow[] {
+  const buckets = pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey);
+  const rows = buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
+  const grouped = new Map<string, TableRow>();
+  const labelContext = usageLabelContext(report, filteredRows(report, filter), unknownModelLabel);
+  for (const row of rows) {
+    const key = group === 'source' ? row.source_id : pairKey(row.source_id, row.model_id);
+    const identity = group === 'source'
+      ? null
+      : {
+        key,
+        sourceId: row.source_id,
+        modelId: row.model_id,
+        sourceLabel: sourceLabel(report, row.source_id),
+        modelLabel: modelLabel(report, row.source_id, row.model_id),
+      } satisfies UsageIdentity;
+    const previous = grouped.get(key);
+    grouped.set(key, {
+      key,
+      label: group === 'source'
+        ? sourceIdentityLabel(report, row.source_id, labelContext)
+        : identityDisplayLabel(identity!, unknownModelLabel, labelContext),
+      detail: group === 'source' ? '' : sourceIdentityLabel(report, row.source_id, labelContext),
+      counters: aggregateCounters([...(previous ? [previous.counters] : []), row]),
+    });
+  }
+  return [...grouped.values()];
+}
 
-type SourceColumn = (typeof SOURCE_COLUMNS)[number];
-
-const columnLabel = (column: SourceColumn): TranslationKey => `settings.models.usage.bySource.col.${column}`;
-
-/**
- * One measured cell, told which column it answers.
- *
- * A cell's column is the position it holds in its row, which is what makes the
- * header row above it an answer and not decoration — so no row may end early: the
- * model row holds its empty column open below rather than shifting the cells after
- * it. The label repeats the header on the cell itself because the header is the
- * first thing that goes when the surface narrows, and a stacked cell has to remain
- * a labelled number rather than an unattributed one. Between them the two cover
- * both widths, so a per-cell `aria-colindex` would restate what position already
- * says; the index earns its keep only for a row that skips a column in the middle,
- * and holding the place with an empty cell is the simpler way to not have one.
- */
-const Cell: React.FC<{ column: SourceColumn; children: React.ReactNode }> = ({ column, children }) => {
-  const { t } = useTranslation();
-  return (
-    <span role="cell" className="model-hub-usage-cell flex items-baseline justify-between gap-2 md:justify-end">
-      <span className="model-hub-usage-cell-label md:hidden">{t(columnLabel(column))}</span>
-      <span className="min-w-0 truncate">{children}</span>
-    </span>
-  );
-};
-
-const StatCard: React.FC<{ label: string; value: React.ReactNode; note: string }> = ({ label, value, note }) => (
-  <div className="model-hub-usage-stat flex flex-col rounded-xl border border-border bg-background">
+const StatCard: React.FC<{ label: string; value: React.ReactNode; note: React.ReactNode }> = ({ label, value, note }) => (
+  <div className="model-hub-usage-stat-card">
     <span className="model-hub-usage-stat-label">{label}</span>
-    <span className="model-hub-usage-stat-value font-semibold text-foreground">{value}</span>
+    <strong className="model-hub-usage-stat-value">{value}</strong>
     <span className="model-hub-usage-stat-note">{note}</span>
   </div>
 );
 
-const StatGrid: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
-  const { t, i18n } = useTranslation();
-  const count = useCount();
-  const totals = summary.totals;
-  const shortfall = usageReportShortfall(totals);
-  const cachedShare = usageCachedInputShare(totals);
-  return (
-    <div className="grid gap-4 sm:grid-cols-3">
-      <StatCard
-        label={t('settings.models.usage.tokens.label') as string}
-        value={<TokenFigure counters={totals} value={usageTotalTokens(totals)} />}
-        // The input/output split is a reading of the same unreported total, so it
-        // cannot survive on its own once the total is blank: it says what nobody
-        // reported instead.
-        note={(usageTokensAreKnown(totals)
-          ? t('settings.models.usage.tokens.detail', { input: count(totals.input_tokens), output: count(totals.output_tokens) })
-          : t('settings.models.usage.tokens.none')) as string}
-      />
-      <StatCard
-        label={t('settings.models.usage.requests.label') as string}
-        value={count(totals.requests)}
-        // A shortfall means reports that never arrived, never capacity left
-        // unused, and the copy has to say which of the two it is.
-        note={(shortfall > 0
-          ? t('settings.models.usage.requests.shortfall', { count: shortfall })
-          : t('settings.models.usage.requests.reported')) as string}
-      />
-      <StatCard
-        label={t('settings.models.usage.cached.label') as string}
-        value={cachedShare === null ? (t('settings.models.usage.blank') as string) : formatPercent(cachedShare, i18n.language)}
-        // 「No input tokens in this window」 is the same defect one card over: with
-        // nothing reported there were no input tokens WE KNOW OF, and an absence of
-        // reports is not an absence of usage. Coverage is asked before the share, so
-        // the card states the missing reports rather than an empty input.
-        note={(!usageTokensAreKnown(totals)
-          ? t('settings.models.usage.tokens.none')
-          : cachedShare === null
-            ? t('settings.models.usage.cached.none')
-            : t('settings.models.usage.cached.detail', { cached: count(totals.cached_input_tokens), input: count(totals.input_tokens) })) as string}
-      />
-    </div>
-  );
-};
-
-const ModelRow: React.FC<{ model: UsageByModel }> = ({ model }) => {
-  const { t, i18n } = useTranslation();
-  const count = useCount();
-  const share = usageCachedInputShare(model);
-  return (
-    <div role="row" className="model-hub-usage-row model-hub-usage-row--model grid border-t border-border md:items-center">
-      <span role="rowheader" className="model-hub-usage-model flex min-w-0 items-baseline">
-        <RowIdentity identity={modelIdentity(model)} goneKey="settings.models.usage.bySource.goneModel" />
-      </span>
-      <Cell column="tokens"><TokenFigure counters={model} value={usageTotalTokens(model)} /></Cell>
-      <Cell column="requests">{count(model.requests)}</Cell>
-      <Cell column="cached">
-        {share === null ? (t('settings.models.usage.blank') as string) : formatPercent(share, i18n.language)}
-      </Cell>
-      {/* A model has no metering timestamp of its own; the column stays empty
-          rather than repeating the Source's, and holds its place so every cell
-          before it still sits under the header it answers. */}
-      <span role="cell" className="hidden md:block" />
-    </div>
-  );
-};
-
-const SourceRows: React.FC<{ source: UsageBySource }> = ({ source }) => {
-  const { t, i18n } = useTranslation();
-  const count = useCount();
-  const share = usageCachedInputShare(source);
-  return (
-    // A Source and the models under it are one group of rows, which is also what
-    // the border draws: the group is the unit a reader scans, not each line.
-    <div role="rowgroup" className="border-b border-border last:border-b-0">
-      <div role="row" className="model-hub-usage-row grid md:items-center">
-        <span role="rowheader" className="model-hub-usage-source flex min-w-0 items-baseline font-semibold text-foreground">
-          <RowIdentity identity={sourceIdentity(source)} goneKey="settings.models.usage.bySource.goneSource" />
-        </span>
-        <Cell column="tokens"><TokenFigure counters={source} value={usageTotalTokens(source)} /></Cell>
-        <Cell column="requests">{count(source.requests)}</Cell>
-        <Cell column="cached">
-          {share === null ? (t('settings.models.usage.blank') as string) : formatPercent(share, i18n.language)}
-        </Cell>
-        <Cell column="lastMetered">
-          {source.last_metered_at === null ? (t('settings.models.usage.blank') as string) : formatDayTime(source.last_metered_at, i18n.language)}
-        </Cell>
-      </div>
-      {source.models.map((model) => <ModelRow key={model.model_id} model={model} />)}
-    </div>
-  );
-};
-
-const BySourcePanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
-  const { t } = useTranslation();
-  const titleId = React.useId();
-  return (
-    <section className="model-hub-usage-card overflow-hidden rounded-xl border border-border bg-background">
-      <h3 id={titleId} className="model-hub-usage-card-head model-hub-usage-section-title border-b border-border font-semibold text-foreground">
-        {t('settings.models.usage.bySource.title')}
-      </h3>
-      {/* A table by role rather than by tag. The layout is a CSS grid that stacks
-          into labelled lines on a narrow surface, which a `<table>` can only do
-          through a `display` override — and overriding `display` is exactly what
-          strips a table of the semantics it was chosen for. Explicit roles keep
-          the grid and the structure at every width. */}
-      <div role="table" aria-labelledby={titleId}>
-        <div role="row" className="model-hub-usage-head hidden border-b border-border font-semibold md:grid">
-          {SOURCE_COLUMNS.map((column, index) => (
-            <span key={column} role="columnheader" className={index === 0 ? 'truncate' : 'flex justify-end truncate'}>
-              {t(columnLabel(column))}
-            </span>
-          ))}
-        </div>
-        {summary.sources.map((source) => <SourceRows key={source.source_id} source={source} />)}
-      </div>
-    </section>
-  );
-};
-
-/**
- * The trend, over every day of the window rather than every day reported.
- *
- * `usageDayColumns` is what densifies it; the track behind each column is what
- * makes the zero-fill legible. A bar of zero height in an empty row is
- * indistinguishable from a missing bar, and the difference — an idle day versus a
- * day the report does not cover — is the whole reason the series is drawn.
- *
- * Which day ran is `usageDayIsMetered`'s answer and never a token total: an
- * upstream can serve a call and report nothing about it, so a window of those has
- * bars to draw and a peak it cannot name. Whether a day's cost is known at all is
- * `usageTokensAreReported`'s separate answer — asked of the very same zero.
- */
-const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
-  const { t, i18n } = useTranslation();
-  const count = useCount();
-  const tokenText = useTokenText();
-  const columns = React.useMemo(() => usageDayColumns(summary), [summary]);
-  // Only a day whose tokens were reported can be the busiest one. A day with no
-  // report has no measured cost to compare, so naming it the peak would put a
-  // superlative on a number the report never carried.
-  const peak = columns.reduce<UsageDayColumn | null>(
-    (best, column) => (usageTokensAreReported(column) && column.tokens > (best?.tokens ?? 0) ? column : best),
-    null,
-  );
-  const metered = columns.some(usageDayIsMetered);
-  const reported = columns.some(usageTokensAreReported);
-  const day = (value: string) => formatLocalDay(value, i18n.language);
-  // One day's figures as a hover readout. The table below states the same three
-  // values in cells, and MH-USAGE-023 derives its expectation from this sentence
-  // so the two readings of a day cannot answer differently.
-  const readout = (column: UsageDayColumn) =>
-    t('settings.models.usage.byDay.column', {
-      day: day(column.day),
-      tokens: tokenText(column, column.tokens),
-      requests: count(column.requests),
-    }) as string;
-  return (
-    <section className="model-hub-usage-card overflow-hidden rounded-xl border border-border bg-background">
-      <h3 className="model-hub-usage-card-head model-hub-usage-section-title border-b border-border font-semibold text-foreground">
-        {t('settings.models.usage.byDay.title')}
-      </h3>
-      <div className="model-hub-usage-plot flex flex-col">
-        <div
-          role="img"
-          aria-label={t('settings.models.usage.byDay.chart', { from: day(summary.from_day), to: day(summary.to_day) }) as string}
-          className="model-hub-usage-chart flex items-end"
-        >
-          {columns.map((column) => (
-            <div
-              key={column.day}
-              className="model-hub-usage-track flex flex-1 items-end"
-              title={readout(column)}
-            >
-              {/* A metered day is floored to a visible sliver so the quietest one
-                  still reads as activity — including one whose tokens never came
-                  back, which is why the floor asks about calls and not about
-                  tokens. Only a day that carried nothing keeps zero height and
-                  shows the track alone. */}
-              <div className="model-hub-usage-column w-full" style={{ height: usageDayIsMetered(column) ? `max(2px, ${column.ratio * 100}%)` : 0 }} />
-            </div>
-          ))}
-        </div>
-        {/* Every day's figures again, as a table. A pointer tooltip is the one
-            readout a keyboard or screen-reader user cannot open, and `role="img"`
-            above hides the columns from assistive tech by design — so the series
-            needs a second reading, in cells rather than one sentence per day,
-            which is the same per-column association the Source table carries.
-            Sibling of the image, never a child: inside it, it would be hidden
-            along with everything else. */}
-        {/* Apply the visually-hidden box to a generic wrapper. A table keeps its
-            intrinsic column width even when the table itself is only one pixel
-            wide; containing that layout inside the clipped wrapper keeps its
-            semantics without letting it widen the document. */}
-        <div className="model-hub-usage-a11y-table sr-only">
-          <table>
-            <caption>{t('settings.models.usage.byDay.table', { from: day(summary.from_day), to: day(summary.to_day) })}</caption>
-            <thead>
-              <tr>
-                <th scope="col">{t('settings.models.usage.byDay.col.day')}</th>
-                <th scope="col">{t('settings.models.usage.tokens.label')}</th>
-                <th scope="col">{t('settings.models.usage.requests.label')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {columns.map((column) => (
-                <tr key={column.day}>
-                  <th scope="row">{day(column.day)}</th>
-                  <td><TokenFigure counters={column} value={column.tokens} /></td>
-                  <td>{count(column.requests)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="model-hub-usage-axis">
-          <span className="model-hub-usage-axis-label">{day(summary.from_day)}</span>
-          <span className="model-hub-usage-axis-label model-hub-usage-peak">
-            {peak !== null
-              ? t('settings.models.usage.byDay.peak', { tokens: tokenText(peak, peak.tokens), day: day(peak.day) })
-              // No peak is three different windows, and the tokens cannot tell them
-              // apart: one nobody used, one whose upstreams never reported what the
-              // calls cost, and one that was measured and really did cost nothing.
-              // Coverage is asked before activity, because a window with any report
-              // in it can state what its reports said — the calls that came back
-              // without one are the requests card's shortfall to name, not this
-              // sentence's.
-              : reported
-                ? t('settings.models.usage.byDay.zero')
-                : metered
-                  ? t('settings.models.usage.byDay.unreported')
-                  : t('settings.models.usage.byDay.quiet')}
-          </span>
-          <span className="model-hub-usage-axis-label">{day(summary.to_day)}</span>
-        </div>
-      </div>
-    </section>
-  );
-};
-
 export const UsageTab: React.FC<{
-  usage: RegionRead<UsageSummary>;
-  /** The window the user asked for. The report answers with what it served. */
-  windowDays: UsageWindowOption;
-  onWindowChange: (days: UsageWindowOption) => void;
+  usage: RegionRead<UsageReport>;
+  windowKey: UsageWindowKey;
+  onWindowChange: (window: UsageWindowKey) => void;
   onRetry?: () => void | Promise<void>;
-}> = ({ usage: usageRead, windowDays, onWindowChange, onRetry }) => {
-  const { t, i18n } = useTranslation();
-  const summary = foldRegionRead<UsageSummary, UsageSummary | null>(usageRead, {
+}> = ({ usage: usageRead, windowKey, onWindowChange, onRetry }) => {
+  const { t, i18n } = useUsageTranslation();
+  const count = useCount();
+  const report = foldRegionRead<UsageReport, UsageReport | null>(usageRead, {
     loading: () => null,
     ready: (data) => data,
     unread: () => null,
-    // A stale report is still the last true one; it stays on screen under the
-    // failure strip rather than being replaced by an empty state that would read
-    // as "nothing was ever metered".
     degraded: (staleData) => staleData,
   });
-  const options = React.useMemo(
-    () => USAGE_WINDOW_OPTIONS.map((option) => ({ id: String(option), label: t('settings.models.usage.window.option', { days: option }) as string })),
-    [t],
+  const [sourceIds, setSourceIds] = React.useState<string[]>([]);
+  const [modelKeys, setModelKeys] = React.useState<string[]>([]);
+  const [metric, setMetric] = React.useState<UsageMetric>('tokens');
+  const [group, setGroup] = React.useState<UsageGroup>('type');
+  const [tableGroup, setTableGroup] = React.useState<'model' | 'source'>('model');
+  const [sortAscending, setSortAscending] = React.useState(false);
+  const [pinnedKey, setPinnedKey] = React.useState<string | null>(null);
+  const scopeKey = JSON.stringify([windowKey, sourceIds, modelKeys, metric, group]);
+
+  React.useEffect(() => {
+    setSourceIds([]);
+    setModelKeys([]);
+    setPinnedKey(null);
+  }, [windowKey]);
+
+  React.useEffect(() => {
+    setPinnedKey(null);
+  }, [scopeKey]);
+
+  React.useEffect(() => {
+    if (report !== null && pinnedKey !== null && !report.buckets.some((bucket) => bucket.key === pinnedKey)) {
+      setPinnedKey(null);
+    }
+  }, [report, pinnedKey]);
+
+  if (report === null) {
+    return (
+      <div className="model-hub-usage-analytics">
+        <UsageHeading report={null} windowKey={windowKey} onWindowChange={onWindowChange} />
+        {regionFailed(usageRead) ? (
+          <FailureState onRetry={onRetry} />
+        ) : (
+          <div className="model-hub-usage-loading" role="status">
+            <LoaderCircle className="size-4 animate-spin" />
+            {t('common.loading')}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const allRows = filteredRows(report, { sourceIds: [], modelKeys: [] });
+  const unknownModelLabel = t('settings.models.usage.unknownModel');
+  const labelContext = usageLabelContext(report, allRows, unknownModelLabel);
+  const sourceOptions: FilterOption[] = report.sources.map((source) => ({
+    key: source.source_id,
+    label: sourceIdentityLabel(report, source.source_id, labelContext),
+  }));
+  const modelOptions = [...new Map(
+    allRows.map((row) => {
+      const key = pairKey(row.source_id, row.model_id);
+      const identity = {
+        key,
+        sourceId: row.source_id,
+        modelId: row.model_id,
+        sourceLabel: sourceLabel(report, row.source_id),
+        modelLabel: modelLabel(report, row.source_id, row.model_id),
+      } satisfies UsageIdentity;
+      return [key, {
+        key,
+        label: identityDisplayLabel(identity, unknownModelLabel, labelContext),
+        detail: identity.modelLabel ? undefined : unknownModelLabel,
+      }];
+    }),
+  ).values()];
+  const filter: UsageFilter = { sourceIds, modelKeys };
+  const scopedRows = filteredRows(report, filter);
+  const totals = aggregateCounters(scopedRows);
+  const partialHistory = reportHasPartialHistory(report, filter);
+  const reportEmpty = usageIsEmpty(report);
+  const filteredEmpty = !reportEmpty && scopedRows.length === 0 && !partialHistory;
+  const historyOnlyUnknown = partialHistory && scopedRows.length === 0;
+  const pinnedBucket = pinnedKey === null
+    ? null
+    : report.buckets.find((bucket) => bucket.key === pinnedKey) ?? null;
+  const activePinnedKey = pinnedBucket?.key ?? null;
+  const rows = tableRows(report, filter, tableGroup, activePinnedKey, unknownModelLabel);
+  const sortValue = (row: TableRow): number => usageMetricValue(row.counters, metric) ?? -1;
+  const sortedRows = [...rows].sort((left, right) => (sortValue(right) - sortValue(left)) * (sortAscending ? -1 : 1));
+  const tableTotal = aggregateCounters(
+    (activePinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === activePinnedKey))
+      .flatMap((bucket) => filterBucketRows(bucket, filter)),
   );
-  const pickWindow = (id: string) => {
-    const next = USAGE_WINDOW_OPTIONS.find((option) => String(option) === id);
-    if (next !== undefined) onWindowChange(next);
+  const metricText = (counters: UsageCounters, selectedMetric = metric) =>
+    tokenText(counters, selectedMetric, count, t('settings.models.usage.blank') as string);
+  const partialHistoryNote = String(t('settings.models.usage.partialHistory'));
+  const unknownTokensNote = String(t('settings.models.usage.unknownTokens'));
+  const allReportedNote = String(t('settings.models.usage.stats.allReported'));
+
+  const exportCsv = () => {
+    const csv = buildUsageCsv(report, filter, activePinnedKey, {
+      bucketKey: t('settings.models.usage.csv.bucketKey') as string,
+      startAt: t('settings.models.usage.csv.startAt') as string,
+      endAt: t('settings.models.usage.csv.endAt') as string,
+      historyComplete: t('settings.models.usage.csv.historyComplete') as string,
+      sourceId: t('settings.models.usage.csv.sourceId') as string,
+      modelId: t('settings.models.usage.csv.modelId') as string,
+      ledgerKey: t('settings.models.usage.csv.ledgerKey') as string,
+      sourceLabel: t('settings.models.usage.csv.sourceLabel') as string,
+      modelLabel: t('settings.models.usage.csv.modelLabel') as string,
+      requests: t('settings.models.usage.table.requests') as string,
+      tokenReports: t('settings.models.usage.csv.tokenReports') as string,
+      inputTokens: t('settings.models.usage.csv.inputTokens') as string,
+      nonCachedInputTokens: t('settings.models.usage.csv.nonCachedInputTokens') as string,
+      cachedInputTokens: t('settings.models.usage.csv.cachedInputTokens') as string,
+      outputTokens: t('settings.models.usage.csv.outputTokens') as string,
+      totalTokens: t('settings.models.usage.csv.totalTokens') as string,
+    }, t('settings.models.usage.unknownModel') as string);
+    const url = URL.createObjectURL(new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `model-usage-${report.window_key}.csv`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
-  const day = (value: string) => formatLocalDay(value, i18n.language);
 
   return (
-    <div className="model-hub-usage">
-      <div className="model-hub-usage-bar flex flex-col gap-3 rounded-xl border border-border bg-surface sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 flex-col gap-1">
-          <h2 className="model-hub-usage-title font-semibold text-foreground">{t('settings.models.usage.title')}</h2>
-          <p className="model-hub-usage-note truncate">
-            {summary === null
-              ? t('settings.models.usage.detail')
-              : t('settings.models.usage.range', { from: day(summary.from_day), to: day(summary.to_day), days: summary.window_days })}
-          </p>
-        </div>
-        <SegmentedRadio
-          value={String(windowDays)}
-          onChange={pickWindow}
-          options={options}
-          ariaLabel={t('settings.models.usage.window.label') as string}
-          className="shrink-0 sm:w-auto"
+    <div className="model-hub-usage-analytics">
+      <UsageHeading report={report} windowKey={windowKey} onWindowChange={onWindowChange} />
+      {regionFailed(usageRead) && <FailureState onRetry={onRetry} />}
+      <div className="model-hub-usage-filter-bar">
+        <Filter aria-hidden className="size-3.5 text-muted" />
+        <MultiFilter
+          label={t('settings.models.usage.filters.source') as string}
+          icon={<Network aria-hidden className="size-3.5" />}
+          options={sourceOptions}
+          selected={sourceIds}
+          onChange={setSourceIds}
         />
-      </div>
-      {regionFailed(usageRead) && (
-        <div className="model-hub-usage-failure flex items-center justify-between gap-3 rounded-xl border border-border bg-background text-destructive-ink">
-          <span>{t('settings.models.toast.refreshFailed')}</span>
-          <button type="button" onClick={() => void onRetry?.()} className="model-hub-action-mint shrink-0 font-semibold">
-            {t('settings.models.upstream.retry')}
-          </button>
+        <MultiFilter
+          label={t('settings.models.usage.filters.model') as string}
+          icon={<Cpu aria-hidden className="size-3.5" />}
+          options={modelOptions}
+          selected={modelKeys}
+          onChange={setModelKeys}
+        />
+        <div className="model-hub-usage-select">
+          <Zap aria-hidden className="size-3.5" />
+          <select
+            aria-label={t('settings.models.usage.metric.label') as string}
+            value={metric}
+            onChange={(event) => {
+              const next = event.target.value as UsageMetric;
+              setMetric(next);
+              if (next === 'requests' && group === 'type') setGroup('total');
+            }}
+          >
+            {metricKeys.map((key) => <option value={key} key={key}>{metricLabel(key, t)}</option>)}
+          </select>
+          <ChevronDown aria-hidden className="size-3" />
         </div>
+        {(sourceIds.length > 0 || modelKeys.length > 0 || metric !== 'tokens') && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="model-hub-usage-reset"
+            onClick={() => { setSourceIds([]); setModelKeys([]); setMetric('tokens'); setGroup('type'); }}
+          >
+            <X aria-hidden className="size-3" />
+            {t('settings.models.usage.filters.reset')}
+          </Button>
+        )}
+        <span className="model-hub-usage-filter-context">
+          {sourceIds.length > 0 ? t('settings.models.usage.filters.sourceCount', { count: sourceIds.length }) : t('settings.models.usage.filters.allSources')}
+          <span>·</span>
+          {modelKeys.length > 0 ? t('settings.models.usage.filters.modelCount', { count: modelKeys.length }) : t('settings.models.usage.filters.allModels')}
+        </span>
+      </div>
+
+      {reportEmpty ? (
+        <EmptyState kind="report" />
+      ) : filteredEmpty ? (
+        <EmptyState kind="filter" onReset={() => { setSourceIds([]); setModelKeys([]); }} />
+      ) : (
+        <>
+          <div className="model-hub-usage-stat-grid">
+            <StatCard
+              label={t('settings.models.usage.stats.tokens')}
+              value={historyOnlyUnknown ? t('settings.models.usage.blank') : metricText(totals, 'tokens')}
+              note={!historyOnlyUnknown && usageTokensAreKnown(totals)
+                ? t('settings.models.usage.stats.tokenSplit', { input: count(totals.input_tokens), output: count(totals.output_tokens) })
+                : historyOnlyUnknown ? partialHistoryNote : unknownTokensNote}
+            />
+            <StatCard
+              label={t('settings.models.usage.stats.requests')}
+              value={historyOnlyUnknown ? t('settings.models.usage.blank') : count(totals.requests)}
+              note={!historyOnlyUnknown && usageReportShortfall(totals) > 0
+                ? t('settings.models.usage.stats.shortfall', { count: usageReportShortfall(totals) })
+                : historyOnlyUnknown ? partialHistoryNote : allReportedNote}
+            />
+            <StatCard
+              label={t('settings.models.usage.stats.cached')}
+              value={historyOnlyUnknown || usageCachedInputShare(totals) === null ? t('settings.models.usage.blank') : formatPercent(usageCachedInputShare(totals) ?? 0, i18n.language, 1)}
+              note={historyOnlyUnknown || usageCachedInputShare(totals) === null
+                ? t('settings.models.usage.stats.cacheUnknown')
+                : t('settings.models.usage.stats.cacheSplit', { cached: count(totals.cached_input_tokens), input: count(totals.input_tokens) })}
+            />
+          </div>
+          {(partialHistory || reportHasUnknownTokens(report, filter)) && (
+            <div className="model-hub-usage-notice" role="status">
+              <CircleHelp aria-hidden className="size-3.5 shrink-0" />
+              <span>
+                {partialHistory && t(report.granularity === 'hour'
+                  ? 'settings.models.usage.historicalHourly'
+                  : 'settings.models.usage.partialHistory')}
+                {partialHistory && reportHasUnknownTokens(report, filter) && ' '}
+                {reportHasUnknownTokens(report, filter) && t('settings.models.usage.unknownTokens')}
+              </span>
+            </div>
+          )}
+          <section className="model-hub-usage-card" aria-labelledby="model-hub-usage-chart-title">
+            <div className="model-hub-usage-card-header">
+              <div>
+                <h3 id="model-hub-usage-chart-title">{t('settings.models.usage.chart.title')} <span>{t(`settings.models.usage.granularity.${report.granularity}`)}</span></h3>
+                <p>{t('settings.models.usage.chart.subtitle')}</p>
+              </div>
+              <div className="model-hub-usage-group-control">
+                <span>{t('settings.models.usage.group.label')}</span>
+                <div role="group" aria-label={t('settings.models.usage.group.label') as string}>
+                  {groupKeys.map((key) => (
+                    <button
+                      type="button"
+                      key={key}
+                      aria-pressed={group === key}
+                      disabled={key === 'type' && metric === 'requests'}
+                      className={cn(group === key && 'is-selected')}
+                      onClick={() => setGroup(key)}
+                    >
+                      {t(`settings.models.usage.group.${key}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <UsageChart
+              report={report}
+              filter={filter}
+              metric={metric}
+              group={group}
+              pinnedKey={activePinnedKey}
+              scopeKey={scopeKey}
+              onPin={setPinnedKey}
+            />
+          </section>
+          <section className="model-hub-usage-card model-hub-usage-details" aria-labelledby="model-hub-usage-details-title">
+            <div className="model-hub-usage-card-header model-hub-usage-details-header">
+              <div>
+                <h3 id="model-hub-usage-details-title">{t('settings.models.usage.table.title')} <span>{sortedRows.length}</span></h3>
+                <p>{activePinnedKey === null
+                  ? t('settings.models.usage.table.range')
+                  : t('settings.models.usage.table.bucket', { bucket: formatBucketLabel(pinnedBucket!, i18n.language) })}</p>
+              </div>
+              <div className="model-hub-usage-details-actions">
+                {activePinnedKey !== null && <Button type="button" variant="ghost" size="sm" onClick={() => setPinnedKey(null)}><X aria-hidden className="size-3" />{t('settings.models.usage.table.allBuckets')}</Button>}
+                <div className="model-hub-usage-table-group" role="group" aria-label={t('settings.models.usage.table.group') as string}>
+                  <button type="button" className={tableGroup === 'model' ? 'is-selected' : ''} aria-pressed={tableGroup === 'model'} onClick={() => setTableGroup('model')}>{t('settings.models.usage.table.byModel')}</button>
+                  <button type="button" className={tableGroup === 'source' ? 'is-selected' : ''} aria-pressed={tableGroup === 'source'} onClick={() => setTableGroup('source')}>{t('settings.models.usage.table.bySource')}</button>
+                </div>
+                <Button type="button" variant="outline" size="sm" onClick={exportCsv}><ArrowDownToLine aria-hidden className="size-3.5" />{t('settings.models.usage.table.export')}</Button>
+              </div>
+            </div>
+            <div className="model-hub-usage-table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">{t('settings.models.usage.table.identity')}</th>
+                    <th scope="col">{t('settings.models.usage.table.requests')}</th>
+                    <th scope="col">{t('settings.models.usage.table.input')}</th>
+                    <th scope="col">{t('settings.models.usage.table.nonCache')}</th>
+                    <th scope="col">{t('settings.models.usage.table.cache')}</th>
+                    <th scope="col">{t('settings.models.usage.table.output')}</th>
+                    <th scope="col" aria-sort={sortAscending ? 'ascending' : 'descending'}>
+                      <button
+                        type="button"
+                        aria-label={t(`settings.models.usage.table.${sortAscending ? 'sortAscending' : 'sortDescending'}`, { metric: metricLabel(metric, t) })}
+                        onClick={() => setSortAscending((value) => !value)}
+                      >
+                        {metricLabel(metric, t)} <ArrowDown aria-hidden className={cn('size-3', sortAscending && 'rotate-180')} />
+                      </button>
+                    </th>
+                    <th scope="col">{t('settings.models.usage.table.share')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedRows.map((row) => {
+                    const value = usageMetricValue(row.counters, metric);
+                    const totalValue = usageMetricValue(tableTotal, metric);
+                    const share = value === null || totalValue === null || totalValue === 0 ? null : value / totalValue;
+                    return (
+                      <tr key={row.key}>
+                        <th scope="row">
+                          <span className="model-hub-usage-row-name">{row.label}</span>
+                          {row.detail && <span className="model-hub-usage-row-detail">{row.detail}</span>}
+                        </th>
+                        <td>{count(row.counters.requests)}</td>
+                        <td>{tokenText(row.counters, 'input', count, t('settings.models.usage.blank') as string)}</td>
+                        <td>{usageTokensAreKnown(row.counters) ? count(usageNonCachedInput(row.counters)) : t('settings.models.usage.blank')}</td>
+                        <td>{tokenText(row.counters, 'cache', count, t('settings.models.usage.blank') as string)}</td>
+                        <td>{tokenText(row.counters, 'output', count, t('settings.models.usage.blank') as string)}</td>
+                        <td className="model-hub-usage-table-total">{value === null ? t('settings.models.usage.blank') : count(value)}</td>
+                        <td>{share === null ? t('settings.models.usage.blank') : formatPercent(share, i18n.language, 1)}</td>
+                      </tr>
+                    );
+                  })}
+                  {sortedRows.length === 0 && <tr><td colSpan={8} className="model-hub-usage-table-empty">{t('settings.models.usage.table.empty')}</td></tr>}
+                </tbody>
+                {sortedRows.length > 0 && (
+                  <tfoot>
+                    <tr>
+                      <th scope="row">{t('settings.models.usage.table.total')}</th>
+                      <td>{count(tableTotal.requests)}</td>
+                      <td>{tokenText(tableTotal, 'input', count, t('settings.models.usage.blank') as string)}</td>
+                      <td>{usageTokensAreKnown(tableTotal) ? count(usageNonCachedInput(tableTotal)) : t('settings.models.usage.blank')}</td>
+                      <td>{tokenText(tableTotal, 'cache', count, t('settings.models.usage.blank') as string)}</td>
+                      <td>{tokenText(tableTotal, 'output', count, t('settings.models.usage.blank') as string)}</td>
+                      <td>{metricText(tableTotal)}</td>
+                      <td>{(() => {
+                        const totalValue = usageMetricValue(tableTotal, metric);
+                        return totalValue === null || totalValue === 0
+                          ? t('settings.models.usage.blank')
+                          : formatPercent(1, i18n.language);
+                      })()}</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+            <div className="model-hub-usage-table-foot">
+              <CircleHelp aria-hidden className="size-3.5 shrink-0" />
+              {t('settings.models.usage.table.accounting')}
+            </div>
+          </section>
+        </>
       )}
-      {summary === null
-        ? usageRead.kind === 'loading' && <p className="model-hub-usage-pending text-muted">{t('common.loading')}</p>
-        : usageIsEmpty(summary)
-          ? <p className="model-hub-usage-empty rounded-xl border border-border bg-background text-center text-muted">{t('settings.models.usage.empty')}</p>
-          : <>
-              <StatGrid summary={summary} />
-              <BySourcePanel summary={summary} />
-              <ByDayPanel summary={summary} />
-            </>}
     </div>
   );
 };
+
+function UsageHeading({
+  report,
+  windowKey,
+  onWindowChange,
+}: {
+  report: UsageReport | null;
+  windowKey: UsageWindowKey;
+  onWindowChange: (window: UsageWindowKey) => void;
+}) {
+  const { t, i18n } = useUsageTranslation();
+  return (
+    <div className="model-hub-usage-heading">
+      <div>
+        <h2>{t('settings.models.usage.title')}</h2>
+        <p>
+          {report
+            ? formatBucketRange({ start_at: report.from_at, end_at: report.to_at, key: report.from_at, history_complete: true, rows: [] }, i18n.language, true)
+            : t('settings.models.usage.detail')}
+        </p>
+      </div>
+      <SegmentedRadio
+        value={windowKey}
+        onChange={onWindowChange}
+        options={USAGE_WINDOW_OPTIONS.map((key) => ({ id: key, label: t(`settings.models.usage.window.${key}`) as string }))}
+        ariaLabel={t('settings.models.usage.window.label') as string}
+        className="model-hub-usage-window"
+      />
+    </div>
+  );
+}
+
+function FailureState({ onRetry }: { onRetry?: () => void | Promise<void> }) {
+  const { t } = useUsageTranslation();
+  return (
+    <div className="model-hub-usage-failure" role="alert">
+      <span>{t('settings.models.usage.failure')}</span>
+      <button type="button" onClick={() => void onRetry?.()}>{t('settings.models.usage.retry')}</button>
+    </div>
+  );
+}
+
+function EmptyState({ kind, onReset }: { kind: 'report' | 'filter'; onReset?: () => void }) {
+  const { t } = useUsageTranslation();
+  return (
+    <div className="model-hub-usage-empty-state">
+      <Search aria-hidden className="size-7" />
+      <h3>{t(`settings.models.usage.empty.${kind}.title`)}</h3>
+      <p>{t(`settings.models.usage.empty.${kind}.body`)}</p>
+      {onReset && <Button type="button" variant="outline" onClick={onReset}>{t('settings.models.usage.filters.reset')}</Button>}
+    </div>
+  );
+}

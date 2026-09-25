@@ -41,10 +41,11 @@ import type {
   SourceRepaired,
   SupplyChannel,
   SupplyGap,
+  UsageReport,
+  UsageWindowKey,
   QuotaSummary,
-  UsageSummary,
 } from './types';
-import { USAGE_DEFAULT_WINDOW_DAYS } from './types';
+import { USAGE_DEFAULT_WINDOW } from './types';
 
 /** Add-time Route placement returned by both source-creation paths. */
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
@@ -160,10 +161,8 @@ export type ModelsApi = {
   applyMigration(itemIds: string[], cleanApiKeys?: boolean): Promise<MigrationApplyResult>;
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
-  /** Metered token report over a trailing local-day window. `days` is a REQUEST:
-   *  the server clamps it to retention and echoes what it served in
-   *  `window_days`, which is the only number a view may display. */
-  getUsageSummary(days?: number): Promise<UsageSummary>;
+  /** Usage analytics over the explicit modern window selector. */
+  getUsageSummary(window?: UsageWindowKey): Promise<UsageReport>;
   /** Subscription rate-limit windows, served from the service's 5-minute cache. */
   getQuota(): Promise<QuotaSummary>;
   /** The same report, re-read now (the service bounds how often). */
@@ -649,8 +648,8 @@ export const modelsApi: ModelsApi = {
     call<{ events: ResolutionEvent[] }>(
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
     ).then((r) => r.events),
-  getUsageSummary: (days = USAGE_DEFAULT_WINDOW_DAYS) =>
-    call<{ usage: UsageSummary }>(`/api/models/usage?days=${days}`).then((r) => r.usage),
+  getUsageSummary: (window = USAGE_DEFAULT_WINDOW) =>
+    call<{ usage: UsageReport }>(`/api/models/usage?window=${window}`).then((r) => r.usage),
   getQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota').then((r) => r.quota),
   refreshQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota/refresh', jsonInit('POST')).then((r) => r.quota),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),

@@ -12,6 +12,8 @@ for (const lang of ['en', 'zh'] as const) {
     await page.goto(`/e2e/model-catalog/fixture.html?view=quota&lang=${lang}`);
     const cards = page.getByRole('article');
     await expect(cards).toHaveCount(2);
+    // Usage analytics must not override the quota summary's shared type scale.
+    await expect(page.locator('.model-hub-usage-stat-label').first()).toHaveCSS('font-size', '11px');
     const [first, second] = await Promise.all([box(cards.nth(0)), box(cards.nth(1))]);
 
     // One account per line: the second card starts below the first, in the same column.
