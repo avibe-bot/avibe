@@ -206,6 +206,29 @@ def test_claude_filename_migration_rejects_cross_source_rebind(tmp_path):
     assert len(store._oauth_credentials()) == 1
 
 
+def test_claude_credential_reconciliation_scans_renamed_auth_file(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    new_name = "claude-00f765af-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    store.write_oauth_auth_file(
+        old_name,
+        {
+            "type": "claude",
+            "prefix": prefix,
+            "email": "user@example.com",
+            "account_uuid": "account-a",
+            "organization_uuid": "organization-a",
+            "access_token": "private-access-fixture",
+        },
+    )
+    (store.auth_dir / old_name).rename(store.auth_dir / new_name)
+
+    assert store.reconcile_oauth_credential(ref, auth_provider="claude") == new_name
+    assert store.credential_metadata(ref)["auth_name"] == new_name
+
+
 def test_claude_exact_filename_rewrite_rejects_identity_change(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     auth_name = "claude-user@example.com.json"

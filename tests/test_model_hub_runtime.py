@@ -759,6 +759,16 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
         fail_delete = True
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if (method, path) == ("GET", "/auth-files"):
+                return {
+                    "files": [
+                        {
+                            "id": "claude-account.json",
+                            "name": "claude-account.json",
+                            "provider": "claude",
+                        }
+                    ]
+                }
             assert (method, path) == ("DELETE", "/auth-files")
             if self.fail_delete:
                 raise EngineClientError("delete failed")
@@ -779,12 +789,21 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
         auth_file = store.auth_dir / "claude-account.json"
-        auth_file.write_text("{}", encoding="utf-8")
-        auth_file.chmod(0o600)
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
             auth_file.name,
+        )
+        store.write_oauth_auth_file(
+            auth_file.name,
+            {
+                "type": "claude",
+                "prefix": store.credential_metadata(credential_ref)["prefix"],
+                "email": "user@example.com",
+                "account_uuid": "account-a",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-fixture",
+            },
         )
         client = Client()
         adapter = CLIProxyEngineAdapter(
@@ -810,6 +829,16 @@ def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
         delete_calls = 0
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if (method, path) == ("GET", "/auth-files"):
+                return {
+                    "files": [
+                        {
+                            "id": "claude-account.json",
+                            "name": "claude-account.json",
+                            "provider": "claude",
+                        }
+                    ]
+                }
             assert (method, path) == ("DELETE", "/auth-files")
             self.delete_calls += 1
             return {"status": "ok"}
@@ -829,12 +858,21 @@ def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
         auth_file = store.auth_dir / "claude-account.json"
-        auth_file.write_text("{}", encoding="utf-8")
-        auth_file.chmod(0o600)
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
             auth_file.name,
+        )
+        store.write_oauth_auth_file(
+            auth_file.name,
+            {
+                "type": "claude",
+                "prefix": store.credential_metadata(credential_ref)["prefix"],
+                "email": "user@example.com",
+                "account_uuid": "account-a",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-fixture",
+            },
         )
         client = Client()
         adapter = CLIProxyEngineAdapter(
@@ -870,6 +908,85 @@ def test_orphaned_oauth_cleanup_never_existed_ref_is_converged(
         )
 
         assert await adapter.cleanup_orphaned_oauth_material("cred_00000000000000000000000000000000") is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["revoke", "cleanup"])
+@pytest.mark.parametrize("engine_running", [False, True])
+def test_oauth_mutation_reconciles_renamed_claude_grant(
+    tmp_path: Path,
+    operation: str,
+    engine_running: bool,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files" and method == "GET":
+                return {
+                    "files": [
+                        {
+                            "id": "claude-00f765af-account.json",
+                            "name": "claude-00f765af-account.json",
+                            "provider": "claude",
+                        }
+                    ]
+                }
+            if path == "/auth-files" and method == "DELETE":
+                self.deleted.append(str((query or {}).get("name")))
+                return {"status": "ok"}
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def with_engine_excluded(self, operation):
+            return operation(self._client if engine_running else None)
+
+        def invalidate_configs(self) -> None:
+            return None
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        old_name = "claude-account.json"
+        new_name = "claude-00f765af-account.json"
+        credential_ref = store.bind_oauth_credential(
+            "src_fixture123",
+            "anthropic",
+            old_name,
+        )
+        prefix = store.credential_metadata(credential_ref)["prefix"]
+        store.write_oauth_auth_file(
+            old_name,
+            {
+                "type": "claude",
+                "prefix": prefix,
+                "email": "user@example.com",
+                "account_uuid": "account-a",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-fixture",
+            },
+        )
+        (store.auth_dir / old_name).rename(store.auth_dir / new_name)
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        if operation == "revoke":
+            await adapter.revoke_credential(credential_ref)
+        else:
+            assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
+
+        assert client.deleted == ([new_name] if engine_running else [])
+        assert not (store.auth_dir / new_name).exists()
+        assert store.credential_metadata_if_present(credential_ref) is None
 
     asyncio.run(run())
 

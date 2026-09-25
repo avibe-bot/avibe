@@ -1145,6 +1145,46 @@ class EngineStateStore:
                 )
             return credential_ref
 
+    def reconcile_oauth_credential(
+        self,
+        credential_ref: str,
+        *,
+        auth_provider: str,
+    ) -> str:
+        """Refresh one OAuth binding before a credential mutation.
+
+        A running CPA exposes the complete inventory to the adapter. When it is
+        stopped, the managed auth directory is the remaining source of truth;
+        scan it so a CPA filename migration cannot leave revocation pointed at
+        a stale metadata name.
+        """
+
+        normalized_provider = auth_provider.strip().lower()
+        with self._lock:
+            metadata = self.credential_metadata(credential_ref)
+            if metadata.get("kind") != "oauth":
+                raise EngineStateError("OAuth credential is unavailable")
+            auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            if normalized_provider != "claude":
+                return auth_name
+
+            self.audit_auth_permissions(enforce=True)
+            candidate_names = sorted(
+                path.name
+                for path in self.auth_dir.iterdir()
+                if path.name.lower().endswith(".json")
+            )
+            for candidate_name in candidate_names:
+                payload = self._decode_oauth_payload(self.auth_dir / candidate_name)
+                if str(payload.get("type") or "").strip().lower() == normalized_provider:
+                    self.reconcile_oauth_auth_file(
+                        candidate_name,
+                        auth_provider=normalized_provider,
+                    )
+
+            refreshed = self.credential_metadata(credential_ref)
+            return _validated_oauth_auth_name(str(refreshed.get("auth_name") or ""))
+
     def oauth_account_label(
         self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
     ) -> str | None:

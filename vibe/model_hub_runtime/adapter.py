@@ -2149,17 +2149,21 @@ class CLIProxyEngineAdapter:
             if metadata.get("activation_state") != "staged":
 
                 def remove_grant(client: EngineClient | None) -> None:
+                    current_auth_name = self._reconcile_oauth_credential_for_mutation(
+                        credential_ref,
+                        client,
+                    )
                     if client is not None:
                         try:
                             client.management_request(
                                 "DELETE",
                                 "/auth-files",
-                                query={"name": str(auth_name)},
+                                query={"name": current_auth_name},
                                 timeout=1.0,
                             )
                         except EngineClientError as exc:
                             raise EngineStateError("unable to remove OAuth auth file") from exc
-                    self.state_store.delete_oauth_auth_file(str(auth_name))
+                    self.state_store.delete_oauth_auth_file(current_auth_name)
 
                 # One supervisor operation: an engine left running by a previous
                 # service is reaped first, and none can start and load the grant
@@ -2210,7 +2214,7 @@ class CLIProxyEngineAdapter:
         auth_name = metadata.get("auth_name")
         if not isinstance(auth_name, str) or not auth_name:
             return False
-        return await self._cleanup_oauth_material(auth_name, credential_ref)
+        return await self._cleanup_oauth_material(credential_ref)
 
     async def discover_models(
         self,
@@ -2647,14 +2651,45 @@ class CLIProxyEngineAdapter:
         self,
         inventory: Mapping[str, _AuthRecord],
     ) -> None:
+        await asyncio.to_thread(self._reconcile_oauth_inventory_sync, inventory)
+
+    def _reconcile_oauth_inventory_sync(
+        self,
+        inventory: Mapping[str, _AuthRecord],
+    ) -> None:
         for auth in inventory.values():
             if auth.provider != "claude":
                 continue
-            await asyncio.to_thread(
-                self.state_store.reconcile_oauth_auth_file,
+            self.state_store.reconcile_oauth_auth_file(
                 auth.name,
                 auth_provider=auth.provider,
             )
+
+    def _reconcile_oauth_credential_for_mutation(
+        self,
+        credential_ref: str,
+        client: EngineClient | None,
+    ) -> str:
+        metadata = self.state_store.credential_metadata(credential_ref)
+        if metadata.get("kind") != "oauth":
+            raise EngineStateError("OAuth credential is unavailable")
+        vendor = str(metadata.get("vendor") or "").strip().lower()
+        endpoint = _OAUTH_ENDPOINTS.get(vendor)
+        auth_provider = endpoint[2] if endpoint is not None else ""
+        if auth_provider != "claude":
+            return str(metadata.get("auth_name") or "")
+        if client is not None:
+            try:
+                inventory = _auth_inventory(client)
+            except EngineClientError as exc:
+                raise EngineStateError("unable to inspect OAuth auth files") from exc
+            self._reconcile_oauth_inventory_sync(inventory)
+            refreshed = self.state_store.credential_metadata(credential_ref)
+            return str(refreshed.get("auth_name") or "")
+        return self.state_store.reconcile_oauth_credential(
+            credential_ref,
+            auth_provider=auth_provider,
+        )
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         endpoint = _OAUTH_ENDPOINTS.get(vendor)
@@ -3030,7 +3065,6 @@ class CLIProxyEngineAdapter:
                 # may remain behind it. Both auth-file deletions must be
                 # confirmed before revocation can discard the minted ref.
                 if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
-                    auth.name,
                     credential_ref,
                 ):
                     self._set_retained_material(
@@ -3082,8 +3116,15 @@ class CLIProxyEngineAdapter:
         except EngineUnavailableError:
             return False
 
-    async def _cleanup_oauth_material(self, auth_name: str, credential_ref: str) -> bool:
+    async def _cleanup_oauth_material(self, credential_ref: str) -> bool:
         def remove_grant(client: EngineClient | None) -> bool:
+            try:
+                auth_name = self._reconcile_oauth_credential_for_mutation(
+                    credential_ref,
+                    client,
+                )
+            except EngineStateError:
+                return False
             engine_delete_succeeded = True
             if client is not None:
                 try:
