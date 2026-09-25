@@ -22,7 +22,10 @@ const retained: Source = {
   models: [],
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 describe('SourcesCard footer', () => {
   it('fills a narrow overview column without preserving an intrinsic panel width', () => {
@@ -39,7 +42,7 @@ describe('SourcesCard footer', () => {
     expect(panel?.children.item(1)?.className).not.toContain('overflow-y-auto');
   });
 
-  it('keeps the source title on its own line above the interface and kind tags', () => {
+  it('keeps the source title on its own line above the kind and protocol tags', () => {
     render(
       <I18nextProvider i18n={i18n}>
         <SourcesCard read={readyRegion([retained])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
@@ -49,7 +52,52 @@ describe('SourcesCard footer', () => {
     const title = screen.getByText('Retained source');
     expect(title.className).toContain('block');
     expect(title.nextElementSibling?.className).toContain('flex');
-    expect(title.closest('button')?.className).toContain('min-h-[96px]');
+    expect(screen.getByRole('button', { name: /^Retained source/ }).className).toContain('min-h-[96px]');
+  });
+
+  it.each(['en', 'zh'])('uses one header toggle for all account, URL and key details in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    const onOpenSource = vi.fn();
+    const rows: Source[] = [
+      { ...retained, base_url: 'https://private-relay.example/v1', masked_credential: 'sk-…7890' },
+      { ...retained, id: 'src_account', kind: 'subscription', account_label: 'owner@example.com' },
+    ];
+    const tree = <I18nextProvider i18n={locale}>
+      <SourcesCard read={readyRegion(rows)} onRetry={vi.fn()} onOpenSource={onOpenSource} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
+    </I18nextProvider>;
+    const view = render(tree);
+    expect(screen.getByRole('button', { name: /private-relay\.example\/v1.*sk-…7890/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /owner@example\.com/ })).toBeTruthy();
+    const toggle = screen.getByRole('button', { name: locale.t('settings.models.upstream.hidePrivateDetails') });
+    expect(toggle.closest('[data-source-id]')).toBeNull();
+    expect(view.container.querySelector('button button')).toBeNull();
+    expect(view.container.querySelector('[data-source-id] button')).toBeNull();
+    await userEvent.click(toggle);
+    expect(onOpenSource).not.toHaveBeenCalled();
+    for (const value of ['private-relay.example', 'sk-…7890', 'owner@example.com']) {
+      expect(view.container.innerHTML).not.toContain(value);
+    }
+    expect(screen.queryByRole('button', { name: /private-relay\.example|sk-…7890|owner@example\.com/ })).toBeNull();
+    expect(screen.getByRole('button', { name: (name) => [
+      locale.t('settings.models.upstream.kind.apiKey'),
+      'Anthropic Messages',
+      locale.t('settings.models.upstream.hiddenDetails'),
+    ].every((part) => name.includes(part)) })).toBeTruthy();
+    const placeholders = screen.getAllByText(lng === 'zh' ? '已隐藏' : 'Hidden', { exact: true });
+    expect(placeholders).toHaveLength(2);
+    for (const placeholder of placeholders) {
+      expect(placeholder.previousElementSibling?.classList.contains('lucide-eye-off')).toBe(true);
+      expect(placeholder.previousElementSibling?.getAttribute('aria-hidden')).toBe('true');
+    }
+    view.unmount();
+    const remounted = render(tree);
+    expect(remounted.container.innerHTML).not.toContain('private-relay.example');
+    const reveal = screen.getByRole('button', { name: locale.t('settings.models.upstream.showPrivateDetails') });
+    reveal.focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.getByText('private-relay.example/v1 · sk-…7890')).toBeTruthy();
+    expect(screen.getByText('owner@example.com')).toBeTruthy();
+    expect(onOpenSource).not.toHaveBeenCalled();
   });
 
   it('exposes the upstream info note to keyboard activation and Escape dismissal', async () => {

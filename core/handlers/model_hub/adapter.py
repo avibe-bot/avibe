@@ -99,6 +99,12 @@ class OriginNotAllowedError(Exception):
     ``RawCallOutcome`` and never triggers fallback."""
 
 
+class OAuthSubmissionRejectedError(Exception):
+    """Raised by ``submit_oauth`` when the provider refuses the pasted value
+    before touching the flow. Nothing was written and the flow still awaits a
+    submission, so the user can paste again on the same flow."""
+
+
 class InvokeCancelledError(asyncio.CancelledError):
     """Owner cancellation carrying wire facts observed before transport cleanup."""
 
@@ -553,6 +559,14 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        """Read optional public account metadata from this source's bound grant.
+
+        This local presentation read never starts the engine, refreshes a grant,
+        or exports credential material. Missing/unsafe metadata returns None.
+        """
+        ...
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,
@@ -664,7 +678,11 @@ class EngineAdapter(Protocol):
     async def oauth_status(self, flow_id: str) -> OAuthFlowState: ...
 
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
-        """``value`` per ``expects``: pasted code or callback URL."""
+        """``value`` per ``expects``: pasted code or callback URL.
+
+        A value the provider refuses without writing anything raises
+        ``OAuthSubmissionRejectedError`` and leaves the flow awaiting action.
+        """
         ...
 
     async def cancel_oauth(self, flow_id: str) -> None: ...

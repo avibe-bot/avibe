@@ -2,7 +2,11 @@
 import * as React from 'react';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { I18nextProvider } from 'react-i18next';
 
+import i18n from '@/i18n';
+import { SourceRow } from './SourceRow';
+import { SourcePrivacyToggle } from './SourcePrivacy';
 import { SupplyGraph } from './SupplyGraph';
 import type { SupplyRelation } from './supplyRelations';
 
@@ -22,11 +26,19 @@ const rect = (left: number, top: number, width: number, height: number): DOMRect
   toJSON: () => ({}),
 });
 
-const Fixture: React.FC<{ relations?: SupplyRelation[] }> = ({ relations = [relation] }) => {
+const Fixture: React.FC<{ relations?: SupplyRelation[]; withSourceCard?: boolean }> = ({ relations = [relation], withSourceCard = false }) => {
   const ref = React.useRef<HTMLDivElement>(null);
   return (
     <div ref={ref} data-testid="graph-root">
-      <div data-source-id="src_a" />
+      {withSourceCard ? <I18nextProvider i18n={i18n}>
+        <SourcePrivacyToggle />
+        <SourceRow source={{
+          id: 'src_a', last_discovered_at: null, kind: 'subscription', vendor: 'openai', display_name: 'OpenAI',
+          protocol: 'openai_responses', base_url: null, supply_channel: 'hub', billing: 'monthly',
+          state: { status: 'standby', retry_at: null, detail_key: null }, models: [],
+          account_label: 'owner@example.com',
+        }} onOpen={() => {}} />
+      </I18nextProvider> : <div data-source-id="src_a" />}
       <div data-source-id="src_b" />
       <div data-agent-backend="claude" />
       <div data-agent-backend="codex" />
@@ -41,6 +53,32 @@ afterEach(() => {
 });
 
 describe('SupplyGraph', () => {
+  it('anchors to the whole SourceRow and distinguishes its focus from the global privacy control', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
+      if (this.dataset.testid === 'graph-root') return rect(0, 0, 600, 300);
+      if (this.dataset.agentBackend === 'claude') return rect(450, 40, 100, 100);
+      // A full-card endpoint includes the account row. An inner title/badge
+      // button would have smaller bounds and must not own this graph hook.
+      if (this.dataset.sourceId === 'src_a' && this.querySelector('[data-source-account]')) return rect(10, 10, 300, 120);
+      if (this.tagName === 'BUTTON') return rect(60, 20, 200, 40);
+      return rect(0, 0, 0, 0);
+    });
+    const view = render(<Fixture withSourceCard />);
+    const path = await waitFor(() => {
+      const element = view.container.querySelector<SVGPathElement>('.model-hub-wire');
+      expect(element).not.toBeNull();
+      return element as SVGPathElement;
+    });
+    expect(path.getAttribute('d')).toBe('M 310 70 C 380 70, 380 90, 450 90');
+    const opener = view.getByRole('button', { name: /^OpenAI/ });
+    fireEvent.focusIn(opener);
+    await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(true));
+    const eye = view.getByRole('button', { name: i18n.t('settings.models.upstream.hidePrivateDetails') });
+    fireEvent.focusOut(opener, { relatedTarget: eye });
+    fireEvent.focusIn(eye);
+    await waitFor(() => expect(path.classList.contains('model-hub-wire--highlighted')).toBe(false));
+  });
+
   it('draws on the shared mount and re-measures when a nested card scrolls', async () => {
     let sourceTop = 10;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function bounds() {
@@ -66,6 +104,31 @@ describe('SupplyGraph', () => {
     fireEvent.scroll(view.container.querySelector('[data-source-id="src_a"]') as Element);
 
     await waitFor(() => expect(path.getAttribute('d')).toContain('M 30 35'));
+  });
+
+  it('ignores scrolling elsewhere and measures once per frame', async () => {
+    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function measure(this: HTMLElement) {
+      if (this.dataset.testid === 'graph-root') return rect(0, 0, 120, 100);
+      if (this.dataset.sourceId === 'src_a') return rect(10, 10, 20, 10);
+      if (this.dataset.agentBackend === 'claude') return rect(90, 40, 20, 20);
+      return rect(0, 0, 0, 0);
+    });
+    const elsewhere = document.body.appendChild(document.createElement('div'));
+    const view = render(<Fixture />);
+    await waitFor(() => expect(view.container.querySelector('.model-hub-wire')).not.toBeNull());
+    const settle = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await settle();
+
+    bounds.mockClear();
+    fireEvent.scroll(elsewhere);
+    await settle();
+    expect(bounds).not.toHaveBeenCalled();
+
+    const card = view.container.querySelector('[data-source-id="src_a"]') as Element;
+    for (let index = 0; index < 5; index += 1) fireEvent.scroll(card);
+    await settle();
+    expect(bounds.mock.contexts.filter((element) => (element as HTMLElement).dataset.testid === 'graph-root')).toHaveLength(1);
+    elsewhere.remove();
   });
 
   it('lands every relation for an agent on the agent card midpoint', async () => {

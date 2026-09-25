@@ -605,7 +605,7 @@ def test_core_standalone_writer_scan(home, tmp_path, role, filename, name, line,
     rows = service.migration_scan()["items"]
     assert rows and all(row["proposed_action"] == "reauth" for row in rows)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"] for row in rows]))
+        asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert not adapter.provisioned and not adapter.oauth_provisioned and not adapter.transient_refs
     assert not adapter.observed and not store.config.sources
     assert path.read_bytes() == line.encode()
@@ -633,7 +633,7 @@ def test_core_independent_backend(home, tmp_path, filename, line):
     rows = {row["backend"]: row for row in service.migration_scan()["items"]}
     assert rows["codex"]["notes_key"].endswith(".dynamic_shell")
     assert rows["claude"]["proposed_action"] == "import"
-    assert asyncio.run(service.migration_apply([rows["claude"]["id"]]))["applied"] == 1
+    assert asyncio.run(service.migration_apply([rows["claude"]["id"]], clean_api_keys=True))["applied"] == 1
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert path.read_text() == kept
 

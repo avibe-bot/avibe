@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
+import { SourcePrivacyToggle } from './SourcePrivacy';
 import type { AgentBackend, Source } from './types';
 
 export const SourcesCard: React.FC<{
@@ -33,9 +34,10 @@ export const SourcesCard: React.FC<{
     { id: 'hub' as const, sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
   ].filter((group) => group.sources.length > 0);
   // The settings route pane owns vertical scrolling. This card grows with its
-  // sources so users never have to coordinate a second scroll area here.
+  // sources so users never have to coordinate a second scroll area here; beside
+  // the routes it sticks near the top so its wires stay readable.
   return (
-    <section className="relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="model-hub-upstream-card relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
@@ -45,7 +47,10 @@ export const SourcesCard: React.FC<{
             className="model-hub-upstream-info"
           />
         </span>
-        {sources !== undefined && <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>}
+        {sources !== undefined && <span className="flex items-center gap-2">
+          {sources.some((source) => source.account_label || source.base_url || source.masked_credential) && <SourcePrivacyToggle />}
+          <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>
+        </span>}
       </div>
       <div className="flex-1 space-y-2.5 p-3">
         {read.kind === 'loading' && sources === undefined

@@ -300,7 +300,6 @@ describe('the copy each remedy names', () => {
     'settings.models.guard.confirm.replaceKey',
     'settings.models.guard.result.label',
     'settings.models.guard.result.gapLabel',
-    'settings.models.guard.result.hint.safe',
     'settings.models.guard.result.hint.interrupt',
   ])('has replacement guard copy in both locales for %s', (key) => {
     for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');

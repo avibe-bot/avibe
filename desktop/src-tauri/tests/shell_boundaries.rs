@@ -226,7 +226,11 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
         assert!(source.contains(required), "native deep-link path is missing {required}");
     }
     assert!(!build.contains("deep_link") && !build.contains("window_state"));
-    assert!(!source.contains("on_open_url") && !source.contains(".eval("));
+    assert!(!source.contains("on_open_url"));
+    // The one script the shell runs in the Workbench is its constant Settings
+    // request; nothing page-supplied is ever evaluated.
+    assert_eq!(source.matches(".eval(").count(), 1);
+    assert!(source.contains("window.eval(open_settings_script())"));
     assert!(!source.contains("RunEvent::Opened"));
     let receiver = source
         .split("fn receive_native_deep_link(")
@@ -790,7 +794,7 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
-fn settings_open_through_the_deep_link_path_only_while_a_workbench_is_shown() {
+fn settings_open_in_the_shown_workbench_and_only_while_one_is_shown() {
     let source = shipping_source("src/lib.rs");
     let body = |name: &str| -> String {
         source
@@ -838,12 +842,31 @@ fn settings_open_through_the_deep_link_path_only_while_a_workbench_is_shown() {
     let gate = handler
         .find("if !settings_is_available(")
         .expect("the handler refuses without a Workbench");
+    // In place first, so the Workbench keeps the surface Settings covers.
+    let in_place = handler
+        .find("window.eval(open_settings_script())")
+        .expect("Settings opens inside the Workbench on screen");
+    let shown = handler
+        .find("origin.matches_url_origin(&url)")
+        .expect("only a window showing the adopted Workbench is asked");
     let delivery = handler
         .find("receive_native_deep_link(app, [SETTINGS_DEEP_LINK]);")
-        .expect("Settings is delivered as a deep link");
-    assert!(gate < delivery, "the handler must refuse before delivering");
+        .expect("a window without a Workbench still gets the deep link");
+    assert!(gate < shown && shown < in_place && in_place < delivery);
     assert!(!handler.contains(".navigate("), "the deep-link path owns navigation");
     assert!(source.contains("const SETTINGS_DEEP_LINK: &str = \"avibe://settings\";"));
+    let event = source
+        .split("const OPEN_SETTINGS_EVENT: &str = \"")
+        .nth(1)
+        .expect("the in-page Settings request")
+        .split('"')
+        .next()
+        .expect("event literal");
+    let reader = read_to_string(&crate_dir().join("../../ui/src/lib/desktopShell.ts"));
+    assert!(
+        reader.contains(&format!("'{event}'")),
+        "the Workbench must listen for the request the shell sends"
+    );
 }
 
 #[test]

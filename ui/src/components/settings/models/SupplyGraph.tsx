@@ -43,10 +43,21 @@ export const SupplyGraph: React.FC<{
     if (!container) return undefined;
     const measure = () => {
       const root = container.getBoundingClientRect();
+      // Index each endpoint once per measurement, not once per relation.
+      const sources = new Map<string, HTMLElement>();
+      for (const element of container.querySelectorAll<HTMLElement>('[data-source-id]')) {
+        const id = element.dataset.sourceId;
+        if (id && !sources.has(id)) sources.set(id, element);
+      }
+      const backends = new Map<string, HTMLElement>();
+      for (const element of container.querySelectorAll<HTMLElement>('[data-agent-backend]')) {
+        const id = element.dataset.agentBackend;
+        if (id && !backends.has(id)) backends.set(id, element);
+      }
       const wires: DrawnRelation[] = [];
       for (const relation of relations) {
-        const source = Array.from(container.querySelectorAll<HTMLElement>('[data-source-id]')).find((element) => element.dataset.sourceId === relation.sourceId);
-        const backend = Array.from(container.querySelectorAll<HTMLElement>('[data-agent-backend]')).find((element) => element.dataset.agentBackend === relation.backend);
+        const source = sources.get(relation.sourceId);
+        const backend = backends.get(relation.backend);
         if (!source || !backend) continue;
         const sourceBounds = source.getBoundingClientRect();
         const backendBounds = backend.getBoundingClientRect();
@@ -60,14 +71,33 @@ export const SupplyGraph: React.FC<{
       setDrawing({ width: root.width, height: root.height, wires });
     };
     measure();
-    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    // Scroll and resize bursts collapse into one measurement per frame.
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        measure();
+      });
+    };
+    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
     resize?.observe(container);
-    container.addEventListener('scroll', measure, true);
-    window.addEventListener('resize', measure);
+    // The route pane scrolls outside this container; a sticky card moves then.
+    // Only a scroller around or inside the graph can move an endpoint; a
+    // dialog or panel elsewhere on the page cannot.
+    const scroll = (event: Event) => {
+      const target = event.target;
+      if (target === document || (target instanceof Node && (target.contains(container) || container.contains(target)))) {
+        schedule();
+      }
+    };
+    window.addEventListener('scroll', scroll, true);
+    window.addEventListener('resize', schedule);
     return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
       resize?.disconnect();
-      container.removeEventListener('scroll', measure, true);
-      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', scroll, true);
+      window.removeEventListener('resize', schedule);
     };
   }, [containerRef, relations]);
 

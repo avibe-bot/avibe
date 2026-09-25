@@ -66,7 +66,7 @@ def test_provision_failure_before_return_keeps_durable_cleanup_owner(monkeypatch
 
     setattr(adapter, method, write_then_lose_return)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert len(observed) == 1
     assert service.revocations.list() == observed
     assert not store.config.sources
@@ -93,7 +93,7 @@ def test_failed_journal_durability_prevents_secret_provision(monkeypatch, tmp_pa
 
     monkeypatch.setattr(service.revocations, "_sync_directory", fail_flush)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert not adapter.provisioned and not adapter.oauth_provisioned and not adapter.transient_refs
     assert not store.config.sources
     assert native.read_bytes() == original
@@ -129,7 +129,7 @@ def test_exposed_grant_is_owned_by_its_current_source_during_revocation_replay(m
 
     adapter.validate_oauth_credential = validation_pending
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     record = service.migration_journal.load()
     assert record["phase"] == "exposed"
     source, = store.config.sources
@@ -158,7 +158,7 @@ def test_prepared_save_uncertain_outcome_keeps_its_provisional_grant(
 
     monkeypatch.setattr(service.migration_journal, "save", committed_then_failed)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     pending = service.migration_journal.load()
     assert pending["phase"] == "prepared"
     assert not adapter.revoked
@@ -218,7 +218,7 @@ def test_real_engine_material_is_recovered_without_a_prepared_takeover_record(
 
     monkeypatch.setattr(service.migration_journal, "save", fail_prepared)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert native.read_bytes() == original
     assert not store.config.sources
     assert service.migration_journal.load() is None

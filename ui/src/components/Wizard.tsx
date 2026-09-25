@@ -25,6 +25,7 @@ import {
 } from './onboarding/providers/gatewayBootstrap';
 import logoImg from '@/assets/logo.png';
 import { LanguageSwitcher } from './LanguageSwitcher';
+import { isDesktopShell } from '../lib/desktopShell';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
@@ -37,9 +38,13 @@ import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, 
  * the logo asset, which already carries its white tile, beside the two-line wordmark —
  * at the window's own gutter, and the shared language switcher wearing its round
  * trigger opposite it.
+ *
+ * The desktop shell leaves it out, and its height with it: the window's title bar
+ * names the app, and language lives in General Settings behind the native menu.
  */
 function SetupHeader() {
   const { t } = useTranslation();
+  if (isDesktopShell()) return null;
   return (
     <header>
       <div className="onboarding-brand">

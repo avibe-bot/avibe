@@ -210,7 +210,8 @@ describe('direct route editing', () => {
       expect(modelsApi.getAgentChain).toHaveBeenCalledTimes(2);
     } else {
       expect(footer().queryByRole('button', { name: 'Cancel changes' })).toBeNull();
-      await user.click(footer().getByRole('button', { name: 'Close' }));
+      expect(footer().queryByRole('button', { name: 'Close' })).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Close' }));
       expect(close).toHaveBeenCalledTimes(1);
       expect(modelsApi.getAgentChain).toHaveBeenCalledTimes(1);
     }

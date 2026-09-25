@@ -98,7 +98,7 @@ def test_live_auth_is_mirrored_before_publication_and_completed_receipt(monkeypa
 
     adapter.sync_sources = checked_sync
     service.migration_journal.complete = checked_complete
-    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
     assert [phase for phase, _ in observations] == ["withdrawn", "exposed"]
     assert service.migration_journal.load() is None
     assert not runtime.admissions and not runtime.turns
@@ -121,7 +121,7 @@ def test_preexposure_mirror_failure_recovers_the_restored_direction(monkeypatch,
 
     service.migration_reconcile_auth = fail
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert service.store.native_auth_snapshot(("claude",)) == before
     assert not adapter.synced
     assert not adapter.activated
@@ -152,7 +152,7 @@ def test_exposed_mirror_failure_keeps_current_ref_and_forward_only_recovery(monk
 
     service.migration_reconcile_auth = fail_before_receipt
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     record = service.migration_journal.load()
     assert record["phase"] == "exposed"
     ref = service.store.load().sources[0].credential_ref
@@ -192,7 +192,7 @@ def test_terminal_oauth_recovery_mirrors_before_releasing_custody(monkeypatch, t
     adapter.validate_oauth_credential = rejected
     service.migration_reconcile_auth = fail_terminal
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert service.migration_journal.load()["terminal"]["invalid_source_ids"]
     assert service.migration_journal.completed() is None
     assert service.migration_blocked_backends == {"claude"}
@@ -209,3 +209,35 @@ def test_terminal_oauth_recovery_mirrors_before_releasing_custody(monkeypatch, t
     assert service.migration_journal.completed()["outcome"] == "needs_auth"
     assert service.migration_journal.load() is None
     assert not runtime.admissions and not runtime.turns
+
+
+def test_copy_only_takeover_keeps_the_avibe_saved_native_key(monkeypatch, tmp_path):
+    """MH-MIG-007: without cleanup the V2 native key survives for Direct mode."""
+    service, adapter, before, _live, _observations, ids, _runtime = _persistent_takeover(monkeypatch, tmp_path)
+    assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+    assert len(adapter.provisioned) == 1
+    assert V2Config.load().model_hub.agents["claude"].mode == "hub"
+    assert service.store.native_auth_snapshot(("claude",)) == before
+    assert service.migration_scan()["items"] == []
+
+
+def test_copy_only_batch_keeps_an_earlier_clean_store_receipt(tmp_path):
+    from core.handlers.model_hub.migration_journal import NativeTakeoverJournal
+
+    journal = NativeTakeoverJournal(tmp_path / "takeover.json")
+
+    def record(**extra):
+        return {
+            "version": 1, "phase": "exposed", "items": [], "backends": ["codex"],
+            "source_ids": [], "credentials": [], "previous": {}, "updated": {"sources": []},
+            "files": [], "keychain": [], **extra,
+        }
+
+    journal.complete(record(clean_native_stores={"codex": "rev-clean"}))
+    journal.complete(record(retained_native_ids={"key_fixture": {"source_id": "src_fixture", "credential_ref": "ref_fixture"}}))
+    receipt = journal.completed()
+    assert receipt["clean_native_stores"] == {"codex": "rev-clean"}
+    assert receipt["retained_native_ids"] == {"key_fixture": {"source_id": "src_fixture", "credential_ref": "ref_fixture"}}
+    # A batch that edited the store itself replaces the earlier proof.
+    journal.complete(record(keychain=[{"backend": "codex", "operations": []}]))
+    assert journal.completed()["clean_native_stores"] == {}

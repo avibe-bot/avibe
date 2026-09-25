@@ -177,6 +177,31 @@ describe('SettingsLayout', () => {
     expect(await screen.findByText('chat-body')).toBeTruthy();
   });
 
+  it('leaves the top bar to the desktop shell and keeps the rail way out', async () => {
+    media.matches = true;
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    try {
+      const user = userEvent.setup();
+      renderLayout({
+        pathname: '/settings/general',
+        state: settingsOverlayOpenState({
+          pathname: '/chat/ses_7',
+          search: '',
+          hash: '',
+          state: null,
+          key: 'chat-origin',
+        }),
+      });
+
+      expect(screen.queryByRole('banner')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'settings.close' })).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'settings.backToApp' }));
+      expect(await screen.findByText('chat-body')).toBeTruthy();
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    }
+  });
+
   it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
     renderLayout('/settings/replies');
 
@@ -279,6 +304,26 @@ describe('SettingsLayout', () => {
     await waitFor(() => {
       expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     });
+  });
+
+  // AUTH-SETUP-125: Settings opened over the wizard offers only the sections the
+  // setup visit keeps, so no row leads out of the setup and loses its step.
+  it('offers only the setup visit sections over the wizard', async () => {
+    const setup: Location = { pathname: '/setup', search: '', hash: '', state: null, key: 'setup' };
+    renderLayout(
+      { pathname: '/settings/general', state: settingsOverlayOpenState(setup, null) },
+      { shellHasSidebar: false },
+    );
+
+    expect(screen.getByText('general-body')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    });
+    const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
   });
 
   it('opens Messaging Platforms by default and still allows manual collapse', async () => {

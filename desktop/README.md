@@ -205,7 +205,7 @@ Packaged installations register `avibe://` for native, single-window navigation:
 | --- | --- |
 | `avibe://session/<id>` | `/chat/<id>` |
 | `avibe://show/<id>` | `/apps/show/<id>` |
-| `avibe://settings` | `/admin/settings/service` |
+| `avibe://settings` | `/settings/general` |
 | `avibe://vaults/request/<id>` | `/vaults?request_id=<id>` |
 
 IDs use literal ASCII letters, digits, `.`, `_`, and `-`, up to 128 bytes;

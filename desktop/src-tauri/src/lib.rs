@@ -73,9 +73,14 @@ const STOP_MENU_ID: &str = "stop-runtime";
 const QUIT_MENU_ID: &str = "quit-avibe";
 const LOGIN_MENU_ID: &str = "start-at-login";
 const SETTINGS_MENU_ID: &str = "open-settings";
-/// What Settings opens: the Workbench deep link, whose destination
-/// `parse_deep_link` owns, delivered the way an external link is.
+/// Where Settings leads: the Workbench deep link, whose destination
+/// `parse_deep_link` owns. It is delivered as a page load only when the window
+/// has no Workbench able to open Settings in place.
 const SETTINGS_DEEP_LINK: &str = "avibe://settings";
+/// The in-page request to open Settings, read by `ui/src/lib/desktopShell.ts`.
+/// A Workbench that handles it cancels it; an uncancelled one falls back to
+/// loading the deep link's destination.
+const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 #[cfg(feature = "bundled-runtime")]
 const ACTIVITY_UNINSTALL: u8 = 3;
 
@@ -382,15 +387,45 @@ fn settings_is_available(activity: u8, workbench_origin: bool) -> bool {
     activity == ACTIVITY_MONITOR && workbench_origin
 }
 
+/// Settings opens inside the Workbench already on screen, through the same
+/// navigation its own Settings control takes, so leaving Settings returns to the
+/// surface it covered — project, session and unsent draft included. A page load
+/// would discard all of that. Only a window that shows no Workbench goes through
+/// the deep-link path instead, which waits for one.
 fn open_workbench_settings(app: &AppHandle) {
     let Some(shell) = app.try_state::<Shell>() else {
         return;
     };
-    let workbench_origin = shell.active_origin.lock().is_ok_and(|origin| origin.is_some());
-    if !settings_is_available(shell.activity.load(Ordering::SeqCst), workbench_origin) {
+    let Some(origin) = shell.active_origin.lock().ok().and_then(|origin| origin.clone()) else {
+        return;
+    };
+    if !settings_is_available(shell.activity.load(Ordering::SeqCst), true) {
         return;
     }
+    let shown = app
+        .get_webview_window(MAIN_WINDOW)
+        .filter(|window| window.url().is_ok_and(|url| origin.matches_url_origin(&url)));
+    if let Some(window) = shown {
+        focus_or_restore_main_window(app);
+        if window.eval(open_settings_script()).is_ok() {
+            return;
+        }
+    }
     receive_native_deep_link(app, [SETTINGS_DEEP_LINK]);
+}
+
+/// Asks the page to open Settings, and loads the deep link's destination when
+/// nothing in the page takes the request: an older Workbench, or a route outside
+/// the app shell. The destination is a same-origin path, so the load stays on the
+/// adopted Runtime.
+fn open_settings_script() -> String {
+    let path = avibe_runtime_host::deep_link::parse_deep_link(SETTINGS_DEEP_LINK)
+        .expect("the Settings deep link is part of the frozen grammar")
+        .path()
+        .to_owned();
+    format!(
+        "if (window.dispatchEvent(new Event('{OPEN_SETTINGS_EVENT}', {{ cancelable: true }}))) window.location.assign('{path}');"
+    )
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -1709,6 +1744,15 @@ mod tests {
             assert_eq!(settings_is_available(activity, true), activity == ACTIVITY_MONITOR);
         }
         assert!(avibe_runtime_host::deep_link::parse_deep_link(SETTINGS_DEEP_LINK).is_some());
+    }
+
+    #[test]
+    fn the_settings_request_falls_back_to_the_deep_link_destination() {
+        assert_eq!(
+            open_settings_script(),
+            "if (window.dispatchEvent(new Event('avibe:desktop-open-settings', { cancelable: true }))) \
+             window.location.assign('/settings/general');"
+        );
     }
 
     #[test]
