@@ -132,6 +132,18 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored).toEqual([]);
   });
 
+  it('skips interim narration when inferring the request owner', () => {
+    const interim = { ...message('agent-interim', '2026-07-30T10:00:05Z'), type: 'interim' };
+    const reply = message('agent-reply', '2026-07-30T10:00:10Z');
+    const placed = placeVaultProvisionRequests(
+      [message('user-before', '2026-07-30T09:59:00Z', 'user'), interim, reply],
+      [request('p', 'provision', '2026-07-30T10:00:00Z')],
+    );
+
+    expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['p']);
+    expect(placed.byMessageId.has(interim.id)).toBe(false);
+  });
+
   it('does not infer an unrelated detached completion as the request owner', () => {
     const detached = {
       ...message('background-completion', '2026-07-30T10:00:05Z'),
