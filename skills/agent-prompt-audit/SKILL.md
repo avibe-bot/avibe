@@ -21,6 +21,12 @@ text stored in Avibe state (Agent prompts, Task and Watch messages). Apply
 edits only when the request asks for them. A clean surface is a valid result; do not
 manufacture findings.
 
+Read both references in full before step 2; they are part of this procedure,
+not background. [references/surfaces.md](references/surfaces.md) says where each
+layer lives, who owns it, and how to query run evidence;
+[references/patterns.md](references/patterns.md) is the defect catalog and the
+keep list every finding is judged against.
+
 ## 1. Scope and target
 
 State these at the top of the report as assumptions instead of asking:
@@ -39,9 +45,8 @@ State these at the top of the report as assumptions instead of asking:
 
 ## 2. Inventory the lifecycle surface
 
-List what you found before auditing it. See
-[references/surfaces.md](references/surfaces.md) for where each layer lives and
-who owns it. The layers, by when they reach the Agent:
+List what you found before auditing it, using the locations in
+`references/surfaces.md`. The layers, by when they reach the Agent:
 
 1. **Always loaded**: Avibe-injected runtime prompt, global rules, the project
    AGENTS.md/CLAUDE.md chain, the Agent's system prompt, and the Skill
@@ -59,7 +64,7 @@ Prefer what Agents actually did over what the text seems to say. First
 resolve the sessions in scope, then pull their recent failed, cancelled,
 long-running, or user-corrected Agent runs and read the
 transcripts around the failure (`vibe runs`, `vibe data query`; recipes in
-[references/surfaces.md](references/surfaces.md)). User corrections ("you
+`references/surfaces.md`). User corrections ("you
 stopped", "why didn't you report", "don't ask me that") are the strongest
 signal. For each symptom, find the line that produced it — or the missing line
 that would have prevented it. Use `git blame` on version-controlled prompt files to
@@ -71,7 +76,7 @@ reproduces.
 For each instruction ask: is this **context only the author knows** (audience,
 environment facts, contracts, authority, reasons — keep), or a **constraint on
 behavior** (test whether it still earns its place)? Then scan against
-[references/patterns.md](references/patterns.md): dated prompt text,
+`references/patterns.md`: dated prompt text,
 lifecycle-control gaps, layering defects, and cross-backend hazards. A finding
 must name its pattern and a reason grounded in evidence or documented model
 behavior; otherwise it is a low-confidence flag or nothing.
