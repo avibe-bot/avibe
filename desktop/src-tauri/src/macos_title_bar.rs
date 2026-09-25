@@ -4,23 +4,27 @@
 //! title, so the traffic lights float over the page instead of sitting on a
 //! separate grey strip. Two things then have to hold:
 //!
-//! - The page must keep its own controls out of the strip. It learns the
-//!   strip's height from `--shell-titlebar-inset`, which [`inset_script`] sets on
-//!   the root element before any Workbench script runs.
-//! - The strip must still move the window. WKWebView honours no `app-region`
-//!   CSS and swallows the mouse-down that would start a native drag, and Tauri's
+//! - The page must keep the strip's region free of its own controls. The strip
+//!   covers only the sidebar's top — the traffic lights float there — so the
+//!   main pane's chat and search headers reach the window's top edge with their
+//!   ordinary padding. Left-edge and full-window surfaces learn the strip's
+//!   height from `--shell-titlebar-inset`, which [`inset_script`] sets on the
+//!   root element before any Workbench script runs.
+//! - The strip must move the window. WKWebView honours no `app-region` CSS and
+//!   swallows the mouse-down that would start a native drag, and Tauri's
 //!   drag-region attribute needs an IPC grant the remote Workbench origin
 //!   deliberately does not have. So the shell lays one transparent native view
 //!   over the strip, above the WebView: a drag there moves the window and a
 //!   double-click does what the system title bar would, with no page script
 //!   involved and no capability widened.
 //!
-//! Both only hold for a page that knows the inset. The shell can adopt a
-//! Runtime it did not ship, whose older Workbench still puts controls in the top
-//! 28 points, so every loaded page is asked, natively and without IPC, whether
-//! it declares [`SUPPORT_META`]. A page that does keeps the overlay; any other
-//! page, or a page that cannot answer, gets the standard title bar back with the
-//! strip hidden and the inset reset to zero.
+//! Both only hold for a page built against this exact geometry. The shell can
+//! adopt a Runtime it did not ship, whose Workbench keeps a different region
+//! free — or none at all — so every loaded page is asked, natively and without
+//! IPC, whether it declares [`SUPPORT_META`] with the geometry this shell
+//! draws. A page that does keeps the overlay; any other page, or a page that
+//! cannot answer, gets the standard title bar back with the strip hidden and
+//! the inset reset to zero.
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -40,6 +44,13 @@ use tauri::{Webview, WebviewWindow};
 /// macOS title bar of a window without a toolbar, where the traffic lights sit.
 pub const TITLE_BAR_INSET: f64 = 28.0;
 
+/// Width, in points, of the strip: the Workbench sidebar's minimum width
+/// (`MIN_SIDEBAR_WIDTH` in `ui/src/lib/sidebarWidth.ts`). The sidebar can only
+/// grow from there and keeps its whole top edge free, so the strip never
+/// reaches the main pane, whose headers therefore keep the window's full
+/// height. The traffic lights float over the sidebar, above the strip.
+pub const TITLE_BAR_STRIP_WIDTH: f64 = 248.0;
+
 /// Publishes [`TITLE_BAR_INSET`] to the Workbench and the bootstrap page. User
 /// scripts run after the document element exists and before any page script.
 /// Top-level document only: Show Page content in subframes is laid out by the
@@ -51,17 +62,27 @@ pub fn inset_script() -> String {
     )
 }
 
-/// The `<meta name>` a page carries when it lays itself out below the strip.
-/// The Workbench (`ui/index.html`) and the bootstrap page (`index.html`) both
-/// declare it; a Workbench from before the overlay title bar does not.
-const SUPPORT_META: &str = "avibe-shell-titlebar-inset";
+/// The `<meta name>` a page carries when it keeps the strip's region free, with
+/// the geometry it was built against as the content (`240x28`). The Workbench
+/// (`ui/index.html`) and the bootstrap page (`index.html`) both declare it. A
+/// page from another release that kept a different region free carries a
+/// different name or content, so skew in either direction falls back to the
+/// standard title bar instead of covering that page's controls.
+const SUPPORT_META: &str = "avibe-shell-title-strip";
 
-/// Answers whether the loaded top-level page declares [`SUPPORT_META`], and
-/// makes the published inset agree with that answer.
+/// The geometry half of the [`SUPPORT_META`] contract, `<width>x<height>` in
+/// points, derived from the constants the strip is drawn with.
+fn support_geometry() -> String {
+    format!("{TITLE_BAR_STRIP_WIDTH}x{TITLE_BAR_INSET}")
+}
+
+/// Answers whether the loaded top-level page declares [`SUPPORT_META`] for this
+/// shell's exact strip geometry, and makes the published inset agree.
 fn support_probe() -> String {
+    let geometry = support_geometry();
     format!(
         "(function () {{ \
-         var supported = document.querySelector('meta[name=\"{SUPPORT_META}\"]') !== null; \
+         var supported = document.querySelector('meta[name=\"{SUPPORT_META}\"][content=\"{geometry}\"]') !== null; \
          document.documentElement.style.setProperty('--shell-titlebar-inset', supported ? '{TITLE_BAR_INSET}px' : '0px'); \
          return supported ? 'supported' : 'unsupported'; }})()"
     )
@@ -139,15 +160,18 @@ pub fn install(window: &WebviewWindow) {
         };
         let strip = TitleBarDragStrip::new(
             mtm,
-            NSRect::new(NSPoint::new(0.0, y), NSSize::new(bounds.size.width, TITLE_BAR_INSET)),
+            NSRect::new(
+                NSPoint::new(0.0, y),
+                NSSize::new(TITLE_BAR_STRIP_WIDTH, TITLE_BAR_INSET),
+            ),
         );
-        // Pinned to the top edge and stretched with the width on every resize.
+        // Pinned to the top-left corner, fixed size, on every resize.
         let pin_top = if flipped {
             NSAutoresizingMaskOptions::ViewMaxYMargin
         } else {
             NSAutoresizingMaskOptions::ViewMinYMargin
         };
-        strip.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | pin_top);
+        strip.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMaxXMargin | pin_top);
         content.addSubview_positioned_relativeTo(&strip, NSWindowOrderingMode::Above, None);
     });
 }
@@ -208,18 +232,36 @@ fn set_overlay(window: &NSWindow, overlay: bool, _mtm: MainThreadMarker) {
 mod tests {
     use super::*;
 
-    /// A page that lays itself out below the strip must say so, or the shell
-    /// falls back to the standard title bar for it. Both pages the shell can
-    /// show at the current release declare the name the shell asks for.
+    /// A page that keeps the strip's region free must say so for this exact
+    /// geometry, or the shell falls back to the standard title bar for it. Both
+    /// pages the shell can show at the current release declare it.
     #[test]
-    fn every_page_this_release_serves_declares_overlay_support() {
+    fn every_page_this_release_serves_declares_this_strip_geometry() {
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for page in ["../index.html", "../../ui/index.html"] {
             let html = std::fs::read_to_string(crate_dir.join(page)).expect("page is readable");
             assert!(
-                html.contains(&format!("<meta name=\"{SUPPORT_META}\"")),
-                "{page} must declare {SUPPORT_META}"
+                html.contains(&format!(
+                    "<meta name=\"{SUPPORT_META}\" content=\"{}\"",
+                    support_geometry()
+                )),
+                "{page} must declare {SUPPORT_META} for {}",
+                support_geometry()
             );
         }
+    }
+
+    /// The strip must never reach the main pane, whose headers use the full
+    /// window height. The sidebar guarantees that by never shrinking below the
+    /// strip's width; if its minimum changes, the strip and the geometry
+    /// contract must change with it.
+    #[test]
+    fn the_strip_never_outgrows_the_workbench_sidebar() {
+        let widths = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/src/lib/sidebarWidth.ts");
+        let widths = std::fs::read_to_string(widths).expect("sidebarWidth.ts is readable");
+        assert!(
+            widths.contains(&format!("MIN_SIDEBAR_WIDTH = {TITLE_BAR_STRIP_WIDTH};")),
+            "the sidebar's minimum width must equal the native drag strip's width ({TITLE_BAR_STRIP_WIDTH}px)"
+        );
     }
 }
