@@ -3,26 +3,6 @@ import * as React from 'react';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 
-type Placement = { side: 'bottom' | 'left' | 'right'; align: 'center' | 'end' };
-const BELOW: Placement = { side: 'bottom', align: 'end' };
-
-/**
- * Where the exact moment opens, clear of the figures around it. In a quota row
- * foot laid out as one line, the rows above and below carry their percentages
- * at the edge, so it opens sideways into the foot's own gap, toward the row's
- * middle. Stacked (the narrow layout's own CSS rule), the line has room beside
- * it and the next row is not at its edge, so it opens below. Reading the foot's
- * computed layout keeps this in step with that rule. Radix flips on collision.
- */
-const placement = (el: HTMLElement): Placement => {
-  const foot = el.closest<HTMLElement>('.model-hub-quota-row-foot');
-  if (!foot || getComputedStyle(foot).flexDirection === 'column') return BELOW;
-  const self = el.getBoundingClientRect();
-  const row = foot.getBoundingClientRect();
-  const inRightHalf = self.left + self.width / 2 > row.left + row.width / 2;
-  return { side: inRightHalf ? 'left' : 'right', align: 'center' };
-};
-
 /**
  * A relative time ("in 5 days") that reveals its exact moment on mouse hover,
  * keyboard focus, or a tap — a phone has no hover, so a tap toggles it. The
@@ -36,13 +16,8 @@ export const TimeHint: React.FC<{
   exact: string;
   className?: string;
 }> = ({ text, exact, className }) => {
-  const [open, setOpenState] = React.useState(false);
-  const [place, setPlace] = React.useState<Placement>(BELOW);
+  const [open, setOpen] = React.useState(false);
   const anchor = React.useRef<HTMLButtonElement>(null);
-  const setOpen = React.useCallback((next: boolean | ((prev: boolean) => boolean)) => {
-    if (anchor.current) setPlace(placement(anchor.current));
-    setOpenState(next);
-  }, []);
   // A pointer press focuses the button before its click; only keyboard focus
   // opens on focus, so a tap is one clean toggle rather than open-then-close.
   const pointer = React.useRef<string | null>(null);
@@ -69,8 +44,9 @@ export const TimeHint: React.FC<{
         </button>
       </PopoverAnchor>
       <PopoverContent
-        side={place.side}
-        align={place.align}
+        // Below, end-aligned: clear of its own row's figure; Radix flips it on collision.
+        side="bottom"
+        align="end"
         sideOffset={6}
         onOpenAutoFocus={(event) => event.preventDefault()}
         // The anchor is not a Radix trigger, so its own tap would read as outside.

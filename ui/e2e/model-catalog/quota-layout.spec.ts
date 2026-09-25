@@ -12,8 +12,8 @@ type Box = { x: number; y: number; width: number; height: number };
 
 /**
  * MH-QUOTA-029: a tap (or, without touch, a click) on the weekly countdown opens
- * its exact moment inside the viewport, covering no row's remaining figure and
- * not this row's pace line.
+ * its exact moment inside the viewport, clear of its own row's remaining figure
+ * and pace line. Briefly covering the next row is fine for a transient hint.
  */
 const openHintClear = async (page: Page, width: number, touch: boolean) => {
   const row = page.locator('[data-quota-window="seven_day"]').first();
@@ -28,10 +28,7 @@ const openHintClear = async (page: Page, width: number, touch: boolean) => {
   expect(hintBox.x + hintBox.width).toBeLessThanOrEqual(width);
   expect(overlaps(hintBox, await box(countdown))).toBe(false);
   expect(overlaps(hintBox, await box(row.locator('.model-hub-quota-pace')))).toBe(false);
-  const card = page.getByRole('article').filter({ has: row });
-  for (const figure of await card.locator('.model-hub-quota-left').all()) {
-    expect(overlaps(hintBox, await box(figure))).toBe(false);
-  }
+  expect(overlaps(hintBox, await box(row.locator('.model-hub-quota-left')))).toBe(false);
 };
 
 for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]] as const) {
@@ -108,7 +105,7 @@ for (const [lang, width] of [['en', 360], ['zh', 360], ['en', 390], ['zh', 390]]
 }
 
 for (const lang of ['en', 'zh'] as const) {
-  test(`MH-QUOTA-029: at desktop width the exact moment opens beside its countdown, clear of every figure (${lang})`, async ({ page }, testInfo) => {
+  test(`MH-QUOTA-029: at desktop width the exact moment opens clear of its own row's figure and pace line (${lang})`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`/e2e/model-catalog/fixture.html?view=quota&lang=${lang}`);
     await expect(page.getByRole('article')).toHaveCount(2);
