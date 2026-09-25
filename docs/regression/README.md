@@ -134,6 +134,7 @@ remain outside this cleanup boundary.
 
 The same sender-only policy covers `.DS_Store` at any depth and these
 repository-root host artifacts: `.bot.pid`, `.gstack/`, `.tmp/`,
+`desktop/target` (including a symlink to an external build directory),
 `vibe/_version.py`, and `vibe/show_runtime_manifest.json`. Their stale copies
 are removed only from the disposable synced source, never from the operator's
 checkout or persistent product home.
