@@ -286,6 +286,10 @@ const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.React
 /** The service refreshes each Source at most this often; polling faster buys nothing. */
 const QUOTA_POLL_MS = 5 * 60_000;
 
+/** Back to the re-login button of a quota card, or to the selected tab once a refresh has removed it. */
+const focusQuotaOpener = (opener: HTMLElement) =>
+  (opener.isConnected ? opener : document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))?.focus();
+
 type HubTab = 'sources' | 'quota' | 'usage' | 'logs';
 
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
@@ -1407,11 +1411,7 @@ export const SettingsModelsPage: React.FC = () => {
     // quota card, back to its button, or to the quota tab once it is gone.
     const opener = quotaReauthOpenerRef.current;
     quotaReauthOpenerRef.current = null;
-    window.setTimeout(() => {
-      if (!opener) return sourceDetailHeadingRef.current?.focus();
-      const tab = document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
-      (opener.isConnected ? opener : tab)?.focus();
-    }, 0);
+    window.setTimeout(() => (opener ? focusQuotaOpener(opener) : sourceDetailHeadingRef.current?.focus()), 0);
   }, []);
   const closeSubscriptionPicker = React.useCallback(() => {
     subscriptionPickerHandoffRef.current = false;
@@ -1686,7 +1686,7 @@ export const SettingsModelsPage: React.FC = () => {
             setQuotaReauthSource(null);
             const opener = quotaReauthOpenerRef.current;
             quotaReauthOpenerRef.current = null;
-            if (opener) window.setTimeout(() => opener.focus(), 0);
+            if (opener) window.setTimeout(() => focusQuotaOpener(opener), 0);
           }}
           title={t('settings.models.repair.reauthTitle', { name: quotaReauthSource.display_name })}
           description={t(reauthBodyKey(quotaReauthSource))}

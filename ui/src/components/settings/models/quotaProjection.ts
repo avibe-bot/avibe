@@ -48,12 +48,22 @@ export const quotaIsRetained = (source: SourceQuota): boolean =>
 
 export const windowIsScoped = (window: QuotaWindow): boolean => window.kind === 'model_weekly';
 
-/** `true` while the window is spent and has not yet reached its reset. */
-export function windowIsExhausted(window: QuotaWindow, now: number): boolean {
-  if (window.used_pct < 100) return false;
+/** `true` once the window's reset instant has come; the reading predates it. */
+export function windowHasReset(window: QuotaWindow, now: number): boolean {
   const resetAt = windowResetAt(window);
-  return resetAt === null || resetAt > now;
+  return resetAt !== null && resetAt <= now;
 }
+
+/**
+ * Share used as of `now`. A window past its reset has given its quota back, so
+ * it reads as unused until the next read: every figure, bar, and status derives
+ * from this one value so none can claim a reset beside a spent number.
+ */
+export const windowUsedNow = (window: QuotaWindow, now: number): number =>
+  windowHasReset(window, now) ? 0 : window.used_pct;
+
+/** `true` while the window is spent and has not yet reached its reset. */
+export const windowIsExhausted = (window: QuotaWindow, now: number): boolean => windowUsedNow(window, now) >= 100;
 
 export type QuotaPace =
   | { kind: 'paused' }
@@ -79,18 +89,19 @@ export function windowPace(window: QuotaWindow, now: number, retained: boolean):
   const remaining = resetAt !== null ? resetAt - now : null;
   const elapsed = remaining !== null && length !== null ? Math.min(1, Math.max(0, 1 - remaining / length)) : null;
   const elapsedPct = elapsed !== null ? Math.round(elapsed * 100) : null;
+  const used = windowUsedNow(window, now);
   if (retained) return { pace: { kind: 'paused' }, tone: 'stale', elapsedPct };
-  if (remaining !== null && remaining <= 0) return { pace: { kind: 'reset' }, tone: 'ok', elapsedPct };
-  if (window.used_pct >= 100) return { pace: { kind: 'exhausted', remainingMs: remaining }, tone: 'danger', elapsedPct };
+  if (windowHasReset(window, now)) return { pace: { kind: 'reset' }, tone: 'ok', elapsedPct };
+  if (used >= 100) return { pace: { kind: 'exhausted', remainingMs: remaining }, tone: 'danger', elapsedPct };
   if (elapsed === null || elapsedPct === null || remaining === null || length === null) {
     return { pace: { kind: 'ok' }, tone: 'ok', elapsedPct };
   }
-  const rate = window.used_pct / Math.max(elapsed, 0.02);
-  const toFull = rate > 0 ? ((100 - window.used_pct) / rate) * length : Infinity;
-  if (window.used_pct > elapsedPct + 8 && toFull < remaining) {
+  const rate = used / Math.max(elapsed, 0.02);
+  const toFull = rate > 0 ? ((100 - used) / rate) * length : Infinity;
+  if (used > elapsedPct + 8 && toFull < remaining) {
     return { pace: { kind: 'fast', runsOutAt: now + toFull }, tone: 'warn', elapsedPct };
   }
-  return { pace: { kind: window.used_pct > elapsedPct ? 'slightly_fast' : 'ok' }, tone: 'ok', elapsedPct };
+  return { pace: { kind: used > elapsedPct ? 'slightly_fast' : 'ok' }, tone: 'ok', elapsedPct };
 }
 
 export type QuotaStatus =
@@ -111,16 +122,11 @@ export type QuotaPick = { source: SourceQuota; window: QuotaWindow };
 const livePicks = (sources: SourceQuota[]): QuotaPick[] =>
   sources.filter(quotaIsLive).flatMap((source) => source.windows.map((window) => ({ source, window })));
 
-const notYetReset = (window: QuotaWindow, now: number) => {
-  const resetAt = windowResetAt(window);
-  return resetAt === null || resetAt > now;
-};
-
 /** The live window with the least left that is still usable. */
 export function tightestWindow(sources: SourceQuota[], now: number): QuotaPick | null {
   return livePicks(sources)
-    .filter(({ window }) => window.used_pct < 100 && notYetReset(window, now))
-    .sort((a, b) => b.window.used_pct - a.window.used_pct)[0] ?? null;
+    .filter(({ window }) => windowUsedNow(window, now) < 100)
+    .sort((a, b) => windowUsedNow(b.window, now) - windowUsedNow(a.window, now))[0] ?? null;
 }
 
 /** Live windows that are spent right now, soonest recovery first. */
@@ -135,14 +141,15 @@ export function upcomingResets(sources: SourceQuota[], now: number, limit = 5): 
   return livePicks(sources)
     .filter(({ window }) => {
       const resetAt = windowResetAt(window);
-      return window.used_pct > 0 && resetAt !== null && resetAt > now && resetAt - now < 7 * DAY_MS;
+      return windowUsedNow(window, now) > 0 && resetAt !== null && resetAt - now < 7 * DAY_MS;
     })
     .sort((a, b) => (windowResetAt(a.window) ?? 0) - (windowResetAt(b.window) ?? 0))
     .slice(0, limit);
 }
 
-/** Whole percent left, never negative; any headroom rounds up so it never reads as 0% left. */
-export const windowLeftPct = (window: QuotaWindow): number => Math.max(0, Math.ceil(100 - window.used_pct));
+/** Whole percent left as of `now`, never negative; any headroom rounds up so it never reads as 0% left. */
+export const windowLeftPct = (window: QuotaWindow, now: number): number =>
+  Math.max(0, Math.ceil(100 - windowUsedNow(window, now)));
 
 /** Whole percent used, the complement of `windowLeftPct`: a limit with headroom never reads as 100% used. */
-export const windowUsedPct = (window: QuotaWindow): number => 100 - windowLeftPct(window);
+export const windowUsedPct = (window: QuotaWindow, now: number): number => 100 - windowLeftPct(window, now);

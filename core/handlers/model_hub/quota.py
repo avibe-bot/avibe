@@ -286,12 +286,18 @@ def _codex_window(value: object) -> Optional[tuple[float, Optional[int], Optiona
     return used, _seconds(value.get("limit_window_seconds")), _unix_timestamp(value.get("reset_at"))
 
 
-def _hours_label(seconds: Optional[int]) -> str:
+def _span_label(seconds: Optional[int]) -> str:
+    """A window length as written: whole days, whole hours, else hours and minutes."""
     if seconds is None:
         return ""
     if seconds % 86400 == 0:
         return f"{seconds // 86400}d"
-    return f"{max(1, round(seconds / 3600))}h"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    hours, minutes = divmod(max(1, round(seconds / 60)), 60)
+    if not minutes:
+        return f"{hours}h"
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
 
 
 def parse_codex_quota(body: object) -> dict[str, Any]:
@@ -314,7 +320,7 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
                 _window(
                     window_id=slot,
                     kind=kind,
-                    label=slot if kind != "other" else (_hours_label(seconds) or slot),
+                    label=slot if kind != "other" else (_span_label(seconds) or slot),
                     used_pct=used,
                     window_seconds=seconds,
                     resets_at=resets_at,
@@ -336,7 +342,7 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
                     continue
                 used, seconds, resets_at = parsed
                 weekly = _codex_kind(seconds) == "weekly"
-                span = _hours_label(seconds)
+                span = _span_label(seconds)
                 windows.append(
                     _window(
                         window_id=f"additional:{index}:{slot}",
@@ -484,7 +490,6 @@ class SubscriptionQuotaCache:
         interval = QUOTA_FORCED_REFRESH_INTERVAL if force else QUOTA_REFRESH_INTERVAL
         if entry.attempted_at is not None and now - entry.attempted_at < interval:
             return None
-        entry.attempted_at = now
         entry.task = asyncio.create_task(
             self._refresh(source, entry),
             name=f"model-hub-quota-{source.source_id}",
@@ -494,6 +499,9 @@ class SubscriptionQuotaCache:
     async def _refresh(self, source: QuotaSourceRef, entry: _QuotaEntry) -> None:
         try:
             async with self._fetch_slots:
+                # The throttle counts from the vendor request, not from the queue:
+                # a read that waited for a slot has not yet asked the vendor.
+                entry.attempted_at = self._now()
                 parsed = await self._fetch(source.source_id, source.vendor, source.credential_ref)
             windows = parsed.get("windows")
             if not isinstance(windows, list):

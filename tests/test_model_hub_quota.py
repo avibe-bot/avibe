@@ -160,6 +160,20 @@ def test_claude_quota_parser_prefers_server_limits_and_keeps_unknown_rows():
     assert "scope_model" not in other
 
 
+@pytest.mark.parametrize(
+    ("seconds", "label"),
+    [(60, "1m"), (1800, "30m"), (3600, "1h"), (5400, "1h 30m"), (18000, "5h"), (86400, "1d"),
+     (90000, "25h"), (91800, "25h 30m"), (1209600, "14d"), (89, "1m"), (5430, "1h 30m")],
+)
+def test_codex_generic_limit_names_its_window_length_as_written(seconds, label):
+    """MH-QUOTA-003: An unrecognised Codex limit names its period exactly; a sub-hour window is not rounded to 1h."""
+
+    report = {"additional_rate_limits": [{"limit_name": "实验模型", "rate_limit": {"primary_window": {
+        "used_percent": 3, "limit_window_seconds": seconds, "reset_after_seconds": 10, "reset_at": 1790000100}}}]}
+    windows = parse_codex_quota(json.dumps(report, ensure_ascii=False))["windows"]
+    assert [window["label"] for window in windows if window["kind"] == "other"] == [f"实验模型 · {label}"]
+
+
 def test_codex_quota_parser_reads_primary_secondary_and_additional_limits():
     """MH-QUOTA-003: Codex windows classify by length; Spark is named from its metered feature; unknown limits stay generic."""
 
@@ -415,6 +429,33 @@ async def test_quota_cache_bounds_concurrent_vendor_fetches():
     gate.set()
     summary = await reading
     assert peak == 4 and [source["state"] for source in summary["sources"]] == ["ok"] * 12
+
+
+async def test_quota_cache_throttles_from_the_vendor_request_not_the_queue():
+    """MH-QUOTA-008: A read that waited for a fetch slot starts its forced-refresh cooldown when it asks the vendor."""
+
+    clock, gate, calls = _Clock(), asyncio.Event(), []
+
+    async def fetch(source_id, vendor, credential_ref):
+        calls.append(source_id)
+        if len(calls) <= 4:
+            await gate.wait()
+        return {"plan": None, "windows": [_WINDOW]}
+
+    cache = SubscriptionQuotaCache(fetch, now=clock)
+    sources = [QuotaSourceRef(f"src_{i}", "anthropic", f"cred_{i}", f"S{i}", None) for i in range(5)]
+    reading = asyncio.create_task(cache.summary(sources))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert calls == ["src_0", "src_1", "src_2", "src_3"]
+    # The fifth read sits in the queue past the forced-refresh interval.
+    clock.now += QUOTA_FORCED_REFRESH_INTERVAL * 2
+    gate.set()
+    await reading
+    assert calls[-1] == "src_4"
+    await cache.summary(sources, force=True)
+    # The four that asked the vendor a minute ago re-read; the one that only just asked does not.
+    assert sorted(calls[5:]) == ["src_0", "src_1", "src_2", "src_3"]
 
 
 async def test_quota_cache_forgets_a_reauthenticated_grant():

@@ -2440,4 +2440,23 @@ describe('SettingsModelsPage quota region', () => {
     // The finished sign-in closes its dialog; focus returns to the quota card's button, not the document.
     await waitFor(() => expect(document.activeElement).toBe(trigger), { timeout: 4000 });
   }, 12000);
+  it('returns focus to the quota tab when a refresh removed the re-login button behind its confirmation', async () => {
+    renderPage([nativeSubscription]);
+    vi.mocked(modelsApi.getQuota).mockResolvedValue({
+      refresh_interval_seconds: 300,
+      sources: [{
+        source_id: nativeSubscription.id, vendor: 'anthropic', display_name: nativeSubscription.display_name,
+        account_label: null, plan: null, fetched_at: null, state: 'auth_expired',
+        error_key: 'models.quota.error.auth_expired', windows: [],
+      }],
+    });
+    await screen.findByText('Claude native login');
+    await openQuota();
+    const trigger = await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ });
+    await userEvent.click(trigger);
+    // A background read settles while the confirmation is open and drops the button.
+    trigger.remove();
+    await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ })));
+  });
 });

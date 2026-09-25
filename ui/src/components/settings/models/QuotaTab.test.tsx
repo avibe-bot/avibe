@@ -163,16 +163,36 @@ describe('QuotaTab', () => {
   });
 
   it('never shows a limit with headroom as 0% left or 100% used beside its usable status', () => {
-    expect(windowLeftPct(window({ used_pct: 99.9 }))).toBe(1);
-    expect(windowLeftPct(window({ used_pct: 100 }))).toBe(0);
-    expect(windowUsedPct(window({ used_pct: 99.9 }))).toBe(99);
-    expect(windowUsedPct(window({ used_pct: 100 }))).toBe(100);
+    expect(windowLeftPct(window({ used_pct: 99.9 }), NOW)).toBe(1);
+    expect(windowLeftPct(window({ used_pct: 100 }), NOW)).toBe(0);
+    expect(windowUsedPct(window({ used_pct: 99.9 }), NOW)).toBe(99);
+    expect(windowUsedPct(window({ used_pct: 100 }), NOW)).toBe(100);
     draw(readyRegion(summary([claude({ windows: [window({ used_pct: 99.9, resets_at: iso(NOW + HOUR) })] })])));
     expect(screen.getByRole('article').textContent).not.toContain('0%');
     const meter = screen.getByRole('meter');
     expect(meter.getAttribute('aria-label')).toContain('99%');
     expect(meter.getAttribute('aria-label')).not.toContain('100%');
     expect(meter.getAttribute('aria-valuenow')).toBe('99');
+  });
+
+  it('reads a spent window whose reset has come as given back, in every figure', () => {
+    // The reading predates the reset; until the next read the card must not say
+    // 「已重置」 and 「可用」 beside a full bar and 0% left.
+    for (const resetsAt of [NOW - 60_000, NOW]) {
+      const spent = window({ used_pct: 100, resets_at: iso(resetsAt) });
+      expect(windowLeftPct(spent, NOW)).toBe(100);
+      expect(windowUsedPct(spent, NOW)).toBe(0);
+      expect(windowPace(spent, NOW, false).pace.kind).toBe('reset');
+      draw(readyRegion(summary([claude({ windows: [spent] })])));
+      const card = screen.getByRole('article');
+      expect(card.textContent).toContain('100%');
+      expect(card.textContent).not.toContain('0% ');
+      const meter = within(card).getByRole('meter');
+      expect(meter.getAttribute('aria-valuenow')).toBe('0');
+      expect((meter.querySelector('i') as HTMLElement).style.width).toBe('0%');
+      expect(screen.getByText('所有账号都能正常使用')).toBeTruthy();
+      cleanup();
+    }
   });
 
   it('states an unread Source in words instead of an empty bar', () => {

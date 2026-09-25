@@ -28,6 +28,7 @@ import {
   sourceStatus,
   tightestWindow,
   upcomingResets,
+  windowIsExhausted,
   windowIsScoped,
   windowLeftPct,
   windowUsedPct,
@@ -111,7 +112,7 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
           {hint && <small>{hint}</small>}
         </div>
         <div className={cn('model-hub-quota-left flex shrink-0 items-baseline gap-1', toneClass(reading.tone))}>
-          <b>{windowLeftPct(window)}%</b>
+          <b>{windowLeftPct(window, now)}%</b>
           <span>{t('settings.models.quota.left')}</span>
         </div>
       </div>
@@ -120,10 +121,10 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
         role="meter"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={windowUsedPct(window)}
-        aria-label={t('settings.models.quota.meter', { label, pct: windowUsedPct(window) }) as string}
+        aria-valuenow={windowUsedPct(window, now)}
+        aria-label={t('settings.models.quota.meter', { label, pct: windowUsedPct(window, now) }) as string}
       >
-        <i className={toneClass(reading.tone)} style={{ width: `${Math.min(100, window.used_pct)}%` }} />
+        <i className={toneClass(reading.tone)} style={{ width: `${windowUsedPct(window, now)}%` }} />
         {untilReset !== null && untilReset > 0 && reading.elapsedPct !== null && (
           <span className="model-hub-quota-time-mark" style={{ left: `${reading.elapsedPct}%` }} />
         )}
@@ -314,7 +315,7 @@ export const QuotaTab: React.FC<{
                   primary
                   label={t('settings.models.quota.stat.tightest')}
                   icon={<Gauge className="size-[15px]" aria-hidden />}
-                  value={tightest ? <>{windowLeftPct(tightest.window)}%<small className="model-hub-quota-stat-unit">{t('settings.models.quota.left')}</small></> : '—'}
+                  value={tightest ? <>{windowLeftPct(tightest.window, now)}%<small className="model-hub-quota-stat-unit">{t('settings.models.quota.left')}</small></> : '—'}
                   note={tightest
                     ? (() => {
                         const resetAt = windowResetAt(tightest.window);
@@ -348,7 +349,7 @@ export const QuotaTab: React.FC<{
                 <div className="model-hub-quota-timeline flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface" aria-label={t('settings.models.quota.upcoming') as string}>
                   <span className="model-hub-quota-timeline-title flex items-center gap-1.5"><TimerReset className="size-[13px]" aria-hidden />{t('settings.models.quota.upcoming')}</span>
                   {upcoming.map(({ source, window }) => (
-                    <span key={`${source.source_id}:${window.id}`} className={cn('model-hub-quota-chip flex items-baseline gap-1.5', window.used_pct >= 100 && toneClass('danger'))}>
+                    <span key={`${source.source_id}:${window.id}`} className={cn('model-hub-quota-chip flex items-baseline gap-1.5', windowIsExhausted(window, now) && toneClass('danger'))}>
                       <b>{text.duration((windowResetAt(window) as number) - now)}</b>
                       {source.display_name} · {text.windowLabel(window)}
                     </span>
