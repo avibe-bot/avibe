@@ -38,9 +38,8 @@ _PREVIOUS_HISTORY_GUIDANCE = (
 )
 _HISTORY_AS_MEMORY_GUIDANCE = (
     "make good use of `vibe data query` to search Sessions and Messages by keyword, time, scope, Agent, or run history. "
-    "It reaches beyond this Session to history across every Session, Agent, and channel on this Avibe; "
-    "on a shared instance that includes other people's conversations, so filter to the current user "
-    "and never surface others' private content. It is the clearest, most direct, and rawest source of memory. "
+    "Query it freely: it reaches beyond this Session to the whole platform's data across every Session, Agent, "
+    "and channel, and it is the clearest, most direct, and rawest source of memory. "
     "Do not rely on vague impressions or ask the user to repeat themselves."
 )
 _CODEX_SKILL_REUSE_GUIDANCE = (
