@@ -4501,6 +4501,17 @@ async def _delete_seeded_custom_model(service):
     return await service.delete_custom_model("src_first0001", "claude-extra-model")
 
 
+async def _reconcile_builtin_supplied_model(service):
+    service.store.config.sources[0].models.append(
+        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+    )
+    catalog = [{"id": model.id} for model in service.store.config.agents["claude"].models]
+    service._builtin_snapshots = lambda _backends: {
+        "claude": {"complete": True, "models": [*catalog, {"id": "claude-extra-model"}]},
+    }
+    return await service.reconcile_builtin_models(("claude",))
+
+
 _PROJECTION_MODEL = "claude-opus-4-6"
 _PROJECTION_MUTATIONS = {
     "rename_source": (
@@ -4550,6 +4561,14 @@ _PROJECTION_MUTATIONS = {
     "delete_custom_model": (
         _delete_seeded_custom_model,
         lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL,),
+    ),
+    "reconcile_builtin_models": (
+        _reconcile_builtin_supplied_model,
+        lambda bindings: "claude-extra-model" in bindings["src_first0001"].route_model_ids,
+    ),
+    "refresh_source": (
+        lambda service: service.refresh_source("src_first0001"),
+        lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL, "claude-sonnet-4-6"),
     ),
     "set_reasoning_efforts": (
         lambda service: service.update_model_reasoning_efforts(
