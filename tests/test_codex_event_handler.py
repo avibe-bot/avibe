@@ -588,6 +588,28 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_awaited_once()
         assert agent.emit_result_message.await_args.args[1] == "Final answer"
 
+    async def test_reasoning_summary_stays_process_only(self):
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        await handler._on_item_completed(
+            {
+                "turnId": "turn-1",
+                "item": {"type": "reasoning", "summary": ["Weighing the options"]},
+            },
+            request,
+        )
+
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            request.context,
+            "assistant",
+            "_🧠 Weighing the options_",
+            parse_mode="markdown",
+            level="process",
+        )
+
     async def test_empty_success_result_falls_back_to_new_thread_generated_images(self):
         agent = _StubAgent()
         handler = CodexEventHandler(agent)

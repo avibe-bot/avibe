@@ -257,6 +257,7 @@ _AGENT_TYPE_BY_CANONICAL = {
     "notify": "notify",
     "output": "output",
     "assistant": "assistant",
+    "interim": "interim",
     "system": "assistant",
 }
 

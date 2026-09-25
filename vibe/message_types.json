@@ -104,6 +104,12 @@
       "inboxActivity": true,
       "activityRole": "activity",
       "render": "activity"
+    },
+    "interim": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "render": "muted"
     }
   }
 }

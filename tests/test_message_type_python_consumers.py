@@ -62,6 +62,7 @@ def test_fork_activity_sets_match_legacy_values() -> None:
         "notify",
         "vault",
         "error",
+        "interim",
     }
 
 

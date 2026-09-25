@@ -97,6 +97,7 @@ def test_transcript_types_match_current_constant() -> None:
         "notify",
         "vault",
         "error",
+        "interim",
     )
     assert types_with("transcript") == expected
     assert messages_service.TRANSCRIPT_TYPES == expected
@@ -106,7 +107,7 @@ def test_searchable_types_match_current_default_query() -> None:
     connection = _CaptureConnection()
     messages_service.search_messages(connection, query="catalog-probe")
 
-    expected = ("user", "harness", "annotation", "output", "result", "vault")
+    expected = ("user", "harness", "annotation", "output", "result", "vault", "interim")
     assert types_with("searchable") == expected
     assert _message_type_sequences(connection.statements[-1]) == {expected}
 
@@ -123,6 +124,7 @@ def test_inbox_activity_types_match_current_constant() -> None:
         "vault",
         "error",
         "assistant",
+        "interim",
     )
     assert types_with("inboxActivity") == expected
     assert messages_service.INBOX_ACTIVITY_TYPES == expected
