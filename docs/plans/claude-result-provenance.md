@@ -210,3 +210,43 @@ No review-thread operations, manual review trigger, PR merge, deployment,
 service restart, or Watch/cursor changes are part of this pass. Fresh exact-head
 automatic review and repository CI remain required after the single push;
 local green tests are not acceptance.
+
+## Bounded terminal ownership transfer correction (2026-09-26)
+
+The orchestrator authorized one coherent correction after `61751dee2389`.
+The cumulative breaker remains at twelve findings-bearing reviewed heads.
+This pass corrects the existing ownership-transfer boundaries, without a new
+queue, service, lock, provenance policy, or thread operation.
+
+- EOF/error replay carries the receiver's exact client and activation identity.
+  It validates that identity under the existing steering fence before consuming
+  buffered state or a pending request. The caller validates again after replay
+  and before fallback settlement or Activity flushing; a replacement during an
+  await cannot transfer a failure to the successor. The empty-buffer fast path
+  keeps the existing lock order and does not wait unnecessarily on steering.
+- A detached Result freezes selected text, phase identity, claim eligibility,
+  and output ownership before the first fallible receipt operation. The existing
+  FIFO selector can return its raw claim to that ledger owner. The owner then
+  constructs the MessageOutput with the existing receipt ID or its immutable
+  phase ID before binding. Binding and delivery retries retain exactly those
+  members, text, and idempotency identity; they neither reconstruct a CLI
+  summary nor absorb later completions. The existing managed worker retries
+  that record before claiming other completed outputs.
+- Completed-output settlement indexes its terminal snapshot before persistence
+  and callback. The terminal callback can therefore acknowledge the durable
+  evidence once, including when output-local settlement reports an error.
+  Classification alone still cannot acknowledge an awaiting/claimed receipt.
+
+Consumer tests cover EOF/error replacement while replay waits on the steering
+fence, replacement after replay returns, pre-emission/post-consumption replay
+failures, and Stop refusing a phase already owned by EOF. Event-held streams
+cover repeated receipt-storage failure through live delivery, EOF/error,
+Stop, and replacement, followed by recovery and successor admission. Real
+dispatcher/SQLite consumers cover pre-bound and new batches, delivery failure,
+later queued completions, stable output identity, and terminal acknowledgement
+with and without accepted Message evidence and local settlement errors.
+These are hermetic adapter/service/dispatcher consumers, not native SDK or
+Web/IM end-to-end tests. The ledger remains process-local; restart coverage
+concerns the existing durable Activity receipt store, not a new unsolicited
+output outbox. Fresh automatic exact-head review and CI remain required after
+the single push; local tests do not establish acceptance.

@@ -1057,6 +1057,7 @@ class SessionActivityRegistry:
         *,
         turn_ids: set[str] | None = None,
         metadata_match: dict[str, Any] | None = None,
+        bind_receipt: bool = True,
     ) -> list[SessionActivity]:
         """Atomically claim one causal batch without disturbing other output.
 
@@ -1065,7 +1066,9 @@ class SessionActivityRegistry:
         defines the batch; turn-less legacy completions remain single-item.
         ``metadata_match`` is an eligibility predicate for the same FIFO and
         persisted-receipt selection rules; it never creates a second batching
-        algorithm.
+        algorithm. A recovery owner may defer binding to retain the exact claim
+        and payload before a fallible receipt write; it must then bind that
+        claim before delivery or explicitly requeue it.
         """
 
         key = (str(backend), str(runtime_key))
@@ -1131,7 +1134,10 @@ class SessionActivityRegistry:
                             metadata_match=metadata_match,
                             limit=None if phase_id else 1,
                         )
-                        return self._bind_claimed_output_batch_or_requeue(claimed)
+                        return (
+                            self._bind_claimed_output_batch_or_requeue(claimed)
+                            if bind_receipt else claimed
+                        )
                     identities = {head_turn_id}
                 claimed = self._claim_completed_outputs(
                     backend,
@@ -1140,7 +1146,10 @@ class SessionActivityRegistry:
                     unbound_only=True,
                     metadata_match=metadata_match,
                 )
-            return self._bind_claimed_output_batch_or_requeue(claimed)
+            return (
+                self._bind_claimed_output_batch_or_requeue(claimed)
+                if bind_receipt else claimed
+            )
 
     def classify_provisional_provenance(
         self,
@@ -1356,6 +1365,8 @@ class SessionActivityRegistry:
     def bind_completed_output_batch(
         self,
         activities: list[SessionActivity],
+        *,
+        batch_id: str | None = None,
     ) -> list[SessionActivity]:
         """Persist one receipt identity onto every claimed batch member."""
 
@@ -1377,8 +1388,8 @@ class SessionActivityRegistry:
             next(iter(assigned_ids))
             if assigned_ids
             else (
-                f"{activities[0].backend}:{activities[0].runtime_key}:"
-                f"batch:{uuid.uuid4().hex}"
+                str(batch_id or "").strip()
+                or f"{activities[0].backend}:{activities[0].runtime_key}:batch:{uuid.uuid4().hex}"
             )
         )
         raw_member_lists: list[tuple[str, ...]] = []
@@ -1902,6 +1913,12 @@ class SessionActivityRegistry:
                         claimed,
                         entry=replace(claimed.entry, activity=terminal_activity),
                     )
+                    # Receipt settlement owns this terminal evidence before
+                    # invoking the Run-policy callback. Its acknowledgement
+                    # deliberately cannot delete ordinary awaiting-output rows.
+                    self._terminal_snapshots[
+                        (terminal_activity.backend, terminal_activity.runtime_key)
+                    ][terminal_activity.id] = terminal_activity
                 self._claimed_completed_outputs[activity_key] = claimed
                 claimed_by_key[activity_key] = claimed
 

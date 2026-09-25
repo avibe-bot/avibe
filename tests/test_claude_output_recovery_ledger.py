@@ -242,6 +242,484 @@ def activity_store(tmp_path):
     engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["eof", "error"])
+@pytest.mark.parametrize("replace_while_waiting", [False, True])
+async def test_failure_replay_revalidates_after_steering_wait(ending, replace_while_waiting):
+    """A preflight check cannot authorize replay after cleanup wins the lock."""
+    from tests.test_claude_result_provenance import TaskStartedMessage, _failure_assistant
+
+    agent, service = _build_agent()
+    key = "old-replay:/tmp/work"
+    activations = RuntimeActivationRegistry()
+    service.activation_registry = activations
+    old_identity = activations.attach("claude", key)
+    context = context_for(key)
+    assert await service.begin_agent_initiated_turn("claude", context, key, activation_identity=old_identity)
+    agent._pending_requests[key] = [SimpleNamespace(context=context)]
+    agent._adopt_pending_turn_token = ClaudeAgent._adopt_pending_turn_token
+    agent._handle_assistant_terminal_failure = ClaudeAgent._handle_assistant_terminal_failure.__get__(agent)
+    agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+    agent.record_model_hub_native_failure = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+    agent.controller.agent_auth_service = SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False))
+    agent.session_handler.handle_session_error = AsyncMock(return_value=True)
+    ready, end = asyncio.Event(), asyncio.Event()
+    emissions = []
+
+    async def emit(ctx, kind, text, **kwargs):
+        emissions.append((
+            kind, text, ctx.platform_specific["agent_runtime_turn_token"],
+            kwargs["output"].completes_turn,
+        ))
+        if kwargs["output"].completes_turn:
+            service.release_runtime_turn(ctx)
+        return "accepted"
+
+    agent.controller.emit_agent_message = AsyncMock(side_effect=emit)
+
+    class Client:
+        _vibe_runtime_activation_identity = old_identity
+        disconnect = AsyncMock()
+
+        def receive_messages(self):
+            async def stream():
+                yield TaskStartedMessage("old-background")
+                yield _failure_assistant("OLD PHASE FAILURE")
+                ready.set()
+                await end.wait()
+                if ending == "error":
+                    raise RuntimeError("old transport disconnected")
+            return stream()
+
+    old = Client()
+    agent.claude_sessions[key] = old
+    receiver = asyncio.create_task(agent._receive_messages(old, "old-replay", "/tmp/work", context, composite_key=key))
+    lock = agent._steering_lock(key)
+    replacement = None
+    new_context = context_for(key)
+    successor = SimpleNamespace(context=new_context)
+
+    async def replace_receiver():
+        await agent._cleanup_runtime_session(key, expected_client=old)
+        service.release_runtime_turn(context)
+        identity = activations.attach("claude", key)
+        agent.claude_sessions[key] = SimpleNamespace(_vibe_runtime_activation_identity=identity)
+        assert await service.begin_agent_initiated_turn("claude", new_context, key, activation_identity=identity)
+        agent._pending_requests[key] = [successor]
+
+    try:
+        await asyncio.wait_for(ready.wait(), 1)
+        assert agent._buffered_assistant_messages[key]
+        if replace_while_waiting:
+            await lock.acquire()
+            replacement = asyncio.create_task(replace_receiver())
+            await asyncio.wait_for(_wait_until(lambda: len(lock._waiters or ()) == 1), 1)
+            end.set()
+            await asyncio.wait_for(_wait_until(lambda: len(lock._waiters or ()) == 2), 1)
+            # Cleanup precedes replay in the lock FIFO after replay preflight.
+            lock.release()
+            await asyncio.wait_for(replacement, 1)
+        else:
+            end.set()
+        await asyncio.wait_for(receiver, 1)
+        if replace_while_waiting:
+            assert agent._pending_requests.get(key) == [successor]
+            assert service.runtime_turn_active(key)
+            assert service._get_turn_gate(key).token == new_context.platform_specific["agent_runtime_turn_token"]
+            assert emissions == []
+        else:
+            assert len([item for item in emissions if item[3]]) == 1
+            assert len([item for item in emissions if item[1]]) == 1
+            assert "OLD PHASE FAILURE" in emissions[0][1]
+            assert not service.runtime_turn_active(key)
+    finally:
+        if lock.locked():
+            lock.release()
+        receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
+        if replacement is not None:
+            replacement.cancel()
+            await asyncio.gather(replacement, return_exceptions=True)
+        service.release_runtime_turn(new_context)
+        service.release_runtime_turn(context)
+        retry = agent._activity_flush_tasks.pop(key, None)
+        if retry:
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
+
+
+@pytest.mark.parametrize("local_error", [False, True])
+@pytest.mark.parametrize("accepted_message", [False, True])
+def test_delivered_terminal_evidence_is_acknowledged_before_restart(
+    activity_store, local_error, accepted_message,
+):
+    """Successful Run-policy acknowledgement must remove its terminal evidence."""
+    agent, service = _build_agent()
+    registry = SessionActivityRegistry(activity_store)
+    service.activities = registry
+    settled = []
+    agent.controller.scheduled_task_service = SimpleNamespace(
+        settle_activity_runs=lambda activity: settled.append(activity.id),
+    )
+    key = "delivered-terminal"
+    registry.start(
+        backend="claude", runtime_key=key, session_id="ses-probe", activity_id="task-one",
+        kind="background_task", run_id="run-one",
+    )
+    registry.complete(
+        backend="claude", runtime_key=key, activity_id="task-one", status="completed", expects_output=True,
+    )
+    batch = registry.claim_completed_output_batch("claude", key)
+    output = activity_completion_output(batch[0], activities=batch, detached=True, completes_turn=False)
+    assert registry.settle_completed_output_batch(
+        output, accepted_message_exists=accepted_message,
+        settlement_error=RuntimeError("local finalization failed") if local_error else None,
+        settle_terminal=service.on_activity_terminal,
+    )
+    assert not registry.claimed_completed_output_batch_for_output(output)
+    assert activity_store.list_activities() == []
+    restarted = SessionActivityRegistry(activity_store)
+    assert restarted.drain_recovered_terminals() == []
+    assert not restarted.has_backend_work("claude")
+    assert settled == (["task-one"] if local_error else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_binding", [False, True])
+@pytest.mark.parametrize("ending", ["live", "eof", "error", "stop", "replacement"])
+async def test_unowned_terminal_text_survives_claim_failure(
+    activity_store, monkeypatch, fail_binding, ending,
+):
+    """The consumed Result, not a CLI summary, owns text across receipt failure."""
+    from tests.test_claude_result_provenance import ResultMessage, TaskNotificationMessage, TaskStartedMessage
+
+    agent, service = _build_agent()
+    registry = SessionActivityRegistry(activity_store)
+    service.activities = registry
+    key = "unowned-result:/tmp/work"
+    context = context_for(key)
+    agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0.01
+    agent._adopt_pending_turn_token = ClaudeAgent._adopt_pending_turn_token
+    original = activity_store.upsert_activity
+    allow_binding = asyncio.Event()
+    binding_attempts = []
+
+    def persist(activity, *, phase):
+        if activity["metadata"].get("output_batch_id"):
+            binding_attempts.append((
+                activity["id"], activity["metadata"]["output_batch_id"],
+                tuple(activity["metadata"]["output_batch_activity_ids"]),
+            ))
+            if fail_binding and not allow_binding.is_set():
+                raise RuntimeError("receipt binding unavailable")
+        original(activity, phase=phase)
+
+    monkeypatch.setattr(activity_store, "upsert_activity", persist)
+    payloads = []
+
+    async def accepted(ctx, kind, text, **kwargs):
+        payloads.append((text, kwargs["output"]))
+        output = kwargs["output"]
+        assert registry.settle_completed_output_batch(output, accepted_message_exists=True)
+        if output.completes_turn:
+            service.release_runtime_turn(ctx)
+        return "accepted-output"
+
+    async def emit_result(ctx, text, **kwargs):
+        return await accepted(ctx, "result", text, **kwargs)
+
+    agent.emit_result_message = AsyncMock(side_effect=emit_result)
+    agent.controller.emit_agent_message = AsyncMock(side_effect=accepted)
+    after_result, hold = asyncio.Event(), asyncio.Event()
+
+    class Client:
+        interrupt = AsyncMock()
+        disconnect = AsyncMock()
+
+        def receive_messages(self):
+            async def stream():
+                yield TaskStartedMessage("task-one")
+                yield TaskNotificationMessage("task-one", "CLI receipt, not answer")
+                yield ResultMessage("ACTUAL BACKGROUND ANSWER", origin={"kind": "task-notification"})
+                after_result.set()
+                await hold.wait()
+                if ending == "error":
+                    raise RuntimeError("receiver disconnected during binding recovery")
+            return stream()
+
+    client = Client()
+    agent.claude_sessions[key] = client
+    receiver = asyncio.create_task(agent._receive_messages(client, "unowned-result", "/tmp/work", context, composite_key=key))
+    agent.receiver_tasks[key] = receiver
+    try:
+        await asyncio.wait_for(after_result.wait(), 1)
+        if fail_binding:
+            await asyncio.wait_for(_wait_until(lambda: len(binding_attempts) >= 2), 1)
+            records = agent._output_records_for_runtime(key)
+            assert len(records) == 1
+            record = records[0]
+            assert record.lifecycle == "delivery_pending"
+            assert record.text == "ACTUAL BACKGROUND ANSWER"
+            assert [activity.id for activity in record.activities] == ["task-one"]
+            assert record.output.activity_batch_id == binding_attempts[0][1]
+            retained_identity = record.output.idempotency_key
+            assert not payloads
+            assert service.runtime_turn_active(key)
+            assert agent._pending_requests[key] == [record.request]
+            if ending in {"eof", "error"}:
+                hold.set()
+                await asyncio.wait_for(receiver, 1)
+            elif ending == "replacement":
+                await agent._cleanup_runtime_session(key, expected_client=client)
+            elif ending == "stop":
+                stop = AgentRequest(
+                    context=context_for(key), message="", user_message="", working_path="/tmp/work",
+                    base_session_id="unowned-result", composite_session_id=key, session_key="session-key",
+                )
+                assert await service.handle_stop("claude", stop)
+            if ending != "live":
+                assert key not in agent.claude_sessions
+                # Repeated retirement cannot remove the receipt recovery owner.
+                await agent._cleanup_runtime_session(key, expected_client=client)
+                assert agent._pending_requests[key] == [record.request]
+                assert service.runtime_turn_active(key)
+            allow_binding.set()
+        await asyncio.wait_for(_wait_until(lambda: bool(payloads)), 1)
+        assert [text for text, _ in payloads] == ["ACTUAL BACKGROUND ANSWER"]
+        assert payloads[0][1].activity_ids == ("task-one",)
+        assert len(set(binding_attempts)) == 1
+        assert payloads[0][1].activity_batch_id == binding_attempts[0][1]
+        if fail_binding:
+            assert payloads[0][1].idempotency_key == retained_identity
+        if ending == "live" or not fail_binding:
+            assert not receiver.done()
+        assert not agent._has_pending_requests(key)
+        assert not service.runtime_turn_active(key)
+        assert not registry.has_claimed_output("claude", key)
+        assert activity_store.list_activities() == []
+        successor = context_for(key)
+        assert await service.begin_agent_initiated_turn("claude", successor, key)
+        service.release_runtime_turn(successor)
+    finally:
+        receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
+        retry = agent._activity_flush_tasks.pop(key, None)
+        if retry:
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["eof", "error"])
+@pytest.mark.parametrize("fault", ["before_emit", "after_pop"])
+@pytest.mark.parametrize("retirement", ["stop", "replacement"])
+async def test_receiver_end_revalidates_after_replay_before_fallback(ending, fault, retirement):
+    """Replay's lock check does not authorize its caller after another await."""
+    from tests.test_claude_result_provenance import TaskStartedMessage, _failure_assistant
+
+    agent, service = _build_agent()
+    key = "replay-fallback:/tmp/work"
+    activations = RuntimeActivationRegistry()
+    service.activation_registry = activations
+    old_identity = activations.attach("claude", key)
+    context = context_for(key)
+    assert await service.begin_agent_initiated_turn("claude", context, key, activation_identity=old_identity)
+    request = AgentRequest(
+        context=context, message="human", user_message="human", working_path="/tmp/work",
+        base_session_id="replay-fallback", composite_session_id=key, session_key="session-key",
+    )
+    agent._pending_requests[key] = [request]
+    agent._adopt_pending_turn_token = ClaudeAgent._adopt_pending_turn_token
+    agent._handle_assistant_terminal_failure = ClaudeAgent._handle_assistant_terminal_failure.__get__(agent)
+    agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+    agent.record_model_hub_native_failure = AsyncMock(
+        side_effect=[RuntimeError("pre-consumption failure"), None] if fault == "before_emit" else None,
+    )
+    agent._remove_ack_reaction = AsyncMock(
+        side_effect=[RuntimeError("post-consumption failure"), None] if fault == "after_pop" else None,
+    )
+    agent.controller.agent_auth_service = SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False))
+    agent.session_handler.handle_session_error = AsyncMock(return_value=True)
+    replay_finished, return_replay = asyncio.Event(), asyncio.Event()
+    replay = agent._replay_buffered_terminal_failures
+
+    async def hold_replay(*args, **kwargs):
+        result = await replay(*args, **kwargs)
+        assert result.replay_failed
+        replay_finished.set()
+        await return_replay.wait()
+        return result
+
+    agent._replay_buffered_terminal_failures = hold_replay
+    terminals = []
+
+    async def accepted(ctx, kind, text, **kwargs):
+        if kwargs["output"].completes_turn:
+            terminals.append((text, ctx.platform_specific["agent_runtime_turn_token"]))
+            service.release_runtime_turn(ctx)
+        return "accepted"
+
+    agent.controller.emit_agent_message = AsyncMock(side_effect=accepted)
+
+    class Client:
+        _vibe_runtime_activation_identity = old_identity
+        interrupt = AsyncMock()
+        disconnect = AsyncMock()
+
+        def receive_messages(self):
+            async def frames():
+                yield TaskStartedMessage("task")
+                yield _failure_assistant("old failure")
+                if ending == "error":
+                    raise RuntimeError("old receiver failed")
+            return frames()
+
+    old = Client()
+    agent.claude_sessions[key] = old
+    receiver = asyncio.create_task(agent._receive_messages(old, "replay-fallback", "/tmp/work", context, composite_key=key))
+    new_context = context_for(key)
+    try:
+        await asyncio.wait_for(replay_finished.wait(), 1)
+        if retirement == "stop":
+            # EOF/error already closed native admission. Stop cannot steal its
+            # terminal claim; replacement still may retire that exact client.
+            assert not await service.handle_stop("claude", request)
+        await agent._cleanup_runtime_session(key, expected_client=old)
+        service.release_runtime_turn(context)
+        previous_terminals = list(terminals)
+        identity = activations.attach("claude", key)
+        new_client = SimpleNamespace(_vibe_runtime_activation_identity=identity)
+        agent.claude_sessions[key] = new_client
+        assert await service.begin_agent_initiated_turn("claude", new_context, key, activation_identity=identity)
+        successor = SimpleNamespace(context=new_context)
+        agent._pending_requests[key] = [successor]
+        return_replay.set()
+        await asyncio.wait_for(receiver, 1)
+        assert agent.claude_sessions[key] is new_client
+        assert agent._pending_requests[key] == [successor]
+        assert service.runtime_turn_active(key)
+        assert service._get_turn_gate(key).token == new_context.platform_specific["agent_runtime_turn_token"]
+        assert terminals == previous_terminals
+        assert len(terminals) == (1 if fault == "after_pop" else 0)
+    finally:
+        receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
+        service.release_runtime_turn(new_context)
+        service.release_runtime_turn(context)
+        retry = agent._activity_flush_tasks.pop(key, None)
+        if retry:
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound_receipt", [False, True])
+async def test_detached_claim_retry_keeps_batch_boundary_with_real_dispatcher(
+    activity_store, monkeypatch, bound_receipt,
+):
+    """Later completions cannot join a retained receipt or lose their own flush."""
+    from tests.test_claude_result_provenance import ResultMessage
+
+    agent, service = _build_agent()
+    registry = SessionActivityRegistry(activity_store)
+    service.activities = registry
+    delivery = _ActivityDeliveryClient(fail_delivery=True)
+    _install_activity_dispatcher(agent, delivery)
+    key = "batch-claim-retry:/tmp/work"
+    context = MessageContext(
+        user_id="U1", channel_id="C1", platform="discord",
+        platform_specific={"agent_runtime_turn_key": key, "agent_session_id": "ses-batch-retry"},
+    )
+    agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0.01
+
+    def complete(activity_id, summary=""):
+        registry.start(
+            backend="claude", runtime_key=key, session_id="ses-batch-retry",
+            activity_id=activity_id, kind="background_task", turn_id="origin-turn",
+        )
+        registry.complete(
+            backend="claude", runtime_key=key, activity_id=activity_id,
+            status="completed", expects_output=True, metadata={"summary": summary},
+        )
+
+    complete("one")
+    complete("two")
+    prior_output = None
+    if bound_receipt:
+        batch = registry.claim_completed_output_batch("claude", key)
+        prior_output = activity_completion_output(batch[-1], activities=batch, detached=True, completes_turn=False)
+        assert registry.requeue_completed_outputs(batch) == 2
+    allow_binding = asyncio.Event()
+    binding_attempts = []
+    original = activity_store.upsert_activities
+
+    def persist_batch(activities, *, phase):
+        binding_attempts.append(tuple(
+            (activity["id"], activity["metadata"]["output_batch_id"]) for activity in activities
+        ))
+        if not allow_binding.is_set():
+            raise RuntimeError("atomic batch binding unavailable")
+        return original(activities, phase=phase)
+
+    monkeypatch.setattr(activity_store, "upsert_activities", persist_batch)
+    terminal_seen, hold = asyncio.Event(), asyncio.Event()
+
+    class Client:
+        def receive_messages(self):
+            async def frames():
+                yield ResultMessage("EXACT TERMINAL TEXT", origin={"kind": "task-notification"})
+                terminal_seen.set()
+                await hold.wait()
+            return frames()
+
+    client = Client()
+    agent.claude_sessions[key] = client
+    # The real dispatcher owns Activity settlement. Message mirroring is
+    # disabled here, so durable evidence comes from the real SQLite receipts.
+    with (
+        patch("core.message_dispatcher.persist_agent_message", return_value=None),
+        patch("core.message_dispatcher.agent_message_exists", return_value=False),
+    ):
+        receiver = asyncio.create_task(agent._receive_messages(client, "batch-claim-retry", "/tmp/work", context, composite_key=key))
+        try:
+            await asyncio.wait_for(terminal_seen.wait(), 1)
+            record = agent._output_records_for_runtime(key)[0]
+            output_identity = record.output.idempotency_key
+            if bound_receipt:
+                assert output_identity == prior_output.idempotency_key
+            else:
+                await asyncio.wait_for(_wait_until(lambda: len(binding_attempts) >= 2), 1)
+            assert [activity.id for activity in record.activities] == ["one", "two"]
+            complete("three", "later task output")
+            allow_binding.set()
+            await asyncio.wait_for(_wait_until(lambda: not record.claim_pending), 1)
+            assert record.output.idempotency_key == output_identity
+            assert record.output.activity_ids == ("one", "two")
+            assert registry.has_claimed_output("claude", key)
+            assert delivery.sent == []
+            delivery.fail_delivery = False
+            await asyncio.wait_for(_wait_until(lambda: len(delivery.sent) == 2), 1)
+            assert delivery.sent == ["EXACT TERMINAL TEXT", "later task output"]
+            if not bound_receipt:
+                assert len(set(binding_attempts)) == 1
+            assert record.output.idempotency_key == output_identity
+            assert not registry.has_claimed_output("claude", key)
+            assert not registry.has_completed_output("claude", key)
+            assert activity_store.list_activities() == []
+            assert SessionActivityRegistry(activity_store).drain_recovered_terminals() == []
+            assert not service.runtime_turn_active(key)
+            assert not agent._has_pending_requests(key)
+            assert not agent._output_records_for_runtime(key)
+        finally:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+            retry = agent._activity_flush_tasks.pop(key, None)
+            if retry:
+                retry.cancel()
+                await asyncio.gather(retry, return_exceptions=True)
+
+
 @pytest.mark.parametrize("status", ["completed", "failed", "stopped", "killed"])
 def test_later_completion_retires_failed_active_provenance_write(
     activity_store, monkeypatch, status,

@@ -643,8 +643,9 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
+        client = _ConsumedClient()
         await agent._receive_messages(
-            _ConsumedClient(),
+            client,
             "session-ambiguous-consumed",
             "/tmp/work",
             context,
@@ -659,7 +660,11 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             output=ANY,
         )
         agent.emit_result_message.assert_not_awaited()
-        agent._handle_receiver_eof.assert_awaited_once_with(composite_key, context)
+        agent._handle_receiver_eof.assert_awaited_once_with(
+            composite_key, context,
+            expected_client=client,
+            expected_activation_identity=None,
+        )
         self.assertNotIn(composite_key, agent._ambiguous_primary_results)
 
     async def test_failed_ambiguous_half_close_preserves_work_until_later_result(self):
@@ -966,6 +971,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent._cleanup_runtime_session.assert_awaited_once_with(
             composite_key,
             current_receiver_task=receiver_task,
+            expected_client=client,
             preserve_pending_request_state=True,
             reason="receiver_eof_without_result",
         )

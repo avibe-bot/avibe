@@ -2513,6 +2513,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
             reason="receiver_error_auth_failure",
+            expected_client=client,
         )
         self.assertFalse(agent._pending_requests.get(composite_key))
 
@@ -3064,9 +3065,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 "OAuth login failed; Claude process terminated: SIGABRT"
             ),
         )
-        controller.claude_sessions[composite_key] = SimpleNamespace(
+        client = SimpleNamespace(
             _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
         )
+        controller.claude_sessions[composite_key] = client
         controller.receiver_tasks[composite_key] = asyncio.current_task()
 
         await agent._handle_receiver_eof(composite_key, stale_context)
@@ -3078,6 +3080,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
             reason="receiver_auth_failure",
+            expected_client=client,
         )
         self.assertFalse(agent._pending_requests.get(composite_key))
 
