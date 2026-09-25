@@ -21,7 +21,9 @@
         "minHeight": 600,
         "visible": false,
         "center": true,
-        "resizable": true
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

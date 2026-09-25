@@ -405,71 +405,64 @@ def test_project_mutations_follow_instance_operations_and_lower_role_acl(engine,
         assert project_access_service.get_project_policy(conn, project["id"]) == policy
 
 
-def test_every_project_entry_point_resolves_through_the_visibility_check():
-    """Every way into a Project row goes through the check ``list_projects`` uses.
+def _list_entry(conn, project_id, context):
+    listed = projects_service.list_projects(conn, include_archived=True, authorization_context=context)
+    if project_id not in {project["id"] for project in listed}:
+        raise LookupError(project_id)
 
-    The enumeration is taken from the module, not written down here: each round
-    of review found one more entry point that resolved a Project without the
-    ACL -- first mutation by id, then create-or-reuse by folder path -- because
-    each fix named the paths it knew about. Reading the call graph instead means
-    an entry point added later is covered on the day it is added, and one that
-    stops applying the check fails here rather than in a review.
 
-    "Reaching" is transitive on purpose: ``create_project`` never calls the
-    check itself, it calls the resolver that does, which is exactly where the
-    check belongs -- at the lookup rather than at each of its callers.
+_PROJECT_ENTRY_POINTS = {
+    "list_projects": _list_entry,
+    "get_project": lambda conn, project_id, context: projects_service.get_project(
+        conn, project_id, authorization_context=context
+    ),
+    "get_project_workdir": lambda conn, project_id, context: projects_service.get_project_workdir(
+        conn, project_id, authorization_context=context
+    ),
+    "create_project": lambda conn, project_id, context: projects_service.create_project(
+        conn, projects_service.get_project_workdir(conn, project_id), authorization_context=context
+    ),
+    "update_project": lambda conn, project_id, context: projects_service.update_project(
+        conn, project_id, display_name="Denied", authorization_context=context
+    ),
+    "archive_project": lambda conn, project_id, context: projects_service.archive_project(
+        conn, project_id, authorization_context=context
+    ),
+    "reorder_projects": lambda conn, project_id, context: projects_service.reorder_projects(
+        conn, [project_id], expected_order=[project_id], authorization_context=context
+    ),
+}
+
+
+@pytest.mark.parametrize("role", ["editor", "viewer"])
+@pytest.mark.parametrize("entry_point", sorted(_PROJECT_ENTRY_POINTS))
+def test_restricted_project_is_unreachable_through_every_entry_point(engine, tmp_path, role, entry_point):
+    """An excluded lower-role caller cannot reach a restricted Project by any door.
+
+    Breaks if one entry point resolves the Project without the ACL that
+    ``list_projects`` applies -- e.g. ``get_project_workdir`` dropping its
+    ``can_read_project`` check would hand the host cwd of a hidden Project to
+    Skills and the instruction editor. The mutation doors are denied by the
+    instance-role floor today; they stay in the table so a relaxed floor still
+    has to answer to the Project ACL.
     """
 
-    import ast
-    import inspect
-
-    gates = {"_require_visible_project", "can_read_project", "filter_accessible_projects"}
-    tree = ast.parse(inspect.getsource(projects_service))
-    functions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-    def _calls(node: ast.AST) -> set[str]:
-        names: set[str] = set()
-        for child in ast.walk(node):
-            if not isinstance(child, ast.Call):
-                continue
-            func = child.func
-            if isinstance(func, ast.Name):
-                names.add(func.id)
-            elif isinstance(func, ast.Attribute):
-                names.add(func.attr)
-        return names
-
-    def _reaches_gate(name: str, seen: frozenset[str] = frozenset()) -> bool:
-        if name in seen or name not in functions:
-            return False
-        called = _calls(functions[name])
-        if called & gates:
-            return True
-        return any(_reaches_gate(callee, seen | {name}) for callee in called)
-
-    # Public + takes a Connection: that is precisely the set of functions that
-    # return or mutate Project rows on behalf of an HTTP caller. ``make_directory``
-    # touches no rows and takes no connection, so it falls out by construction.
-    entry_points = {
-        name
-        for name, node in functions.items()
-        if not name.startswith("_")
-        and any(arg.arg == "conn" for arg in node.args.args)
-    }
-    assert entry_points >= {
-        "list_projects",
-        "get_project",
-        "get_project_workdir",
-        "create_project",
-        "update_project",
-        "archive_project",
-    }
-    ungated = sorted(name for name in entry_points if not _reaches_gate(name))
-    assert ungated == [], f"Project entry points that never reach a visibility check: {ungated}"
+    folder = tmp_path / "restricted"
+    folder.mkdir()
+    excluded = _acl_context(role, email="outsider@example.com")
+    included = _acl_context(role, email="insider@example.com")
+    call = _PROJECT_ENTRY_POINTS[entry_point]
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, str(folder), display_name="Restricted")
+        _restrict_project_to(conn, project["id"], "insider@example.com")
+        if entry_point in {"list_projects", "get_project", "get_project_workdir"}:
+            call(conn, project["id"], included)
+        # A reorder naming a hidden id is a stale view to the caller, not a hit.
+        with pytest.raises((LookupError, InstanceAuthorizationError, projects_service.ProjectOrderConflict)):
+            call(conn, project["id"], excluded)
+        payload = projects_service.get_project(conn, project["id"])
+        assert payload["display_name"] == "Restricted"
+        assert payload["archived"] is False
 
 
 @pytest.mark.parametrize("role", ["member", "owner", "editor", "viewer"])

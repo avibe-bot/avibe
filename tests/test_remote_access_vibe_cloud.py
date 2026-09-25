@@ -1789,6 +1789,39 @@ def test_session_projects_instance_kind_for_local_and_authenticated_remote(
     assert "instance_kind" not in unauthenticated.get_json()
 
 
+def test_session_names_the_principal_this_browser_writes_chat_rows_as(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.ui.setup_host = "192.168.2.3"
+    config.save()
+
+    loopback = ui_server.app.test_client().get("/api/session", base_url="http://localhost")
+    assert loopback.get_json()["author_id"] == "local"
+
+    # A LAN setup-host browser is not remote either, but it is not the machine
+    # owner: it writes no local author, so nothing it reads is its own.
+    lan = ui_server.app.test_client().get(
+        "/api/session",
+        base_url="http://192.168.2.3",
+        environ_base={"REMOTE_ADDR": "192.168.2.50"},
+    )
+    assert lan.get_json()["remote"] is False
+    assert lan.get_json()["author_id"] is None
+
+    remote = ui_server.app.test_client()
+    remote.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _session_cookie(config),
+        domain="alex.avibe.bot",
+    )
+    authenticated = remote.get("/api/session", base_url="https://alex.avibe.bot")
+    assert authenticated.get_json()["author_id"] == "remote:user-1"
+
+
 def test_pair_reports_success_when_connector_start_fails(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()

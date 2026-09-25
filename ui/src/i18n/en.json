@@ -4212,6 +4212,7 @@
     "olderLoadFailed": "Couldn't load earlier messages — tap to retry",
     "organizationNotice": "This is an organization session — messages show who sent them.",
     "senderUnknown": "Unknown sender",
+    "senderYou": "You",
     "forkedEmptyTitle": "Forked session ready",
     "forkedEmptyBody": "This session has been forked from the source context. The visible transcript starts clean, and the source context is preserved so you can continue the conversation here.",
     "forkedFromPrefix": "Forked from",

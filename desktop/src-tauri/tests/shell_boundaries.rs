@@ -664,6 +664,20 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
 }
 
 #[test]
+fn the_macos_overlay_title_bar_needs_no_page_permission_and_defaults_to_no_inset() {
+    let window = &config()["app"]["windows"][0];
+    assert_eq!(window["titleBarStyle"], "Overlay");
+    assert_eq!(window["hiddenTitle"], true);
+    // The strip drags natively; the page is granted no window permission for it.
+    assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
+    let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
+    assert!(
+        css.contains("--shell-titlebar-inset: 0px;"),
+        "outside the macOS shell the Workbench must lay out with no title bar inset"
+    );
+}
+
+#[test]
 fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
     let source = shipping_source("src/lib.rs");
     for required in [

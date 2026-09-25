@@ -4212,6 +4212,7 @@
     "olderLoadFailed": "加载更早的消息失败，点击重试",
     "organizationNotice": "这是一个组织会话，消息会显示发送者。",
     "senderUnknown": "未知发送者",
+    "senderYou": "你",
     "forkedEmptyTitle": "复刻会话已创建",
     "forkedEmptyBody": "已从原会话上下文复刻，当前对话记录从空白开始，原会话上下文已保留，继续对话即可",
     "forkedFromPrefix": "复刻自",

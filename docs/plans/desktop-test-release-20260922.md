@@ -1222,6 +1222,13 @@ lane will not change that boundary on its own authority. Shipping the overlay
 without a drag region would leave an undraggable window, so the item was dropped
 from this head, as the owner allowed.
 
+*Follow-up (feat/desktop-overlay-titlebar):* the overlay ships without touching
+the capability boundary. The drag path is native instead of IPC: a transparent
+`NSView` over the top 28pt, above the WebView, calls
+`performWindowDragWithEvent`, and the shell publishes the strip height to the
+page as `--shell-titlebar-inset`. See `desktop/README.md`, "Native links and
+window frame".
+
 ## H22 — orchestrator hold on `f654f245b`
 
 Two more boundaries in F1's class, one Settings gap, and the title-bar ruling.
