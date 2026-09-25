@@ -37,8 +37,9 @@ _PREVIOUS_HISTORY_GUIDANCE = (
     "instead of relying on memory or asking the user to repeat context."
 )
 _HISTORY_AS_MEMORY_GUIDANCE = (
-    "make good use of `vibe data query` to search Sessions and Messages by keyword, time, scope, Agent, or run history; "
-    "it is the clearest, most direct, and rawest source of memory. "
+    "make good use of `vibe data query` to search Sessions and Messages by keyword, time, scope, Agent, or run history. "
+    "It reaches beyond this Session to the user's whole Avibe history across every Session, Agent, and channel, "
+    "and it is the clearest, most direct, and rawest source of memory. "
     "Do not rely on vague impressions or ask the user to repeat themselves."
 )
 _CODEX_SKILL_REUSE_GUIDANCE = (
