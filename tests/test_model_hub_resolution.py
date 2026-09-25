@@ -1765,8 +1765,48 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
             discovery=ObservationDiscovery.NOT_ATTEMPTED,
             models=(),
         ),
+        SourceObservation(
+            outcome=ObservationOutcome.AMBIGUOUS,
+            reachable=True,
+            authenticated=False,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            models=(),
+        ),
+        SourceObservation(
+            outcome=ObservationOutcome.UNREACHABLE,
+            reachable=True,
+            authenticated=None,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            models=(),
+        ),
+        SourceObservation(
+            outcome=ObservationOutcome.ADAPTER_ERROR,
+            reachable=True,
+            authenticated=None,
+            protocol="anthropic",
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            models=(),
+        ),
+        SourceObservation(
+            outcome=ObservationOutcome.TIMEOUT,
+            reachable=None,
+            authenticated=None,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            models=(DiscoveredModel(id="claude-opus-4-6"),),
+        ),
     ],
-    ids=["observed_without_protocol", "failed_discovery_with_models", "auth_failed_but_authenticated"],
+    ids=[
+        "observed_without_protocol",
+        "failed_discovery_with_models",
+        "auth_failed_but_authenticated",
+        "ambiguous_but_rejected",
+        "unreachable_but_reached",
+        "adapter_error_with_protocol",
+        "timeout_with_models",
+    ],
 )
 def test_illegal_adapter_observation_is_never_previewed_and_revokes_the_credential(
     tmp_path,
@@ -1787,7 +1827,7 @@ def test_illegal_adapter_observation_is_never_previewed_and_revokes_the_credenti
             )
         )
 
-    assert exc.value.code == "discovery_failed"
+    assert (exc.value.code, exc.value.status) == ("discovery_failed", 502)
     assert store.load().sources == []
     assert adapter.revoked == ["cred_00000001"]
 

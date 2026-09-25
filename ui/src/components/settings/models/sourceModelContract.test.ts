@@ -2,10 +2,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import { buildMockSources } from './mockData';
-import { SOURCE_PROTOCOLS } from './types';
+import { SOURCE_PROTOCOLS, type SourceProtocol } from './types';
 
 const SOURCE_SCHEMA = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -17,6 +17,7 @@ describe('Source model wire contract', () => {
   it('offers exactly the protocols the Source schema accepts', () => {
     const schema = JSON.parse(readFileSync(SOURCE_SCHEMA, 'utf8'));
     expect([...SOURCE_PROTOCOLS].sort()).toEqual([...schema.properties.protocol.enum].sort());
+    expectTypeOf<SourceProtocol>().toEqualTypeOf<(typeof SOURCE_PROTOCOLS)[number]>();
   });
 
   it('keeps typed fixtures aligned with every required model field and origin member', () => {

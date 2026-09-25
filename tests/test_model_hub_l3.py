@@ -103,11 +103,13 @@ from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
     _AuthenticationEvidence,
+    _AuthRecord,
     CLIProxyEngineAdapter,
     hub_subscription_serving_protocol,
     _HUB_SUBSCRIPTION_PROTOCOLS,
     _OAUTH_ENDPOINTS,
     _parse_protocol_authenticated_evidence,
+    _probe_oauth_protocol_response,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
     _ProtocolEvidence,
@@ -8709,6 +8711,43 @@ def test_protocol_observation_classifies_from_the_body_not_the_status(status) ->
     for evidence in asyncio.run(scenario()):
         assert evidence.protocol is _ProtocolProof.UNPROVEN
         assert evidence.authentication is _AuthenticationEvidence.UNKNOWN
+
+
+@pytest.mark.parametrize("status", (200, 401))
+@pytest.mark.parametrize(
+    ("vendor", "protocol"),
+    (("anthropic", "anthropic"), ("openai", "openai_responses"), ("codex", "openai_responses")),
+)
+def test_oauth_protocol_observation_classifies_from_the_body_not_the_status(vendor, protocol, status) -> None:
+    """The engine-held OAuth probe sends the model-free body and reads the shape, not the status."""
+
+    class Client:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            self.payloads.append(payload)
+            return {"status_code": status, "body": json.dumps({"status": "ok"})}
+
+    client = Client()
+    evidence = _probe_oauth_protocol_response(
+        client=client,  # type: ignore[arg-type]
+        auth=_AuthRecord(
+            identity="account.json",
+            auth_index="0",
+            name="account.json",
+            provider=vendor,
+            fingerprint="fp",
+        ),
+        vendor=vendor,
+        protocol=protocol,
+    )
+
+    assert [json.loads(payload["data"]) for payload in client.payloads] == [
+        {"anthropic": {"max_tokens": 0, "messages": []}, "openai_responses": {}}[protocol]
+    ]
+    assert evidence.protocol is _ProtocolProof.UNPROVEN
+    assert evidence.authentication is _AuthenticationEvidence.UNKNOWN
 
 
 def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:
