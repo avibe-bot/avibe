@@ -671,6 +671,16 @@ class OpenCodePollLoop:
                             parse_mode="markdown",
                         )
                     emitted_assistant_messages.add(message_id)
+                    # A restored poll resumes from this set, so a restart neither
+                    # re-emits nor drops the intermediate messages already sent.
+                    update_active_poll = getattr(
+                        getattr(self._agent, "sessions", None), "update_active_poll_state", None
+                    )
+                    if callable(update_active_poll):
+                        update_active_poll(
+                            session_id,
+                            emitted_assistant_messages=sorted(emitted_assistant_messages),
+                        )
 
             if messages:
                 remaining = deadline - time.monotonic()
@@ -1001,6 +1011,25 @@ class OpenCodePollLoop:
                                     tool_summary = f"`{tool_name}`: `{_relative_path(path)}`"
 
                             await self._agent.controller.emit_agent_message(context, "tool_call", tool_summary)
+
+                    if (
+                        info.get("time", {}).get("completed")
+                        and message_id not in emitted_assistant_messages
+                        and info.get("finish") == "tool-calls"
+                    ):
+                        text = self._agent._extract_response_text(message)
+                        if text:
+                            await self._agent.controller.emit_agent_message(
+                                context,
+                                "assistant",
+                                text,
+                                parse_mode="markdown",
+                            )
+                        emitted_assistant_messages.add(message_id)
+                        poll_info.emitted_assistant_messages = sorted(emitted_assistant_messages)
+                        self._agent.sessions.update_active_poll_state(
+                            session_id, emitted_assistant_messages=poll_info.emitted_assistant_messages
+                        )
 
                 if messages:
                     remaining = deadline - time.monotonic()
