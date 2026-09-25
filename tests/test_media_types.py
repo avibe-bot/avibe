@@ -1,44 +1,22 @@
-"""Every extension the Web UI plays inline must be guessed as media, and served inline, by the server.
+"""Every extension the Web UI plays natively must be guessed as media, and served inline, by the server.
 
-The UI classifier (``ui/src/lib/filePreview.ts``) and the server's type inference drifted twice
-(files the card offered to play were served as ``application/octet-stream`` attachments), so the
-extension sets are read from the UI source itself rather than mirrored here.
+The UI classifier and the server's type inference drifted twice (files the card offered to play were
+served as ``application/octet-stream`` attachments); both now read ``vibe/data/media_types.json``, and
+this holds the server side of that catalog to the inline contract on any host.
 """
 
 from __future__ import annotations
 
 import mimetypes
-import re
-from pathlib import Path
 
 import pytest
 
 from core.file_browser_service import INLINE_SAFE_CONTENT_TYPES
-from core.media_types import is_inline_safe_type
+from core.media_types import MEDIA_TYPES_BY_EXT, is_inline_safe_type
 from vibe.ui_server import _INLINE_SAFE_MEDIA_TYPES
 
-_FILE_PREVIEW = Path(__file__).resolve().parents[1] / "ui" / "src" / "lib" / "filePreview.ts"
 
-
-def _ui_playable_exts() -> list[str]:
-    src = _FILE_PREVIEW.read_text(encoding="utf-8")
-    exts: list[str] = []
-    for name in ("AUDIO_EXT", "VIDEO_EXT", "CONTAINER_EXT"):
-        match = re.search(rf"const {name}\b[^=]*=\s*(?:new Set\(\[(.*?)\]\)|\{{(.*?)\}})", src, re.S)
-        assert match, f"{name} not found in filePreview.ts"
-        body = match.group(1) or match.group(2)
-        exts += re.findall(r"'([a-z0-9]+)'", body) if match.group(1) else re.findall(r"(\w+)\s*:", body)
-    return exts
-
-
-UI_PLAYABLE_EXTS = _ui_playable_exts()
-
-
-def test_ui_playable_extension_set_is_parsed():
-    assert {"wav", "mp3", "ogg", "webm", "mp4", "weba", "ogv"} <= set(UI_PLAYABLE_EXTS)
-
-
-@pytest.mark.parametrize("ext", UI_PLAYABLE_EXTS)
+@pytest.mark.parametrize("ext", sorted(MEDIA_TYPES_BY_EXT))
 def test_ui_playable_extension_is_guessed_as_media_and_served_inline(ext):
     mime = mimetypes.guess_type(f"clip.{ext}")[0]
 

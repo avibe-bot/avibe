@@ -3,6 +3,8 @@
 // language in the FileViewer. Keep the language ids here in sync with the
 // grammar loaders in ``highlighter.ts``.
 
+import mediaCatalog from '../../../vibe/data/media_types.json';
+
 export type PreviewKind = 'markdown' | 'text' | 'json' | 'csv' | 'code' | 'source';
 
 // Refuse to preview files larger than this (fetch the bytes into the page) —
@@ -172,12 +174,14 @@ export function docPreviewKind(name: string, mime?: string | null, serverExt?: s
 // of opening a broken player. An unambiguous media ext decides; Ogg and WebM containers hold either
 // audio or video, so for those an explicit content type wins and the ext only supplies the default.
 // Otherwise the content type (including the aliases Python's ``mimetypes`` emits, e.g. ``audio/x-wav``)
-// classifies a label-only chat link. The server serves every audio/* and video/* inline; keep the ext
-// sets within ``core/media_types.py`` ``MEDIA_TYPES_BY_EXT`` so each one is also guessed as media there.
+// classifies a label-only chat link. The playable extensions come from ``vibe/data/media_types.json``,
+// the same catalog ``core/media_types.py`` registers server-side, so every ext offered here is guessed as
+// audio/* or video/* and served inline there (Vite inlines the JSON at build time).
 export type MediaKind = 'audio' | 'video';
-const AUDIO_EXT = new Set(['wav', 'mp3', 'm4a', 'aac', 'oga', 'opus', 'flac', 'weba']);
-const VIDEO_EXT = new Set(['mp4', 'm4v', 'mov', 'ogv']);
-const CONTAINER_EXT: Record<string, MediaKind> = { ogg: 'audio', webm: 'video' };
+const CONTAINER_EXTS = new Set(['ogg', 'webm']);
+const MEDIA_EXT: Record<string, MediaKind> = Object.fromEntries(
+  Object.entries(mediaCatalog as Record<string, string>).map(([ext, mime]) => [ext, mime.startsWith('video/') ? 'video' : 'audio']),
+);
 const AUDIO_MIME = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave',
   'audio/mp4', 'audio/x-m4a', 'audio/mp4a-latm', 'audio/aac', 'audio/x-aac',
@@ -187,12 +191,11 @@ const VIDEO_MIME = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video
 
 export function mediaKind(name: string, mime?: string | null, serverExt?: string | null): MediaKind | null {
   const ext = effectiveExt(name, serverExt);
-  if (AUDIO_EXT.has(ext)) return 'audio';
-  if (VIDEO_EXT.has(ext)) return 'video';
+  if (MEDIA_EXT[ext] && !CONTAINER_EXTS.has(ext)) return MEDIA_EXT[ext];
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (AUDIO_MIME.has(m)) return 'audio';
   if (VIDEO_MIME.has(m)) return 'video';
-  return CONTAINER_EXT[ext] ?? null;
+  return CONTAINER_EXTS.has(ext) ? (MEDIA_EXT[ext] ?? null) : null;
 }
 
 // ── Unified preview dispatch ────────────────────────────────────────────────

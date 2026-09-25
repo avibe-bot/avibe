@@ -42,6 +42,17 @@ describe('FileCard media', () => {
     expect(screen.getByLabelText('chat.media.preview')).toBeTruthy();
   });
 
+  it('drops the previous attachment\'s audio kind when a reused card switches to a new URL', async () => {
+    serveMeta({ name: 'take-2.wav', ext: 'wav', content_type: 'audio/x-wav', size: 2048 });
+    const { container, rerender } = render(<FileCard href="/api/media/one">Attachment</FileCard>);
+    await waitFor(() => expect(container.querySelector('audio')).toBeTruthy());
+
+    mock.apiFetch.mockReturnValue(new Promise<Response>(() => {}));
+    rerender(<FileCard href="/api/media/two">Attachment</FileCard>);
+
+    expect(container.querySelector('audio')).toBeNull();
+  });
+
   it('keeps video behind the preview control rather than autoloading it in the card', async () => {
     serveMeta({ name: 'demo.mp4', ext: 'mp4', content_type: 'video/mp4', size: 4096 });
     const { container } = render(<FileCard href="/api/media/tok">Demo</FileCard>);

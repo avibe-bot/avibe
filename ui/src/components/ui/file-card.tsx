@@ -49,7 +49,10 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
   const { t } = useTranslation();
   const viewer = useFileViewer();
   const label = nodeText(children).trim();
-  const [meta, setMeta] = React.useState<Meta | null>(null);
+  // Metadata is keyed by the URL it describes: a reused card whose ``href`` changes must not render the
+  // previous attachment's kind (e.g. mount a player on an unrelated token) before its own /meta lands.
+  const [resolved, setResolved] = React.useState<{ href: string; meta: Meta } | null>(null);
+  const meta = resolved?.href === href ? resolved.meta : null;
 
   React.useEffect(() => {
     // Only fetch metadata for our own media proxy — never auto-call an arbitrary
@@ -59,7 +62,7 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
     apiFetch(`${href}/meta`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (alive && data) setMeta(data);
+        if (alive && data) setResolved({ href, meta: data });
       })
       .catch(() => {});
     return () => {
