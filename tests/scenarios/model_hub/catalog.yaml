@@ -871,7 +871,7 @@ scenarios:
     layer: unit
     test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-014
   - id: MH-QUOTA-015
-    name: The quota tab stays within a narrow viewport
+    name: The quota tab stays within a narrow viewport and names an unrecognised limit in words on one line
     status: covered
     kind: observation
     layer: unit

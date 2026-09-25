@@ -3058,11 +3058,16 @@
   padding-left: var(--model-hub-quota-nested-indent);
   border-left: 2px solid var(--border);
 }
+/* One line beside the remaining figure: a long name ellipsizes, never wraps under it. */
 .model-hub-quota-row-title {
   font-size: var(--model-hub-usage-cell-size);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 .model-hub-quota-row-title small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 4;
   margin-left: 8px;
   color: var(--model-hub-usage-note-ink);
   font-size: var(--model-hub-quota-hint-size);

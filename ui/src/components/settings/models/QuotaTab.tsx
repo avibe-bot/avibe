@@ -25,6 +25,7 @@ import {
   HOUR_MS,
   MINUTE_MS,
   exhaustedWindows,
+  limitLabelParts,
   quotaDuration,
   quotaIsLive,
   quotaIsRetained,
@@ -88,18 +89,28 @@ const useQuotaText = (now: number) => {
       ? t('settings.models.quota.ago.minutes', { count: Math.max(1, Math.round(ms / MINUTE_MS)) }) as string
       : t('settings.models.quota.ago.long', { duration: duration(ms) }) as string;
   }, [duration, now, t]);
+  /**
+   * An upstream name as shown: an identifier (`seven_day_cowork`) in words, its
+   * spans in this product's window wording (「7-day Cowork」); text stays as written.
+   */
+  const upstreamName = React.useCallback((label: string) => {
+    const parts = limitLabelParts(label);
+    return parts ? parts.map((part) => ('span' in part
+      ? t(`settings.models.quota.window.span.${part.span}`, { [part.span]: part.count }) as string
+      : part.word)).join(' ') : label;
+  }, [t]);
   /** A window's name: the vendor's own model name, framed in this product's words. */
   const windowLabel = React.useCallback((window: QuotaWindow) => {
     if (window.kind === 'session') return t('settings.models.quota.window.session') as string;
     if (window.kind === 'weekly') return t('settings.models.quota.window.weekly') as string;
-    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model: window.scope_model ?? window.label }) as string;
-    return window.label;
-  }, [t]);
+    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model: window.scope_model ?? upstreamName(window.label) }) as string;
+    return upstreamName(window.label);
+  }, [t, upstreamName]);
   const windowHint = React.useCallback((window: QuotaWindow) => {
-    if (window.kind === 'model_weekly') return t('settings.models.quota.hint.model', { model: window.scope_model ?? window.label }) as string;
+    if (window.kind === 'model_weekly') return t('settings.models.quota.hint.model', { model: window.scope_model ?? upstreamName(window.label) }) as string;
     if (window.kind === 'session' || window.kind === 'weekly') return t('settings.models.quota.hint.shared') as string;
     return null;
-  }, [t]);
+  }, [t, upstreamName]);
   const paceText = React.useCallback((pace: QuotaPace) => {
     switch (pace.kind) {
       case 'paused': return t('settings.models.quota.pace.paused') as string;
@@ -143,9 +154,9 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
   return (
     <div className={cn('model-hub-quota-row', nested && 'model-hub-quota-row--nested')} data-quota-window={window.id}>
       <div className="flex items-end justify-between gap-2.5">
-        <div className="model-hub-quota-row-title min-w-0">
-          <strong className="font-medium text-foreground">{label}</strong>
-          {hint && <small>{hint}</small>}
+        <div className="model-hub-quota-row-title flex min-w-0 items-baseline">
+          <strong className="min-w-0 truncate font-medium text-foreground" title={label}>{label}</strong>
+          {hint && <small title={hint}>{hint}</small>}
         </div>
         <div className={cn('model-hub-quota-left flex shrink-0 items-baseline gap-1', toneClass(reading.tone))}>
           <b>{windowLeftPct(window, now)}%</b>

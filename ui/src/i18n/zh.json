@@ -1342,7 +1342,11 @@
         "window": {
           "session": "5 小时额度",
           "weekly": "每周额度",
-          "model": "{{model}} 每周额度"
+          "model": "{{model}} 每周额度",
+          "span": {
+            "hours": "{{hours}} 小时",
+            "days": "{{days}} 天"
+          }
         },
         "hint": {
           "shared": "所有模型共用",

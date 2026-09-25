@@ -201,3 +201,38 @@ export function quotaPayback(costUsd: number, feeUsd: number): QuotaPayback | nu
   if (multiple >= 1) return { kind: 'even', multiple, surplusUsd: costUsd - feeUsd };
   return { kind: 'short', multiple, shortfallUsd: feeUsd - costUsd };
 }
+
+/** One piece of an upstream limit id read as words: a span the copy names, or a plain word. */
+export type LimitLabelPart = { span: 'hours' | 'days'; count: number } | { word: string };
+
+const SPAN_COUNTS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, fourteen: 14, thirty: 30,
+};
+const SPAN_UNITS: Record<string, 'hours' | 'days'> = { hour: 'hours', hours: 'hours', day: 'days', days: 'days' };
+
+/**
+ * An upstream limit name that is an identifier (`seven_day_cowork`), read as
+ * words: a count followed by `hour`/`day` becomes a span, every other token a
+ * word. A name that is already text — spaces, CJK, a display name, or a single
+ * bare word — is `null`, and stays as the vendor wrote it.
+ */
+export function limitLabelParts(label: string): LimitLabelPart[] | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(label) || !/[_-]/.test(label)) return null;
+  const tokens = label.split(/[_-]+/).filter(Boolean);
+  if (!tokens.length) return null;
+  const parts: LimitLabelPart[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const lower = token.toLowerCase();
+    const count = /^\d+$/.test(token) ? Number(token) : SPAN_COUNTS[lower];
+    const unit = SPAN_UNITS[tokens[index + 1]?.toLowerCase() ?? ''];
+    if (count !== undefined && count > 0 && unit) {
+      parts.push({ span: unit, count });
+      index += 1;
+    } else {
+      parts.push({ word: token.charAt(0).toUpperCase() + token.slice(1) });
+    }
+  }
+  return parts;
+}
