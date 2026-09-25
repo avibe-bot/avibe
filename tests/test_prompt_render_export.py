@@ -32,6 +32,16 @@ _EVIDENCE_LED_PRINCIPLE = (
     "Ground judgments in facts and take responsibility for their reliability and practical value. "
     "Turn uncertainty into motivation for exploration and action, rather than an excuse to stop prematurely."
 )
+_PREVIOUS_HISTORY_GUIDANCE = (
+    "use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history "
+    "instead of relying on memory or asking the user to repeat context."
+)
+_HISTORY_AS_MEMORY_GUIDANCE = (
+    "make good use of `vibe data query` to search Sessions and Messages by keyword, time, scope, Agent, or run history. "
+    "Query it freely: it reaches beyond this Session to the whole platform's data across every Session, Agent, "
+    "and channel, and it is the clearest, most direct, and rawest source of memory. "
+    "Do not rely on vague impressions or ask the user to repeat themselves."
+)
 _CODEX_SKILL_REUSE_GUIDANCE = (
     "Choose skills by task relevance, but load a skill only if it has not already been read "
     "in this conversation; reuse already-loaded instructions across turns, callbacks, "
@@ -504,10 +514,13 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         blocks = render_prompt_context(_inputs(backend, history, skill_mode))["blocks"]
         text = "".join(block["text"] for block in blocks if block["id"] not in changed)
         assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
+        assert text.count(_HISTORY_AS_MEMORY_GUIDANCE) == 1
+        text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
         outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
     # omitting only the approved Skill-loading guidance blocks (including the
-    # Codex-only reuse sentence) and restoring the previous verification principle.
+    # Codex-only reuse sentence) and restoring the previous verification principle
+    # and conversation-history guidance.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"
