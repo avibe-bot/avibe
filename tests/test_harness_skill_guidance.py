@@ -303,17 +303,14 @@ def test_pr_delivery_loop_keeps_one_optional_reference_out_of_routine_loading() 
 
 
 def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
-    """The audit Skill and its required references teach live `vibe` calls.
+    """The audit Skill teaches live `vibe` calls.
 
     Each backticked example that carries a flag or placeholder is parsed with
     its `<placeholder>` and `...` slots filled, so a renamed command or flag
     fails here instead of in an audit run.
     """
 
-    directory = ROOT / "skills/agent-prompt-audit"
-    body = "\n".join(
-        path.read_text() for path in (directory / "SKILL.md", *sorted((directory / "references").glob("*.md")))
-    )
+    body = _read("skills/agent-prompt-audit/SKILL.md")
     examples = sorted(
         {example for example in re.findall(r"`(vibe [^`]+)`", body) if "--" in example or "<" in example}
     )
