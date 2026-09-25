@@ -167,6 +167,38 @@ describe('route mode editing', () => {
     expect(restore).not.toHaveBeenCalled();
   });
 
+  it('keeps focus on the pending Undo while removing the sole hop previews a restore', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'previewAgentChain').mockReturnValue(new Promise(() => {}));
+    mount(makeChain('codex', 'manual'));
+    await user.click((await screen.findAllByRole('button', { name: 'Remove hop' }))[0]);
+    await user.click(screen.getByRole('button', { name: 'Remove hop' }));
+    expect(mode('Follow defaults')).toHaveProperty('disabled', true);
+    await waitFor(() => expect(document.activeElement).toBe(within(document.querySelector<HTMLElement>('.model-hub-route-pending')!).getByRole('button', { name: 'Undo' })));
+  });
+
+  it('does not reopen a nested menu on the next route after the selection is cleared', async () => {
+    const user = userEvent.setup();
+    const chain = makeChain('codex', 'manual');
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
+    const agent: AgentSupply = {
+      backend: 'codex', cli_present: true, mode: 'hub', menu_kind: 'fixed',
+      sources: { order: sources.map((source) => source.id), eligibility: sources.map((source) => ({ source_id: source.id, eligible: true })) },
+      catalog_models: [{ id: 'gpt-test', display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [], supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true }],
+    };
+    const view = (open: boolean) => <I18nextProvider i18n={i18n}><RouteChainDialog
+      selection={open ? { agent, modelId: chain.model_id, read: readyRegion(chain) } : null}
+      sources={sources} onClose={vi.fn()} onManageModel={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
+    /></I18nextProvider>;
+    const { rerender } = render(view(true));
+    await user.click(await screen.findByRole('button', { name: 'Model actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Edit model' })).toBeTruthy();
+    rerender(view(false));
+    rerender(view(true));
+    await screen.findAllByRole('button', { name: 'Edit hop' });
+    expect(screen.queryByRole('menuitem', { name: 'Edit model' })).toBeNull();
+  });
+
   it('invalidates a pending restore on Cancel changes, without closing or applying the late preview', async () => {
     const user = userEvent.setup();
     let resolve!: (chain: AgentChain) => void;

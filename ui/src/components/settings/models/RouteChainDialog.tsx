@@ -181,6 +181,7 @@ export const RouteChainDialog: React.FC<{
   const removeRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const addButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const modeRef = React.useRef<HTMLDivElement | null>(null);
+  const pendingUndoRef = React.useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const isMobile = useIsMobile();
@@ -280,6 +281,14 @@ export const RouteChainDialog: React.FC<{
     requestAnimationFrame(() =>
       modeRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus(),
     );
+  // A restore preview disables the mode switch while it reads, so focus waits
+  // on its Undo instead; a local revert leaves the switch live.
+  const focusAfterFollow = () =>
+    requestAnimationFrame(() => {
+      const undo = pendingUndoRef.current;
+      if (undo && !undo.disabled) undo.focus();
+      else modeRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
+    });
 
   const readChain = React.useCallback(async () => {
     if (!selectionBackend) return;
@@ -339,6 +348,10 @@ export const RouteChainDialog: React.FC<{
     setFailedMembers(new Set());
     setUnknownObservation("none");
     setUnknownSourceCurrent(false);
+    setHeadMenu(false);
+    setHopMenu(null);
+    setReplacing(null);
+    setRecordDetails(false);
     advanceInteraction({ type: "reset", draft: [], focusIndex: 0 });
     if (selection) void readChain();
   }, [advanceInteraction, readChain, selection]);
@@ -414,7 +427,7 @@ export const RouteChainDialog: React.FC<{
       return;
     if (draft.length === 1) {
       followDefaults();
-      focusMode();
+      focusAfterFollow();
       return;
     }
     const next = advanceInteraction({ type: "remove", index });
@@ -837,6 +850,7 @@ export const RouteChainDialog: React.FC<{
       else setManualDraft(true);
     } else if (manualDraft) {
       followDefaults();
+      focusAfterFollow();
     }
   };
   const undoSwitch = () => {
@@ -1315,7 +1329,7 @@ export const RouteChainDialog: React.FC<{
             {preview && <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`, { defaultValue: `settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}` })}</strong>}
             <span>{t(pendingSwitch === 'pin' ? 'settings.models.routing.manualPending' : 'settings.models.routing.restorePending')}</span>
           </span>
-          <button type="button" disabled={phase !== 'ready'} onClick={undoSwitch} className="model-hub-route-pending-undo flex shrink-0 items-center font-semibold">
+          <button ref={pendingUndoRef} type="button" disabled={phase !== 'ready'} onClick={undoSwitch} className="model-hub-route-pending-undo flex shrink-0 items-center font-semibold">
             <Undo2 aria-hidden="true" />
             {t('settings.models.routeDialog.mode.undo')}
           </button>
