@@ -562,6 +562,7 @@ const ProjectRow: React.FC<{
   return (
     <div className="flex flex-col gap-0.5">
       <div
+        data-settings-interaction-owner="true"
         className="group flex items-center gap-1.5 rounded-md py-1.5 pl-1 pr-2 transition hover:bg-foreground/[0.04]"
         title={project.folder_path}
         onContextMenu={(e) => {

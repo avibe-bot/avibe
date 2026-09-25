@@ -172,6 +172,9 @@ the publisher, feeds the rule directly.
   never dismisses from outside interaction; its Settings toggle remains an
   explicit close path. When a non-owning outside action opens a modal, the
   foreground modal keeps focus ahead of the dismissed panel's return target.
+  Project and session context-menu rows declare ownership before pointer-down,
+  as do their menu triggers, so opening a portal never depends on its content
+  already being mounted.
 - **`SettingsLayout`**'s rail is `var(--app-sidebar-w)` when standalone (so it
   tracks even a dragged sidebar) and stays 196px inline, where spending a second
   full-width column on a secondary nav would cost 496px of left chrome.
@@ -253,6 +256,9 @@ edited into `design.pen`.
   for sidebar links and a portaled window owner. Feedback ownership, modal
   focus precedence, and standalone remaining open for outside controls are
   covered too; the portal case is the one an ancestry test cannot pass.
+- `e2e/workbench-general/settings-dismissal.spec.ts` — a real project-row
+  right-click keeps inline Settings open while its menu opens. Escape dismisses
+  that menu first, then Settings on a separate press.
 - `e2e/workbench-general/geometry.spec.ts` — measured in a browser: the 248 rail,
   the card's background matching a neighbouring page's card, and inline actually
   putting a live sidebar beside Settings at the sidebar's own width. It also
