@@ -4940,6 +4940,35 @@ async def model_hub_usage_get(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/models/quota", include_in_schema=False)
+async def model_hub_quota_get(starlette_request: FastAPIRequest):
+    # Native and awaited: a read may wait (bounded) on vendor quota calls.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            quota = await _model_hub_service().quota_summary()
+            return _model_hub_success(quota=quota)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/quota/refresh", include_in_schema=False)
+async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            quota = await _model_hub_service().quota_summary(force=True)
+            return _model_hub_success(quota=quota)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chains", methods=["GET"])
 def model_hub_agent_chains_get(backend):
     from core.handlers.model_hub import ModelHubError

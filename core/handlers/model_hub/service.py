@@ -115,6 +115,7 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
@@ -446,6 +447,9 @@ class UnavailableEngineAdapter:
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         return None
+
+    async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
+        raise SubscriptionQuotaError("unavailable")
 
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
@@ -949,6 +953,7 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
+        self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
 
     @staticmethod
     @asynccontextmanager
@@ -1999,6 +2004,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source_id)
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -2833,6 +2839,7 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
+                self.quota.forget(source.id)
                 self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
                     flow_id,
@@ -2972,6 +2979,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source.id)
         return config
 
     async def _materialize_failed_hub_reauth(
@@ -5466,6 +5474,50 @@ class ModelHubService:
             ],
         )
 
+    async def _fetch_subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> Mapping[str, Any]:
+        reader = getattr(self.adapter, "subscription_quota", None)
+        if not callable(reader):
+            raise SubscriptionQuotaError("unavailable")
+        return await reader(source_id, vendor, credential_ref)
+
+    def _quota_sources(self) -> list[QuotaSourceRef]:
+        config = self.store.load()
+        refs = []
+        for source in config.sources:
+            if source.kind != "subscription" or source.supply_channel != "hub" or not source.credential_ref:
+                continue
+            payload = self._source_account_payload(
+                {
+                    "id": source.id,
+                    "kind": source.kind,
+                    "vendor": source.vendor,
+                    "supply_channel": source.supply_channel,
+                    "credential_ref": source.credential_ref,
+                    "account_label": source.account_label,
+                }
+            )
+            refs.append(
+                QuotaSourceRef(
+                    source_id=source.id,
+                    vendor=source.vendor.strip().lower(),
+                    credential_ref=source.credential_ref,
+                    display_name=source.display_name,
+                    account_label=payload.get("account_label"),
+                )
+            )
+        return refs
+
+    async def quota_summary(self, *, force: bool = False) -> dict:
+        """Report each hub-held subscription's rate-limit windows.
+
+        A report only, like usage metering: nothing in resolution reads it. The
+        cache re-reads a Source at most every five minutes, or every thirty
+        seconds when forced, and keeps the last good snapshot across failures.
+        """
+
+        sources = await asyncio.to_thread(self._quota_sources)
+        return await self.quota.summary(sources, force=force)
+
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         events = self.events.list(limit=limit, before=before)
         for event in events:
@@ -5874,6 +5926,9 @@ class ModelHubService:
             detail_key=detail_key,
         )
         persisted = self._save_runtime_config(previous, config)
+        if persisted:
+            # A blocked grant must not keep reporting the windows it had while usable.
+            self.quota.forget(source.id)
         if persisted and emit_event:
             self._record_event(
                 agent=cast(EventAgent, backend),

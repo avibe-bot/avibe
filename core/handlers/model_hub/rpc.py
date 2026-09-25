@@ -203,6 +203,8 @@ async def dispatch_model_hub_rpc(
             service.usage_summary,
             days=payload.get("days", USAGE_DEFAULT_WINDOW_DAYS),
         )
+    if operation == "quota_summary":
+        return await service.quota_summary(force=payload.get("force") is True)
     if operation == "get_agent_chain":
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))
     if operation == "get_agent_chains":

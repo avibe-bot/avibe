@@ -231,6 +231,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, protocol-establishment, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
+| `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report. A report only; carries no grant, raw body, or monetary field. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |

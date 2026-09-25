@@ -208,6 +208,14 @@
   --model-hub-usage-column-radius: 2px;
   --model-hub-usage-note-ink: var(--model-hub-muted-b3);
 
+  /* Subscription quota tab. Reuses the usage tab's gutter and type scale. */
+  --model-hub-quota-bar-height: 6px;
+  --model-hub-quota-bar-radius: 4px;
+  --model-hub-quota-left-size: 17px;
+  --model-hub-quota-hint-size: 10px;
+  --model-hub-quota-row-gap: 14px;
+  --model-hub-quota-nested-indent: 12px;
+
   /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
    * Tailwind arbitrary value in the dialog's markup, which has no selector of
    * its own to declare it on. */
@@ -2199,6 +2207,172 @@
   text-align: center;
 }
 
+/* Subscription quota. A tone is one ink, read by every part of a window that
+ * speaks for it — bar, remaining figure, pace line, status pill — so a warning
+ * cannot be amber in one place and neutral in the next. */
+.model-hub-quota-tone--ok { --model-hub-quota-tone: var(--mint-ink); }
+.model-hub-quota-tone--warn { --model-hub-quota-tone: var(--gold-ink); }
+.model-hub-quota-tone--danger { --model-hub-quota-tone: var(--destructive-ink); }
+.model-hub-quota-tone--stale { --model-hub-quota-tone: var(--model-hub-ink-73); }
+.model-hub-quota-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.model-hub-quota-stat--primary { border-color: var(--model-hub-mint-4d); }
+.model-hub-quota-stat-unit {
+  margin-left: 5px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-label-size);
+  font-weight: 400;
+}
+.model-hub-quota-timeline {
+  padding: 11px 14px;
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-timeline-title {
+  margin-right: 6px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-quota-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--background);
+  color: var(--model-hub-ink-8c);
+}
+.model-hub-quota-chip b {
+  color: var(--foreground);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-quota-chip.model-hub-quota-tone--danger {
+  border-color: color-mix(in srgb, var(--model-hub-quota-tone) 40%, transparent);
+}
+.model-hub-quota-chip.model-hub-quota-tone--danger b { color: var(--model-hub-quota-tone); }
+.model-hub-quota-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.model-hub-quota-card { padding: 16px var(--model-hub-usage-padding-x) 18px; }
+.model-hub-quota-account { font-size: var(--model-hub-usage-title-size); }
+.model-hub-quota-plan {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+  font-weight: 500;
+}
+.model-hub-quota-account-label {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-status {
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--model-hub-quota-tone) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--model-hub-quota-tone) 7%, transparent);
+  color: var(--model-hub-quota-tone);
+  font-size: var(--model-hub-usage-note-size);
+  white-space: nowrap;
+}
+.model-hub-quota-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--model-hub-quota-tone, currentColor);
+}
+.model-hub-quota-stale,
+.model-hub-quota-unread {
+  margin-top: 14px;
+  padding: 8px 10px;
+  border: 1px dashed var(--input);
+  border-radius: 8px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-rows {
+  gap: var(--model-hub-quota-row-gap);
+  margin-top: 18px;
+}
+.model-hub-quota-card--retained .model-hub-quota-rows { opacity: 0.55; }
+.model-hub-quota-row { min-width: 0; }
+.model-hub-quota-row--nested {
+  padding-left: var(--model-hub-quota-nested-indent);
+  border-left: 2px solid var(--border);
+}
+.model-hub-quota-row-title {
+  font-size: var(--model-hub-usage-cell-size);
+  overflow-wrap: anywhere;
+}
+.model-hub-quota-row-title small {
+  margin-left: 8px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-quota-hint-size);
+}
+.model-hub-quota-left b {
+  color: var(--foreground);
+  font-size: var(--model-hub-quota-left-size);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-quota-left.model-hub-quota-tone--warn b,
+.model-hub-quota-left.model-hub-quota-tone--danger b { color: var(--model-hub-quota-tone); }
+.model-hub-quota-left span {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-quota-hint-size);
+}
+.model-hub-quota-bar {
+  position: relative;
+  height: var(--model-hub-quota-bar-height);
+  margin-top: 7px;
+  border-radius: var(--model-hub-quota-bar-radius);
+  background: var(--model-hub-wash-14);
+}
+.model-hub-quota-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: var(--model-hub-quota-bar-radius);
+  background: color-mix(in srgb, var(--model-hub-quota-tone) 85%, transparent);
+}
+.model-hub-quota-time-mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--foreground);
+  opacity: 0.55;
+}
+.model-hub-quota-row-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-pace.model-hub-quota-tone--warn,
+.model-hub-quota-pace.model-hub-quota-tone--danger { color: var(--model-hub-quota-tone); }
+.model-hub-quota-reset { white-space: nowrap; }
+.model-hub-quota-reset em {
+  margin-left: 6px;
+  color: var(--model-hub-usage-note-ink);
+  font-style: normal;
+}
+.model-hub-quota-scoped {
+  margin: 2px 0 -4px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-scoped span {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-quota-hint-size);
+}
+.model-hub-quota-foot {
+  padding: 0 2px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 1.6;
+}
+
 @media (min-width: 1024px) {
   .model-hub-direct-grid {
     grid-template-columns: minmax(0, 1fr) var(--model-hub-direct-benefits-width);
@@ -2216,6 +2390,11 @@
   /* Stacked, each cell carries its own label, so the column gutter becomes a
    * line gap and 16px of it would read as four separate rows. */
   .model-hub-usage-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  /* One account per line; the pace and reset lines stack so neither truncates. */
+  .model-hub-quota-grid { grid-template-columns: minmax(0, 1fr); }
+  .model-hub-quota-row-foot { flex-direction: column; gap: 4px; }
+  .model-hub-quota-reset { white-space: normal; }
+  .model-hub-quota-timeline-title { width: 100%; }
 }
 
 @media (min-width: 1024px) {
