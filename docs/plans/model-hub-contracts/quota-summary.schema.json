@@ -87,7 +87,10 @@
         "used_pct": { "type": "number", "minimum": 0, "maximum": 100 },
         "window_seconds": { "type": ["integer", "null"], "minimum": 1 },
         "resets_at": { "type": ["string", "null"], "format": "date-time" }
-      }
+      },
+      "if": { "properties": { "kind": { "const": "model_weekly" } } },
+      "then": { "required": ["scope_model"] },
+      "else": { "not": { "required": ["scope_model"] } }
     }
   }
 }

@@ -103,6 +103,25 @@ def test_quota_contract_carries_a_reason_exactly_when_not_ok(state, error_key, v
     assert (not errors) is valid
 
 
+@pytest.mark.parametrize(
+    ("kind", "scope_model", "valid"),
+    [
+        ("model_weekly", "Sonnet", True),
+        ("model_weekly", None, False),
+        *[(kind, None, True) for kind in ("session", "weekly", "other")],
+        *[(kind, "Sonnet", False) for kind in ("session", "weekly", "other")],
+    ],
+)
+def test_quota_contract_names_a_model_exactly_for_model_weekly(kind, scope_model, valid):
+    """A model-scoped window without its model, or a shared window with one, violates the contract."""
+
+    window = {"id": "w", "kind": kind, "label": "Sonnet", "used_pct": 10, "window_seconds": None, "resets_at": None}
+    if scope_model is not None:
+        window["scope_model"] = scope_model
+    errors = list(Draft7Validator(QUOTA_SCHEMA["definitions"]["QuotaWindow"]).iter_errors(window))
+    assert (not errors) is valid
+
+
 def test_claude_quota_parser_reads_legacy_windows_and_skips_nulls():
     """MH-QUOTA-001: Claude's fixed windows parse; null and app-only windows are skipped."""
 

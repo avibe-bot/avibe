@@ -30,6 +30,7 @@ import {
   upcomingResets,
   windowIsScoped,
   windowLeftPct,
+  windowUsedPct,
   windowPace,
   windowResetAt,
   type QuotaPace,
@@ -119,8 +120,8 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
         role="meter"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={window.used_pct}
-        aria-label={t('settings.models.quota.meter', { label, pct: Math.round(window.used_pct) }) as string}
+        aria-valuenow={windowUsedPct(window)}
+        aria-label={t('settings.models.quota.meter', { label, pct: windowUsedPct(window) }) as string}
       >
         <i className={toneClass(reading.tone)} style={{ width: `${Math.min(100, window.used_pct)}%` }} />
         {untilReset !== null && untilReset > 0 && reading.elapsedPct !== null && (
