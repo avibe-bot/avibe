@@ -6,10 +6,6 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { formatLocalClockTime, formatLocalDateTime } from '../../lib/relativeTime';
 import { SENDER_TONE_CLASS, senderInitial, senderTone } from '../../lib/senderIdentity';
 
-// The principal a loopback browser writes as (vibe/ui_server.py
-// ``_trusted_browser_author_key``). It has no email behind it to resolve.
-const LOCAL_PRINCIPAL = 'local';
-
 // The name/time/avatar line above a human bubble on an Organization instance
 // (design.pen nlrCu). Several people share that transcript, so a bubble with no
 // name cannot be attributed; on a personal instance every human row is the
@@ -26,11 +22,12 @@ export const SenderHead: React.FC<{
   createdAt: string;
 }> = ({ authorId, label, createdAt }) => {
   const { t } = useTranslation();
-  const { remote } = useInstanceAuthorization();
-  // A loopback reader is the ``local`` principal, so a ``local`` row is their
-  // own: "You" over the default avatar. A Cloud reader is someone else and
-  // falls through to "unknown" -- "You" would attribute it to them.
-  const own = !remote && authorId === LOCAL_PRINCIPAL;
+  const { readerPrincipal } = useInstanceAuthorization();
+  // A row written by the reader's own principal is theirs: "You" over the
+  // default avatar, whether they sit at the loopback or come in through Cloud.
+  // Anyone else's ``local`` row still has no email behind it and reads as
+  // "unknown" -- "You" would attribute it to the wrong person.
+  const own = Boolean(readerPrincipal) && authorId === readerPrincipal;
   // No label means the server could not resolve this principal — an IM-relayed
   // human row, or a subject Cloud never stored an email for. Naming it anything
   // but "unknown" would attribute the message to someone.

@@ -1373,6 +1373,16 @@ def _is_local_request(config: V2Config | None = None) -> bool:
     return _is_setup_host_request(config)
 
 
+def _is_direct_loopback_connection() -> bool:
+    """The request reached this process directly over loopback.
+
+    No proxy forwarding, no Docker bridge allowance, no LAN setup host: only a
+    browser on this machine talking to a loopback address qualifies.
+    """
+
+    return not _has_forwarded_metadata() and _is_loopback_peer() and _is_loopback_host(request.host)
+
+
 def _is_direct_loopback_browser_request() -> bool:
     """Strict same-origin browser admission for local author attribution.
 
@@ -1381,7 +1391,7 @@ def _is_direct_loopback_browser_request() -> bool:
     directly connected over loopback and present a same-origin header.
     """
 
-    if _has_forwarded_metadata() or not _is_loopback_peer() or not _is_loopback_host(request.host):
+    if not _is_direct_loopback_connection():
         return False
     origin = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
@@ -7259,6 +7269,13 @@ def remote_access_auth_callback():
     return response
 
 
+def _remote_author_id(subject: Any) -> str | None:
+    """The principal ``_trusted_browser_author_key`` writes a Cloud subject's rows as."""
+
+    subject = str(subject or "").strip()
+    return f"remote:{subject}" if subject else None
+
+
 @app.route("/api/session", methods=["GET"])
 def api_session():
     from vibe import remote_access
@@ -7278,6 +7295,11 @@ def api_session():
                 "instance_kind": instance_kind,
                 "instance_role": "owner",
                 "capabilities": context.capability_projection(),
+                # The principal this browser's Chat rows are written as, so the
+                # UI can recognise them as its own. Only a direct loopback
+                # browser is ``local``; a LAN setup host is not remote either,
+                # but it is not the machine owner and writes no local author.
+                "author_id": "local" if _is_direct_loopback_connection() else None,
             }
         )
     else:
@@ -7298,6 +7320,7 @@ def api_session():
                         "authenticated": True,
                         "email": str(identity.get("email", "")),
                         "sub": str(identity.get("sub", "")),
+                        "author_id": _remote_author_id(identity.get("sub")),
                         "instance_kind": instance_kind,
                         "authorization_state": "unavailable",
                     }
@@ -7309,6 +7332,7 @@ def api_session():
                         "authenticated": True,
                         "email": str(identity.get("email", "")),
                         "sub": str(identity.get("sub", "")),
+                        "author_id": _remote_author_id(identity.get("sub")),
                         "instance_kind": instance_kind,
                         "authorization_state": "revoked",
                     }
@@ -7324,6 +7348,7 @@ def api_session():
                         "authenticated": True,
                         "email": str(payload.get("email", "")),
                         "sub": str(payload.get("sub", "")),
+                        "author_id": _remote_author_id(payload.get("sub")),
                         "instance_kind": instance_kind,
                         "instance_role": context.instance_role,
                         "capabilities": context.capability_projection(),

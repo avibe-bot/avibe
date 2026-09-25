@@ -16,7 +16,13 @@ import {
   type InstanceAuthorizationValue,
 } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
-import { DENIED_INSTANCE_CAPABILITIES, type InstanceKind } from '../../lib/sessionInfo';
+import { InstanceAuthorizationProvider } from '../../context/InstanceAuthorizationProvider';
+import {
+  DENIED_INSTANCE_CAPABILITIES,
+  normalizeSessionInfo,
+  type InstanceKind,
+  type SessionInfo,
+} from '../../lib/sessionInfo';
 import { senderInitial, senderTone } from '../../lib/senderIdentity';
 import { MessageRow } from './ChatPage';
 
@@ -37,22 +43,19 @@ const HOVER_STAMP = 'group-hover/message:opacity-100';
 // and not only in the helper's return value.
 const TONE_FILL = `bg-${senderTone('remote:sub-amy')}`;
 
-const instance = (
-  instanceKind: InstanceKind | null,
-  remote = instanceKind !== null,
-): InstanceAuthorizationValue => ({
-  remote,
+const instance = (instanceKind: InstanceKind | null): InstanceAuthorizationValue => ({
+  remote: instanceKind !== null,
   instanceKind,
   instanceRole: 'owner',
   capabilities: DENIED_INSTANCE_CAPABILITIES,
 });
 
-const render = (ui: ReactElement, instanceKind: InstanceKind | null, remote?: boolean) =>
+const render = (ui: ReactElement, instanceKind: InstanceKind | null) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={i18n}>
       <ToastProvider>
         <MemoryRouter>
-          <InstanceAuthorizationContext.Provider value={instance(instanceKind, remote)}>
+          <InstanceAuthorizationContext.Provider value={instance(instanceKind)}>
             {ui}
           </InstanceAuthorizationContext.Provider>
         </MemoryRouter>
@@ -83,12 +86,51 @@ const humanMessage = (over: Partial<WorkbenchMessage> = {}): WorkbenchMessage =>
     ...over,
   }) as unknown as WorkbenchMessage;
 
-const row = (message: WorkbenchMessage, instanceKind: InstanceKind | null, remote?: boolean) =>
-  render(
-    <MessageRow message={message} session={session} messageFontSize={13} />,
-    instanceKind,
-    remote,
+const row = (message: WorkbenchMessage, instanceKind: InstanceKind | null) =>
+  render(<MessageRow message={message} session={session} messageFontSize={13} />, instanceKind);
+
+// The same row as a real reader sees it: the reader's principal comes from the
+// session payload through the production provider, not from a hand-built value.
+const rowAs = (message: WorkbenchMessage, reader: SessionInfo) =>
+  renderToStaticMarkup(
+    <I18nextProvider i18n={i18n}>
+      <ToastProvider>
+        <MemoryRouter>
+          <InstanceAuthorizationProvider session={reader}>
+            <MessageRow message={message} session={session} messageFontSize={13} />
+          </InstanceAuthorizationProvider>
+        </MemoryRouter>
+      </ToastProvider>
+    </I18nextProvider>,
   );
+
+// Readers exactly as ``normalizeSessionInfo`` hands them over from /api/session.
+const LOOPBACK_READER = normalizeSessionInfo({
+  remote: false,
+  instance_kind: 'organization',
+  author_id: 'local',
+});
+// A LAN setup-host browser: not remote, but not the machine owner either.
+const LAN_READER = normalizeSessionInfo({
+  remote: false,
+  instance_kind: 'organization',
+  author_id: null,
+});
+const cloudReader = (sub: string): SessionInfo =>
+  normalizeSessionInfo({
+    remote: true,
+    authenticated: true,
+    email: `${sub}@acme.example`,
+    sub,
+    author_id: `remote:${sub}`,
+    instance_kind: 'organization',
+    instance_role: 'member',
+    capabilities: DENIED_INSTANCE_CAPABILITIES,
+    authorization_state: 'current',
+  });
+const YOU = `>${en.chat.senderYou}<`;
+// The default avatar: a person glyph instead of an initial or a "?".
+const DEFAULT_AVATAR = 'lucide-user-round';
 
 describe('organization sender identity', () => {
   it('names the sender on an organization instance', () => {
@@ -114,24 +156,40 @@ describe('organization sender identity', () => {
     expect(markup).not.toContain(TONE_FILL);
   });
 
-  it('calls a loopback row "You" for the loopback reader', () => {
+  it('calls the reader\'s own row "You" at the loopback and through Cloud', () => {
     const local = humanMessage({ author_id: 'local', sender_label: null });
-    const markup = row(local, 'organization', false);
+    const amy = humanMessage({ author_id: 'remote:sub-amy', sender_label: 'amy.chen' });
 
-    expect(markup).toContain(`>${en.chat.senderYou}<`);
-    expect(markup).not.toContain(en.chat.senderUnknown);
-    // The default avatar: a person glyph on the neutral chip, no initial, no tone.
-    expect(markup).toContain('lucide-user-round');
-    expect(markup).not.toContain('>?<');
-    expect(markup).not.toContain(TONE_FILL);
+    for (const [message, reader] of [
+      [local, LOOPBACK_READER],
+      [amy, cloudReader('sub-amy')],
+    ] as const) {
+      const markup = rowAs(message, reader);
+      expect(markup).toContain(YOU);
+      expect(markup).toContain(DEFAULT_AVATAR);
+      expect(markup).not.toContain('amy.chen');
+      expect(markup).not.toContain(en.chat.senderUnknown);
+      expect(markup).not.toContain('>?<');
+      expect(markup).not.toContain(TONE_FILL);
+    }
   });
 
-  it('never tells a Cloud reader that a loopback row is theirs', () => {
+  it('never calls someone else\'s row "You"', () => {
     const local = humanMessage({ author_id: 'local', sender_label: null });
-    const markup = row(local, 'organization', true);
+    const amy = humanMessage({ author_id: 'remote:sub-amy', sender_label: 'amy.chen' });
 
-    expect(markup).not.toContain(`>${en.chat.senderYou}<`);
-    expect(markup).toContain(en.chat.senderUnknown);
+    // A Cloud reader looking at the loopback owner's row, and at a colleague's.
+    const bo = cloudReader('sub-bo');
+    expect(rowAs(local, bo)).not.toContain(YOU);
+    expect(rowAs(local, bo)).toContain(en.chat.senderUnknown);
+    expect(rowAs(amy, bo)).not.toContain(YOU);
+    expect(rowAs(amy, bo)).toContain('amy.chen');
+    // A LAN browser is not remote, but the owner's loopback rows are not its own.
+    expect(rowAs(local, LAN_READER)).not.toContain(YOU);
+    expect(rowAs(local, LAN_READER)).toContain(en.chat.senderUnknown);
+    // The loopback reader looking at a Cloud member's row.
+    expect(rowAs(amy, LOOPBACK_READER)).toContain('amy.chen');
+    expect(rowAs(amy, LOOPBACK_READER)).not.toContain(YOU);
   });
 
   it('ignores a label the server should not have sent on a personal instance', () => {

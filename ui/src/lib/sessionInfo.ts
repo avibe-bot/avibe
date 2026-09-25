@@ -27,6 +27,7 @@ export type SessionInfo =
       instance_kind: InstanceKind | null;
       instance_role?: 'owner';
       capabilities?: InstanceCapabilities;
+      author_id?: string | null;
     }
   | { remote: true; authenticated: false; authorization_refresh_required?: boolean }
   | {
@@ -46,6 +47,7 @@ export type SessionInfo =
       instance_role: InstanceRole;
       capabilities: InstanceCapabilities;
       authorization_state: 'current';
+      author_id?: string | null;
     };
 
 export const DENIED_INSTANCE_CAPABILITIES: InstanceCapabilities = {
@@ -84,6 +86,10 @@ const normalizeCapabilities = (value: Record<string, unknown>): InstanceCapabili
 const normalizeInstanceKind = (value: unknown): InstanceKind | null =>
   value === 'personal' || value === 'organization' ? value : null;
 
+// The principal the server writes this browser's Chat rows as, or nothing.
+const authorIdField = (value: unknown): { author_id?: string } =>
+  typeof value === 'string' && value.trim() ? { author_id: value.trim() } : {};
+
 export const normalizeSessionInfo = (value: unknown): SessionInfo => {
   if (!isRecord(value)) return { remote: true, authenticated: false };
 
@@ -93,6 +99,7 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
       instance_kind: normalizeInstanceKind(value.instance_kind),
       instance_role: 'owner',
       capabilities: OWNER_INSTANCE_CAPABILITIES,
+      ...authorIdField(value.author_id),
     };
   }
 
@@ -142,5 +149,6 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     instance_role: instanceRole,
     capabilities,
     authorization_state: 'current',
+    ...authorIdField(value.author_id),
   };
 };
