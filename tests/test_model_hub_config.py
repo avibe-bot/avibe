@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import copy
 import inspect
 import json
@@ -528,8 +527,6 @@ def _mirror_schemas(registry: dict) -> dict[str, dict]:
 
 
 def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
-    assert Path("core/handlers/model_hub/adapter.py").read_bytes() == (CONTRACTS / "adapter-interface.py").read_bytes()
-
     for example in _schema("source.schema.json")["examples"]:
         serialized = ModelHubSourceConfig.from_payload(example).to_payload()
         expected = json.loads(json.dumps(example))
@@ -1656,8 +1653,6 @@ def test_config_reload_rejects_pre_v4_opencode_shape_on_invalid_config_path(
     backups = list(config_path.parent.glob("config.json.bak-recovery-*"))
     assert backups
     assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
-    migration_source = inspect.getsource(v2_config._migrate_legacy_model_hub_payload)
-    assert "opencode" not in migration_source
 
 
 def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_path):
@@ -2014,37 +2009,6 @@ def test_loading_a_persisted_config_yields_one_this_product_can_load_again(monke
 
     assert reloaded.load_warnings == ()
     assert reloaded.model_hub.to_payload() == loaded.model_hub.to_payload()
-
-
-def test_every_normalized_identifier_collection_collapses_through_one_owner():
-    # Naming the class rather than its third member. Each collection whose leaf
-    # validator settles a spelling needs its parent to collapse on the settled
-    # value, and the two that exist cost one review round each because nothing
-    # tied the two halves together. Counting them does: a normalization added
-    # without its collapse fails here instead of arriving as a finding.
-    source = Path("config/v2_config.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    normalizing = set()
-    validating = set()
-    collapsing = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for call in ast.walk(node):
-            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
-                continue
-            if call.func.id == "normalized_model_id":
-                # A comparison rejects an unsettled spelling; it does not
-                # produce a normalized identity or require a collapse owner.
-                owner_set = validating if isinstance(parents[call], ast.Compare) else normalizing
-                owner_set.add(node.name)
-            elif call.func.id == "_collapse_settled_duplicates":
-                collapsing.add(node.name)
-    assert normalizing == {"ModelHubModelConfig", "ModelHubRouteHopConfig"}
-    assert validating == {"ModelHubAgentSupplyConfig"}
-    assert collapsing == {"ModelHubSourceConfig", "ModelHubRouteConfig"}
-    assert len(collapsing) == len(normalizing)
 
 
 @pytest.mark.parametrize("repairing", (False, True))

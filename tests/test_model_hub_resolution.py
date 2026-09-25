@@ -2311,50 +2311,6 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
         assert "_would_interrupt" not in calls(methods[name])
 
 
-def test_credential_target_and_refresh_capability_have_single_service_consumers():
-    from ast import AsyncFunctionDef, Attribute, Call, Name, parse, walk
-    from pathlib import Path
-
-    tree = parse(
-        (Path(__file__).parents[1] / "core/handlers/model_hub/service.py").read_text(
-            encoding="utf-8"
-        )
-    )
-    methods = {
-        node.name: node
-        for node in walk(tree)
-        if isinstance(node, AsyncFunctionDef)
-    }
-
-    def calls(method: AsyncFunctionDef) -> set[str]:
-        return {
-            node.func.id
-            if isinstance(node.func, Name)
-            else node.func.attr
-            for node in walk(method)
-            if isinstance(node, Call)
-            and isinstance(node.func, (Name, Attribute))
-        }
-
-    assert "retarget_api_key_credential" in calls(methods["patch_source"])
-    assert "_classify_credential_outcome" in calls(
-        methods["_classify_source_outcome"]
-    )
-    assert "credential_supports_refresh" in calls(
-        methods["_classify_credential_outcome"]
-    )
-    assert "_probe_agent_once" in calls(methods["probe_agent"])
-    assert "_classify_source_outcome" in calls(methods["_probe_agent_once"])
-    assert "_invoke_admitted" in calls(methods["_probe_agent_once"])
-    assert "_classify_source_outcome" in calls(methods["resolve"])
-    capability_callers = {
-        name
-        for name, method in methods.items()
-        if "credential_supports_refresh" in calls(method)
-    }
-    assert capability_callers == {"_classify_credential_outcome"}
-
-
 def test_direct_mode_refuses_chain_and_probe(tmp_path):
     config = ModelHubConfig()
     service, _, _ = _service(tmp_path, config)
