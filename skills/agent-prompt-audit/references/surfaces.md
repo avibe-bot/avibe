@@ -18,26 +18,32 @@ the current machine; they are starting points, not guarantees.
 ## Evidence recipes
 
 `vibe data query` is read-only SQLite; `PRAGMA` is not authorized, so sample a
-row (`select * from <table> limit 1`) to see columns.
+row (`select * from <table> limit 1`) to see columns. Scope every query to the
+audited Agent's sessions so unrelated conversations never enter the evidence:
+resolve them first, then filter by `session_id`. Only Agent-bearing run types
+(`agent_run`, `scheduled`, `watch`, `task_escalation`) reflect prompt behavior;
+`hook_send`, `task_run`, and `watch_runtime` are command executions.
 
 ```sql
--- Failure and cancellation hot spots, last 14 days
-select agent_name, agent_backend, status, count(*) n
-from agent_runs
-where created_at > datetime('now','-14 days') and status in ('failed','canceled')
-group by 1,2,3 order by n desc;
+-- Sessions in scope
+select id, agent_backend, model, reasoning_effort, title, last_active_at
+from agent_sessions where agent_name = '<agent>'
+order by last_active_at desc limit 20;
 
--- Runs that ended without reporting anything
-select id, agent_name, agent_backend, status, created_at
+-- Failed, cancelled, or silent Agent runs in those sessions, last 14 days
+select id, run_type, status, agent_backend, model, created_at,
+       coalesce(trim(result_text),'') = '' as no_result
 from agent_runs
-where status in ('succeeded','completed')
-  and coalesce(trim(result_text),'') = ''
-  and created_at > datetime('now','-14 days');
+where session_id in ('<session>', ...)
+  and run_type in ('agent_run','scheduled','watch','task_escalation')
+  and created_at > datetime('now','-14 days')
+  and (status in ('failed','canceled') or coalesce(trim(result_text),'') = '');
 
--- User corrections, the strongest signal (adjust keywords to the user's language)
+-- User corrections in those sessions (adjust keywords to the user's language)
 select session_id, created_at, substr(content_text,1,200) text
 from messages
-where author = 'user' and created_at > datetime('now','-14 days')
+where author = 'user' and session_id in ('<session>', ...)
+  and created_at > datetime('now','-14 days')
   and (content_text like '%why did%' or content_text like '%stop%'
        or content_text like '%为什么%' or content_text like '%卡住%' or content_text like '%不要%');
 
