@@ -3,6 +3,7 @@
 import { createInstance } from 'i18next';
 import { useEffect, useRef } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,17 +11,22 @@ type VoiceStopped = (
   reason: 'finish' | 'abort' | 'error',
   metadata: { pendingSegmentCount: number },
 ) => void;
+type VoiceSegment = (blob: Blob, metadata: { durationMs: number; final: boolean }) => void;
 
 const voiceMocks = vi.hoisted(() => ({
   abort: vi.fn(),
   finish: vi.fn(),
   getUserMedia: vi.fn(),
+  onSegment: undefined as VoiceSegment | undefined,
   onStopped: undefined as VoiceStopped | undefined,
   pipelineStart: vi.fn(),
   realtimeAbort: vi.fn(),
+  realtimeFinish: vi.fn(),
   realtimeStart: vi.fn(),
 }));
 vi.hoisted(() => {
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     value: vi.fn().mockReturnValue({ matches: false }),
@@ -36,7 +42,8 @@ vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
 vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/voiceRecording')>(),
   VoiceRecordingPipeline: class {
-    constructor(options: { onStopped: VoiceStopped }) {
+    constructor(options: { onStopped: VoiceStopped; onSegment: VoiceSegment }) {
+      voiceMocks.onSegment = options.onSegment;
       voiceMocks.onStopped = options.onStopped;
     }
 
@@ -49,6 +56,7 @@ vi.mock('../../lib/voiceRealtime', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/voiceRealtime')>(),
   VoiceRealtimeSession: class {
     start = voiceMocks.realtimeStart;
+    finish = voiceMocks.realtimeFinish;
     abort = voiceMocks.realtimeAbort;
     sendPcm = vi.fn();
   },
@@ -74,6 +82,7 @@ type ComposerTestState = {
   disabled?: boolean;
   initialDraft?: string;
   mentions?: boolean;
+  onSend?: (text: string) => void;
   shortcutStartEnabled?: boolean;
 };
 
@@ -104,7 +113,7 @@ const ComposerShortcutHarness = ({
       <Composer
         ref={composerRef}
         sessionId={sessionId}
-        onSend={() => undefined}
+        onSend={state.onSend ?? (() => undefined)}
         disabled={state.disabled}
         initialDraft={state.initialDraft}
         onSearchAgents={state.mentions ? async () => [] : undefined}
@@ -135,9 +144,11 @@ beforeEach(() => {
   voiceMocks.abort.mockReset();
   voiceMocks.finish.mockReset();
   voiceMocks.getUserMedia.mockReset();
+  voiceMocks.onSegment = undefined;
   voiceMocks.onStopped = undefined;
   voiceMocks.pipelineStart.mockReset().mockResolvedValue(true);
   voiceMocks.realtimeAbort.mockReset();
+  voiceMocks.realtimeFinish.mockReset();
   voiceMocks.realtimeStart.mockReset().mockReturnValue(new Promise(() => undefined));
   voiceMocks.getUserMedia.mockResolvedValue({
     getTracks: () => [{ stop: vi.fn() }],
@@ -194,6 +205,47 @@ describe('Composer voice shortcut', () => {
 
     fireEvent.keyDown(outside, { code: 'KeyZ', altKey: true });
     expect(voiceMocks.finish).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true].flatMap((mentions) => (
+    ['editor', 'outside', 'moved', 'dialog'].map((focus) => ({ mentions, focus }))
+  )))('restores shortcut focus and Enter sending without taking new focus ($mentions, $focus)', async ({
+    mentions,
+    focus,
+  }) => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    let finishTranscription!: (result: { text: string; cleanup: string }) => void;
+    voiceMocks.realtimeFinish.mockReturnValue(new Promise((resolve) => {
+      finishTranscription = resolve;
+    }));
+    voiceMocks.finish.mockImplementation(() => {
+      voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 1000, final: true });
+      voiceMocks.onStopped?.('finish', { pendingSegmentCount: 0 });
+    });
+    renderComposer(`transcript-shortcut-${mentions}-${focus}`, { mentions, onSend });
+    await screen.findByRole('button', { name: en.chat.compose.voice });
+    const textbox = screen.getByRole('textbox');
+    const outside = screen.getByRole('button', { name: 'Outside composer' });
+    const foreground = screen.getByRole('button', { name: 'Foreground control' });
+    await user.click(focus === 'outside' ? outside : textbox);
+    await user.keyboard('{Alt>}z{/Alt}');
+    await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+    if (focus === 'dialog') await user.click(foreground);
+    await user.keyboard('{Alt>}z{/Alt}');
+    await screen.findByRole('button', { name: en.chat.compose.voiceProcessing });
+    if (focus === 'moved') await user.click(outside);
+    await user.keyboard('{Enter}');
+    expect(onSend).not.toHaveBeenCalled();
+
+    await act(async () => finishTranscription({ text: 'Send this transcript', cleanup: 'success' }));
+
+    const expectedFocus = focus === 'moved' ? outside : focus === 'dialog' ? foreground : textbox;
+    await waitFor(() => expect(document.activeElement).toBe(expectedFocus));
+    if (expectedFocus !== textbox) return;
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(onSend.mock.calls[0][0]).toBe('Send this transcript');
   });
 
   it('does not start behind a foreground surface but always finishes an active recording', async () => {
