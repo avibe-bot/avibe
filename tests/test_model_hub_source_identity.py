@@ -280,6 +280,34 @@ def test_claude_credential_reconciliation_scans_renamed_auth_file(tmp_path):
     assert store.credential_metadata(ref)["auth_name"] == new_name
 
 
+def test_claude_credential_reconciliation_rejects_renamed_file_with_foreign_prefix(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    old_name = "claude-user@example.com.json"
+    new_name = "claude-00f765af-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", old_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    identity = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    store.write_oauth_auth_file(old_name, identity)
+    store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
+    (store.auth_dir / old_name).rename(store.auth_dir / new_name)
+    store.write_oauth_auth_file(
+        new_name,
+        {**identity, "prefix": "foreign-prefix"},
+    )
+
+    with pytest.raises(EngineStateError, match="prefix conflicts"):
+        store.reconcile_oauth_credential(ref, auth_provider="claude")
+
+    assert store.credential_metadata(ref)["auth_name"] == old_name
+
+
 def test_claude_credential_reconciliation_fails_closed_on_duplicate_migrated_files(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     old_name = "claude-user@example.com.json"

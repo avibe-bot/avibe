@@ -1600,6 +1600,9 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
             },
         )
         store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
+        malformed_path = store.root / "credentials" / "cred_malformed123.json"
+        malformed_path.write_text("{", encoding="utf-8")
+        malformed_path.chmod(0o600)
         (store.auth_dir / old_name).rename(store.auth_dir / new_name)
 
         client = Client()

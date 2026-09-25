@@ -222,6 +222,9 @@ def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
     assert "--json isDraft" in workflow
     assert 'gh release edit "$release_tag"' in workflow
     assert "--draft=false" in workflow
+    assert "gh release download \"$release_tag\"" in workflow
+    assert "model_hub_engine_release_guard.py verify" in workflow
+    assert "gh release delete-asset" in workflow
     assert "publish-patched-source:" in workflow
     assert "needs: build-patched-source" in workflow
     assert "needs: [publish-patched-source]" in workflow

@@ -1728,7 +1728,10 @@ class CLIProxyEngineAdapter:
         if self._oauth_startup_reconciled:
             return
 
-        oauth_credentials = await asyncio.to_thread(self.state_store._oauth_credentials)
+        oauth_credentials = await asyncio.to_thread(
+            self.state_store._oauth_credentials,
+            isolate_errors=True,
+        )
         if not any(
             str(metadata.get("vendor") or "").strip().lower() == "anthropic"
             for _credential_ref, metadata in oauth_credentials
@@ -2716,6 +2719,7 @@ class CLIProxyEngineAdapter:
                 self.state_store.reconcile_oauth_auth_file(
                     auth.name,
                     auth_provider=auth.provider,
+                    isolate_errors=isolate_errors,
                 )
             except EngineStateError as exc:
                 if not isolate_errors:

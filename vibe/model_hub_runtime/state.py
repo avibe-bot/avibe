@@ -1028,6 +1028,7 @@ class EngineStateStore:
         auth_name: str,
         *,
         auth_provider: str,
+        isolate_errors: bool = False,
     ) -> str | None:
         """Heal CPA filename migrations without changing credential ownership.
 
@@ -1050,7 +1051,9 @@ class EngineStateStore:
             identity = _oauth_identity_from_payload(payload, provider)
             credentials = [
                 (credential_ref, metadata)
-                for credential_ref, metadata in self._oauth_credentials()
+                for credential_ref, metadata in self._oauth_credentials(
+                    isolate_errors=isolate_errors,
+                )
                 if metadata.get("vendor") == _oauth_vendor_for_provider(provider)
             ]
             exact = [
@@ -1193,6 +1196,7 @@ class EngineStateStore:
 
             self.audit_auth_permissions(enforce=True)
             stored_prefix = str(metadata.get("prefix") or "").strip().strip("/")
+            stored_identity = _oauth_identity_from_metadata(metadata)
             candidate_names = sorted(
                 path.name
                 for path in self.auth_dir.iterdir()
@@ -1207,6 +1211,13 @@ class EngineStateStore:
                     provider == normalized_provider
                     and stored_prefix
                     and payload_prefix == stored_prefix
+                ) or (
+                    provider == normalized_provider
+                    and stored_identity
+                    and _oauth_identity_matches(
+                        stored_identity,
+                        _oauth_identity_from_payload(payload, provider),
+                    )
                 ):
                     matching_names.append(candidate_name)
 
@@ -1371,23 +1382,32 @@ class EngineStateStore:
         self._ensure_private_dir(self.oauth_staging_dir)
         return self.oauth_staging_dir / f"{credential_ref}.json"
 
-    def _oauth_credentials(self) -> list[tuple[str, dict[str, Any]]]:
+    def _oauth_credentials(
+        self,
+        *,
+        isolate_errors: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]:
         self._ensure_private_dir(self.root)
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         result: list[tuple[str, dict[str, Any]]] = []
         for path in credentials_dir.glob("cred_*.json"):
-            mode = path.lstat().st_mode
-            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
-                raise EngineStateError("credential permissions are unsafe")
-            credential_ref = path.stem
-            if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-                raise EngineStateError("credential state contains an unsafe entry")
-            _credential_ref_auth_scheme(credential_ref)
-            payload = self._read_json(path)
-            if payload and payload.get("kind") == "oauth":
-                _validate_credential_auth_scheme(credential_ref, payload)
-                result.append((credential_ref, payload))
+            try:
+                mode = path.lstat().st_mode
+                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                    raise EngineStateError("credential permissions are unsafe")
+                credential_ref = path.stem
+                if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+                    raise EngineStateError("credential state contains an unsafe entry")
+                _credential_ref_auth_scheme(credential_ref)
+                payload = self._read_json(path)
+                if payload and payload.get("kind") == "oauth":
+                    _validate_credential_auth_scheme(credential_ref, payload)
+                    result.append((credential_ref, payload))
+            except (EngineStateError, OSError, TypeError, ValueError) as exc:
+                if not isolate_errors:
+                    raise
+                logger.warning("Skipping invalid credential metadata %s: %s", path.name, exc)
         return result
 
     def _write_sources(self, sources: Sequence[SourceRecord]) -> None:

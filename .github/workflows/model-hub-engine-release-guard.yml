@@ -115,6 +115,40 @@ jobs:
               echo "All expected release asset names already exist; preserving their bytes."
             fi
             if [ "$is_draft" = "true" ]; then
+              draft_dir="$RUNNER_TEMP/model-hub-engine-draft"
+              verify_draft_release() {
+                rm -rf "$draft_dir"
+                mkdir -p "$draft_dir"
+                gh release download "$release_tag" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --dir "$draft_dir"
+                python3 scripts/model_hub_engine_release_guard.py verify \
+                  --asset-dir "$draft_dir"
+              }
+              if ! verify_draft_release; then
+                echo "::warning::Draft release assets differ from the verified build; replacing expected assets."
+                declare -A current_assets=()
+                while IFS= read -r asset_name; do
+                  current_assets["$asset_name"]=1
+                done < <(
+                  gh release view "$release_tag" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --json assets \
+                    --jq '.assets[].name'
+                )
+                for asset in "${assets[@]}"; do
+                  asset_name="${asset##*/}"
+                  if [ -n "${current_assets[$asset_name]:-}" ]; then
+                    gh release delete-asset "$release_tag" "$asset_name" \
+                      --repo "$GITHUB_REPOSITORY" \
+                      --yes
+                  fi
+                done
+                gh release upload "$release_tag" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  "${assets[@]}"
+                verify_draft_release
+              fi
               gh release edit "$release_tag" \
                 --repo "$GITHUB_REPOSITORY" \
                 --draft=false
@@ -242,6 +276,40 @@ jobs:
                 "${missing_assets[@]}"
             fi
             if [ "$is_draft" = "true" ]; then
+              draft_dir="$RUNNER_TEMP/model-hub-engine-draft"
+              verify_draft_release() {
+                rm -rf "$draft_dir"
+                mkdir -p "$draft_dir"
+                gh release download "$release_tag" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --dir "$draft_dir"
+                python3 scripts/model_hub_engine_release_guard.py verify \
+                  --asset-dir "$draft_dir"
+              }
+              if ! verify_draft_release; then
+                echo "::warning::Draft release assets differ from the verified backup; replacing expected assets."
+                declare -A current_assets=()
+                while IFS= read -r asset_name; do
+                  current_assets["$asset_name"]=1
+                done < <(
+                  gh release view "$release_tag" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --json assets \
+                    --jq '.assets[].name'
+                )
+                for asset in "${assets[@]}"; do
+                  asset_name="${asset##*/}"
+                  if [ -n "${current_assets[$asset_name]:-}" ]; then
+                    gh release delete-asset "$release_tag" "$asset_name" \
+                      --repo "$GITHUB_REPOSITORY" \
+                      --yes
+                  fi
+                done
+                gh release upload "$release_tag" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  "${assets[@]}"
+                verify_draft_release
+              fi
               gh release edit "$release_tag" \
                 --repo "$GITHUB_REPOSITORY" \
                 --draft=false
