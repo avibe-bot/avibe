@@ -183,10 +183,10 @@ Source-of-truth rule:
 
 ### Planning and Documentation
 
-- if the task is complex or ambiguous, create a short plan before large changes
-- capture background, goal, solution, and todo items in `docs/plans/`
-- implementations should follow the plan and update it when scope changes materially
-- if requirements are unclear, ask early before committing to a large direction
+- for complex or ambiguous tasks, record the plan in `docs/plans/` (background,
+  goal, solution, todo items) and update it when scope changes materially
+- ask before choosing a direction only when an ambiguity would change the
+  outcome; otherwise proceed and state the assumption
 - update user documentation alongside user-visible features or changed workflows
 - keep project-specific plans, investigations, and summaries under `docs/`, never in the repo root
 
@@ -227,10 +227,8 @@ Source-of-truth rule:
 
 ### Python and Module Conventions
 
-- follow PEP 8 and 4-space indentation
 - use `snake_case` for functions and `PascalCase` for classes/dataclasses
 - add type hints for public functions where practical
-- keep modules cohesive
 - add new business logic under `core/handlers/` when it is platform-agnostic
 - add new IM integrations under `modules/im/` and new agent backends under `modules/agents/`
 - no repo-wide formatter is enforced; keep diffs focused if you use Black/Ruff
