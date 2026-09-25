@@ -286,15 +286,15 @@ scenarios:
     status: covered
     kind: failure
     layer: contract
-    backend: codex
-    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_codex_stop_emits_stop_semantics
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_every_backend_stop_emits_stop_semantics
   - id: HFR-040
     name: no backend stop may use the terminal-turn default
     status: covered
     kind: safety
     layer: contract
     backend: shared
-    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_no_backend_stop_uses_the_terminal_turn_default
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_every_backend_stop_emits_stop_semantics
   - id: HFR-041
     name: every Harness run records its terminal result text, not just agent_run
     status: covered
@@ -1467,13 +1467,10 @@ scenarios:
     # claim is made -- a contract comment on ``PlatformDescriptor.kind`` and one beside
     # ``LADDER_ACK_SOURCES`` -- all five IM descriptors state ``kind="im"`` explicitly
     # instead of inheriting it, and a fourth subordinate test carries this id:
-    # ``test_every_registry_platform_declares_its_kind_explicitly``. It reads the
-    # registry's AST, because at RUNTIME a defaulted ``kind`` and an explicit
-    # ``kind="im"`` are the same object; it also asserts the parsed ids equal the live
-    # registry's keys, so a registry the AST can no longer read fails rather than
-    # silently passing over nothing. The dataclass default is deliberately KEPT --
-    # ``PlatformDescriptor`` is constructed outside the registry too -- so the
-    # enforcement sits at the registry, not on the shared constructor.
+    # ``test_a_platform_descriptor_cannot_inherit_the_im_kind``. The test-audit follow-up
+    # replaced the original registry-AST guard by removing the dataclass default
+    # outright: ``PlatformDescriptor`` now refuses construction without ``kind``, so
+    # the enforcement is the constructor itself and the test pins that refusal.
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).

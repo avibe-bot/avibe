@@ -280,6 +280,10 @@ export const AgentsPage: React.FC = () => {
   // NOT written back to the memory.
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
+  // ``?agent=`` names the Agent a contextual caller wants open (Model Hub's
+  // "Agent needs attention" list). Like ``?tab=`` it is a destination rather
+  // than a remembered choice, so it wins over the default auto-selection.
+  const agentParam = searchParams.get('agent');
   const [agentsTab, setAgentsTab] = useState<AgentsTabKey>(() => resolveAgentsTab(tabParam));
   // One-way URL -> state, keyed on the param so a later user tab click isn't
   // yanked back: both a contextual link arriving while this page is already
@@ -1120,10 +1124,15 @@ export const AgentsPage: React.FC = () => {
       agents.length === 0
     ) return;
     const available = agents.filter((agent) => !coordinator.retired.has(agent.name));
+    // A contextual caller's ``?agent=`` is an explicit destination; the default
+    // is only a fallback for an empty detail panel, so it must not spend a read
+    // on an Agent the param is about to supersede.
+    if (agentParam && available.some((agent) => agent.name === agentParam)) return;
     const target = (defaultName && available.find((a) => a.name === defaultName)) || available[0];
     if (target) void selectAgent(target.name, false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultName, agents]);
+  }, [defaultName, agents, agentParam]);
+
 
   // If the selection clears (agent deleted, or a refresh dropped it) drop the
   // mobile drill state too — otherwise the list stays max-lg:hidden with no
@@ -1245,6 +1254,21 @@ export const AgentsPage: React.FC = () => {
     },
     [beginSelectedIntent, clearResourceError],
   );
+
+  // Applied once per value: the list arrives after mount, so this waits for the
+  // named Agent to exist rather than sending a read for a name the page cannot
+  // show — and a later user pick is not yanked back to the param.
+  const appliedAgentParamRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!agentParam) {
+      appliedAgentParamRef.current = null;
+      return;
+    }
+    if (appliedAgentParamRef.current === agentParam) return;
+    if (!agents.some((agent) => agent.name === agentParam)) return;
+    appliedAgentParamRef.current = agentParam;
+    void selectAgent(agentParam, true);
+  }, [agentParam, agents, selectAgent]);
 
   const dismissSelected = useCallback(() => {
     const coordinator = selectedCoordinatorRef.current;

@@ -64,6 +64,7 @@ def test_registry_addition_drives_platform_validation_and_readiness(monkeypatch)
         client_class="Unused",
         formatter_module="unused",
         formatter_class="Unused",
+        kind="im",
         credential_fields=("token",),
         capabilities=PlatformCapabilities(
             supports_channels=True,

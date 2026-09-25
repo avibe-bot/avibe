@@ -65,7 +65,7 @@ def test_persisted_key_proof_and_custody_use_one_value(home, tmp_path, shape):
     adapter.provision_transient_credential = capture_proof
     rows = [row for row in service.migration_scan()["items"] if row["backend"] == backend]
     assert len(rows) == 1 and rows[0]["proposed_action"] == "import"
-    result = asyncio.run(service.migration_apply([rows[0]["id"]]))
+    result = asyncio.run(service.migration_apply([rows[0]["id"]], clean_api_keys=True))
     assert result["applied"] == 1
     [source] = store.config.sources
     assert proof_values == [adapter.keys[source.credential_ref][2]] == [KEY]
@@ -89,7 +89,7 @@ def test_padded_persisted_key_reuses_the_proven_canonical_credential(home, tmp_p
         "state": {"status": "standby"}, "models": [], "credential_ref": ref,
     }))
     [row] = service.migration_scan()["items"]
-    asyncio.run(service.migration_apply([row["id"]]))
+    asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert store.config.sources[0].credential_ref == ref
     assert adapter.observed and not adapter.transient_refs
@@ -108,7 +108,7 @@ def test_padded_bearer_key_remains_usable_after_actual_http_proof_and_custody(ho
             runtime = _real_http_adapter(service, tmp_path)
             [row] = service.migration_scan()["items"]
             assert row["proposed_action"] == "import"
-            await service.migration_apply([row["id"]])
+            await service.migration_apply([row["id"]], clean_api_keys=True)
             [source] = store.config.sources
             assert runtime.state_store.read_api_key(source.credential_ref) == HTTP_KEY
             assert await runtime.credential_auth_scheme(source.credential_ref) == "bearer"
@@ -164,7 +164,7 @@ def test_prepared_journal_contains_only_selected_credential_store_guards(home, t
     original = {path: path.read_bytes() for backend, (path, _) in unrelated.items() if backend != selected_backend}
     rows = [row for row in service.migration_scan()["items"] if row["backend"] == selected_backend]
     assert len(rows) == 1 and rows[0]["proposed_action"] == "import"
-    asyncio.run(service.migration_apply([rows[0]["id"]]))
+    asyncio.run(service.migration_apply([rows[0]["id"]], clean_api_keys=True))
     assert saved and adapter.provisioned
     for record in saved:
         edits = [NativeFileEdit.from_payload(payload) for payload in record["files"]]
@@ -307,7 +307,7 @@ def test_service_rejects_tightened_shell_permissions_without_restoring_them(home
     setattr(adapter, boundary, tighten)
     [row] = service.migration_scan()["items"]
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert path.read_bytes() == original
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not store.config.sources

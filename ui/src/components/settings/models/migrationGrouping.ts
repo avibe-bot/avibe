@@ -4,8 +4,9 @@
 // the same question the dialog asks — which backends may be taken over together,
 // and which rows a selection actually submits — without owning a second answer.
 // A group is the unit of consent, not a row: shared persisted assignments link
-// backends into one custody boundary, and a single non-importable row inside a
-// linked group blocks the whole group.
+// backends into one custody boundary. Rows the Hub cannot carry are not shown at
+// all — they stay native and never block their group — unless the backend's
+// native config cannot be parsed at all.
 import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, MigrationItem, MigrationScan } from './types';
 
@@ -24,6 +25,12 @@ export type MigrationSelection = {
 export const BACKEND_ORDER: AgentBackend[] = ['claude', 'codex', 'opencode'];
 
 export const isImportable = (item: MigrationItem) => item.proposed_action === 'import';
+
+/**
+ * A row the review has to show: one the Hub can carry, or a native config the
+ * CLI cannot parse, which blocks its whole backend and must be repaired first.
+ */
+export const isMigrationCandidate = (item: MigrationItem) => isImportable(item) || item.config_blocker === true;
 
 /**
  * The transitive closure of backends that share persisted assignments with any
@@ -80,9 +87,9 @@ export const scopedBackends = (
  * Two scopes, because an entry point asks two different questions. `eligible` says
  * which rows it was opened FROM: their backends, widened to their custody closures,
  * are what appears at all. `takeable` says which of the rows that appear it may
- * actually take OVER — and a row in view that fails it blocks its group rather than
- * being quietly left behind, because the server migrates a backend whole and refuses
- * any batch that omits one of its rows. There is no half of a backend to take.
+ * actually take OVER — and an importable row in view that fails it blocks its group
+ * rather than being quietly left behind, because the server migrates every carried
+ * credential of a backend together and refuses a batch that omits one.
  *
  * Settings may take over everything the scan proposes importing, which is the
  * default and makes the second scope invisible there. Setup may not: it is scoped to
@@ -94,16 +101,27 @@ export function groupMigrationCandidates(
   eligible: (item: MigrationItem) => boolean,
   takeable: (item: MigrationItem) => boolean = () => true,
 ): MigrationGroup[] {
-  const scope = scopedBackends(items, eligible);
-  const candidates = items.filter((item) => scope.has(item.backend));
+  // Only what the Hub can carry is a candidate. Everything else stays native,
+  // shadowed by the Hub launch, so offering it would only show what cannot move,
+  // except a config blocker, which holds its whole backend back.
+  const carried = items.filter(isMigrationCandidate);
+  const scope = scopedBackends(carried, eligible);
+  const candidates = carried.filter((item) => scope.has(item.backend));
   const importableHere = (item: MigrationItem) => isImportable(item) && takeable(item);
   return BACKEND_ORDER.map((backend) => {
     const rows = candidates.filter((item) => item.backend === backend);
     const importRows = rows.filter(importableHere);
-    const required = requiredBackends(items, [backend]);
+    const required = requiredBackends(carried, [backend]);
     const linkedRows = candidates.filter((item) => required.has(item.backend));
     const linkedImportRows = linkedRows.filter(importableHere);
-    const blockedRows = linkedRows.filter((item) => !importableHere(item));
+    // A linked backend with nothing to carry can never join the batch, yet the
+    // server still requires it: the shared credential it reads would be moved
+    // out from under it. Its native rows explain why the group cannot move.
+    const stranded = [...required].filter((linked) => !carried.some((item) => item.backend === linked));
+    const blockedRows = [
+      ...linkedRows.filter((item) => !importableHere(item)),
+      ...items.filter((item) => stranded.includes(item.backend) && !isImportable(item)),
+    ];
     return {
       backend,
       rows,
@@ -111,7 +129,7 @@ export function groupMigrationCandidates(
       required,
       linkedImportRows,
       blockedRows,
-      blocked: blockedRows.length > 0,
+      blocked: blockedRows.length > 0 || stranded.length > 0,
     };
   }).filter((group) => group.rows.length > 0);
 }

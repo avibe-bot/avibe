@@ -31,7 +31,7 @@ export function FailureRetry({
   return (
     <Button
       type="button"
-      size="sm"
+      size="2xs"
       variant="secondary"
       disabled={disabled || sending || admitted}
       aria-busy={sending}
@@ -47,7 +47,7 @@ export function FailureRetry({
         }
       }}
     >
-      {admitted ? <Check className="size-3.5" /> : <RotateCcw className="size-3.5" />}
+      {admitted ? <Check /> : <RotateCcw />}
       {t(admitted ? 'chat.retryRequested' : 'common.retry')}
     </Button>
   );

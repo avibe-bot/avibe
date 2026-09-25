@@ -929,8 +929,8 @@
           "1.detail": "When your Claude subscription is exhausted, it moves to the next source you added and the conversation continues.",
           "2": "One key supplies several backends",
           "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
-          "3": "Decide per backend and per model",
-          "3.detail": "You can specify which source each model on each backend uses."
+          "3": "Mix and match models freely",
+          "3.detail": "Pair any backend with any model from any source."
         },
         "note": {
           "perBackend": "Switch one backend at a time — the others stay direct. You can switch back at any time."
@@ -976,8 +976,8 @@
           "summary_one": "{{count}} Agent needs attention",
           "summary_other": "{{count}} Agents need attention",
           "modelMissing": "No model selected",
-          "routeMissing": "No route configured for this model",
-          "degraded": "Model supply degraded",
+          "routeMissing": "{{model}} is not a known model name. Change this Agent's model, or add a route for {{model}}.",
+          "degraded": "Some sources are unavailable; requests fall back to the next one",
           "waiting": "Waiting for a source to recover",
           "interrupted": "No source is available for this model"
         },
@@ -1021,6 +1021,7 @@
           "remove": "Remove {{model}}",
           "reorder": "Reorder {{model}}",
           "removeConfirm": "Remove",
+          "removeTitle": "Remove {{model}}?",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
@@ -1036,7 +1037,8 @@
           "saveConflict": "This list changed elsewhere while you were editing. Your changes were replayed onto the newer list; check it and save again.",
           "saveIdInvalid": "A model ID in this list is not valid for this backend. Remove the model and add it again.",
           "saveDuplicate": "Two models in this list share the same ID. Remove one, then save again.",
-          "saveLocked": "This list disagrees with a model the server owns. It was re-read from the server; check it and save again.",
+          "saveLocked": "A model in this list is marked as built into this backend, which does not publish it. The list was re-read from the server; remove that model and add it again.",
+          "saveOriginImmutable": "This model is already in this list and cannot be added again as a new one. The list was re-read from the server; edit the entry it already has instead.",
           "saveInvalid": "A model in this list has a value this backend will not accept. Check its fields, then save again.",
           "grabbed_one": "Grabbed {{model}}, position {{position}} of {{count}}.",
           "grabbed_other": "Grabbed {{model}}, position {{position}} of {{count}}.",
@@ -1245,6 +1247,7 @@
           "passthrough": "Passthrough",
           "unconfigured": "Unconfigured"
         },
+        "originNow": "Current",
         "help": {
           "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
@@ -1461,6 +1464,8 @@
           "confirm": "Replace",
           "replaced": "Hop {{position}} replaced."
         },
+        "editModel": "Edit model",
+        "removeModel": "Remove model",
         "sourceMissing": "Source missing",
         "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Replace or remove it before saving.",
         "reorder": {
@@ -1591,8 +1596,7 @@
           "native": {
             "label": "Use natively",
             "desc": {
-              "claude": "Claude Code uses this subscription directly; the credential stays on this machine.",
-              "chatgpt": "Codex signs in with this ChatGPT account directly."
+              "claude": "Claude Code uses this subscription directly; the credential stays on this machine."
             }
           },
           "hub": {
@@ -1605,15 +1609,13 @@
         },
         "badge": {
           "recommended": "Recommended",
-          "secondary": "Second choice",
-          "supportedNotRecommended": "Supported, not recommended"
+          "secondary": "Second choice"
         },
         "tos": {
           "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
         },
         "hint": {
-          "claude": "You can have both — add them one at a time.",
-          "chatgpt": "Nothing takes over when the quota runs out, and usage stays invisible."
+          "claude": "You can have both — add them one at a time."
         },
         "signIn": "Sign in",
         "cancel": "Cancel",
@@ -1646,7 +1648,8 @@
           "hint": "After you sign in and approve, paste the code back here"
         },
         "callback": {
-          "hint": "After signing in, paste the callback URL your browser landed on"
+          "hint": "After signing in, paste the callback URL your browser landed on",
+          "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again."
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"
@@ -1707,24 +1710,26 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. After migration, Model Hub will manage the selected authentication.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.",
+        "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
+        "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
         "sharedFiles": "These backends share authentication saved in files and must migrate together: {{backends}}. Changing one selection updates the others.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Migration failed, please retry",
         "blocked": {
-          "config": "Check this CLI's saved configuration, then scan again.",
-          "environment": "This environment-based authentication cannot be imported. Save the key in a supported configuration file, then scan again.",
-          "credential": "This credential could not be read or is not supported. Check credential access and the saved authentication format, then scan again.",
-          "dynamic_shell": "This file uses expressions or commands that cannot be safely read. Save the required authentication as literal values in a supported configuration file, then scan again. Migration never executes shell code.",
-          "ambiguous_shell": "Conflicting saved assignments were found. Resolve the assignments in the listed files to an unambiguous literal value, then scan again.",
-          "unreadable": "This source file could not be read. Check that it exists and that Avibe has read access, then scan again.",
-          "reference": "A referenced variable has no unambiguous saved literal value. Configure and save the corresponding key in the listed configuration or shell startup file, then scan again.",
-          "helper": "Credentials supplied by a command cannot be imported. Save them in a supported static configuration or add the source manually in Model Hub.",
-          "token": "This login token or authentication format cannot be imported. Add a source in Model Hub or sign in again for that source.",
-          "headers": "Custom credential headers cannot be imported. Use a supported authentication method or add the source manually in Model Hub.",
-          "transport": "Model Hub can't use this authentication method yet, so it was skipped and the file is unchanged. You can add the provider again with a standard API key.",
-          "fallback": "This credential cannot be imported. Use the existing Add flow in Model Hub to add this source manually."
+          "config": "The config file is malformed.",
+          "environment": "Keys in environment variables can't be migrated yet.",
+          "credential": "This authentication type isn't supported.",
+          "dynamic_shell": "The key comes from a command and can't be read.",
+          "ambiguous_shell": "The key differs between files.",
+          "unreadable": "No permission to read this file.",
+          "reference": "The referenced variable has no value.",
+          "helper": "The key comes from a script and can't be read.",
+          "token": "This login token isn't supported.",
+          "headers": "Custom request headers aren't supported.",
+          "transport": "The gateway can't send this key that way.",
+          "fallback": "Can't be migrated. Add it manually."
         },
         "applying": "Migrating…",
         "errors": {
@@ -1900,7 +1905,6 @@
           "position": "Order #{{n}}"
         },
         "hint": {
-          "safe": "These models still have another source available.",
           "interrupt": "Some models will be left with no usable source."
         },
         "gap": {
@@ -1912,7 +1916,6 @@
           "label": "Removed hops",
           "gapLabel": "Models left with no source",
           "hint": {
-            "safe": "These models still have another source available.",
             "interrupt": "Some models now have no usable source."
           }
         },
@@ -2092,6 +2095,7 @@
       "submission_failed": "Couldn't submit what you pasted, please retry",
       "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
       "binding_failed": "That account is already used by another source",
+      "account_already_added": "This account is already added. Sign in with a different account to add another subscription.",
       "expired": "Authorization timed out, please reconnect"
     },
     "probe": {
@@ -4377,6 +4381,44 @@
         "showMore": "Show {{count}} more attachments",
         "collapse": "Collapse attachments"
       }
+    },
+    "failureDetails": {
+      "show": "Show details",
+      "hide": "Hide details",
+      "outcome": {
+        "served": "{{model}} was eventually served.",
+        "exhausted": "Every source for {{model}} failed upstream.",
+        "failed_terminal": "The upstream API rejected the request for {{model}}.",
+        "failed_local": "The request for {{model}} failed; see the reason below.",
+        "no_candidate": "No source could serve {{model}} when the request was made.",
+        "canceled": "The request for {{model}} was canceled."
+      },
+      "httpStatus": "HTTP status",
+      "errorCode": "Error code",
+      "reasonLabel": "Reason",
+      "blockers": "Sources that were unavailable",
+      "upstreamNote": "These codes come from the upstream provider's API. Avibe keeps the status and error code but never stores the provider's raw response text, because it can echo credentials.",
+      "copyRecord": "Copy record",
+      "reason": {
+        "quota_exhausted": "Quota exhausted",
+        "cooldown": "Cooling down",
+        "rate_limited": "Rate limited",
+        "server_error": "Upstream server error",
+        "network": "Network error",
+        "recovery": "Recovering",
+        "manual": "Switched manually",
+        "credential_expired": "Credential expired",
+        "credential_revoked": "Credential revoked",
+        "balance_exhausted": "Balance exhausted",
+        "account_banned": "Account suspended",
+        "permission_denied": "Permission denied",
+        "unclassified_error": "Unclassified upstream error",
+        "no_enabled_source": "No source is enabled",
+        "no_eligible_source": "No source can serve this model",
+        "route_unconfigured": "No route configured",
+        "source_missing": "Source no longer exists",
+        "model_unsupported": "Model not offered by this source"
+      }
     }
   },
   "vaults": {
@@ -5031,7 +5073,7 @@
     },
     "import": {
       "title": "Migrate to Model Hub",
-      "description": "After migration, these assistants connect through Model Hub. The matching keys are removed from their original config files; other settings stay as they are.",
+      "description": "After migration, these assistants connect through Model Hub. The keys in their original config files stay in place and are no longer used by these assistants; other settings stay as they are.",
       "action_one": "Review {{count}} selected",
       "action_other": "Review {{count}} selected",
       "scopeNote": "Only API keys can be migrated here. Handle subscription sign-ins and anything else in Settings.",
@@ -5041,7 +5083,7 @@
       "progressDetail": "Migrating authentication and updating linked assistant connections",
       "done_one": "Migrated {{count}} configuration item",
       "done_other": "Migrated {{count}} configuration items",
-      "doneDetail": "Migration and native authentication cleanup are complete. Check the assistants’ model routes.",
+      "doneDetail": "Migration is complete. Check the assistants’ model routes.",
       "remaining_one": "{{count}} item needs review. Continue any time.",
       "remaining_other": "{{count}} items need review. Continue any time.",
       "remainingAction": "Review remaining",

@@ -16,9 +16,11 @@ import { GripVertical, Lock, LoaderCircle, Pencil, Plus, Search, Trash2 } from '
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { useLatestRef } from '@/lib/useLatestRef';
 import type { PendingWrite } from './asyncLifetime';
 import {
   applyBackendCatalogIntent,
@@ -51,11 +53,38 @@ import type {
   BackendModel,
   BackendModelsPut,
   ModelCandidate,
+  RouteHop,
   RouteHopRef,
   SupplyGap,
 } from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
+
+/**
+ * A model the opener already had on screen, and what it wants done to it.
+ *
+ * The Route dialog names one of its own rows and hands it over rather than
+ * growing an edit or removal path of its own: everything that makes those
+ * writes safe — the removal guard, the refusal replay, the single save — lives
+ * here, and a second implementation of it would be a second protocol.
+ */
+export type CatalogFocus = {
+  modelId: string;
+  action: 'edit' | 'remove';
+  /** The route the opener showed for this row, in order — what a focused
+   *  removal's one confirmation stands for. */
+  route?: readonly RouteHop[];
+};
+
+/** Whether a refused plan removes exactly the route the opener showed. */
+const sameShownRoute = (hops: readonly RouteHopRef[], modelId: string, route: readonly RouteHop[]): boolean =>
+  hops.length === route.length
+  && [...hops].sort((left, right) => left.position - right.position).every((hop, index) => (
+    hop.menu_model === modelId
+    && hop.position === index + 1
+    && hop.source_id === route[index].source_id
+    && hop.model_id === route[index].model_id
+  ));
 
 /** Same shape the Source order drawer announces with: the key alone would tell a
  *  screen-reader user something moved without telling them where to. */
@@ -196,11 +225,19 @@ export const BackendModelCatalogDialog: React.FC<{
    *  Route with it has to say whose hop goes away — so the page's own Sources
    *  answer it, and an id they do not cover simply goes unnamed. */
   sourceNames: Readonly<Record<string, string>>;
-  onClose: () => void;
+  /** `removed` says the focused model left the saved list, so an opener that
+   *  was showing it has nothing to return to. */
+  onClose: (result?: { removed: boolean }) => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   onObserved: (observed: AgentSupply) => void | Promise<void>;
   catalogWrite: PendingWrite;
-}> = ({ open, backend, canReadSources, sourceNames, onClose, onSaved, onObserved, catalogWrite }) => {
+  /** Open straight onto one row's edit or removal, for an opener that already
+   *  named the model. Applied once the catalog it names has been read, and
+   *  shown without the list: the editor or the removal confirmation is the
+   *  whole dialog, and answering it saves. The list appears only when that
+   *  answer needs it — a row it cannot open, or a save it has to explain. */
+  focus?: CatalogFocus | null;
+}> = ({ open, backend, canReadSources, sourceNames, onClose, onSaved, onObserved, catalogWrite, focus = null }) => {
   const { t } = useTranslation();
   const [baseline, setBaseline] = React.useState<BackendCatalogBaseline | null>(null);
   const baselineRef = React.useRef<BackendCatalogBaseline | null>(null);
@@ -213,6 +250,12 @@ export const BackendModelCatalogDialog: React.FC<{
   const [picking, setPicking] = React.useState<{ seed: ReadonlySet<string> } | null>(null);
   const [removing, setRemoving] = React.useState<RemovalQuestion | null>(null);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
+  /** A focused opening that fell back to the full list. */
+  const [expanded, setExpanded] = React.useState(false);
+  /** The focused removal the user confirmed, kept on screen while it saves. */
+  const [answered, setAnswered] = React.useState<RemovalQuestion | null>(null);
+  /** The focused edit the user committed, kept on screen while it saves. */
+  const [savingEdit, setSavingEdit] = React.useState<{ model: BackendModel | null; seedId?: string } | null>(null);
   const [announcement, setAnnouncement] = React.useState<Announcement>(null);
   const readAttempt = React.useRef(0);
   const grips = React.useRef(new Map<string, HTMLButtonElement>());
@@ -317,6 +360,8 @@ export const BackendModelCatalogDialog: React.FC<{
     guardedRef.current = [];
     setPicking(null);
     setRemoving(null);
+    setExpanded(false);
+    setAnswered(null);
     loadBaseline(false);
     return () => { readAttempt.current += 1; };
   }, [loadBaseline, open]);
@@ -505,6 +550,42 @@ export const BackendModelCatalogDialog: React.FC<{
     dropModel(model.id, plan);
   };
 
+  /**
+   * The opener's named row, opened on once the catalog has been read.
+   *
+   * It runs the same two handlers the row's own buttons run, so a handoff and a
+   * click are the same act — and it runs at most once per `focus`, because the
+   * question it opens (an editor, a removal confirmation) is the user's from
+   * that moment on and a re-read must not re-ask it.
+   */
+  const openFocus = useLatestRef((model: BackendModel) => {
+    // With no list behind it, the confirmation is the only place the removal
+    // can be answered, so it asks even when no route goes with the row.
+    if (focus?.action === 'remove') setRemoving({ modelId: model.id, plan: removalPreview(model.id), account: 'draft' });
+    else setEditing({ model });
+  });
+  const focusOpened = React.useRef<CatalogFocus | null>(null);
+  React.useEffect(() => {
+    if (!open || !focus) { focusOpened.current = null; return; }
+    if (!editable || focusOpened.current === focus) return;
+    focusOpened.current = focus;
+    // A locked row offers neither action in the list, so it offers neither here.
+    const model = draftRef.current.find((entry) => entry.id === focus.modelId);
+    if (model && !model.locked) openFocus.current(model);
+    else setExpanded(true);
+  }, [editable, focus, open, openFocus]);
+  const direct = focus !== null && !expanded;
+  // A list this build cannot write, a read that failed and a save that failed
+  // all need the list to explain themselves.
+  const needsList = legacy || readState === 'error' || saveFailedKey !== null;
+  React.useEffect(() => {
+    if (direct && needsList) setExpanded(true);
+  }, [direct, needsList]);
+  /** A save closes the dialog; a focused opener learns whether its row survived. */
+  const closeSaved = () => {
+    onClose(focus !== null && !draftRef.current.some((entry) => entry.id === focus.modelId) ? { removed: true } : undefined);
+  };
+
   const commitEdit = (model: BackendModel) => {
     const existing = draft.findIndex((entry) => entry.id === model.id);
     // A row written by hand promises nothing about its suppliers, so an id
@@ -512,9 +593,19 @@ export const BackendModelCatalogDialog: React.FC<{
     // existing row keeps whatever it already carried: the editor holds its id
     // fixed, so the projection is still about the same addition.
     if (existing < 0) chosenRef.current.delete(model.id);
+    // `origin` is how a row was FIRST created, and the server holds it immutable
+    // for an id it already stores — so it is read back off the saved list here
+    // rather than taken from the editor. Add mode stamps `models_dev` on a
+    // typeahead pick and only learns the final id at that moment, so a row the
+    // user removed and then re-added by hand arrives claiming a creation path
+    // the server will refuse. The saved answer is the one that survives; asking
+    // the saved list and not the draft is what keeps a genuinely new row's own
+    // creation path intact.
+    const saved = (baselineRef.current?.models ?? []).find((entry) => entry.id === model.id);
+    const kept = saved ? { ...model, origin: saved.origin } : model;
     mutate(existing >= 0
-      ? draft.map((entry, index) => (index === existing ? { ...model, locked: entry.locked, routeable: entry.routeable } : entry))
-      : [...draft, model]);
+      ? draft.map((entry, index) => (index === existing ? { ...kept, locked: entry.locked, routeable: entry.routeable } : entry))
+      : [...draft, kept]);
     setEditing(null);
   };
 
@@ -639,7 +730,7 @@ export const BackendModelCatalogDialog: React.FC<{
     const intent = backendCatalogIntent(baselineModels, requested);
     setSaveFailedKey(null);
     const body = putBody(baselineModels, requested);
-    void catalogWrite.track(async () => {
+    return catalogWrite.track(async () => {
       let echoed: AgentSupply;
       try {
         echoed = await modelsApi.putAgentModels(backend, body);
@@ -750,7 +841,16 @@ export const BackendModelCatalogDialog: React.FC<{
           // server plan that names an interruption is by construction not
           // covered by what the user has already accepted, and the question is
           // re-asked with the server's own words.
-          const agreed = samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops))
+          //
+          // A focused removal is the exception for its hops, but only for the
+          // route its opener showed. Its one confirmation already said that
+          // route goes with the row, and the picture cannot see an automatic
+          // route at all — so re-asking over the same hops would be the same
+          // question twice. A route that changed since it was shown is not what
+          // the user confirmed, and is asked with the server's own words.
+          const shownRoute = direct && focus?.route
+            && sameShownRoute(refusal.wouldRemoveHops, focus.modelId, focus.route);
+          const agreed = (shownRoute || samePlanContents(refusal.wouldRemoveHops, shown.flatMap((plan) => plan.hops)))
             && samePlanContents(refusal.wouldInterrupt, shown.flatMap((plan) => plan.gaps ?? []));
           refusalRef.current = {
             hops: refusal.wouldRemoveHops,
@@ -827,7 +927,7 @@ export const BackendModelCatalogDialog: React.FC<{
           if (current && landed && !decided) {
             applyBaseline(observed, current);
             await Promise.resolve(onSaved(observed.agent)).catch(() => {});
-            onClose();
+            closeSaved();
             return;
           }
           applyBaseline(observed, current ? applyBackendCatalogIntent(current, intent) : []);
@@ -845,7 +945,7 @@ export const BackendModelCatalogDialog: React.FC<{
         return;
       }
       await Promise.resolve(onSaved(echoed)).catch(() => {});
-      onClose();
+      closeSaved();
     });
   };
 
@@ -935,7 +1035,7 @@ export const BackendModelCatalogDialog: React.FC<{
   return (
     <>
       <Dialog
-        open={open}
+        open={open && !direct}
         onOpenChange={(next) => { if (!next && !busy) onClose(); }}
       >
         <DialogContent
@@ -1081,7 +1181,7 @@ export const BackendModelCatalogDialog: React.FC<{
                 type="button"
                 variant="outline"
                 className="model-hub-catalog-control rounded-md px-5 text-[12.5px] font-semibold"
-                onClick={onClose}
+                onClick={() => onClose()}
                 disabled={busy}
               >
                 {t('settings.models.gateway.catalog.cancel')}
@@ -1153,6 +1253,54 @@ export const BackendModelCatalogDialog: React.FC<{
           )}
         </DialogContent>
       </Dialog>
+      {open && direct && (editing ?? savingEdit) && (
+        <BackendModelEditorDialog
+          open
+          backend={backend}
+          model={(editing ?? savingEdit)!.model}
+          seedId={(editing ?? savingEdit)!.seedId}
+          takenIds={takenIds}
+          effortSuggestions={effortSuggestions}
+          busy={busy || savingEdit !== null}
+          onCancel={() => onClose()}
+          onCommit={(model) => {
+            // With no list behind it, the editor is the only thing on screen,
+            // so it stays — inert — until the write it started settles.
+            setSavingEdit(editing);
+            commitEdit(model);
+            const pending = save();
+            if (pending) void pending.finally(() => setSavingEdit(null));
+            else setSavingEdit(null);
+          }}
+        />
+      )}
+      {open && direct && (removing ?? answered) && (() => {
+        const asked = (removing ?? answered)!;
+        const row = draft.find((entry) => entry.id === asked.modelId);
+        return (
+          <ConfirmDialog
+            open
+            destructive
+            onOpenChange={(next) => { if (!next && !busy) onClose(); }}
+            title={t('settings.models.gateway.catalog.removeTitle', { model: row ? displayLabel(row) : asked.modelId })}
+            confirmLabel={t('settings.models.gateway.catalog.removeConfirm') as string}
+            cancelLabel={t('settings.models.gateway.catalog.cancel') as string}
+            confirmDisabled={busy}
+            onConfirm={() => {
+              setAnswered(asked);
+              acceptRemoval(asked);
+              askNextGuarded();
+              return save()?.finally(() => setAnswered(null));
+            }}
+          >
+            {(asked.plan.hops.length > 0 || (asked.plan.gaps?.length ?? 0) > 0) && (
+              <div className="model-hub-catalog-consequence" role="alert">
+                <GuardImpact hops={asked.plan.hops} gaps={asked.plan.gaps} sourceNames={sourceNames} />
+              </div>
+            )}
+          </ConfirmDialog>
+        );
+      })()}
     </>
   );
 };

@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
+import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
 import {
@@ -45,7 +46,16 @@ import {
   takeProviderTabForNavigation,
 } from './providerTab';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
+import {
+  NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
+  PASTE_REJECTED_KEY,
+  SUBMISSION_REJECTED_FAILURE,
+  callbackValueCarriesResult,
+  oauthFailureKey,
+  oauthStartFailureKey,
+  serverText,
+  type OAuthJourney,
+} from './serverCopy';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -62,7 +72,6 @@ const DEADLINE_MS = 16 * 60 * 1000;
 
 type ConnectPhase = 'choose' | 'flow';
 
-const CHANNELS: SupplyChannel[] = ['native_cli', 'hub'];
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2/40 px-4 py-3">
@@ -96,6 +105,10 @@ export const OAuthConnectDialog: React.FC<{
   const [view, setView] = React.useState<FlowView>(initialFlowView);
   const [code, setCode] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
+  // A paste the provider refused before touching the flow. The flow is still
+  // waiting, so this stays beside the input instead of settling the dialog:
+  // the user fixes the value and submits again on the same authorization.
+  const [pasteError, setPasteError] = React.useState<TranslationKey | null>(null);
   // Seed the chooser from the opening snapshot. Radix may autofocus a control
   // before the passive open effect runs; deriving this here prevents an occupied
   // native row from ever being the initially focused/selected option.
@@ -277,22 +290,6 @@ export const OAuthConnectDialog: React.FC<{
    * one has failed.
    */
   const resolvedAfterAttempt = React.useCallback(() => rowsBehindAreStale(), [rowsBehindAreStale]);
-
-  const copy = (text: string | null | undefined) => (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!text) return;
-    // navigator.clipboard is undefined in non-secure contexts / older browsers;
-    // touching .writeText there throws synchronously, not as a rejected promise.
-    if (!navigator.clipboard?.writeText) {
-      showToast(t('common.copyFailed') as string, 'error');
-      return;
-    }
-    navigator.clipboard
-      .writeText(text)
-      .then(() => showToast(t('common.copied') as string, 'success'))
-      .catch(() => showToast(t('common.copyFailed') as string, 'error'));
-  };
 
   // Drive the flow only after the user confirms one channel.
   React.useEffect(() => {
@@ -486,6 +483,7 @@ export const OAuthConnectDialog: React.FC<{
     // isn't shown while the new startOAuth request is in flight.
     transition({ kind: 'reset' });
     setCode('');
+    setPasteError(null);
     setSubmitting(false);
     setAdoption(null);
     setRepair(null);
@@ -630,6 +628,11 @@ export const OAuthConnectDialog: React.FC<{
     const authority = flowAuthorityRef.current;
     const cur = authority?.current().flow;
     if (!cur || !code.trim()) return;
+    if (cur.presentation?.expects === 'paste_callback_url' && !callbackValueCarriesResult(code)) {
+      setPasteError(PASTE_REJECTED_KEY);
+      return;
+    }
+    setPasteError(null);
     const isCurrent = () =>
       flowAuthorityRef.current === authority && authority.current().flow?.flow_id === cur.flow_id;
     setSubmitting(true);
@@ -668,6 +671,10 @@ export const OAuthConnectDialog: React.FC<{
       // the flow id, so a submit rejecting afterwards is still current and still
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
+      if (failure?.code === SUBMISSION_REJECTED_FAILURE) {
+        setPasteError(PASTE_REJECTED_KEY);
+        return;
+      }
       const failureClass = classifyOAuthFailure(failure);
       const step = authority.transition({
         kind: 'error',
@@ -763,7 +770,7 @@ export const OAuthConnectDialog: React.FC<{
   const recommended = recommendedSubscriptionChannel(vendor);
   const optionOrder = subscriptionOptionOrder(vendor);
   const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
-  const selectableChannels = CHANNELS.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
+  const selectableChannels = optionOrder.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
 
   const moveSelection = (direction: number) => {
     const currentIndex = selectableChannels.indexOf(channel);
@@ -816,9 +823,7 @@ export const OAuthConnectDialog: React.FC<{
                   ? 'settings.models.addSub.opt.added'
                   : candidate === recommended
                     ? 'settings.models.addSub.badge.recommended'
-                    : vendorCopy === 'claude'
-                      ? 'settings.models.addSub.badge.secondary'
-                      : 'settings.models.addSub.badge.supportedNotRecommended';
+                    : 'settings.models.addSub.badge.secondary';
                 const optionKey = isNative ? 'native' : 'hub';
                 return (
                   <button
@@ -865,12 +870,14 @@ export const OAuthConnectDialog: React.FC<{
                         <span className="model-hub-add-sub-option-label font-semibold text-foreground">
                           {t(`settings.models.addSub.opt.${optionKey}.label`)}
                         </span>
-                        <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
-                          {t(badgeKey)}
-                        </span>
+                        {(optionOrder.length > 1 || disabled) && (
+                          <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
+                            {t(badgeKey)}
+                          </span>
+                        )}
                       </span>
                       <span className="model-hub-add-sub-description block text-muted">
-                        {t(`settings.models.addSub.opt.${optionKey}.desc.${vendorCopy}`)}
+                        {t(isNative ? 'settings.models.addSub.opt.native.desc.claude' : `settings.models.addSub.opt.hub.desc.${vendorCopy}`)}
                       </span>
                       {vendorCopy === 'claude' && candidate === 'hub' && (
                         <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10">
@@ -883,10 +890,12 @@ export const OAuthConnectDialog: React.FC<{
                 );
               })}
             </div>
-            <p className="model-hub-add-sub-hint flex items-start gap-2 text-muted">
-              <Info className="mt-0.5 size-3 shrink-0" />
-              <span>{t(`settings.models.addSub.hint.${vendorCopy}`)}</span>
-            </p>
+            {vendorCopy === 'claude' && (
+              <p className="model-hub-add-sub-hint flex items-start gap-2 text-muted">
+                <Info className="mt-0.5 size-3 shrink-0" />
+                <span>{t('settings.models.addSub.hint.claude')}</span>
+              </p>
+            )}
           </div>
 
           <div className="model-hub-add-sub-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
@@ -1003,11 +1012,7 @@ export const OAuthConnectDialog: React.FC<{
                   }
                 >
                   {presentation?.auth_url ? (
-                    <OAuthLinkRow
-                      url={presentation.auth_url}
-                      onCopy={copy(presentation.auth_url)}
-                      copyLabel={t('common.copy') as string}
-                    />
+                    <OAuthLinkRow url={presentation.auth_url} />
                   ) : (
                     <p className="text-[12px] text-muted">{t('settings.models.oauth.starting')}</p>
                   )}
@@ -1015,15 +1020,15 @@ export const OAuthConnectDialog: React.FC<{
 
                 <Step n={2} label={step2Label}>
                   {isDevice ? (
-                    <OAuthDeviceCodeRow
-                      code={presentation?.device_code ?? ''}
-                      onCopy={copy(presentation?.device_code)}
-                      copyLabel={t('common.copy') as string}
-                    />
+                    <OAuthDeviceCodeRow code={presentation?.device_code ?? ''} />
                   ) : (
                     <OAuthSubmitRow
                       value={code}
-                      onChange={setCode}
+                      onChange={(next) => {
+                        setCode(next);
+                        setPasteError(null);
+                      }}
+                      error={pasteError ? (t(pasteError) as string) : undefined}
                       onSubmit={() => void submit()}
                       submitting={submitting || state === 'verifying'}
                       placeholder={
