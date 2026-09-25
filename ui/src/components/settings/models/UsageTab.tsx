@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
+import { formatPercent } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import type { UsageCounters, UsageReport, UsageWindowKey } from './types';
 import {
@@ -980,7 +981,7 @@ export const UsageTab: React.FC<{
             />
             <StatCard
               label={t('settings.models.usage.stats.cached')}
-              value={historyOnlyUnknown || usageCachedInputShare(totals) === null ? t('settings.models.usage.blank') : `${((usageCachedInputShare(totals) ?? 0) * 100).toFixed(1)}%`}
+              value={historyOnlyUnknown || usageCachedInputShare(totals) === null ? t('settings.models.usage.blank') : formatPercent(usageCachedInputShare(totals) ?? 0, i18n.language, 1)}
               note={historyOnlyUnknown || usageCachedInputShare(totals) === null
                 ? t('settings.models.usage.stats.cacheUnknown')
                 : t('settings.models.usage.stats.cacheSplit', { cached: count(totals.cached_input_tokens), input: count(totals.input_tokens) })}
@@ -1057,8 +1058,12 @@ export const UsageTab: React.FC<{
                     <th scope="col">{t('settings.models.usage.table.nonCache')}</th>
                     <th scope="col">{t('settings.models.usage.table.cache')}</th>
                     <th scope="col">{t('settings.models.usage.table.output')}</th>
-                    <th scope="col">
-                      <button type="button" onClick={() => setSortAscending((value) => !value)}>
+                    <th scope="col" aria-sort={sortAscending ? 'ascending' : 'descending'}>
+                      <button
+                        type="button"
+                        aria-label={t(`settings.models.usage.table.${sortAscending ? 'sortAscending' : 'sortDescending'}`, { metric: metricLabel(metric, t) })}
+                        onClick={() => setSortAscending((value) => !value)}
+                      >
                         {metricLabel(metric, t)} <ArrowDown aria-hidden className={cn('size-3', sortAscending && 'rotate-180')} />
                       </button>
                     </th>
@@ -1082,7 +1087,7 @@ export const UsageTab: React.FC<{
                         <td>{tokenText(row.counters, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                         <td>{tokenText(row.counters, 'output', count, t('settings.models.usage.blank') as string)}</td>
                         <td className="model-hub-usage-table-total">{value === null ? t('settings.models.usage.blank') : count(value)}</td>
-                        <td>{share === null ? t('settings.models.usage.blank') : `${(share * 100).toFixed(1)}%`}</td>
+                        <td>{share === null ? t('settings.models.usage.blank') : formatPercent(share, i18n.language, 1)}</td>
                       </tr>
                     );
                   })}
@@ -1102,7 +1107,7 @@ export const UsageTab: React.FC<{
                         const totalValue = usageMetricValue(tableTotal, metric);
                         return totalValue === null || totalValue === 0
                           ? t('settings.models.usage.blank')
-                          : '100%';
+                          : formatPercent(1, i18n.language);
                       })()}</td>
                     </tr>
                   </tfoot>

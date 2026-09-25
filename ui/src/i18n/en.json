@@ -1559,6 +1559,8 @@
           "output": "Output",
           "tokens": "All tokens",
           "share": "Share",
+          "sortAscending": "{{metric}}: Sorted ascending",
+          "sortDescending": "{{metric}}: Sorted descending",
           "total": "Total",
           "empty": "No matching usage",
           "accounting": "All tokens = input + output. Cache reads are included in input and shown separately."

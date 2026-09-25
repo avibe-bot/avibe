@@ -180,6 +180,56 @@ describe('UsageTab', () => {
     expect(container.textContent).not.toContain('Unknown model');
   });
 
+  it('formats every percentage in the active locale even when translations fall back', async () => {
+    const translated = createInstance();
+    await translated.use(initReactI18next).init({
+      lng: 'de-DE',
+      fallbackLng: 'en',
+      resources: { en: { translation: en } },
+      interpolation: { escapeValue: false },
+    });
+    const { container } = render(
+      <I18nextProvider i18n={translated}>
+        <UsageTab usage={readyRegion(report({
+          buckets: [bucket('00', [
+            row({ input_tokens: 2, cached_input_tokens: 1, output_tokens: 0 }),
+            row({ model_id: 'model-b', input_tokens: 14, cached_input_tokens: 1, output_tokens: 0 }),
+          ])],
+        }))} windowKey="24h" onWindowChange={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    expect(container.querySelector('.model-hub-usage-stat-grid')?.textContent).toContain('12,5\u00a0%');
+    expect(container.querySelector('tbody')?.textContent).toContain('12,5\u00a0%');
+    expect(container.querySelector('tbody')?.textContent).toContain('87,5\u00a0%');
+    expect(container.querySelector('tfoot')?.textContent).toContain('100\u00a0%');
+    expect(container.textContent).not.toContain('12.5%');
+  });
+
+  it('exposes the current sort direction together with the actual detail row order', async () => {
+    const { container } = draw(report({
+      buckets: [bucket('00', [
+        row({ input_tokens: 2, cached_input_tokens: 1, output_tokens: 0 }),
+        row({ model_id: 'model-b', input_tokens: 14, cached_input_tokens: 1, output_tokens: 0 }),
+      ])],
+    }));
+    const header = screen.getByRole('columnheader', { name: /All tokens/ });
+    const amounts = () => within(container.querySelector('tbody')!).getAllByRole('row').map(
+      (detail) => within(detail).getAllByRole('cell')[5]?.textContent,
+    );
+
+    expect(header.getAttribute('aria-sort')).toBe('descending');
+    expect(within(header).getByRole('button', { name: /Sorted descending/ })).toBeTruthy();
+    expect(amounts()).toEqual(['14', '2']);
+    await userEvent.click(within(header).getByRole('button'));
+    expect(header.getAttribute('aria-sort')).toBe('ascending');
+    expect(within(header).getByRole('button', { name: /Sorted ascending/ })).toBeTruthy();
+    expect(amounts()).toEqual(['2', '14']);
+    await userEvent.click(within(header).getByRole('button'));
+    expect(header.getAttribute('aria-sort')).toBe('descending');
+    expect(amounts()).toEqual(['14', '2']);
+  });
+
   it('MH-USAGE-019: plots every bucket in the window, including the ones that carried nothing', () => {
     const { container } = draw(report({
       buckets: [bucket('00', []), bucket('01', []), bucket('02', [row()])],

@@ -45,9 +45,13 @@ export function formatTokensCompact(value: number | null): string {
     .format(Math.floor(value));
 }
 
-/** A ratio in [0, 1] as a whole-percent string — 「65%」. */
-export function formatPercent(ratio: number, locale: string): string {
-  return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 0 }).format(ratio);
+/** A ratio in [0, 1] in the reader's notation, with the caller's display precision. */
+export function formatPercent(ratio: number, locale: string, fractionDigits = 0): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'percent',
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(ratio);
 }
 
 /**

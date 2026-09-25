@@ -1559,6 +1559,8 @@
           "output": "输出",
           "tokens": "全部 Tokens",
           "share": "占比",
+          "sortAscending": "{{metric}}：升序排列",
+          "sortDescending": "{{metric}}：降序排列",
           "total": "合计",
           "empty": "没有符合条件的用量",
           "accounting": "全部 Tokens = 输入 + 输出。缓存读取已包含在输入中，同时单独列出。"
