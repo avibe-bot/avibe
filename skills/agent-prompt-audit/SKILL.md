@@ -68,7 +68,12 @@ the transcript rather than asking the model whether it needs the rule.
 
 ## Where the surface lives
 
-Verify against the current machine; these are starting points.
+Verify against the current machine; these are starting points. Each backend
+also reads its own native configuration — config directories moved by
+environment variables (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, OpenCode's config
+path), and native subagent definitions such as `.claude/agents/`,
+`.codex/agents/`, or OpenCode agents — so resolve what the target backend
+actually loads rather than assuming default paths.
 
 | Layer | Where | How it changes |
 | --- | --- | --- |
@@ -87,8 +92,10 @@ Session's working directory, not yours, so read them from there.
 
 ## Finding evidence
 
-Resolve the actual target (backend, model, effort) from the run or session
-record, not the Agent's current definition, which may have changed since.
+Resolve the actual target (backend, model, effort) from the run record, not
+the Agent's current definition. A Session's model and effort can change during
+its life and ordinary IM turns have no run record, so treat the Session row as
+the current setting and mark the target unconfirmed if it may have changed.
 Attribute a symptom only to prompt text that existed when it ran. Each run's
 `prompt` and `message` in `vibe runs show` snapshot what a Task or Watch
 actually sent; file-owned text needs Git or release history matching the run;
@@ -105,7 +112,9 @@ own corrections in `messages` are usually the sharpest evidence. For a
 recurring Task or Watch, `vibe runs list --definition-id <id>` gathers its
 fires across per-run Sessions. A stuck delegated turn stays `running`, so include
 long-running rows when the complaint is a stall; ordinary IM turns have no
-`agent_runs` row, so read that Session's messages instead. Two starting points, each run
+`agent_runs` row, so read that Session's messages instead. A delegated run can succeed while
+its report never arrives; check `callback_status` and `callback_error` when the
+complaint is a missing result. Two starting points, each run
 with `vibe data query --sql-file <file>` (or `--sql-file -` for stdin):
 
 ```sql
