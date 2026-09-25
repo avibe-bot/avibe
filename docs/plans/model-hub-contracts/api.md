@@ -1403,8 +1403,7 @@ It stops re-reading once `pending` is empty or absent.
 
 ### Subscription value
 
-Each hub-held subscription Source that has metered usage carries an optional
-`value` block, and the root carries `value` totals. They price the Source's own
+Each hub-held subscription Source carries an optional `value` block, and the root carries `value` totals. They price the Source's own
 usage-ledger rows at list API prices (see API-price valuation under Usage
 metering) so the page can compare that with what the subscription costs. A
 valuation only, never an amount charged; consumers must treat an absent `value`

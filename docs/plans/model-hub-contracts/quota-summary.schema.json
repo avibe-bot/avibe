@@ -250,11 +250,6 @@
       }
     },
     "Period": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/PricedUsage"
-        }
-      ],
       "type": "object",
       "required": [
         "basis",
@@ -291,11 +286,21 @@
             }
           ]
         },
-        "api_cost_usd": {},
-        "excluded_tokens": {},
-        "api_cost_lower_bound": {}
+        "api_cost_usd": {
+          "$ref": "#/definitions/Money",
+          "description": "Sum over priced usage only."
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Tokens",
+          "description": "input + output tokens of usage whose model has no known price, left out of api_cost_usd."
+        },
+        "api_cost_lower_bound": {
+          "type": "boolean",
+          "description": "True when some priced usage was metered before cache writes were captured on a model that charges for them; api_cost_usd then understates."
+        }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "The span `multiple` compares with the monthly fee, and its valuation (same members as PricedUsage)."
     },
     "SourceValue": {
       "description": "This Source's metered usage priced at list API prices, and how it compares with the plan's monthly fee.",

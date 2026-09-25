@@ -2,20 +2,22 @@
 // (`quota-summary.schema.json`).
 //
 // Like 用量 it is a report and only a report: nothing here feeds resolution,
-// admission, or cooldown. It states quota only. What the same use would cost at
-// API prices belongs to the usage lane; the contract reserves an optional
-// `value` block for it, so this tab draws nothing where that figure would go.
+// admission, or cooldown. Beside the quota it states what the same use would
+// cost at list API prices (the optional `value` block), against the plan's
+// monthly fee — a valuation to judge whether the plan pays for itself, never a
+// charge. A server that predates the block draws the quota alone.
 //
 // Drawn after the 订阅额度 design preview. Its geometry follows the usage tab's
 // vocabulary (12px card radius, 18px gutter) so the two tabs read as one surface.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Clock3, Gauge, RefreshCw, Sparkles, TimerReset } from 'lucide-react';
+import { AlertTriangle, CircleDollarSign, Clock3, Gauge, LoaderCircle, RefreshCw, Sparkles, TimerReset, TrendingUp } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { formatCount, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import type { QuotaSummary, QuotaWindow, SourceQuota } from './types';
+import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue } from './types';
 import { VendorGlyph } from './vendorGlyph';
 import {
   DAY_MS,
@@ -25,6 +27,7 @@ import {
   quotaDuration,
   quotaIsLive,
   quotaIsRetained,
+  quotaPayback,
   sourceStatus,
   tightestWindow,
   upcomingResets,
@@ -87,7 +90,17 @@ const useQuotaText = (now: number) => {
       default: return t('settings.models.quota.pace.ok') as string;
     }
   }, [clock, duration, t]);
-  return { duration, clock, ago, windowLabel, windowHint, paceText };
+  /** A priced figure: 「≥」 when part of it predates cache-write capture. */
+  const dollars = React.useCallback((amount: number) => formatUsd(amount, i18n.language), [i18n.language]);
+  const usd = React.useCallback((value: PricedUsage) => (
+    `${value.api_cost_lower_bound ? '≥ ' : ''}${dollars(value.api_cost_usd)}`
+  ), [dollars]);
+  const tokens = React.useCallback((value: number) => formatCount(value, i18n.language), [i18n.language]);
+  /** A multiple to one decimal, rounded down so 0.99× never reads as 「1.0 倍」. */
+  const multiple = React.useCallback((value: number) => new Intl.NumberFormat(i18n.language, {
+    minimumFractionDigits: 1, maximumFractionDigits: 1,
+  }).format(Math.floor(value * 10) / 10), [i18n.language]);
+  return { duration, clock, ago, windowLabel, windowHint, paceText, dollars, usd, tokens, multiple };
 };
 
 type QuotaText = ReturnType<typeof useQuotaText>;
@@ -156,12 +169,62 @@ const unreadKey = (source: SourceQuota) => {
   return 'settings.models.quota.unread.error' as const;
 };
 
+/** Whether every priced token of a span belongs to a model with no price. */
+const unpriced = (value: PricedUsage) => value.api_cost_usd === 0 && value.excluded_tokens > 0;
+
+/** The account's API-price value: its week, its period against the fee, and the renewal. */
+const ValueStrip: React.FC<{ value: SourceQuotaValue; now: number; text: QuotaText }> = ({ value, now, text }) => {
+  const { t } = useTranslation();
+  const payback = value.fee_usd !== null ? quotaPayback(value.period.api_cost_usd, value.fee_usd) : null;
+  const renewsOn = value.period.renews_on !== null ? Date.parse(`${value.period.renews_on}T00:00:00`) : NaN;
+  const excluded = Math.max(value.week.excluded_tokens, value.period.excluded_tokens);
+  return (
+    <>
+      <div className="model-hub-quota-value" data-quota-value>
+        <div>
+          <span>{t('settings.models.quota.value.week')}</span>
+          <b>{unpriced(value.week) ? t('settings.models.quota.value.noPrice') : text.usd(value.week)}</b>
+        </div>
+        <div>
+          <span>{t(`settings.models.quota.value.period.${value.period.basis}`)}</span>
+          <b>
+            {unpriced(value.period) ? t('settings.models.quota.value.noPrice') : text.usd(value.period)}
+            {payback !== null && (
+            <em className={cn(payback.kind !== 'short' && 'is-good')} data-quota-payback={payback.kind}>
+              {payback.kind === 'paid'
+                  ? t('settings.models.quota.value.paid', { multiple: text.multiple(payback.multiple) })
+                  : payback.kind === 'even'
+                    ? t('settings.models.quota.value.even')
+                    : t('settings.models.quota.value.short', { amount: text.dollars(payback.shortfallUsd) })}
+            </em>
+            )}
+          </b>
+        </div>
+        {!Number.isNaN(renewsOn) && (
+          <div>
+            <span>{t('settings.models.quota.value.renews')}</span>
+            <b>
+              {t('settings.models.quota.value.renewsIn', { count: Math.max(0, Math.ceil((renewsOn - now) / DAY_MS)) })}
+              <em>{value.period.renews_on}</em>
+            </b>
+          </div>
+        )}
+      </div>
+      {excluded > 0 && (
+        <p className="model-hub-quota-value-note">{t('settings.models.quota.value.excluded', { tokens: text.tokens(excluded) })}</p>
+      )}
+    </>
+  );
+};
+
 const AccountCard: React.FC<{
   source: SourceQuota;
   now: number;
   text: QuotaText;
+  /** The read is still running: a gap is loading, not a failure. */
+  pending?: boolean;
   onRequestReauth?: (sourceId: string) => void;
-}> = ({ source, now, text, onRequestReauth }) => {
+}> = ({ source, now, text, pending = false, onRequestReauth }) => {
   const { t } = useTranslation();
   const retained = quotaIsRetained(source);
   const status = sourceStatus(source, now);
@@ -205,7 +268,14 @@ const AccountCard: React.FC<{
           )}
         </div>
       )}
-      {source.windows.length === 0 || (!retained && !quotaIsLive(source))
+      {source.windows.length === 0 && pending && source.state === 'error'
+        ? (
+            <div className="model-hub-quota-unread flex items-center gap-2" role="status" data-quota-pending>
+              <LoaderCircle className="size-[13px] shrink-0 animate-spin" aria-hidden />
+              <span className="min-w-0 flex-1">{t('settings.models.quota.pending')}</span>
+            </div>
+          )
+        : source.windows.length === 0 || (!retained && !quotaIsLive(source))
         ? (
             <div className="model-hub-quota-unread flex items-center gap-2">
               <span className="min-w-0 flex-1">
@@ -231,6 +301,7 @@ const AccountCard: React.FC<{
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}
             </div>
           )}
+      {source.value && <ValueStrip value={source.value} now={now} text={text} />}
     </article>
   );
 };
@@ -280,6 +351,12 @@ export const QuotaTab: React.FC<{
   const tightest = tightestWindow(sources, now);
   const exhausted = exhaustedWindows(sources, now);
   const upcoming = upcomingResets(sources, now);
+  const pending = new Set(summary?.pending ?? []);
+  const value = summary?.value;
+  const periodPayback = value?.period ? quotaPayback(value.period.api_cost_usd, value.period.fee_usd) : null;
+  const unfeed = sources.filter((source) => source.value && source.value.fee_usd === null).length;
+  // 本期 is each account's billing cycle only where its renewal day is known.
+  const rollingPeriod = sources.some((source) => source.value?.fee_usd != null && source.value.period.basis === 'rolling_30d');
 
   return (
     <section className="model-hub-usage" aria-label={t('settings.models.quota.title') as string}>
@@ -310,7 +387,7 @@ export const QuotaTab: React.FC<{
         : sources.length === 0
           ? <p className="model-hub-usage-empty rounded-xl border border-border bg-background text-center text-muted">{t('settings.models.quota.empty')}</p>
           : <>
-              <div className="model-hub-quota-stats grid gap-4">
+              <div className={cn('model-hub-quota-stats grid gap-4', value && 'model-hub-quota-stats--valued')}>
                 <StatCard
                   primary
                   label={t('settings.models.quota.stat.tightest')}
@@ -344,6 +421,39 @@ export const QuotaTab: React.FC<{
                     // when every account has a current reading to back it.
                     : t(sources.every(quotaIsLive) ? 'settings.models.quota.stat.exhaustedNone' : 'settings.models.quota.stat.exhaustedNoneObserved')}
                 />
+                {value && (
+                  <StatCard
+                    label={t('settings.models.quota.stat.weekValue')}
+                    icon={<CircleDollarSign className="size-[15px]" aria-hidden />}
+                    value={unpriced(value.week)
+                      ? t('settings.models.quota.value.noPrice')
+                      : <>{text.usd(value.week)}<small className="model-hub-quota-stat-unit">USD</small></>}
+                    note={[
+                      t('settings.models.quota.stat.weekValueNote'),
+                      value.week.excluded_tokens > 0 && !unpriced(value.week)
+                        ? t('settings.models.quota.value.excluded', { tokens: text.tokens(value.week.excluded_tokens) })
+                        : null,
+                    ].filter(Boolean).join(' · ')}
+                  />
+                )}
+                {value && (
+                  <StatCard
+                    label={t('settings.models.quota.stat.payback')}
+                    icon={<TrendingUp className="size-[15px]" aria-hidden />}
+                    value={value.period && periodPayback
+                      ? <>{t('settings.models.quota.stat.paybackMultiple', { multiple: text.multiple(periodPayback.multiple) })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
+                      : '—'}
+                    note={value.period && periodPayback
+                      ? [
+                          periodPayback.kind === 'short'
+                            ? t('settings.models.quota.stat.paybackShort', { amount: text.dollars(periodPayback.shortfallUsd) })
+                            : t('settings.models.quota.stat.paybackPaid', { amount: text.dollars(periodPayback.surplusUsd) }),
+                          rollingPeriod ? t('settings.models.quota.stat.paybackRolling') : null,
+                          unfeed > 0 ? t('settings.models.quota.stat.paybackPartial', { count: unfeed }) : null,
+                        ].filter(Boolean).join(' · ')
+                      : t('settings.models.quota.stat.paybackUnknown')}
+                  />
+                )}
               </div>
               {upcoming.length > 0 && (
                 <div className="model-hub-quota-timeline flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface" aria-label={t('settings.models.quota.upcoming') as string}>
@@ -357,11 +467,26 @@ export const QuotaTab: React.FC<{
                 </div>
               )}
               <div className="model-hub-quota-grid grid gap-4">
-                {sources.map((source) => <AccountCard key={source.source_id} source={source} now={now} text={text} onRequestReauth={onRequestReauth} />)}
+                {sources.map((source) => (
+                  <AccountCard
+                    key={source.source_id}
+                    source={source}
+                    now={now}
+                    text={text}
+                    pending={pending.has(source.source_id)}
+                    onRequestReauth={onRequestReauth}
+                  />
+                ))}
               </div>
               <p className="model-hub-quota-foot flex items-start gap-2">
                 <Clock3 className="mt-px size-[13px] shrink-0" aria-hidden />
-                <span>{t('settings.models.quota.footnote')}</span>
+                <span>
+                  {t('settings.models.quota.footnote')}
+                  {value && <>{' '}{t('settings.models.quota.footnoteValue')}</>}
+                  {value && <>{' '}{value.price_table_date
+                    ? t('settings.models.quota.priceTableDate', { date: value.price_table_date })
+                    : t('settings.models.quota.priceTableUnknown')}</>}
+                </span>
               </p>
             </>}
     </section>

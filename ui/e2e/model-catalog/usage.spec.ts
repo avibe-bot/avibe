@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
-const openUsage = async (page: Page, theme: 'light' | 'dark' = 'dark') => {
-  await page.goto(`/e2e/model-catalog/fixture.html?view=usage&lang=en&theme=${theme}`);
+const openUsage = async (page: Page, theme: 'light' | 'dark' = 'dark', query = '') => {
+  await page.goto(`/e2e/model-catalog/fixture.html?view=usage&lang=en&theme=${theme}${query}`);
   await expect(page.getByRole('heading', { name: 'Usage', level: 2 })).toBeVisible();
 };
 
@@ -136,5 +136,19 @@ test.describe('hermetic UsageTab', () => {
     expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
     await page.getByRole('heading', { name: 'Exact usage details', level: 3 }).scrollIntoViewIfNeeded();
     expect(await scrollOwner.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+  });
+
+  test('MH-USAGE-029: the API-price value holds the narrow layout and plots as dollars', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 844 });
+    await openUsage(page, 'dark', '&priced=1');
+    const grid = page.locator('.model-hub-usage-stat-grid--priced');
+    await expect(grid.locator('.model-hub-usage-stat-card')).toHaveCount(4);
+    expect(await grid.evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').length)).toBe(1);
+    await expect(grid).toContainText('$4.50');
+    await expect(grid).toContainText('Price table from 2026-09-23');
+    await page.getByRole('combobox', { name: 'Metric' }).selectOption('cost');
+    await expect(page.locator('.model-hub-usage-cost-note')).toHaveText('At published API prices, not a charge');
+    await expect(page.locator('.model-hub-usage-svg')).toContainText('$');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 });

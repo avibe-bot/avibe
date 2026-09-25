@@ -348,6 +348,68 @@ describe('UsageTab', () => {
     expect(screen.getAllByRole('button', { name: /Usage bucket/ })).toHaveLength(3);
   });
 
+  // API price is a report beside the token counts: offered only when the server
+  // priced the report, never read as a charge, and never $0 for a model with no
+  // price.
+  const pricedReport = (): UsageReport => {
+    const cost = (usd: number, excluded = 0) => ({ api_cost_usd: usd, excluded_tokens: excluded, api_cost_lower_bound: false });
+    const pricedRow = row(cost(0.5));
+    const unpricedRow = row({ source_id: 'source-b', model_id: 'relay-model', ...cost(0, 140) });
+    return report({
+      totals: counters({ requests: 4, token_reports: 4, input_tokens: 200, cached_input_tokens: 50, output_tokens: 80, ...cost(0.5, 140) }),
+      sources: [
+        { source_id: 'source-a', label: 'Claude', last_metered_at: null, ...counters(cost(0.5)),
+          models: [{ model_id: 'model-a', label: 'Opus', ...counters(cost(0.5)) }] },
+        { source_id: 'source-b', label: 'Relay', last_metered_at: null, ...counters(cost(0, 140)),
+          models: [{ model_id: 'relay-model', label: 'Relay model', ...counters(cost(0, 140)) }] },
+      ],
+      buckets: [bucket('00', [pricedRow, unpricedRow])],
+      pricing: { currency: 'USD', price_table_date: '2026-09-23' },
+    });
+  };
+
+  it('MH-USAGE-030: offers the API-price metric only for a priced report', () => {
+    draw(report());
+    const metric = () => screen.getByRole('combobox', { name: 'Metric' }) as HTMLSelectElement;
+    expect([...metric().options].map((option) => option.value)).not.toContain('cost');
+    cleanup();
+    draw(pricedReport());
+    expect([...metric().options].map((option) => option.value)).toContain('cost');
+  });
+
+  it('MH-USAGE-029: states the API-price value, what it leaves out, and its price table', async () => {
+    const { container } = draw(pricedReport());
+    const stats = container.querySelector('.model-hub-usage-stat-grid--priced');
+    expect(stats).not.toBeNull();
+    expect(stats!.textContent).toContain('At API price');
+    expect(stats!.textContent).toContain('$0.50');
+    expect(stats!.textContent).toContain('At published API prices, not a charge');
+    expect(stats!.textContent).toContain('140 tokens have no price and are left out');
+    expect(stats!.textContent).toContain('Price table from 2026-09-23');
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    expect(container.querySelector('.model-hub-usage-cost-note')?.textContent).toBe('At published API prices, not a charge');
+    expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('No price yet');
+    expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('$0.50');
+  });
+
+  it('MH-USAGE-031: reads the API-price value in Chinese as a conversion, not a charge', async () => {
+    await i18n.addResourceBundle('zh', 'translation', zh, true, true);
+    await i18n.changeLanguage('zh');
+    try {
+      const { container } = draw(pricedReport());
+      const stats = container.querySelector('.model-hub-usage-stat-grid--priced')!;
+      expect(stats.textContent).toContain('折合 API 价格');
+      expect(stats.textContent).toContain('不是实际扣费');
+      expect(stats.textContent).toContain('价格表日期 2026-09-23');
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: '指标' }), 'cost');
+      expect(container.querySelector('.model-hub-usage-cost-note')?.textContent).toContain('不是实际扣费');
+      expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('暂无价格');
+    } finally {
+      await i18n.changeLanguage('en');
+    }
+  });
+
   it('renders exact accounting and preserves source/model pair rows', () => {
     const second = row({ source_id: 'source-b', model_id: 'model-a' });
     const value = report({

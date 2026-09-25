@@ -1405,10 +1405,40 @@
           "exhaustedNone": "所有账号都能正常使用",
           "exhaustedNoneObserved": "已读到的额度都没用完",
           "exhaustedNote": "{{name}} · {{time}} 恢复",
-          "resetsIn": "{{duration}}后重置"
+          "resetsIn": "{{duration}}后重置",
+          "weekValue": "近 7 天按 API 价格",
+          "weekValueNote": "所有订阅账号的用量，按官方 API 标价计算",
+          "payback": "本期回本",
+          "paybackMultiple": "{{multiple}} 倍",
+          "paybackUnit": "月费",
+          "paybackPaid": "已回本，多薅了 {{amount}}",
+          "paybackShort": "还差 {{amount}} 回本",
+          "paybackRolling": "未设续费日的账号按近 30 天计",
+          "paybackPartial_one": "{{count}} 个账号套餐未知，未计入",
+          "paybackPartial_other": "{{count}} 个账号套餐未知，未计入",
+          "paybackUnknown": "套餐未知，暂不计算回本"
         },
         "upcoming": "即将重置",
-        "footnote": "进度条是已用的部分，细竖线是这个周期已经过去的时间：进度条超过竖线，就是用得比时间快。"
+        "footnote": "进度条是已用的部分，细竖线是这个周期已经过去的时间：进度条超过竖线，就是用得比时间快。",
+        "pending": "正在读取额度…",
+        "footnoteValue": "“按 API 价格”指同样的用量按官方 API 标价要花多少钱，用来看订阅值不值，不是实际扣费。",
+        "priceTableDate": "价格表日期 {{date}}。",
+        "priceTableUnknown": "暂无价格表日期。",
+        "value": {
+          "week": "近 7 天按 API 价格",
+          "period": {
+            "billing_cycle": "本期按 API 价格",
+            "rolling_30d": "近 30 天按 API 价格"
+          },
+          "noPrice": "暂无价格",
+          "paid": "回本 {{multiple}} 倍",
+          "even": "刚好回本",
+          "short": "还差 {{amount}} 回本",
+          "renews": "距下次续费",
+          "renewsIn_one": "{{count}} 天",
+          "renewsIn_other": "{{count}} 天",
+          "excluded": "{{tokens}} tokens 暂无价格，未计入"
+        }
       },
       "usage": {
         "title": "用量",
@@ -1422,7 +1452,16 @@
           "60d": "60 天"
         },
         "range": "{{from}} – {{to}} · 近 {{days}} 天",
-        "empty": "还没有计量数据。模型网关完成请求后，这里就会有内容。",
+        "empty": {
+          "report": {
+            "title": "这个区间没有用量",
+            "body": "模型网关在所选时间范围内还没有记录请求。"
+          },
+          "filter": {
+            "title": "没有符合条件的用量",
+            "body": "试试其他供应商或模型，或重置筛选。"
+          }
+        },
         "blank": "—",
         "tokens": {
           "label": "Tokens",
@@ -1472,7 +1511,8 @@
           "input": "输入（含缓存）",
           "output": "输出",
           "cache": "缓存读取",
-          "requests": "请求数"
+          "requests": "请求数",
+          "cost": "折合 API 价格"
         },
         "filters": {
           "source": "供应商",
@@ -1500,7 +1540,8 @@
           "shortfall_other": "{{count}} 次请求没有回报 token",
           "allReported": "每次请求都回报了 token",
           "cacheUnknown": "暂无已知输入 token",
-          "cacheSplit": "输入 {{input}} 中有 {{cached}} 来自缓存"
+          "cacheSplit": "输入 {{input}} 中有 {{cached}} 来自缓存",
+          "cost": "折合 API 价格"
         },
         "unknownTokens": "部分请求没有回报 token，相关 token 数值不可用",
         "partialHistory": "部分时间桶的历史记录不完整",
@@ -1583,18 +1624,16 @@
           "outputTokens": "输出 token",
           "totalTokens": "总 token"
         },
-        "empty": {
-          "report": {
-            "title": "这个区间没有用量",
-            "body": "模型网关在所选时间范围内还没有记录请求。"
-          },
-          "filter": {
-            "title": "没有符合条件的用量",
-            "body": "试试其他供应商或模型，或重置筛选。"
-          }
-        },
         "failure": "暂时没能读取用量报表。",
-        "retry": "重试"
+        "retry": "重试",
+        "cost": {
+          "notBilled": "按官方 API 标价折算，不是实际扣费",
+          "noPrice": "暂无价格",
+          "excluded_one": "{{tokens}} tokens 暂无价格，未计入",
+          "excluded_other": "{{tokens}} tokens 暂无价格，未计入",
+          "tableDate": "价格表日期 {{date}}",
+          "tableDateUnknown": "暂无价格表日期"
+        }
       },
       "supplyTooltip": {
         "label": "使用："

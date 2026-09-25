@@ -493,6 +493,32 @@ async def test_quota_cache_does_not_hold_the_page_on_a_slow_vendor(monkeypatch):
     assert [source["state"] for source in (await cache.summary([_CLAUDE, _CODEX]))["sources"]] == ["ok", "ok"]
 
 
+async def test_quota_summary_names_the_sources_still_being_read(monkeypatch):
+    """MH-QUOTA-020: A read past the deadline is named `pending` until it lands, then the hint is gone."""
+
+    from core.handlers.model_hub import quota
+
+    monkeypatch.setattr(quota, "QUOTA_READ_DEADLINE_SECONDS", 0.05)
+    release = asyncio.Event()
+
+    async def fetch(source_id, vendor, credential_ref):
+        if source_id == "src_codex":
+            await release.wait()
+        return {"plan": None, "windows": [_WINDOW]}
+
+    cache = SubscriptionQuotaCache(fetch, now=_Clock())
+    first = await cache.summary([_CLAUDE, _CODEX])
+    assert first["pending"] == ["src_codex"]
+    # A re-read while the vendor is still slow says so again, without a second fetch.
+    assert (await cache.summary([_CLAUDE, _CODEX]))["pending"] == ["src_codex"]
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    settled = await cache.summary([_CLAUDE, _CODEX])
+    assert "pending" not in settled
+    assert [source["state"] for source in settled["sources"]] == ["ok", "ok"]
+
+
 class _Supervisor:
     def __init__(self, client):
         self._client = client
@@ -505,8 +531,9 @@ class _Supervisor:
 
 
 class _EngineClient:
-    def __init__(self, response):
+    def __init__(self, response, by_url=None):
         self.response = response
+        self.by_url = by_url or {}
         self.calls = []
 
     def management_request(self, method, path, *, query=None, payload=None, timeout=None):
@@ -517,7 +544,10 @@ class _EngineClient:
                 {"auth_index": "8", "id": "codex-b.json", "name": "codex-b.json", "provider": "codex",
                  "id_token": {"chatgpt_account_id": "acct_123"}},
             ]}
-        return self.response
+        answer = self.by_url.get((payload or {}).get("url"), self.response)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 class _StateStore:
@@ -528,11 +558,11 @@ class _StateStore:
         return self.metadata[credential_ref]
 
 
-def _adapter(response, metadata):
+def _adapter(response, metadata, by_url=None):
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 
     adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
-    client = _EngineClient(response)
+    client = _EngineClient(response, by_url)
     adapter.supervisor = _Supervisor(client)
     adapter.state_store = _StateStore(metadata)
     return adapter, client
@@ -547,10 +577,15 @@ _METADATA = {
 async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant():
     """MH-QUOTA-011: The engine makes the usage call with `$TOKEN$`, the witness headers, and Claude's OAuth beta; only parsed windows return."""
 
-    adapter, client = _adapter({"status_code": 200, "header": {}, "body": json.dumps(CLAUDE_LEGACY)}, _METADATA)
+    adapter, client = _adapter(
+        {"status_code": 200, "header": {}, "body": json.dumps(CLAUDE_LEGACY)},
+        _METADATA,
+        {_PROFILE_URL: {"status_code": 200, "body": "{}"}},
+    )
     parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
     assert set(parsed) == {"plan", "windows"}
-    method, path, payload = client.calls[-1]
+    usage_calls = [call for call in client.calls if (call[2] or {}).get("url") != _PROFILE_URL]
+    method, path, payload = usage_calls[-1]
     assert (method, path) == ("POST", "/api-call")
     assert payload["auth_index"] == "7"
     assert payload["url"] == "https://api.anthropic.com/api/oauth/usage"
@@ -566,6 +601,65 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
     assert payload["header"]["ChatGPT-Account-ID"] == "acct_123"
     assert payload["header"]["User-Agent"] == "codex-cli"
     assert "anthropic-beta" not in payload["header"]
+
+
+_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+
+
+@pytest.mark.parametrize(
+    ("organization", "plan"),
+    [
+        ({"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_20x"}, "max_20x"),
+        ({"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}, "max_5x"),
+        ({"organization_type": "claude_pro", "rate_limit_tier": "default_claude_ai"}, "pro"),
+        ({"organization_type": "claude_max", "rate_limit_tier": "something_new"}, None),
+        ("not an object", None),
+    ],
+)
+def test_claude_plan_is_read_from_the_oauth_profile_organization(organization, plan):
+    """MH-QUOTA-019: The profile's rate-limit tier separates the Max tiers; anything unknown is no plan."""
+
+    from core.handlers.model_hub.quota import parse_claude_plan
+
+    assert parse_claude_plan(json.dumps({"account": {"uuid": "u"}, "organization": organization})) == plan
+    assert parse_claude_plan("<html>") is None
+
+
+async def test_adapter_adds_the_claude_plan_from_the_profile_and_never_fails_on_it():
+    """MH-QUOTA-019: The plan is a second, best-effort read with the witness headers; its failure leaves windows intact."""
+
+    usage = {"status_code": 200, "header": {}, "body": json.dumps(CLAUDE_LEGACY)}
+    profile = {"status_code": 200, "body": json.dumps(
+        {"account": {"uuid": "u"}, "organization": {"rate_limit_tier": "default_claude_max_5x"}}
+    )}
+    adapter, client = _adapter(usage, _METADATA, {_PROFILE_URL: profile})
+    parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+    assert parsed["plan"] == "max_5x" and parsed["windows"]
+    profile_call = client.calls[-1][2]
+    assert profile_call["url"] == _PROFILE_URL
+    assert profile_call["header"]["Authorization"] == "Bearer $TOKEN$"
+
+    from vibe.model_hub_runtime.client import EngineClientError
+
+    for failure in ({"status_code": 500, "body": "{}"}, {"status_code": 200, "body": "<html>"}, EngineClientError("down")):
+        adapter, _client = _adapter(usage, _METADATA, {_PROFILE_URL: failure})
+        parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+        assert parsed["plan"] is None and parsed["windows"]
+
+
+async def test_a_missing_plan_on_one_read_keeps_the_last_known_plan():
+    """MH-QUOTA-019: A plan read that misses once does not blank the plan the page prices against."""
+
+    plans = iter(["max_20x", None])
+    moment = [datetime(2026, 9, 1, tzinfo=timezone.utc)]
+
+    async def fetch(source_id, vendor, credential_ref):
+        return {"plan": next(plans), "windows": []}
+
+    cache = SubscriptionQuotaCache(fetch, now=lambda: moment[0])
+    assert (await cache.summary([_CLAUDE]))["sources"][0]["plan"] == "max_20x"
+    moment[0] += timedelta(minutes=6)
+    assert (await cache.summary([_CLAUDE]))["sources"][0]["plan"] == "max_20x"
 
 
 @pytest.mark.parametrize(

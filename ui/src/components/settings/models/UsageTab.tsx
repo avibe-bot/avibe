@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
-import { formatPercent } from './format';
+import { formatPercent, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import type { UsageCounters, UsageReport, UsageWindowKey } from './types';
 import {
@@ -34,6 +34,7 @@ import {
   modelLabel,
   pairKey,
   reportHasPartialHistory,
+  reportIsPriced,
   reportHasUnknownTokens,
   seriesFor,
   sourceIdentityLabel,
@@ -41,6 +42,7 @@ import {
   usageLabelContext,
   usageCachedInputShare,
   usageIsEmpty,
+  usageIsPriced,
   usageMetricValue,
   usageNonCachedInput,
   usageReportShortfall,
@@ -68,6 +70,10 @@ type FilterOption = { key: string; label: string; detail?: string };
 type UsageTranslate = (key: string, options?: Record<string, unknown>) => string;
 
 const metricKeys: UsageMetric[] = ['tokens', 'input', 'output', 'cache', 'requests'];
+/** 折合 API 价格 is offered only when the server priced the report. */
+const metricKeysFor = (report: UsageReport): UsageMetric[] => (reportIsPriced(report) ? [...metricKeys, 'cost'] : metricKeys);
+/** Metrics with one series only, where 按类型 has nothing to split. */
+const unsplitMetric = (metric: UsageMetric) => metric === 'requests' || metric === 'cost';
 const groupKeys: UsageGroup[] = ['total', 'type', 'model', 'source'];
 
 const useUsageTranslation = () => {
@@ -83,6 +89,16 @@ const useCount = () => {
   return React.useCallback((value: number) => new Intl.NumberFormat(i18n.language).format(value), [i18n.language]);
 };
 
+/** The formatter for one metric's figures: dollars for 折合 API 价格, a count for the rest. */
+const useMetricFormat = (metric: UsageMetric) => {
+  const { i18n } = useTranslation();
+  const count = useCount();
+  return React.useCallback(
+    (value: number) => (metric === 'cost' ? formatUsd(value, i18n.language) : count(value)),
+    [count, i18n.language, metric],
+  );
+};
+
 const tokenText = (
   counters: UsageCounters,
   metric: UsageMetric,
@@ -92,6 +108,10 @@ const tokenText = (
   const value = usageMetricValue(counters, metric);
   return value === null ? blank : count(value);
 };
+
+/** Every priced token of these counters belongs to a model with no known price. */
+const usageHasNoPrice = (counters: UsageCounters): boolean =>
+  usageIsPriced(counters) && (counters.excluded_tokens ?? 0) > 0 && (counters.api_cost_usd ?? 0) === 0;
 
 const metricLabel = (metric: UsageMetric, t: UsageTranslate): string =>
   t(`settings.models.usage.metric.${metric}`);
@@ -264,6 +284,7 @@ function UsageChart({
 }) {
   const { t, i18n } = useUsageTranslation();
   const count = useCount();
+  const format = useMetricFormat(metric);
   const [hovered, setHovered] = React.useState<number | null>(null);
   const [inspected, setInspected] = React.useState<number | null>(null);
   const [dismissed, setDismissed] = React.useState(false);
@@ -304,7 +325,9 @@ function UsageChart({
             ? t('settings.models.usage.series.output')
             : item.key === 'requests'
               ? t('settings.models.usage.series.requests')
-              : item.label,
+              : item.key === 'cost'
+                ? metricLabel('cost', t)
+                : item.label,
   ])), [metric, series, t]);
   const visibleSeries = series.filter((item) => !hidden.includes(item.key));
   const narrow = width < 560;
@@ -524,7 +547,7 @@ function UsageChart({
         hidden={hidden}
         onToggle={toggleHidden}
         labels={labels}
-        count={count}
+        count={format}
         blank={t('settings.models.usage.blank') as string}
         ariaLabel={t('settings.models.usage.chart.legend') as string}
       />
@@ -546,7 +569,7 @@ function UsageChart({
           {[0, 1, 2, 3, 4].map((step) => (
             <g key={step}>
               <line x1={left} x2={width - right} y1={y(max * step / 4)} y2={y(max * step / 4)} className="model-hub-usage-grid" strokeDasharray={step === 0 ? undefined : '3 5'} />
-              <text x={left - 10} y={y(max * step / 4) + 4} textAnchor="end" className="model-hub-usage-tick">{count(max * step / 4)}</text>
+              <text x={left - 10} y={y(max * step / 4) + 4} textAnchor="end" className="model-hub-usage-tick">{format(max * step / 4)}</text>
             </g>
           ))}
           {activeIndex !== null && activeIndex >= 0 && (
@@ -693,14 +716,14 @@ function UsageChart({
               </div>
             </div>
             <div className="model-hub-usage-tooltip-total">
-              <strong>{activeValue === null ? t('settings.models.usage.blank') : count(activeValue)}</strong>
+              <strong>{activeValue === null ? t('settings.models.usage.blank') : format(activeValue)}</strong>
               <span>{metricLabel(metric, t)}</span>
             </div>
             <div className="model-hub-usage-tooltip-lines">
               {visibleSeries.map((item) => (
                 <div key={item.key}>
                   <span><i style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />{labels.get(item.key) ?? item.label}</span>
-                  <b>{item.values[activeIndex as number] === null ? t('settings.models.usage.blank') : count(item.values[activeIndex as number] ?? 0)}</b>
+                  <b>{item.values[activeIndex as number] === null ? t('settings.models.usage.blank') : format(item.values[activeIndex as number] ?? 0)}</b>
                 </div>
               ))}
             </div>
@@ -718,6 +741,7 @@ function UsageChart({
       </div>
       <div className="model-hub-usage-chart-foot">
         <span>{t('settings.models.usage.chart.points', { count: report.buckets.length, granularity: t(`settings.models.usage.granularity.${report.granularity}`) })}</span>
+        {metric === 'cost' && <span className="model-hub-usage-cost-note">{t('settings.models.usage.cost.notBilled')}</span>}
         <span>{hidden.length > 0 ? t('settings.models.usage.chart.legendOnly') : t('settings.models.usage.chart.interaction')}</span>
       </div>
     </div>
@@ -791,6 +815,7 @@ export const UsageTab: React.FC<{
   const [sourceIds, setSourceIds] = React.useState<string[]>([]);
   const [modelKeys, setModelKeys] = React.useState<string[]>([]);
   const [metric, setMetric] = React.useState<UsageMetric>('tokens');
+  const format = useMetricFormat(metric);
   const [group, setGroup] = React.useState<UsageGroup>('type');
   const [tableGroup, setTableGroup] = React.useState<'model' | 'source'>('model');
   const [sortAscending, setSortAscending] = React.useState(false);
@@ -806,6 +831,10 @@ export const UsageTab: React.FC<{
   React.useEffect(() => {
     setPinnedKey(null);
   }, [scopeKey]);
+
+  React.useEffect(() => {
+    if (report !== null && metric === 'cost' && !reportIsPriced(report)) setMetric('tokens');
+  }, [report, metric]);
 
   React.useEffect(() => {
     if (report !== null && pinnedKey !== null && !report.buckets.some((bucket) => bucket.key === pinnedKey)) {
@@ -872,7 +901,8 @@ export const UsageTab: React.FC<{
       .flatMap((bucket) => filterBucketRows(bucket, filter)),
   );
   const metricText = (counters: UsageCounters, selectedMetric = metric) =>
-    tokenText(counters, selectedMetric, count, t('settings.models.usage.blank') as string);
+    tokenText(counters, selectedMetric, selectedMetric === metric ? format : count, t('settings.models.usage.blank') as string);
+  const priced = reportIsPriced(report);
   const partialHistoryNote = String(t('settings.models.usage.partialHistory'));
   const unknownTokensNote = String(t('settings.models.usage.unknownTokens'));
   const allReportedNote = String(t('settings.models.usage.stats.allReported'));
@@ -932,10 +962,10 @@ export const UsageTab: React.FC<{
             onChange={(event) => {
               const next = event.target.value as UsageMetric;
               setMetric(next);
-              if (next === 'requests' && group === 'type') setGroup('total');
+              if (unsplitMetric(next) && group === 'type') setGroup('total');
             }}
           >
-            {metricKeys.map((key) => <option value={key} key={key}>{metricLabel(key, t)}</option>)}
+            {metricKeysFor(report).map((key) => <option value={key} key={key}>{metricLabel(key, t)}</option>)}
           </select>
           <ChevronDown aria-hidden className="size-3" />
         </div>
@@ -964,7 +994,7 @@ export const UsageTab: React.FC<{
         <EmptyState kind="filter" onReset={() => { setSourceIds([]); setModelKeys([]); }} />
       ) : (
         <>
-          <div className="model-hub-usage-stat-grid">
+          <div className={cn('model-hub-usage-stat-grid', priced && 'model-hub-usage-stat-grid--priced')}>
             <StatCard
               label={t('settings.models.usage.stats.tokens')}
               value={historyOnlyUnknown ? t('settings.models.usage.blank') : metricText(totals, 'tokens')}
@@ -986,6 +1016,25 @@ export const UsageTab: React.FC<{
                 ? t('settings.models.usage.stats.cacheUnknown')
                 : t('settings.models.usage.stats.cacheSplit', { cached: count(totals.cached_input_tokens), input: count(totals.input_tokens) })}
             />
+            {priced && (
+              <StatCard
+                label={t('settings.models.usage.stats.cost')}
+                value={historyOnlyUnknown || !usageIsPriced(totals)
+                  ? t('settings.models.usage.blank')
+                  : usageHasNoPrice(totals)
+                    ? t('settings.models.usage.cost.noPrice')
+                    : `${totals.api_cost_lower_bound ? '≥ ' : ''}${formatUsd(totals.api_cost_usd ?? 0, i18n.language)}`}
+                note={[
+                  t('settings.models.usage.cost.notBilled'),
+                  (totals.excluded_tokens ?? 0) > 0 && !usageHasNoPrice(totals)
+                    ? t('settings.models.usage.cost.excluded', { count: totals.excluded_tokens ?? 0, tokens: count(totals.excluded_tokens ?? 0) })
+                    : null,
+                  report.pricing?.price_table_date
+                    ? t('settings.models.usage.cost.tableDate', { date: report.pricing.price_table_date })
+                    : t('settings.models.usage.cost.tableDateUnknown'),
+                ].filter(Boolean).join(' · ')}
+              />
+            )}
           </div>
           {(partialHistory || reportHasUnknownTokens(report, filter)) && (
             <div className="model-hub-usage-notice" role="status">
@@ -1013,7 +1062,7 @@ export const UsageTab: React.FC<{
                       type="button"
                       key={key}
                       aria-pressed={group === key}
-                      disabled={key === 'type' && metric === 'requests'}
+                      disabled={key === 'type' && unsplitMetric(metric)}
                       className={cn(group === key && 'is-selected')}
                       onClick={() => setGroup(key)}
                     >
@@ -1088,7 +1137,9 @@ export const UsageTab: React.FC<{
                         <td>{usageTokensAreKnown(row.counters) ? count(usageNonCachedInput(row.counters)) : t('settings.models.usage.blank')}</td>
                         <td>{tokenText(row.counters, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                         <td>{tokenText(row.counters, 'output', count, t('settings.models.usage.blank') as string)}</td>
-                        <td className="model-hub-usage-table-total">{value === null ? t('settings.models.usage.blank') : count(value)}</td>
+                        <td className="model-hub-usage-table-total">{metric === 'cost' && usageHasNoPrice(row.counters)
+                          ? t('settings.models.usage.cost.noPrice')
+                          : value === null ? t('settings.models.usage.blank') : format(value)}</td>
                         <td>{share === null ? t('settings.models.usage.blank') : formatPercent(share, i18n.language, 1)}</td>
                       </tr>
                     );

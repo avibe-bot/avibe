@@ -1405,10 +1405,40 @@
           "exhaustedNone": "Every account is usable",
           "exhaustedNoneObserved": "None used up in current readings",
           "exhaustedNote": "{{name}} · back {{time}}",
-          "resetsIn": "resets in {{duration}}"
+          "resetsIn": "resets in {{duration}}",
+          "weekValue": "Last 7 days at API price",
+          "weekValueNote": "All subscription use, at the vendors’ published API prices",
+          "payback": "Paid back this period",
+          "paybackMultiple": "{{multiple}}×",
+          "paybackUnit": "the monthly fee",
+          "paybackPaid": "Paid back, {{amount}} ahead",
+          "paybackShort": "{{amount}} to pay back",
+          "paybackRolling": "Accounts without a renewal day use the last 30 days",
+          "paybackPartial_one": "{{count}} account with an unknown plan left out",
+          "paybackPartial_other": "{{count}} accounts with an unknown plan left out",
+          "paybackUnknown": "Plan unknown, so payback isn’t shown"
         },
         "upcoming": "Resetting soon",
-        "footnote": "The bar is the part used; the thin mark is how much of this period has passed. A bar past the mark is spending faster than time."
+        "footnote": "The bar is the part used; the thin mark is how much of this period has passed. A bar past the mark is spending faster than time.",
+        "pending": "Reading quota…",
+        "footnoteValue": "“At API price” is what the same use would cost at the vendor’s published API price — a way to judge the plan, not a charge.",
+        "priceTableDate": "Price table from {{date}}.",
+        "priceTableUnknown": "Price table date unknown.",
+        "value": {
+          "week": "Last 7 days at API price",
+          "period": {
+            "billing_cycle": "This cycle at API price",
+            "rolling_30d": "Last 30 days at API price"
+          },
+          "noPrice": "No price yet",
+          "paid": "Paid back {{multiple}}×",
+          "even": "Just paid back",
+          "short": "{{amount}} to pay back",
+          "renews": "Next renewal",
+          "renewsIn_one": "in {{count}} day",
+          "renewsIn_other": "in {{count}} days",
+          "excluded": "{{tokens}} tokens have no price and are left out"
+        }
       },
       "usage": {
         "title": "Usage",
@@ -1422,7 +1452,16 @@
           "60d": "60 days"
         },
         "range": "{{from}} – {{to}} · trailing {{days}} days",
-        "empty": "Nothing metered yet. A window fills once a gateway source serves a request.",
+        "empty": {
+          "report": {
+            "title": "No usage in this window",
+            "body": "The gateway has not recorded a request in the selected time range."
+          },
+          "filter": {
+            "title": "No matching usage",
+            "body": "Try another Source or model, or reset the filters."
+          }
+        },
         "blank": "—",
         "tokens": {
           "label": "Tokens",
@@ -1472,7 +1511,8 @@
           "input": "Input (including cache)",
           "output": "Output",
           "cache": "Cache reads",
-          "requests": "Requests"
+          "requests": "Requests",
+          "cost": "At API price"
         },
         "filters": {
           "source": "Source",
@@ -1500,7 +1540,8 @@
           "shortfall_other": "{{count}} requests have no token report",
           "allReported": "Every request reported tokens",
           "cacheUnknown": "No measured input available",
-          "cacheSplit": "{{cached}} cached of {{input}} input"
+          "cacheSplit": "{{cached}} cached of {{input}} input",
+          "cost": "At API price"
         },
         "unknownTokens": "Some requests have no token report; token values are unavailable",
         "partialHistory": "Some buckets have incomplete history",
@@ -1583,18 +1624,16 @@
           "outputTokens": "Output tokens",
           "totalTokens": "Total tokens"
         },
-        "empty": {
-          "report": {
-            "title": "No usage in this window",
-            "body": "The gateway has not recorded a request in the selected time range."
-          },
-          "filter": {
-            "title": "No matching usage",
-            "body": "Try another Source or model, or reset the filters."
-          }
-        },
         "failure": "The usage report could not be read.",
-        "retry": "Retry"
+        "retry": "Retry",
+        "cost": {
+          "notBilled": "At published API prices, not a charge",
+          "noPrice": "No price yet",
+          "excluded_one": "{{tokens}} token has no price and is left out",
+          "excluded_other": "{{tokens}} tokens have no price and are left out",
+          "tableDate": "Price table from {{date}}",
+          "tableDateUnknown": "Price table date unknown"
+        }
       },
       "supplyTooltip": {
         "label": "Supplies: "

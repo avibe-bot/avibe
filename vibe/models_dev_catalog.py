@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -19,6 +20,8 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
 
+
+logger = logging.getLogger(__name__)
 
 MODELS_DEV_URL_ENV = "AVIBE_MODELS_DEV_URL"
 DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json"
@@ -199,6 +202,49 @@ def load_models_dev_catalog() -> dict[str, Any]:
             if catalog is not None:
                 return catalog
             raise RuntimeError("models.dev catalog is unavailable") from None
+
+
+_REFRESH_IN_FLIGHT = threading.Event()
+
+
+def _refresh_in_background() -> None:
+    def refresh() -> None:
+        try:
+            with _CACHE_LOCK:
+                _fetch_catalog(_read_cache())
+        except Exception:  # noqa: BLE001 - a background refresh has no one to report to
+            logger.debug("models.dev background refresh failed", exc_info=True)
+        finally:
+            _REFRESH_IN_FLIGHT.clear()
+
+    if _REFRESH_IN_FLIGHT.is_set():
+        return
+    _REFRESH_IN_FLIGHT.set()
+    threading.Thread(target=refresh, name="models-dev-refresh", daemon=True).start()
+
+
+def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None]:
+    """The catalog and when it was fetched, without waiting on the network when a copy exists.
+
+    For readers on a request path, such as usage valuation: a stale cached copy is
+    returned at once and refreshed in the background, since a day-old price table
+    is still the best one there is and the reader shows its date. With no cached
+    copy at all it starts that fetch and returns an empty catalog, so the first
+    read reports nothing as priced rather than holding a page on the network.
+    """
+
+    with _CACHE_LOCK:
+        cached = _read_cache()
+    catalog = _catalog_from_cache(cached) if cached.get("url") == _models_dev_url() else None
+    fetched_at = cached.get("fetched_at")
+    fetched = float(fetched_at) if isinstance(fetched_at, (int, float)) and not isinstance(fetched_at, bool) else None
+    if catalog is not None:
+        age = time.time() - fetched if fetched is not None else None
+        if age is None or not 0 <= age < MODELS_DEV_CACHE_TTL_SECONDS:
+            _refresh_in_background()
+        return catalog, fetched
+    _refresh_in_background()
+    return {}, None
 
 
 def _search_tokens(query: str) -> tuple[str, ...]:

@@ -3,13 +3,14 @@ import type {
   UsageBucketRow,
   UsageCounters,
   UsageReport,
+  UsageSummary,
   UsageWindowKey,
 } from './types';
 
 export const USAGE_WINDOW_OPTIONS = ['24h', '7d', '30d', '60d'] as const satisfies readonly UsageWindowKey[];
 export type UsageWindowOption = UsageWindowKey;
 
-export type UsageMetric = 'tokens' | 'input' | 'output' | 'cache' | 'requests';
+export type UsageMetric = 'tokens' | 'input' | 'output' | 'cache' | 'requests' | 'cost';
 export type UsageGroup = 'total' | 'type' | 'model' | 'source';
 export type UsageFilter = {
   sourceIds: readonly string[];
@@ -53,14 +54,27 @@ export const emptyCounters = (): UsageCounters => ({
 });
 
 export function aggregateCounters(rows: readonly UsageCounters[]): UsageCounters {
-  return rows.reduce((total, row) => ({
-    requests: total.requests + row.requests,
-    token_reports: total.token_reports + row.token_reports,
-    input_tokens: total.input_tokens + row.input_tokens,
-    cached_input_tokens: total.cached_input_tokens + row.cached_input_tokens,
-    output_tokens: total.output_tokens + row.output_tokens,
+  const total = rows.reduce<UsageCounters>((sum, row) => ({
+    requests: sum.requests + row.requests,
+    token_reports: sum.token_reports + row.token_reports,
+    input_tokens: sum.input_tokens + row.input_tokens,
+    cached_input_tokens: sum.cached_input_tokens + row.cached_input_tokens,
+    output_tokens: sum.output_tokens + row.output_tokens,
   }), emptyCounters());
+  // A priced row carries its cost; the sum is priced only when every row is.
+  if (rows.length > 0 && rows.every(usageIsPriced)) {
+    total.api_cost_usd = rows.reduce((sum, row) => sum + (row.api_cost_usd ?? 0), 0);
+    total.excluded_tokens = rows.reduce((sum, row) => sum + (row.excluded_tokens ?? 0), 0);
+    total.api_cost_lower_bound = rows.some((row) => row.api_cost_lower_bound === true);
+  }
+  return total;
 }
+
+/** Whether the server priced these counters at API prices. */
+export const usageIsPriced = (counters: UsageCounters): boolean => typeof counters.api_cost_usd === 'number';
+
+/** Whether the report carries API-price value at all: a server that predates it never does. */
+export const reportIsPriced = (report: UsageSummary): boolean => report.pricing !== undefined;
 
 export function usageTotalTokens(counters: UsageCounters): number {
   return counters.input_tokens + counters.output_tokens;
@@ -84,6 +98,8 @@ export function usageTokensAreReported(counters: Pick<UsageCounters, 'token_repo
 
 export function usageMetricValue(counters: UsageCounters, metric: UsageMetric): number | null {
   if (metric === 'requests') return counters.requests;
+  // Nothing metered costs nothing, priced or not.
+  if (metric === 'cost') return usageIsPriced(counters) ? counters.api_cost_usd ?? 0 : counters.requests === 0 ? 0 : null;
   if (!usageTokensAreKnown(counters)) return null;
   if (metric === 'tokens') return usageTotalTokens(counters);
   if (metric === 'input') return counters.input_tokens;
@@ -322,6 +338,9 @@ const typeSeries = (
   metric: UsageMetric,
   historyComplete: boolean,
 ): Array<[string, number | null]> => {
+  if (metric === 'cost') {
+    return [['cost', !historyComplete && rows.length === 0 ? null : usageMetricValue(aggregateCounters(rows), 'cost')]];
+  }
   if (!historyComplete && rows.length === 0) {
     if (metric === 'requests') return [['requests', null]];
     if (metric === 'output') return [['output', null]];
@@ -377,6 +396,7 @@ export function seriesFor(
       cache: 'Cache reads',
       output: 'Output',
       requests: 'Requests',
+      cost: 'API price',
     };
     return [...valuesByKey.entries()].map(([key, values], index) => ({
       key,

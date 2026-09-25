@@ -37,6 +37,23 @@ for (const lang of ['en', 'zh'] as const) {
     expect(await fits(title)).toBe(true);
     expect(titleBox.height).toBeGreaterThan(20);
 
+    // The API-price value holds too: two stat cards per row, and each account's
+    // value strip stays inside its card.
+    const stats = page.locator('.model-hub-quota-stats--valued > *');
+    await expect(stats).toHaveCount(4);
+    const statBoxes = await Promise.all((await stats.all()).map(box));
+    expect(Math.abs(statBoxes[0].y - statBoxes[1].y)).toBeLessThanOrEqual(1);
+    expect(statBoxes[2].y).toBeGreaterThanOrEqual(statBoxes[0].y + statBoxes[0].height - 1);
+    for (const stat of statBoxes) expect(stat.x + stat.width).toBeLessThanOrEqual(360);
+    const strips = page.locator('[data-quota-value]');
+    await expect(strips).toHaveCount(2);
+    for (let index = 0; index < 2; index += 1) {
+      const [strip, card] = await Promise.all([box(strips.nth(index)), box(cards.nth(index))]);
+      expect(strip.x + strip.width).toBeLessThanOrEqual(card.x + card.width + 1);
+      expect(await fits(strips.nth(index))).toBe(true);
+    }
+    await expect(page.locator('[data-quota-payback]').first()).toBeVisible();
+
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('quota-layout.png'), fullPage: true });
   });

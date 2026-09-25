@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, formatCount, formatDayTime, formatNameList, formatPercent, formatTokensCompact } from './format';
+import { cooldownEtaMinutes, formatCount, formatDayTime, formatNameList, formatPercent, formatTokensCompact, formatUsd } from './format';
 
 describe('formatCount', () => {
   it('groups so a figure can be read against a vendor console', () => {
@@ -94,5 +94,17 @@ describe('cooldownEtaMinutes', () => {
 
   it('rounds the remaining wait to whole minutes', () => {
     expect(cooldownEtaMinutes(new Date(Date.now() + 5 * 60_000 + 1_000).toISOString())).toBe(5);
+  });
+});
+
+describe('formatUsd', () => {
+  // A value in dollars is a report, never a bill: two decimals, a sub-cent
+  // figure never reads as free, and a negative one never appears.
+  it('MH-USAGE-028: renders dollars with cents, a floor below one cent, and never a negative', () => {
+    expect(formatUsd(1234.5, 'en-US')).toBe('$1,234.50');
+    expect(formatUsd(1234.5, 'zh-CN')).toBe('$1,234.50');
+    expect(formatUsd(0, 'en-US')).toBe('$0.00');
+    expect(formatUsd(0.001, 'en-US')).toBe('<$0.01');
+    expect(formatUsd(-3, 'en-US')).toBe('$0.00');
   });
 });

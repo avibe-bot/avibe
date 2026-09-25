@@ -2,15 +2,19 @@ import { describe, expect, it } from 'vitest';
 
 import type { UsageBucket, UsageBucketRow, UsageCounters, UsageReport } from './types';
 import {
+  aggregateCounters,
   formatBucketAxisLabel,
   formatBucketRange,
   identityLabel,
   pairKey,
   reportHasPartialHistory,
+  reportIsPriced,
   seriesFor,
   sourceIdentityLabel,
   usageLabelContext,
   usageIsEmpty,
+  usageIsPriced,
+  usageMetricValue,
   usageNonCachedInput,
   usageTotalTokens,
 } from './usageProjection';
@@ -208,5 +212,25 @@ describe('usageProjection', () => {
       end_at: '2026-09-25T00:00:00+08:00',
     }, 'en-US')).toBe('Sep 24');
     expect(formatBucketRange(hourly, 'en-US')).toContain('Sep 24, 2026');
+  });
+
+  // A total at API price is the sum of its rows, and it is a price only when
+  // every row was priced: a server that predates valuation must not read as $0.
+  it('MH-USAGE-028: sums API price only across rows that all carry one', () => {
+    const priced = aggregateCounters([
+      counters({ api_cost_usd: 1.25, excluded_tokens: 0, api_cost_lower_bound: false }),
+      counters({ api_cost_usd: 0.5, excluded_tokens: 30, api_cost_lower_bound: true }),
+    ]);
+    expect(priced.api_cost_usd).toBeCloseTo(1.75);
+    expect(priced.excluded_tokens).toBe(30);
+    expect(priced.api_cost_lower_bound).toBe(true);
+    expect(usageMetricValue(priced, 'cost')).toBeCloseTo(1.75);
+
+    const mixed = aggregateCounters([counters({ api_cost_usd: 1 }), counters()]);
+    expect(usageIsPriced(mixed)).toBe(false);
+    expect(usageMetricValue(mixed, 'cost')).toBeNull();
+    expect(usageMetricValue(counters({ requests: 0, token_reports: 0 }), 'cost')).toBe(0);
+    expect(reportIsPriced(reportWith([]))).toBe(false);
+    expect(reportIsPriced({ ...reportWith([]), pricing: { currency: 'USD', price_table_date: null } })).toBe(true);
   });
 });
