@@ -2625,6 +2625,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
             ModelHubModelConfig(id="gpt-no-reasoning", provenance="discovered"),
             # A near neighbour of a catalog id, which must not borrow its row.
             ModelHubModelConfig(id="gpt-described-mini", provenance="discovered"),
+            ModelHubModelConfig(id="claude-unknown", provenance="discovered"),
         ],
         credential_ref="cred_enrich001",
     )
@@ -2672,10 +2673,12 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
     assert rows["gpt-supplier-says"]["display_name"] == "Relay label"
     assert rows["gpt-supplier-says"]["reasoning_efforts"] == ["high"]
     assert rows["gpt-supplier-says"]["models_dev_id"] == "openai/gpt-supplier-says"
-    # Nobody states a ladder: the shared default tiers, and no description.
+    # Nobody states a ladder: the tiers the family's protocol accepts, and no
+    # description.
     for model_id in ("gpt-unknown", "gpt-described-mini"):
-        assert rows[model_id]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+        assert rows[model_id]["reasoning_efforts"] == ["minimal", "low", "medium", "high", "xhigh"]
         assert "models_dev_id" not in rows[model_id]
+    assert rows["claude-unknown"]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
     # A model stated not to reason gets no invented ladder.
     assert rows["gpt-no-reasoning"]["reasoning_efforts"] == []
     assert rows["gpt-no-reasoning"]["supports_reasoning"] is False

@@ -514,28 +514,35 @@ def exact_models_dev_matches(
 
     Exact means the full ``provider/model`` identity, the bare model id, or the
     bare id with punctuation folded (``claude-3.5-x`` == ``claude-3-5-x``), in
-    that order of preference. Substring hits are never returned: this answer is
-    applied without the user choosing it, so a near neighbour would silently
-    describe a different model.
+    that order of preference; a relay's ``prefix/model`` also tries its last
+    segment. Case is kept, and substring hits and search aliases are never
+    returned: this answer is applied without the user choosing it, so a near
+    neighbour would silently describe a different model.
     """
+
+    def keys(model_id: str) -> tuple[str, ...]:
+        # The id as given, and its last segment when a relay prefixes one. No
+        # search aliases and no case folding: either could name another model.
+        return tuple(dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])))
+
+    def fold(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]+", "", value)
 
     literal: dict[str, list[str]] = {}
     folded: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
-        for token in _search_tokens(model_id):
-            literal.setdefault(token, []).append(model_id)
-            folded.setdefault(_fold(token), []).append(model_id)
+        for key in keys(model_id):
+            literal.setdefault(key, []).append(model_id)
+            folded.setdefault(fold(key), []).append(model_id)
     if not literal or not catalog:
         return {}
     vendor_map = load_model_vendor_map()
     by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
 
     def admit(provider_id: str, model_id: str, _display_name: str):
-        identity = f"{provider_id}/{model_id}".lower()
-        bare = model_id.lower()
-        hits = [(0, requested) for requested in literal.get(identity, ())]
-        hits += [(1, requested) for requested in literal.get(bare, ())]
-        hits += [(2, requested) for requested in folded.get(_fold(bare), ())]
+        hits = [(0, requested) for requested in literal.get(f"{provider_id}/{model_id}", ())]
+        hits += [(1, requested) for requested in literal.get(model_id, ())]
+        hits += [(2, requested) for requested in folded.get(fold(model_id), ())]
         return hits or None
 
     for copies in _catalog_rows(catalog, vendor_map, admit).values():

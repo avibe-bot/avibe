@@ -349,19 +349,28 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
             "models": {
                 "gpt-target": {"name": "GPT target"},
                 "gpt-target-mini": {"name": "GPT target mini"},
+                "foo": {"name": "Foo"},
+                "Case-Target": {"name": "Case target"},
             },
         },
     }
 
     matches = models_dev_catalog.exact_models_dev_matches(
-        ["gpt-target", "openrouter/gpt-target", "claude-3.5-target", "gpt", "gpt-target-max"],
+        [
+            "gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini", "claude-3.5-target",
+            "gpt", "gpt-target-max", "avibe-foo", "case-target",
+        ],
         catalog,
     )
 
     # A bare id prefers the first-party copy; a full identity names its own.
     assert matches["gpt-target"]["models_dev_id"] == "openai/gpt-target"
     assert matches["openrouter/gpt-target"]["models_dev_id"] == "openrouter/gpt-target"
-    # Punctuation folds; substrings and prefixes never match.
+    # A relay prefix falls back to the last segment.
+    assert matches["relay/gpt-target-mini"]["models_dev_id"] == "openai/gpt-target-mini"
+    # Punctuation folds; substrings, search aliases, and case changes never match.
     assert matches["claude-3.5-target"]["models_dev_id"] == "openrouter/claude-3-5-target"
-    assert set(matches) == {"gpt-target", "openrouter/gpt-target", "claude-3.5-target"}
+    assert set(matches) == {
+        "gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini", "claude-3.5-target",
+    }
     assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}

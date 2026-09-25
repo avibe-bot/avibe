@@ -43,7 +43,7 @@ from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
 from vibe.backend_model_catalog import (
-    UNSTATED_REASONING_EFFORT_DEFAULTS,
+    PROTOCOL_REASONING_EFFORT_DEFAULTS,
     bundled_catalog_reasoning_efforts_by_model,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -4607,8 +4607,8 @@ class ModelHubService:
                 model_id,
             )
             # Suppliers speak first, models.dev fills what they left unsaid, and
-            # an unstated ladder falls back to the shared tiers unless either
-            # side says the model cannot reason at all.
+            # an unstated ladder falls back to the tiers the model family's own
+            # protocol accepts, unless models.dev says it cannot reason at all.
             match = described.get(model_id)
             enrichment = (
                 {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
@@ -4619,7 +4619,9 @@ class ModelHubService:
             if not reasoning_efforts and match is not None:
                 reasoning_efforts = list(match["reasoning_efforts"])
             if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
-                reasoning_efforts = list(UNSTATED_REASONING_EFFORT_DEFAULTS)
+                reasoning_efforts = list(
+                    PROTOCOL_REASONING_EFFORT_DEFAULTS[native_protocol_for_model_id(model_id)]
+                )
             admitted = admissible_backend_model(
                 agent_backend,
                 model_id,
