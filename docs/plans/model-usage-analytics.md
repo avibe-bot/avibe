@@ -118,7 +118,7 @@ internal `hourly_expired_before` field records their exclusive UTC-hour boundary
 if a clock rollback brings pruned evidence into range, hourly history is incomplete.
 Nonzero expired counters without a valid boundary also retain uncertainty. Keep
 UTC-recent rows through subsequent writes after host timezone changes, without
-changing their original daily ownership or the daily ledger's capacity policy.
+changing their original daily ownership or the daily reports' capacity policy.
 Existing batching must not combine calls from different hours before the ledger sees
 their temporal identity. It must also retain distinct local-day owners when a
 UTC hour spans midnight; a fold is valid only within both temporal boundaries.
@@ -211,6 +211,15 @@ focused tests, a production UI build, real fixture browser/HTTP+IPC acceptance,
 and current-head CI. Do not redesign storage, alter public docs, manually trigger
 Codex, or merge/deploy/restart the live service. Preserve the existing durable
 Watch and report the final gated head to the coordinating session.
+
+The independent local review of `aac9d257b` reproduced a remaining capacity
+interaction: an old-zone future owner could outrank a newer call at `max_rows=1`.
+Membership and eviction must use compatible evidence. For write retention and
+hourly capacity only, derive the recency calendar label from usable UTC evidence,
+not the old owner label. Keep the persisted owner unchanged and retain the exact
+existing day-first policy for daily report capacity. Ordinary same-zone ordering
+is unchanged. Verify both timezone directions with and without hourly history,
+both with room for the old row and with capacity for only the newest call.
 
 ## Known by design
 

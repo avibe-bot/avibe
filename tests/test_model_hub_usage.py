@@ -1294,13 +1294,15 @@ def test_hourly_report_uses_utc_evidence_after_a_timezone_change(
     ],
 )
 @pytest.mark.parametrize("daily_only", [False, True])
+@pytest.mark.parametrize("max_rows", [1, 4])
 def test_timezone_change_preserves_recent_owners_across_a_write(
-    tmp_path: Path, old_zone: str, new_zone: str, daily_only: bool,
+    tmp_path: Path, old_zone: str, new_zone: str, daily_only: bool, max_rows: int,
 ) -> None:
     """Recent UTC evidence survives writes at either local retention edge.
 
     Read-only timezone coverage missed the subsequent write deleting its owner.
     Released daily-only owners must also survive without inventing hourly counts.
+    At capacity, an old owner label must not evict a more recently metered call.
     """
 
     previous_tz = os.environ.get("TZ")
@@ -1308,7 +1310,7 @@ def test_timezone_change_preserves_recent_owners_across_a_write(
     try:
         os.environ["TZ"] = old_zone
         time.tzset()
-        ledger = _ledger(tmp_path, retention_days=1, now=_Clock(now))
+        ledger = _ledger(tmp_path, retention_days=1, max_rows=max_rows, now=_Clock(now))
         ledger.record(
             source_id="src_old-zone", model_id="模型-β",
             usage=ProtocolUsageReport(input_tokens=7), at=now - timedelta(hours=6),
@@ -1323,13 +1325,17 @@ def test_timezone_change_preserves_recent_owners_across_a_write(
 
         os.environ["TZ"] = new_zone
         time.tzset()
-        reopened = _ledger(tmp_path, retention_days=1, now=_Clock(now))
+        reopened = _ledger(tmp_path, retention_days=1, max_rows=max_rows, now=_Clock(now))
         reopened.record(
             source_id="src_new-zone", model_id="模型-β",
             usage=ProtocolUsageReport(input_tokens=11), at=now,
         )
         persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
         hourly = _ledger(tmp_path, now=_Clock(now)).report(window="24h", now=now)
+        bounded_hourly = _ledger(tmp_path, max_rows=1, now=_Clock(now)).report(
+            window="24h", now=now,
+        )
+        daily = reopened.summary(days=1, now=now)
     finally:
         if previous_tz is None:
             os.environ.pop("TZ", None)
@@ -1337,6 +1343,13 @@ def test_timezone_change_preserves_recent_owners_across_a_write(
             os.environ["TZ"] = previous_tz
         time.tzset()
 
+    assert daily["totals"]["input_tokens"] == 11
+    assert bounded_hourly["totals"]["input_tokens"] == 11
+    if max_rows == 1:
+        assert [item["source_id"] for item in persisted] == ["src_new-zone"]
+        assert hourly["totals"]["requests"] == 1
+        assert hourly["totals"]["input_tokens"] == 11
+        return
     old = next(item for item in persisted if item["source_id"] == "src_old-zone")
     assert old["day"] == original["day"]
     assert old["input_tokens"] == 7

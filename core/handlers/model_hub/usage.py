@@ -620,7 +620,9 @@ def _keyed_identities(
     return sources, models
 
 
-def _recency(row: dict, ceiling: datetime) -> tuple[str, datetime]:
+def _recency(
+    row: dict, ceiling: datetime, *, utc_owner_days: bool = False,
+) -> tuple[str, datetime]:
     """Order rows oldest-metered first, so the bound evicts what costs least.
 
     Ordering by key instead would evict by spelling: an early-sorting model would
@@ -644,13 +646,26 @@ def _recency(row: dict, ceiling: datetime) -> tuple[str, datetime]:
     recurring: `_retained` keeps a future instant out of the file, and each time
     that was the only place it happened, the report path ordered by the raw value.
 
-    Membership is each caller's own filter: daily reports use local owner days,
-    while hourly reads and write retention also admit recent UTC evidence after
-    a timezone change. Keep the existing day-first survivor policy for the bounded
-    daily ledger; admitting an old-zone owner does not reassign its calendar day.
+    Daily reports retain the existing owner-day ordering. Write retention and
+    hourly reads also admit old-zone owners through UTC evidence, so their recency
+    calendar label must follow that evidence in the current zone. This changes
+    eviction only, never persisted daily ownership.
     """
 
     metered = _instant(row["last_metered_at"])
+    if utc_owner_days:
+        evidence = [metered] if metered is not None and metered <= ceiling else []
+        for item in row.get("hours") or ():
+            parts = _hour_key_parts(item.get("key"))
+            if parts is None or parts[1] > ceiling:
+                continue
+            evidence.append(parts[1])
+            latest = _instant(item.get("last_metered_at"))
+            if latest is not None and latest <= ceiling:
+                evidence.append(latest)
+        if evidence:
+            latest = max(evidence)
+            return (local_usage_day(latest).isoformat(), latest)
     if metered is None or metered > ceiling:
         return (row["day"], _OLDEST_INSTANT)
     return (row["day"], metered)
@@ -855,32 +870,22 @@ class BoundedUsageLedger:
         self._now = now
         self._lock = threading.RLock()
 
-    def _within_capacity(self, rows: list[dict], *, measured: datetime) -> list[dict]:
-        """Return at most `max_rows` of these rows, evicting the least recently metered.
+    def _within_capacity(
+        self, rows: list[dict], *, measured: datetime, utc_owner_days: bool = False,
+    ) -> list[dict]:
+        """Bound an already-reportable set using its admission policy.
 
-        `_recency` orders by day first, so this may only be handed rows that are
-        already reportable. Given a future-dated row it does the opposite of its
-        job: that row outranks every real one, survives, and then reads refuse it
-        — which is the defect `_retained` exists to close, and which reappeared
-        the one time this was called on rows straight out of the file.
-
-        So the two callers are the two places a reportable set is formed, and
-        neither is the parse. `_write` calls it on rows `_retained` has already
-        placed inside the ledger's own day window; `window` calls it on rows it
-        has already filtered to the requested one. Both keep the same survivors
-        in the same order.
-
-        `measured` is what those two filters cannot supply: the day they bound is
-        only the first half of the order, and an instant inside today can still be
-        one no clock has reached. It is the reading each caller already took for its
-        own window, so the eviction and the placement answer to one clock — and on
-        the write path it changes nothing, because `_retained` has already brought
-        every instant back under it.
+        Daily readers preserve owner-day ordering. Writes and hourly readers use
+        UTC evidence for recency too, so a future old-zone owner cannot displace a
+        newer call merely because its original calendar label sorts later.
         """
 
         if len(rows) <= self.max_rows:
             return rows
-        return sorted(rows, key=lambda row: _recency(row, measured))[-self.max_rows :]
+        return sorted(
+            rows,
+            key=lambda row: _recency(row, measured, utc_owner_days=utc_owner_days),
+        )[-self.max_rows :]
 
     def _read(self) -> _LedgerRead:
         if not self.path.exists():
@@ -977,7 +982,7 @@ class BoundedUsageLedger:
                 self.path,
                 _row_key(row),
             )
-        retained = self._within_capacity(holdable, measured=measured)
+        retained = self._within_capacity(holdable, measured=measured, utc_owner_days=True)
         write_state_document(self.path, sorted(retained, key=_row_key))
 
     def record(
@@ -1198,7 +1203,7 @@ class BoundedUsageLedger:
                 candidates.append(row)
                 continue
 
-        held = self._within_capacity(candidates, measured=report_instant)
+        held = self._within_capacity(candidates, measured=report_instant, utc_owner_days=True)
         if len(held) < len(candidates):
             logger.warning(
                 "Model Hub usage ledger %s held %d hourly report row(s) over "
