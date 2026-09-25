@@ -1746,7 +1746,7 @@ class CLIProxyEngineAdapter:
             inventory = await run_owned_in_thread(_auth_inventory, client)
         except EngineClientError as exc:
             raise EngineStateError("OAuth startup reconciliation failed") from exc
-        await self._reconcile_oauth_inventory(inventory)
+        await self._reconcile_oauth_inventory(inventory, isolate_errors=True)
         self._oauth_startup_reconciled = True
 
     async def stop_runtime(self) -> EngineStatus:
@@ -2694,20 +2694,37 @@ class CLIProxyEngineAdapter:
     async def _reconcile_oauth_inventory(
         self,
         inventory: Mapping[str, _AuthRecord],
+        *,
+        isolate_errors: bool = False,
     ) -> None:
-        await asyncio.to_thread(self._reconcile_oauth_inventory_sync, inventory)
+        await asyncio.to_thread(
+            self._reconcile_oauth_inventory_sync,
+            inventory,
+            isolate_errors=isolate_errors,
+        )
 
     def _reconcile_oauth_inventory_sync(
         self,
         inventory: Mapping[str, _AuthRecord],
+        *,
+        isolate_errors: bool = False,
     ) -> None:
         for auth in inventory.values():
             if auth.provider != "claude":
                 continue
-            self.state_store.reconcile_oauth_auth_file(
-                auth.name,
-                auth_provider=auth.provider,
-            )
+            try:
+                self.state_store.reconcile_oauth_auth_file(
+                    auth.name,
+                    auth_provider=auth.provider,
+                )
+            except EngineStateError as exc:
+                if not isolate_errors:
+                    raise
+                logger.warning(
+                    "Model Hub OAuth startup reconciliation skipped %s: %s",
+                    auth.name,
+                    exc,
+                )
 
     def _reconcile_oauth_credential_for_mutation(
         self,

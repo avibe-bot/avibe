@@ -1144,7 +1144,7 @@ class EngineStateStore:
             credential_ref, metadata = identity_matches[0]
             prefix = str(metadata.get("prefix") or "").strip()
             if not prefix or str(payload.get("prefix") or "").strip().strip("/") != prefix:
-                return None
+                raise EngineStateError("OAuth auth record prefix conflicts")
             updated = {
                 **metadata,
                 "auth_name": normalized_name,

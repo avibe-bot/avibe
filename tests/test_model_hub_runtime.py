@@ -1531,7 +1531,12 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
                         "id": "claude-00f765af-user@example.com.json",
                         "name": "claude-00f765af-user@example.com.json",
                         "provider": "claude",
-                    }
+                    },
+                    {
+                        "id": "claude-damaged.json",
+                        "name": "claude-damaged.json",
+                        "provider": "claude",
+                    },
                 ]
             }
 
@@ -1567,6 +1572,11 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
         new_name = "claude-00f765af-user@example.com.json"
         ref = store.bind_oauth_credential("src_fixture123", "anthropic", old_name)
         prefix = store.credential_metadata(ref)["prefix"]
+        damaged_ref = store.bind_oauth_credential(
+            "src_damaged123",
+            "anthropic",
+            "claude-damaged.json",
+        )
         store.write_oauth_auth_file(
             old_name,
             {
@@ -1576,6 +1586,17 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
                 "account_uuid": "account-a",
                 "organization_uuid": "organization-a",
                 "access_token": "private-access-fixture",
+            },
+        )
+        store.write_oauth_auth_file(
+            "claude-damaged.json",
+            {
+                "type": "claude",
+                "prefix": "foreign-prefix",
+                "email": "damaged@example.com",
+                "account_uuid": "damaged-account",
+                "organization_uuid": "organization-b",
+                "access_token": "private-access-damaged",
             },
         )
         store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
@@ -1590,6 +1611,7 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
         assert supervisor.start_calls == 1
         assert client.inventory_calls == 1
         assert store.credential_metadata(ref)["auth_name"] == new_name
+        assert store.credential_metadata(damaged_ref)["auth_name"] == "claude-damaged.json"
 
         await adapter.start()
         assert client.inventory_calls == 1
