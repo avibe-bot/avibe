@@ -53,3 +53,18 @@ operator check; never simulate success by updating this machine's installation.
 - Windows process/rollback fixtures are wired to the existing Windows CI runner.
 - No real updater secret was used, tag created, release published, or app replaced.
   Native signed two-version upgrade acceptance remains a release prerequisite.
+
+## First review follow-up
+
+Head `65ff58a2e701df861ddc6a1b0cedd9cfb676c51b` received one Codex finding:
+Windows recovery merged the backup into a partial installation. Recovery now
+removes the failed installation before copying the intact backup; native fixtures
+cover deleted installations, newly introduced DLLs/resources, and a successful
+installer exit followed by a rejected version. Native execution remains a
+Windows CI gate.
+
+Signed fixture files disable Git text conversion. All 14 tracked fixture files
+retain their exact signed bytes under a `core.autocrlf=true` checkout, and all
+five Rust updater contract tests pass. Release job condition fixtures now model
+resolution results and the desktop enable flag independently, including stable
+and TEST failures; the three focused Python release files pass 1,653 tests.

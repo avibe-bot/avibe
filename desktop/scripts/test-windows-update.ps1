@@ -35,23 +35,32 @@ public class Installer {
         var root = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         var joined = String.Join(" ", args);
         var destination = joined.Substring(joined.IndexOf("/D=") + 3);
-        if (File.Exists(Path.Combine(root, "fail"))) {
+        var mode = File.ReadAllText(Path.Combine(root, "mode"));
+        if (mode == "deleted") {
             Directory.Delete(destination, true);
             return 1;
+        }
+        if (mode == "partial" || mode == "wrong-version") {
+            File.WriteAllText(Path.Combine(destination, "new-only.dll"), "failed version bytes");
+            Directory.CreateDirectory(Path.Combine(destination, "new-resources"));
+            File.WriteAllText(Path.Combine(destination, "new-resources", "partial.txt"), "partial");
+            File.WriteAllText(Path.Combine(destination, "resources.txt"), "damaged resources");
+            return mode == "partial" ? 1 : 0;
         }
         File.Copy(Path.Combine(root, "next.exe"), Path.Combine(destination, "app.exe"), true);
         return 0;
     }
 }
 '@ -OutputAssembly $installer -OutputType ConsoleApplication
-    foreach ($failure in @($false, $true)) {
-        $directory = Join-Path $root ("installation space 中文 " + $failure)
-        $staging = Join-Path $root ("stage-" + $failure)
+    foreach ($mode in @('success', 'deleted', 'partial', 'wrong-version')) {
+        $failure = $mode -ne 'success'
+        $directory = Join-Path $root ("installation space 中文 " + $mode)
+        $staging = Join-Path $root ("stage-" + $mode)
         [IO.Directory]::CreateDirectory($directory) | Out-Null
         [IO.Directory]::CreateDirectory($staging) | Out-Null
         Copy-Item -LiteralPath $old -Destination (Join-Path $directory 'app.exe')
         [IO.File]::WriteAllText((Join-Path $directory 'resources.txt'), 'previous resources')
-        if ($failure) { [IO.File]::WriteAllText((Join-Path $root 'fail'), '') }
+        [IO.File]::WriteAllText((Join-Path $root 'mode'), $mode)
         $requestData = [pscustomobject]@{
             directory=$directory; staging=$staging; executable=(Join-Path $directory 'app.exe');
             installer=$installer; version='3.1.2'; pid=2147483647
@@ -65,6 +74,10 @@ public class Installer {
         }
         if ([IO.File]::ReadAllText((Join-Path $directory 'resources.txt')) -ne 'previous resources') {
             throw 'Previous application resources were not preserved'
+        }
+        if ((Test-Path -LiteralPath (Join-Path $directory 'new-only.dll')) -or
+            (Test-Path -LiteralPath (Join-Path $directory 'new-resources'))) {
+            throw 'Failed installation left new files mixed into the restored application'
         }
         $marker = Join-Path $directory $(if ($failure) { 'ran-old' } else { 'ran-new' })
         $deadline = [DateTime]::UtcNow.AddSeconds(10)

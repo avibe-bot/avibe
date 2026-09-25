@@ -32,9 +32,13 @@ function Invoke-AvibeReplacement($requestData) {
         $failure = $_
         if ($started) {
             try {
-                # Keep the backup until a complete copy is back in place.
-                [IO.Directory]::CreateDirectory($requestData.directory) | Out-Null
-                Copy-Item -Path (Join-Path $backup '*') -Destination $requestData.directory -Recurse -Force
+                # A failed installer may have introduced DLLs/resources that are
+                # absent from the backup. Never merge those into the old app.
+                # Keep the backup intact even if cleanup or restoration fails.
+                if (Test-Path -LiteralPath $requestData.directory) {
+                    Remove-Item -LiteralPath $requestData.directory -Recurse -Force
+                }
+                Copy-Item -LiteralPath $backup -Destination $requestData.directory -Recurse -Force
                 Start-Process -FilePath $requestData.executable
             } catch {
                 $_ | Out-String | Set-Content -LiteralPath (Join-Path $requestData.staging 'restore-error.txt')
