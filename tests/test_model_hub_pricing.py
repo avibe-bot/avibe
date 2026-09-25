@@ -465,9 +465,14 @@ def test_no_aggregate_over_an_unknown_part_is_published_as_exact(tmp_path, model
     ledger.record_many(calls)
     identities = [SourceIdentity("src_a", "A", ["grok-4.6", model_id])]
     documents = [ledger.summary(days=7, now=now, identities=identities, prices=_table())]
-    # A legacy daily row has no hours, so only daily windows cover an uncaptured write.
-    windows = ("7d",) if usage == "uncaptured" else ("24h", "7d")
-    documents += [ledger.report(window=w, now=now, identities=identities, prices=_table()) for w in windows]
+    documents += [ledger.report(window=w, now=now, identities=identities, prices=_table()) for w in ("7d",)]
+    hourly = ledger.report(window="24h", now=now, identities=identities, prices=_table())
+    if usage == "uncaptured":
+        # A legacy daily row has no hours to place, so the 24 hours it overlaps are
+        # incomplete and their valuation is a floor even though the row is not in them.
+        assert hourly["totals"]["api_cost_lower_bound"] is True
+    else:
+        documents.append(hourly)
     for document in documents:
         covering = [
             aggregate for aggregate in _priced_aggregates(document)
@@ -485,4 +490,28 @@ def test_no_aggregate_over_an_unknown_part_is_published_as_exact(tmp_path, model
     assert value["week"]["api_cost_lower_bound"] is True
     assert value["period"]["api_cost_lower_bound"] is True
     assert totals["week"]["api_cost_lower_bound"] is True
+    assert totals["period"]["api_cost_lower_bound"] is True
+
+
+def test_a_degraded_ledger_read_values_nothing_as_exact(tmp_path):
+    """MH-PRICE-012: Rows a ledger read had to drop are unknown usage, so every valuation over the read is a floor."""
+
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "usage.json"
+    path.write_text("{not json", encoding="utf-8")
+    ledger = BoundedUsageLedger(path, now=lambda: now)
+    identities = [SourceIdentity("src_a", "A", ["claude-opus-5"])]
+    documents = [ledger.summary(days=7, now=now, identities=identities, prices=_table())]
+    documents += [ledger.report(window=w, now=now, identities=identities, prices=_table()) for w in ("24h", "7d")]
+    for document in documents:
+        assert document["totals"]["api_cost_usd"] == 0
+        assert document["totals"]["api_cost_lower_bound"] is True
+
+    costs = ledger.daily_costs(days=31, now=now, identities=identities, prices=_table())
+    sources = [{"source_id": "src_a", "vendor": "anthropic", "plan": "max_20x"}]
+    totals = quota_values(sources, daily_costs=costs, prices=_table(), today=date(2026, 9, 25))
+    value = sources[0]["value"]
+    assert value["fee_usd"] == 200
+    assert value["week"]["api_cost_lower_bound"] is True
+    assert value["period"]["api_cost_lower_bound"] is True
     assert totals["period"]["api_cost_lower_bound"] is True

@@ -200,7 +200,8 @@ const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ va
             {unpriced(value.period) ? t('settings.models.quota.value.noPrice') : text.usd(value.period)}
             {payback !== null && (
             <em className={cn(payback.kind !== 'short' && 'is-good')} data-quota-payback={payback.kind}>
-              {payback.kind === 'paid'
+              {/* 「刚好回本」 sizes the value against the fee; a floor there only proves it is at least paid back. */}
+              {payback.kind === 'paid' || (payback.kind === 'even' && floor)
                   ? t('settings.models.quota.value.paid', { multiple: atLeast(text.multiple(payback.multiple), floor) })
                   : payback.kind === 'even'
                     ? t('settings.models.quota.value.even')

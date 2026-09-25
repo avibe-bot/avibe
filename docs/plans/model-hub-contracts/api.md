@@ -1514,7 +1514,9 @@ price, never as free. `api_cost_lower_bound` is true when `api_cost_usd` is only
 floor: some tokens are excluded, some requests have no token report
 (`requests > token_reports`), or priced usage includes reports from before cache
 writes were captured on a model that lists a cache-write price (five-minute or
-one-hour) above its input price.
+one-hour) above its input price. It is also true for every aggregate of a read
+that could not see all usage: a degraded ledger read (rows dropped), or an hourly
+bucket, and the 24-hour totals over it, whose `history_complete` is false.
 
 The override file is optional and read on every summary; an unreadable file is
 ignored with a warning. Every member is optional:

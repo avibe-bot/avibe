@@ -55,6 +55,7 @@ capability:
     - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
     - tests/test_model_hub_persisted_migration.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py
     - tests/e2e/test_model_hub_guards.py
     - tests/e2e/test_model_hub_migration.py
     - tests/e2e/test_model_hub_migration_persisted.py
@@ -1023,6 +1024,12 @@ scenarios:
     kind: observation
     layer: unit
     test: tests/test_model_hub_pricing.py::test_priced_usage_reads_match_the_usage_summary_contract
+  - id: MH-PRICE-SCENARIO-001
+    name: A metered stream's cache writes and an unreported call reach the served usage and quota value at API price, as a floor
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py::test_mh_price_scenario_001_a_metered_stream_is_valued_through_usage_and_quota
   - id: MH-PRICE-012
     name: Any unpriced, unreported, or uncaptured part reaches every usage aggregate and quota value above it as a floor
     status: covered

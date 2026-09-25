@@ -399,6 +399,14 @@ describe('QuotaTab', () => {
       expect(screen.getByRole('article').textContent).toContain('回本 ≥ 2.0 倍');
       expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('已回本，多薅了 ≥ $200.00');
       cleanup();
+      // A floor just past the fee is at least paid back, never 「刚好回本」.
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(210, 200, { period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...floor(210) } }) })],
+        totals(210, { cost: 210, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 1.05, ...floor(210) } }),
+      )));
+      expect(screen.getByRole('article').textContent).not.toContain('刚好回本');
+      expect(screen.getByRole('article').textContent).toContain('回本 ≥ 1.0 倍');
+      cleanup();
       // A floor of zero (calls whose size went unreported) is still a floor: 「≥ $0.00」, never an exact zero or a shortfall.
       const zero = priced(0, { api_cost_lower_bound: true });
       draw(readyRegion(valued(

@@ -798,10 +798,15 @@ def _priced_bucket_row(
     row: dict,
     prices: Optional[PriceTable],
     keyed_model_labels: Mapping[tuple[str, str], str],
+    *,
+    degraded: bool = False,
 ) -> dict:
     if prices is None:
         return row
-    return {**row, **row_cost(row, _row_price(row, prices, keyed_model_labels)).fields()}
+    cost = row_cost(row, _row_price(row, prices, keyed_model_labels))
+    # A degraded read lost rows of unknown size, so no figure from it is exact.
+    cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
+    return {**row, **cost.fields()}
 
 
 def _recency(
@@ -1421,7 +1426,7 @@ class BoundedUsageLedger:
             if (key := usage_ledger_key(identity.source_id)) is not None
         }
         _labels, keyed_model_labels = _keyed_identities(identities)
-        rows, _degraded = self._window_rows(days=days, now=now)
+        rows, degraded = self._window_rows(days=days, now=now)
         costs: dict[str, dict[str, Cost]] = {}
         for row in rows:
             source_id = keyed_sources.get(row["source_id"])
@@ -1429,6 +1434,12 @@ class BoundedUsageLedger:
                 continue
             cost = row_cost(row, _row_price(row, prices, keyed_model_labels))
             costs.setdefault(source_id, {}).setdefault(row["day"], Cost()).add(cost)
+        if degraded:
+            # Rows of unknown size were lost, so every Source's value is a floor:
+            # today lies in every span the quota page sums.
+            today = local_usage_day(now).isoformat()
+            for source_id in keyed_sources.values():
+                costs.setdefault(source_id, {}).setdefault(today, Cost()).add(Cost(api_cost_lower_bound=True))
         return costs
 
     def _hourly_rows(
@@ -1517,7 +1528,7 @@ class BoundedUsageLedger:
 
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
-        rows, _degraded = self._window_rows(days=bounded_days, now=now)
+        rows, degraded = self._window_rows(days=bounded_days, now=now)
         return self._summary_from_rows(
             rows,
             window_days=bounded_days,
@@ -1525,6 +1536,7 @@ class BoundedUsageLedger:
             to_day=today.isoformat(),
             identities=identities,
             prices=prices,
+            degraded=degraded,
         )
 
     def _summary_from_rows(
@@ -1536,11 +1548,13 @@ class BoundedUsageLedger:
         to_day: str,
         identities: Optional[Sequence[SourceIdentity]],
         prices: Optional[PriceTable] = None,
+        degraded: bool = False,
     ) -> dict:
         """Aggregate one exact set of daily or hourly rows.
 
         With a price table, every aggregate also carries its API-price valuation,
         summed from the same rows so a total always equals the sum of its parts.
+        A `degraded` read lost rows of unknown size, so every valuation is a floor.
         """
 
         keyed_source_labels, keyed_model_labels = _keyed_identities(identities)
@@ -1554,7 +1568,9 @@ class BoundedUsageLedger:
             published = {key: value for key, value in target.items() if key != omit}
             if prices is None:
                 return published
-            return {**published, **costs.get(id(target), Cost()).fields()}
+            cost = costs.get(id(target), Cost())
+            cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
+            return {**published, **cost.fields()}
 
         totals = _empty_totals()
         sources: dict[str, dict] = {}
@@ -1655,6 +1671,7 @@ class BoundedUsageLedger:
             to_day=today.isoformat(),
             identities=identities,
             prices=prices,
+            degraded=read_degraded,
         )
         _source_labels, keyed_model_labels = _keyed_identities(identities)
         by_day = {
@@ -1673,6 +1690,7 @@ class BoundedUsageLedger:
                         },
                         prices,
                         keyed_model_labels,
+                        degraded=read_degraded,
                     )
                 )
         buckets = []
@@ -1808,6 +1826,8 @@ class BoundedUsageLedger:
                     },
                     prices,
                     keyed_model_labels,
+                    # An incomplete hour holds usage it cannot place, so its cost is a floor.
+                    degraded=index in incomplete,
                 )
                 for row in sorted(
                     measured_by_bucket[index].values(),
@@ -1836,6 +1856,7 @@ class BoundedUsageLedger:
             to_day=days[-1],
             identities=identities,
             prices=prices,
+            degraded=bool(incomplete),
         )
         return {
             **summary,
