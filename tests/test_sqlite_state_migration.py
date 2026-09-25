@@ -6900,8 +6900,9 @@ def test_legacy_sessions_import_still_requires_platform_for_an_unresolvable_lega
 def test_state_under_any_directory_name_migrates_in_place(tmp_path: Path) -> None:
     # One name that carries every character Alembic's ConfigParser treats specially
     # or that SQLAlchemy 2.1 percent-encodes when it renders the URL: non-ASCII, a
-    # literal `%`, and an interpolation-shaped `%(here)s`.
-    state_dir = tmp_path / "麦 50%(here)s"
+    # literal `%`, an interpolation-shaped `%(here)s`, and URL-escape-shaped
+    # `%20` / `%2F` that must stay literal rather than decode to a space or `/`.
+    state_dir = tmp_path / "麦 50%(here)s a%20b a%2Fb"
     db_path = state_dir / "vibe.sqlite"
 
     cfg = migrations.alembic_config(db_path)
