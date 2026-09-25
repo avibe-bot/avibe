@@ -1062,6 +1062,10 @@ class EngineStateStore:
                 raise EngineStateError("OAuth auth record binding is ambiguous")
             if exact:
                 credential_ref, metadata = exact[0]
+                stored_prefix = str(metadata.get("prefix") or "").strip().strip("/")
+                payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
+                if not stored_prefix or payload_prefix != stored_prefix:
+                    raise EngineStateError("OAuth auth record prefix conflicts")
                 stored_identity = _oauth_identity_from_metadata(metadata)
                 if (
                     stored_identity

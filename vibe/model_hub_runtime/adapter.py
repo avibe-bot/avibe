@@ -3066,6 +3066,7 @@ class CLIProxyEngineAdapter:
                 # confirmed before revocation can discard the minted ref.
                 if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
                     credential_ref,
+                    auth_name_override=auth.name,
                 ):
                     self._set_retained_material(
                         flow,
@@ -3116,15 +3117,23 @@ class CLIProxyEngineAdapter:
         except EngineUnavailableError:
             return False
 
-    async def _cleanup_oauth_material(self, credential_ref: str) -> bool:
+    async def _cleanup_oauth_material(
+        self,
+        credential_ref: str,
+        *,
+        auth_name_override: str | None = None,
+    ) -> bool:
         def remove_grant(client: EngineClient | None) -> bool:
-            try:
-                auth_name = self._reconcile_oauth_credential_for_mutation(
-                    credential_ref,
-                    client,
-                )
-            except EngineStateError:
-                return False
+            if auth_name_override is None:
+                try:
+                    auth_name = self._reconcile_oauth_credential_for_mutation(
+                        credential_ref,
+                        client,
+                    )
+                except EngineStateError:
+                    return False
+            else:
+                auth_name = auth_name_override
             engine_delete_succeeded = True
             if client is not None:
                 try:

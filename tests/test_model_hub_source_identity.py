@@ -289,6 +289,34 @@ def test_claude_exact_filename_rewrite_rejects_identity_change(tmp_path):
     assert stored["oauth_identity"]["organization_uuid"] == "organization-a"
 
 
+@pytest.mark.parametrize("replacement_prefix", ["foreign-prefix", None])
+def test_claude_exact_filename_rewrite_rejects_prefix_change(tmp_path, replacement_prefix):
+    store = EngineStateStore(tmp_path / "engine")
+    auth_name = "claude-user@example.com.json"
+    ref = store.bind_oauth_credential("src_identity001", "anthropic", auth_name)
+    prefix = store.credential_metadata(ref)["prefix"]
+    identity = {
+        "type": "claude",
+        "prefix": prefix,
+        "email": "user@example.com",
+        "account_uuid": "account-a",
+        "organization_uuid": "organization-a",
+        "access_token": "private-access-fixture",
+    }
+    store.write_oauth_auth_file(auth_name, identity)
+    store.reconcile_oauth_auth_file(auth_name, auth_provider="claude")
+    replacement = {**identity, "prefix": replacement_prefix}
+    store.write_oauth_auth_file(auth_name, replacement)
+
+    with pytest.raises(EngineStateError, match="prefix conflicts"):
+        store.reconcile_oauth_auth_file(auth_name, auth_provider="claude")
+
+    stored = store.credential_metadata(ref)
+    assert stored["auth_name"] == auth_name
+    assert stored["prefix"] == prefix
+    assert stored["oauth_identity"]["organization_uuid"] == "organization-a"
+
+
 def test_claude_filename_migration_does_not_merge_different_organizations(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     old_name = "claude-user@example.com.json"

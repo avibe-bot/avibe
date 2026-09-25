@@ -8007,19 +8007,20 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
-        store.write_oauth_auth_file(
-            "claude-account.json",
-            {
-                "type": "claude",
-                "email": "user@example.com",
-                "organization_uuid": "organization-a",
-                "account_uuid": "account-a",
-            },
-        )
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
             "claude-account.json",
+        )
+        store.write_oauth_auth_file(
+            "claude-account.json",
+            {
+                "type": "claude",
+                "prefix": store.credential_metadata(credential_ref)["prefix"],
+                "email": "user@example.com",
+                "organization_uuid": "organization-a",
+                "account_uuid": "account-a",
+            },
         )
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store),  # type: ignore[arg-type]
@@ -8137,6 +8138,10 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                 }:
                     raise EngineClientError("patch failed")
                 self.patches.append(dict(payload or {}))
+                auth_path = self.store.auth_dir / str((payload or {})["name"])
+                auth_payload = json.loads(auth_path.read_text(encoding="utf-8"))
+                auth_payload["prefix"] = (payload or {})["prefix"]
+                self.store.write_oauth_auth_file(auth_path.name, auth_payload)
                 return {"status": "ok"}
             raise AssertionError((method, path, query, payload, timeout))
 
@@ -8246,6 +8251,7 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         store.delete_oauth_auth_file = delete_oauth_auth_file  # type: ignore[method-assign]
         store.revoke_credential = revoke_credential  # type: ignore[method-assign]
         client = Client()
+        client.store = store
         if oauth_record_case == "renamed_conflict":
             def rename_auth_file() -> None:
                 old_path = store.auth_dir / "claude-account.json"

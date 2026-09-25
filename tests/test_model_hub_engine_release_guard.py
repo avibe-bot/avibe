@@ -220,3 +220,9 @@ def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
     assert "--latest=false" in workflow
     assert "missing_assets" in workflow
     assert "--clobber" not in workflow
+    assert "publish-patched-source:" in workflow
+    assert "needs: build-patched-source" in workflow
+    assert "actions/download-artifact@" in workflow
+    assert "python3 scripts/model_hub_engine_release_guard.py verify" in workflow
+    assert 'gh release create "$release_tag"' in workflow
+    assert 'python3 scripts/model_hub_engine_release_guard.py fetch' in workflow
