@@ -72,7 +72,7 @@ Verify against the current machine; these are starting points.
 
 | Layer | Where | How it changes |
 | --- | --- | --- |
-| Avibe runtime prompt | Avibe repo `core/prompts/*.md` | Proposal to the Avibe repository |
+| Avibe runtime prompt | `vibe debug prompt export --format json` (source history in the Avibe repo `core/prompts/`, if checked out) | Proposal to the Avibe repository |
 | Global rules | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, … | Edit the source if the file is generated or imports others |
 | Project rules | nearest `AGENTS.md` / `CLAUDE.md` chain | The repository's own delivery process |
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
@@ -81,7 +81,8 @@ Verify against the current machine; these are starting points.
 | Delegation briefs and callbacks | `agent_runs.message` / `result_text` | The prompt or Skill that writes them |
 
 Only Skill descriptions on the injected catalog page (`vibe skill list`,
-page 1) are loaded every turn; later pages, `disable-model-invocation` Skills,
+page 1, run from the target Session's working directory so project Skills
+resolve as they did at run time) are loaded every turn; later pages, `disable-model-invocation` Skills,
 Skill bodies, and references load on demand.
 
 ## Finding evidence
@@ -89,13 +90,15 @@ Skill bodies, and references load on demand.
 Resolve the actual target (backend, model, effort) from the run or session
 record, not the Agent's current definition, which may have changed since.
 Attribute a symptom only to prompt text that existed when it ran: `git log`
-recovers file-owned text, but Agent prompts and Task and Watch messages live in
-Avibe state without history, so say when attribution is unconfirmed.
+recovers file-owned text, and each run's `prompt` and `message` in
+`vibe runs show` snapshot what a Task or Watch actually sent; Agent system
+prompts live in Avibe state without history, so say when attribution is
+unconfirmed.
 
 `vibe runs show <id>` gives one run's prompt, result, and callback state;
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
-`messages`. Start from what the user reported and widen only within its
-`scope_id`, so other users' and projects' conversations stay out; the user's
+`messages`. Keep evidence to the Session the user reported, plus any others they point
+to — a channel's `scope_id` can hold other people's threads; the user's
 own corrections in `messages` are usually the sharpest evidence. Two starting
 points:
 
@@ -110,7 +113,8 @@ from agent_runs
 where session_id = '<session>'
   and run_type in ('agent_run','scheduled','watch','webhook','task_escalation')
   and (status in ('failed','canceled')
-       or (status in ('succeeded','completed') and coalesce(trim(result_text),'') = ''))
+       or (status in ('succeeded','completed') and exit_code is null
+           and coalesce(trim(result_text),'') = ''))
 order by created_at desc;
 ```
 
