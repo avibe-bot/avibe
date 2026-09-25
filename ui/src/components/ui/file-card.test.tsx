@@ -30,6 +30,18 @@ describe('FileCard media', () => {
     expect(screen.getByLabelText('chat.media.download')).toBeTruthy();
   });
 
+  it('never mounts a player on the label alone — only once /meta confirms audio', async () => {
+    let resolve!: (r: Response) => void;
+    mock.apiFetch.mockReturnValue(new Promise<Response>((r) => { resolve = r; }));
+    const { container } = render(<FileCard href="/api/media/tok">report.mp3</FileCard>);
+
+    expect(container.querySelector('audio')).toBeNull();
+    resolve(new Response(JSON.stringify({ name: 'report.pdf', ext: 'pdf', content_type: 'application/pdf', size: 1024 }), { status: 200 }));
+    await waitFor(() => expect(screen.getByText(/PDF/)).toBeTruthy());
+    expect(container.querySelector('audio')).toBeNull();
+    expect(screen.getByLabelText('chat.media.preview')).toBeTruthy();
+  });
+
   it('keeps video behind the preview control rather than autoloading it in the card', async () => {
     serveMeta({ name: 'demo.mp4', ext: 'mp4', content_type: 'video/mp4', size: 4096 });
     const { container } = render(<FileCard href="/api/media/tok">Demo</FileCard>);

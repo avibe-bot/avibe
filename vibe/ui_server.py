@@ -10413,66 +10413,34 @@ async def files_meta(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-def _parse_single_byte_range(header: str | None, total: int) -> tuple[int, int] | bool | None:
-    """Resolve a single ``Range: bytes=`` spec against ``total`` bytes.
-
-    Returns ``(start, end)`` (inclusive) for a satisfiable range, ``False`` when it is
-    unsatisfiable (416), and ``None`` to serve the whole body (no header, multi-range,
-    or a malformed spec — RFC 9110 lets a server ignore those). Native ``<audio>`` /
-    ``<video>`` players (Safari requires it) seek through these requests.
-    """
-    if not header:
-        return None
-    unit, _, spec = header.partition("=")
-    if unit.strip().lower() != "bytes" or "," in spec:
-        return None
-    first, sep, last = spec.strip().partition("-")
-    if not sep or not (first.isdigit() or last.isdigit()) or (first and not first.isdigit()) or (last and not last.isdigit()):
-        return None
-    if not first:
-        suffix = int(last)
-        if suffix == 0 or total == 0:
-            return False
-        return max(total - suffix, 0), total - 1
-    start = int(first)
-    end = min(int(last), total - 1) if last else total - 1
-    if last and int(last) < start:
-        return None
-    if start >= total:
-        return False
-    return start, end
-
-
 @app.get("/api/files/content", include_in_schema=False)
 async def files_content(starlette_request: FastAPIRequest):
     async def handler():
         from core import file_browser_service
 
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "private, no-store",
+            "Accept-Ranges": "bytes",
+        }
         try:
             content = await asyncio.to_thread(
                 file_browser_service.file_content,
                 request.args.get("path") or "",
                 download=request.args.get("download") == "1",
+                range_header=starlette_request.headers.get("range"),
             )
+        except file_browser_service.RangeNotSatisfiableError as exc:
+            return FastAPIResponse(status_code=416, headers={**headers, "Content-Range": f"bytes */{exc.size}"})
         except Exception as exc:
             return _file_browser_error_response(exc)
-        headers = {
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-            "Cache-Control": "private, no-store",
-            "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
-            "Accept-Ranges": "bytes",
-        }
-        total = len(content.data)
-        byte_range = _parse_single_byte_range(starlette_request.headers.get("range"), total)
-        if byte_range is None:
+        headers["Content-Disposition"] = f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}"
+        if content.byte_range is None:
             return FastAPIResponse(content=content.data, media_type=content.mime, headers=headers)
-        if byte_range is False:
-            headers["Content-Range"] = f"bytes */{total}"
-            return FastAPIResponse(status_code=416, headers=headers)
-        start, end = byte_range
-        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-        return FastAPIResponse(content=content.data[start : end + 1], status_code=206, media_type=content.mime, headers=headers)
+        start, end = content.byte_range
+        headers["Content-Range"] = f"bytes {start}-{end}/{content.size}"
+        return FastAPIResponse(content=content.data, status_code=206, media_type=content.mime, headers=headers)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -10828,7 +10796,8 @@ async def files_search_undo(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-# Content types the media proxy is willing to serve ``inline``. Anything else —
+# Content types the media proxy is willing to serve ``inline``, plus every audio/* and
+# video/* type (``core.media_types.is_inline_safe_type``). Anything else —
 # text/html, image/svg+xml, xml, application/octet-stream, unknown — is forced to
 # ``attachment`` so a preview-open of agent-produced ACTIVE content can't execute
 # script on the UI origin (``nosniff`` doesn't help when the type IS active).
@@ -10845,29 +10814,6 @@ _INLINE_SAFE_MEDIA_TYPES = {
     "image/heif",
     "application/pdf",
     "text/plain",
-    "audio/mpeg",
-    "audio/mp4",
-    "audio/aac",
-    "audio/ogg",
-    "audio/wav",
-    "audio/webm",
-    "audio/flac",
-    "audio/x-m4a",
-    # Aliases Python's ``mimetypes`` and browsers report for common audio/video; keep in sync with
-    # the Web UI player allowlist (ui/src/lib/filePreview.ts ``mediaKind``).
-    "audio/x-wav",
-    "audio/wave",
-    "audio/vnd.wave",
-    "audio/mp3",
-    "audio/mp4a-latm",
-    "audio/x-aac",
-    "audio/x-flac",
-    "audio/opus",
-    "video/x-m4v",
-    "video/mp4",
-    "video/webm",
-    "video/ogg",
-    "video/quicktime",
 }
 
 
@@ -11013,8 +10959,11 @@ def _registered_media_response(
     filename = row.get("file_name") or candidate.name
     # Force download for non-allowlisted (active) types even without ?download=1,
     # so previewing an agent-produced HTML/SVG can't run script on this origin.
-    base_ct = mime_type.split(";", 1)[0].strip().lower()
-    force_download = request.args.get("download") == "1" or base_ct not in _INLINE_SAFE_MEDIA_TYPES
+    from core.media_types import is_inline_safe_type
+
+    # The same ``mime_type`` is sent as Content-Type (with nosniff), so an inline response is always
+    # rendered as exactly the type it was judged by — even when an upload's declared type is wrong.
+    force_download = request.args.get("download") == "1" or not is_inline_safe_type(mime_type, _INLINE_SAFE_MEDIA_TYPES)
     disposition = "attachment" if force_download else "inline"
     response.headers["Content-Disposition"] = f"{disposition}; filename*=UTF-8''{quote(filename)}"
     return response

@@ -172,11 +172,11 @@ export function docPreviewKind(name: string, mime?: string | null, serverExt?: s
 // of opening a broken player. An unambiguous media ext decides; Ogg and WebM containers hold either
 // audio or video, so for those an explicit content type wins and the ext only supplies the default.
 // Otherwise the content type (including the aliases Python's ``mimetypes`` emits, e.g. ``audio/x-wav``)
-// classifies a label-only chat link. Keep the MIME sets within the server's inline allowlists
-// (``_INLINE_SAFE_MEDIA_TYPES`` / ``INLINE_SAFE_CONTENT_TYPES``).
+// classifies a label-only chat link. The server serves every audio/* and video/* inline; keep the ext
+// sets within ``core/media_types.py`` ``MEDIA_TYPES_BY_EXT`` so each one is also guessed as media there.
 export type MediaKind = 'audio' | 'video';
-const AUDIO_EXT = new Set(['wav', 'mp3', 'm4a', 'aac', 'oga', 'opus', 'flac']);
-const VIDEO_EXT = new Set(['mp4', 'm4v', 'mov']);
+const AUDIO_EXT = new Set(['wav', 'mp3', 'm4a', 'aac', 'oga', 'opus', 'flac', 'weba']);
+const VIDEO_EXT = new Set(['mp4', 'm4v', 'mov', 'ogv']);
 const CONTAINER_EXT: Record<string, MediaKind> = { ogg: 'audio', webm: 'video' };
 const AUDIO_MIME = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave',

@@ -42,8 +42,8 @@ describe('File Browser open classification', () => {
 
 describe('audio / video preview classification', () => {
   it.each([
-    ...['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac'].map((ext) => [`clip.${ext}`, 'audio'] as const),
-    ...['mp4', 'm4v', 'webm', 'mov'].map((ext) => [`clip.${ext}`, 'video'] as const),
+    ...['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'weba'].map((ext) => [`clip.${ext}`, 'audio'] as const),
+    ...['mp4', 'm4v', 'webm', 'mov', 'ogv'].map((ext) => [`clip.${ext}`, 'video'] as const),
   ])('renders %s as %s', (name, kind) => {
     expect(previewRenderKind(name)).toBe(kind);
   });

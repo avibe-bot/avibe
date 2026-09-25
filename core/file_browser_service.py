@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
+from core.media_types import is_inline_safe_type
+
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -30,6 +32,7 @@ DELETE_UNDO_ENTRY_SIZE_CAP_BYTES = 512 * 1024 * 1024
 DELETE_UNDO_TOTAL_SIZE_CAP_BYTES = 2 * 1024 * 1024 * 1024
 COPY_TOTAL_SIZE_CAP_BYTES = 2 * 1024 * 1024 * 1024
 
+# Every audio/* and video/* type is inline-safe too (``core.media_types.is_inline_safe_type``).
 INLINE_SAFE_CONTENT_TYPES = {
     "image/png",
     "image/jpeg",
@@ -45,30 +48,35 @@ INLINE_SAFE_CONTENT_TYPES = {
     "text/markdown",
     "text/csv",
     "application/json",
-    "audio/mpeg",
-    "audio/mp4",
-    "audio/aac",
-    "audio/ogg",
-    "audio/wav",
-    "audio/webm",
-    "audio/flac",
-    "audio/x-m4a",
-    # Aliases Python's ``mimetypes`` and browsers report for common audio/video; keep in sync with
-    # the Web UI player allowlist (ui/src/lib/filePreview.ts ``mediaKind``).
-    "audio/x-wav",
-    "audio/wave",
-    "audio/vnd.wave",
-    "audio/mp3",
-    "audio/mp4a-latm",
-    "audio/x-aac",
-    "audio/x-flac",
-    "audio/opus",
-    "video/x-m4v",
-    "video/mp4",
-    "video/webm",
-    "video/ogg",
-    "video/quicktime",
 }
+
+# ``Range: bytes=<first>-<last>`` with bounded digits: a longer number is treated as malformed (full
+# 200 body) rather than handed to int(). A comma never matches, so multi-range requests also fall back.
+_BYTE_RANGE_RE = re.compile(r"^\s*bytes\s*=\s*(\d{0,20})\s*-\s*(\d{0,20})\s*$", re.IGNORECASE)
+
+
+def parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
+    """Resolve a single ``Range: bytes=`` spec against ``size`` bytes into an inclusive span.
+
+    Returns ``None`` to serve the whole body (no header, multi-range, or malformed spec — RFC 9110
+    lets a server ignore those) and raises ``RangeNotSatisfiableError`` for a parsable range that
+    starts at or beyond the end of the file."""
+    match = _BYTE_RANGE_RE.match(header or "")
+    if not match or not (match.group(1) or match.group(2)):
+        return None
+    first, last = match.group(1), match.group(2)
+    if not first:
+        suffix = int(last)
+        if suffix == 0 or size == 0:
+            raise RangeNotSatisfiableError(size)
+        return max(size - suffix, 0), size - 1
+    start = int(first)
+    if last and int(last) < start:
+        return None
+    if start >= size:
+        raise RangeNotSatisfiableError(size)
+    return start, min(int(last), size - 1) if last else size - 1
+
 
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
@@ -104,6 +112,12 @@ class FileBrowserError(Exception):
         self.status_code = status_code
 
 
+class RangeNotSatisfiableError(FileBrowserError):
+    def __init__(self, size: int) -> None:
+        super().__init__("range_not_satisfiable", "Requested range not satisfiable", 416)
+        self.size = size
+
+
 class NotFoundError(FileBrowserError):
     def __init__(self, message: str = "Path not found") -> None:
         super().__init__("not_found", message, 404)
@@ -120,6 +134,9 @@ class FileContent:
     mime: str
     disposition: str
     data: bytes
+    size: int = 0
+    # Inclusive (start, end) when ``data`` is a byte-range slice of the ``size``-byte file.
+    byte_range: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -646,14 +663,13 @@ def metadata(raw_path: str) -> dict[str, Any]:
     }
 
 
-def file_content(raw_path: str, *, download: bool = False) -> FileContent:
+def file_content(raw_path: str, *, download: bool = False, range_header: str | None = None) -> FileContent:
     path = _require_regular_file(raw_path)
     stat_result = _stat_existing(path)
     if stat_result.st_size > MAX_FILE_BYTES:
         raise FileBrowserError("too_large", "File is too large", 413)
     mime = _guess_mime(path)
-    base_mime = mime.split(";", 1)[0].strip().lower()
-    disposition = "attachment" if download or base_mime not in INLINE_SAFE_CONTENT_TYPES else "inline"
+    disposition = "attachment" if download or not is_inline_safe_type(mime, INLINE_SAFE_CONTENT_TYPES) else "inline"
     try:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
@@ -665,8 +681,15 @@ def file_content(raw_path: str, *, download: bool = False) -> FileContent:
                 raise FileBrowserError("not_file", "Path is not a regular file", 400)
             if stat_result.st_size > MAX_FILE_BYTES:
                 raise FileBrowserError("too_large", "File is too large", 413)
+            size = stat_result.st_size
+            # A media seek reads only the requested span from the already-validated fd.
+            byte_range = parse_byte_range(range_header, size)
             with os.fdopen(fd, "rb", closefd=False) as handle:
-                data = handle.read(MAX_FILE_BYTES + 1)
+                if byte_range is None:
+                    data = handle.read(MAX_FILE_BYTES + 1)
+                else:
+                    handle.seek(byte_range[0])
+                    data = handle.read(byte_range[1] - byte_range[0] + 1)
         finally:
             os.close(fd)
     except FileNotFoundError as exc:
@@ -677,7 +700,12 @@ def file_content(raw_path: str, *, download: bool = False) -> FileContent:
         raise FileBrowserError("fs_error", str(exc), 400) from exc
     if len(data) > MAX_FILE_BYTES:
         raise FileBrowserError("too_large", "File is too large", 413)
-    return FileContent(path=path, mime=mime, disposition=disposition, data=data)
+    if byte_range is not None:
+        # The file may have shrunk after fstat; report the span actually read.
+        byte_range = (byte_range[0], byte_range[0] + len(data) - 1) if data else None
+        if byte_range is None:
+            raise RangeNotSatisfiableError(size)
+    return FileContent(path=path, mime=mime, disposition=disposition, data=data, size=size, byte_range=byte_range)
 
 
 def _audit_mutation(op: str, path: Path, **extra: Any) -> None:

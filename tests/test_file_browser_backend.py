@@ -2188,6 +2188,9 @@ def test_symlink_mutations_operate_on_link_not_target(tmp_path):
         ("bytes=240-999", 206, bytes(range(240, 256)), "bytes 240-255/256"),
         ("bytes=256-", 416, b"", "bytes */256"),
         ("bytes=0-1,4-5", 200, bytes(range(256)), None),
+        ("bytes=31-16", 200, bytes(range(256)), None),
+        ("bytes=" + "9" * 5000 + "-", 200, bytes(range(256)), None),
+        ("items=0-15", 200, bytes(range(256)), None),
     ],
 )
 def test_file_content_serves_media_inline_with_byte_ranges(tmp_path, range_header, status, body, content_range):

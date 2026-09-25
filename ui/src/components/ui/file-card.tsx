@@ -82,8 +82,10 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
   const renderKind = previewRenderKind(meta?.name || label, meta?.content_type, meta?.ext);
   // Audio plays right in the card (a compact native player under the title row) — opening an overlay
   // just to press play adds a step. It needs the proxy URL (same-origin, cookie-authenticated, Range
-  // capable); the eye stays for every other previewable kind, including video.
-  const inlineAudio = renderKind === 'audio' && proxy;
+  // capable) and the resolved /meta: a label alone is caller-controlled Markdown text, so a player is
+  // never mounted (and never starts fetching) on the label's say-so. The eye stays for every other
+  // previewable kind, including video.
+  const inlineAudio = proxy && meta !== null && renderKind === 'audio';
   const previewable = renderKind !== null && !inlineAudio;
 
   return (
