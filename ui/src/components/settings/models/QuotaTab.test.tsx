@@ -258,7 +258,7 @@ describe('QuotaTab', () => {
     expect(screen.getByRole('article').querySelector('[data-quota-window="x"] small')).toBeNull();
   });
 
-  it('MH-QUOTA-015: names an unrecognised identifier in words, its span in the window wording, with the full name as its title', async () => {
+  it('names an unrecognised identifier in words, its span in the window wording, with the full name as its title', async () => {
     const title = () => screen.getByRole('article').querySelector('[data-quota-window="x"] strong')!;
     draw(readyRegion(summary([claude({ windows: [window({ id: 'x', kind: 'other', label: 'seven_day_cowork' })] })])));
     expect(title().textContent).toBe('7 天 Cowork');

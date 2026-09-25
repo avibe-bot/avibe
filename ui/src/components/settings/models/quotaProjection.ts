@@ -205,32 +205,47 @@ export function quotaPayback(costUsd: number, feeUsd: number): QuotaPayback | nu
 /** One piece of an upstream limit id read as words: a span the copy names, or a plain word. */
 export type LimitLabelPart = { span: 'hours' | 'days'; count: number } | { word: string };
 
-const SPAN_COUNTS: Record<string, number> = {
+const SPAN_ONES: Record<string, number> = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-  eleven: 11, twelve: 12, fourteen: 14, thirty: 30,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19,
 };
+const SPAN_TENS: Record<string, number> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const SPAN_UNITS: Record<string, 'hours' | 'days'> = { hour: 'hours', hours: 'hours', day: 'days', days: 'days' };
+
+/** The count starting at `index` — digits, or number words such as `twenty_four` — and the tokens it spans. */
+const spanCount = (tokens: string[], index: number): { count: number; length: number } | null => {
+  const [first, second] = [tokens[index]?.toLowerCase(), tokens[index + 1]?.toLowerCase()];
+  if (/^\d+$/.test(first)) return { count: Number(first), length: 1 };
+  const tens = SPAN_TENS[first];
+  if (tens !== undefined) {
+    const ones = SPAN_ONES[second];
+    return ones !== undefined && ones < 10 ? { count: tens + ones, length: 2 } : { count: tens, length: 1 };
+  }
+  return SPAN_ONES[first] !== undefined ? { count: SPAN_ONES[first], length: 1 } : null;
+};
 
 /**
  * An upstream limit name that is an identifier (`seven_day_cowork`), read as
  * words: a count followed by `hour`/`day` becomes a span, every other token a
- * word. A name that is already text — spaces, CJK, a display name, or a single
- * bare word — is `null`, and stays as the vendor wrote it.
+ * word. A name that is already text — spaces, CJK, a single bare word, or a
+ * capitalised hyphenated display name (`Claude-Code`) — is `null`, and stays as
+ * the vendor wrote it.
  */
 export function limitLabelParts(label: string): LimitLabelPart[] | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(label) || !/[_-]/.test(label)) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(label)) return null;
+  if (!label.includes('_') && !(label.includes('-') && label === label.toLowerCase())) return null;
   const tokens = label.split(/[_-]+/).filter(Boolean);
   if (!tokens.length) return null;
   const parts: LimitLabelPart[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    const lower = token.toLowerCase();
-    const count = /^\d+$/.test(token) ? Number(token) : SPAN_COUNTS[lower];
-    const unit = SPAN_UNITS[tokens[index + 1]?.toLowerCase() ?? ''];
-    if (count !== undefined && count > 0 && unit) {
-      parts.push({ span: unit, count });
-      index += 1;
+    const counted = spanCount(tokens, index);
+    const unit = counted && SPAN_UNITS[tokens[index + counted.length]?.toLowerCase() ?? ''];
+    if (counted && counted.count > 0 && unit) {
+      parts.push({ span: unit, count: counted.count });
+      index += counted.length;
     } else {
+      const token = tokens[index];
       parts.push({ word: token.charAt(0).toUpperCase() + token.slice(1) });
     }
   }
