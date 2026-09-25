@@ -8,8 +8,11 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+minisign-verify = "0.2"
 reqwest.workspace = true
+semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

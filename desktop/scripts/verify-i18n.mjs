@@ -80,3 +80,8 @@ for (const code of expectedNoticeCodes) {
     `placeholder mismatch for ${code}`,
   )
 }
+
+for (const key of leafShape(en.updater)) {
+  assert.ok(en.updater[key].length > 0 && zh.updater[key].length > 0)
+  assert.deepEqual(placeholders(en.updater[key]), placeholders(zh.updater[key]), `updater.${key}`)
+}

@@ -99,5 +99,10 @@ jobs:
       - name: Test Rust
         run: cargo test --workspace --all-features
 
+      - name: Verify Windows installer transaction with isolated native fixtures
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/test-windows-update.ps1
+
       - name: Build the shell
         run: cargo build --workspace

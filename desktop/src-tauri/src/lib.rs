@@ -20,6 +20,8 @@ use std::time::Duration;
 
 mod native_frame;
 mod notifications;
+mod update_install;
+mod updater;
 
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
@@ -92,6 +94,7 @@ struct ProductCatalog {
 #[derive(Deserialize)]
 struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
+    updater: updater::Catalog,
     notifications: notifications::NativeNotificationCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
@@ -311,6 +314,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         app.state::<notifications::Notifications>().enabled(),
         None::<&str>,
     )?;
+    let updater = app.state::<updater::Updater>();
     let tray = Menu::with_items(
         app,
         &[
@@ -318,6 +322,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &status,
             &PredefinedMenuItem::separator(app)?,
             &settings,
+            &updater.menu,
+            &updater.channel_menu,
             &login,
             &notifications,
             &PredefinedMenuItem::separator(app)?,
@@ -335,6 +341,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         // Elsewhere the first submenu is File, and Settings leads it.
         let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
         submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
+        submenu.insert_items(&[&updater.menu, &updater.channel_menu], settings_position + 1)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     app.set_menu(application_menu)?;
@@ -1154,6 +1161,10 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .initialization_script(DESKTOP_SHELL_MARKER)
+        .initialization_script(format!(
+            "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
+            serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
+        ))
         .on_new_window(|url, _features| handle_new_window_request(url))
         .build()
         .ok()
@@ -1541,12 +1552,15 @@ pub fn run() {
         )
         .plugin(native_frame::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
+                updater::MENU_ID => updater::check(app.clone(), true),
+                updater::CHANNEL_ID => updater::toggle_channel(app),
                 STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
                 QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
@@ -1576,6 +1590,10 @@ pub fn run() {
                     }
                 })
                 .on_navigation(|webview, url| {
+                    if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
+                        updater::check(webview.app_handle().clone(), true);
+                        return false;
+                    }
                     let active_origin = webview
                         .try_state::<Shell>()
                         .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
@@ -1667,7 +1685,9 @@ pub fn run() {
                         .filter_map(|argument| argument.into_string().ok()),
                 );
             }
+            updater::init(app.handle())?;
             install_native_tray(app.handle())?;
+            updater::check(app.handle().clone(), false);
             let _ = spawn_bootstrap(app.handle().clone());
             Ok(())
         })

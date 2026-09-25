@@ -2,6 +2,7 @@ declare global {
   interface Window {
     /** Defined by the Avibe desktop shell before any page script runs, top-level document only. */
     readonly __AVIBE_DESKTOP_SHELL__?: true;
+    readonly __AVIBE_DESKTOP_VERSION__?: string;
   }
 }
 

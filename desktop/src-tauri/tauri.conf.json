@@ -25,15 +25,23 @@
       }
     ],
     "security": {
-      "capabilities": ["bootstrap"],
+      "capabilities": [
+        "bootstrap"
+      ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["avibe"]
+        "schemes": [
+          "avibe"
+        ]
       }
+    },
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
     }
   },
   "bundle": {
@@ -55,6 +63,7 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": false
   }
 }

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,9 +33,11 @@ SEMVER = re.compile(
 
 
 def desktop_version_from_tag(tag: str) -> str:
+    if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+        return tag[1:]
     match = RC_TAG.fullmatch(tag)
     if match is None:
-        raise ValueError("desktop TEST release requires a canonical gh-vX.Y.ZrcN tag")
+        raise ValueError("desktop TEST release requires a canonical gh-vX.Y.ZrcN or vX.Y.Z tag")
     package_version = package_version_from_release_tag(tag)
     return package_version.replace("rc", "-rc.")
 
@@ -142,11 +145,22 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
     )
 
 
-def verify(directory: Path, tag: str, source_sha: str) -> list[Path]:
+def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool = False) -> list[Path]:
     version = desktop_version_from_tag(tag)
     if SHA.fullmatch(source_sha) is None:
         raise ValueError("Invalid source SHA")
     expected = {name for target in TARGETS for name in asset_names(version, target)}
+    if updater_enabled:
+        updater = run_path(str(Path(__file__).with_name("desktop_updater.py")))
+        for target in TARGETS:
+            expected.update(updater["names"](version, target))
+        public = os.environ.get("AVIBE_DESKTOP_UPDATER_PUBLIC_KEY", "")
+        if not public.strip():
+            raise ValueError("Missing updater verification public key")
+        with tempfile.TemporaryDirectory() as temporary:
+            key = Path(temporary) / "public-key.txt"
+            key.write_text(public, encoding="utf-8")
+            updater["verify"](directory, tag, source_sha, key)
     if {path.name for path in directory.iterdir()} != expected:
         raise ValueError("Desktop asset set must contain exactly all three targets and their metadata")
     for target in TARGETS:
@@ -169,8 +183,17 @@ def verify(directory: Path, tag: str, source_sha: str) -> list[Path]:
     return [directory / name for name in sorted(expected)]
 
 
-def check_remote(directory: Path, tag: str, source_sha: str, repo: str, *, complete: bool) -> None:
-    paths = verify(directory, tag, source_sha)
+def check_remote(directory: Path, tag: str, source_sha: str, repo: str, *, complete: bool,
+                 updater_enabled: bool = False) -> None:
+    paths = verify(directory, tag, source_sha, updater_enabled=updater_enabled)
+    if updater_enabled:
+        if repo != "avibe-bot/avibe":
+            raise ValueError("Updater repository mismatch")
+        actual_source = subprocess.check_output(
+            ["gh", "api", f"repos/{repo}/commits/{tag}", "--jq", ".sha"], text=True,
+        ).strip()
+        if actual_source != source_sha:
+            raise ValueError("Live release tag no longer matches updater source")
     state = _github["get_release"](repo, tag)
     if state is None:
         if complete:
@@ -217,6 +240,7 @@ def main() -> None:
     for command in ("verify", "check-remote"):
         consumer = sub.add_parser(command)
         consumer.add_argument("--directory", type=Path, required=True)
+        consumer.add_argument("--updater-enabled", action="store_true")
         consumer.add_argument("--tag", required=True)
         consumer.add_argument("--source-sha", required=True)
         if command == "check-remote":

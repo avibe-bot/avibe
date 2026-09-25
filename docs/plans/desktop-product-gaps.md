@@ -48,6 +48,10 @@ visibility and launch-at-login **shipped** in #1975.
 
 ### G2. Auto-update
 
+- Implementation: see [signed update contract](desktop-auto-update.md) and the
+  desktop README. Publication remains gated on owner-configured signing keys and
+  real native upgrade acceptance. Existing unsigned TEST releases remain manual.
+
 - Problem: today an update means "download and replace the app". No security
   fix can reach an installed base.
 - Work: integrate `tauri-plugin-updater` against a JSON endpoint (GitHub

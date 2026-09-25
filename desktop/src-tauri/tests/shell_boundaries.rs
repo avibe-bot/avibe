@@ -807,7 +807,8 @@ fn settings_open_through_the_deep_link_path_only_while_a_workbench_is_shown() {
         source.contains("MenuItem::with_id(app, SETTINGS_MENU_ID, &catalog.settings, false, Some(\"CmdOrCtrl+,\"))")
     );
     let tray = body("install_native_tray");
-    assert!(tray.contains("&settings,\n            &login,"));
+    assert!(tray
+        .contains("&settings,\n            &updater.menu,\n            &updater.channel_menu,\n            &login,"));
     assert!(
         tray.contains("submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)")
     );
@@ -909,4 +910,18 @@ fn explicit_stop_does_not_schedule_automatic_recovery() {
         "status monitoring survives window closure"
     );
     assert!(monitor.contains("generation.load(Ordering::SeqCst) != observed_generation"));
+}
+
+#[test]
+fn updates_have_one_native_owner_and_no_remote_install_permission() {
+    let source = include_str!("../src/lib.rs");
+    let updater = include_str!("../src/updater.rs");
+    assert!(source.contains("tauri_plugin_updater::Builder::new().build()"));
+    assert!(source.contains("updater::check(app.handle().clone(), false)"));
+    assert!(source.contains("updater::MENU_ID => updater::check(app.clone(), true)"));
+    assert!(source.contains("url.as_str() == updater::OPEN_URL"));
+    assert!(updater.contains("MessageDialogButtons::OkCancelCustom"));
+    assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
+    assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));
+    assert!(!include_str!("../build.rs").contains("update_install"));
 }

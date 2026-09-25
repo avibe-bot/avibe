@@ -77,6 +77,27 @@
       "successMessage": "私有 Runtime 和 Agent 后端已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
       "failureTitle": "卸载失败",
       "failureMessage": "Avibe 无法完整移除私有 Runtime 和后端文件。桌面应用仍保持安装状态，你的用户数据没有发生变化。"
+    },
+    "updater": {
+      "menu": "检查桌面应用更新…",
+      "testChannel": "使用测试版更新",
+      "title": "桌面应用更新",
+      "current": "当前版本",
+      "latest": "最新版本",
+      "checking": "正在检查更新…",
+      "upToDate": "当前应用已是最新版本。",
+      "available": "有新版本可用",
+      "downloading": "正在下载并校验更新…",
+      "installing": "正在安装更新…",
+      "installed": "更新已安装，正在重新启动…",
+      "disabled": "桌面自动更新未启用",
+      "checkFailed": "无法验证更新，请检查网络后重试。此版本可能需要手动安装。",
+      "installFailed": "更新安装失败，已保留旧应用。请重试或重新安装之前的版本。",
+      "install": "下载并安装",
+      "cancel": "稍后",
+      "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
+      "disabledDetail": "此构建尚未配置桌面自动更新，请手动安装新的签名版本。",
+      "error": "更新失败，可重试"
     }
   },
   "installHint": {

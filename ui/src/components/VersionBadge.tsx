@@ -13,6 +13,7 @@ import {
 import { cn } from '@/lib/utils';
 import { setConfigField } from '@/lib/configMutations';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
+import { isDesktopShell } from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 
@@ -30,6 +31,7 @@ function shortenVersion(value: string, tail = 4): string {
 export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const inDesktopShell = isDesktopShell();
   const isDesktop = useIsDesktop();
   const [versionInfo, setVersionInfo] = React.useState<VersionInfo | null>(null);
   const [isPopupOpen, setIsPopupOpen] = React.useState(false);
@@ -43,6 +45,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const popupId = React.useId();
 
   React.useEffect(() => {
+    if (inDesktopShell) return;
     checkVersion();
     loadAutoUpdateSetting();
   }, []);
@@ -115,10 +118,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const hasUpdate = versionInfo?.has_update === true;
+  const hasUpdate = !inDesktopShell && versionInfo?.managed_by !== 'desktop' && versionInfo?.has_update === true;
   const isDesktopManaged = versionInfo?.managed_by === 'desktop';
-  const currentVersion = versionInfo?.current || '...';
-  const isSourceBuild = versionInfo?.build?.kind === 'source';
+  const currentVersion = (inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : versionInfo?.current) || '...';
+  const isSourceBuild = !inDesktopShell && versionInfo?.build?.kind === 'source';
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
   const displayVersion = isSourceBuild ? shortSourceRevision : shortenVersion(currentVersion);
@@ -133,7 +136,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const Popup = isDesktop ? PopoverContent : 'div';
 
   return (
-    <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
+    <Popover open={!inDesktopShell && isPopupOpen} onOpenChange={setIsPopupOpen}>
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
         <PopoverTrigger asChild>
@@ -146,6 +149,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
             title={badgeTitle}
             aria-controls={popupId}
+            onClick={inDesktopShell ? (event) => {
+              event.preventDefault();
+              window.location.href = 'avibe://updates';
+            } : undefined}
           >
             {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
             {displayVersion}
