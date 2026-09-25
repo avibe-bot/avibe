@@ -2010,6 +2010,52 @@ def test_provision_cancellation_fails_when_cleanup_is_not_durable(tmp_path):
     assert service.revocations.list() == []
 
 
+def test_created_source_cancellation_fails_when_cleanup_is_not_durable(tmp_path):
+    adapter = FakeAdapter()
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+    provision_credential = adapter.provision_credential
+
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    async def provision_then_lose_cleanup(*args):
+        credential_ref = await provision_credential(*args)
+        adapter.revoke_error = True
+        service.revocations.add = fail_journal_write
+        adapter.discovery_started = asyncio.Event()
+        adapter.discovery_block = asyncio.Event()
+        return credential_ref
+
+    adapter.provision_credential = provision_then_lose_cleanup
+
+    async def scenario():
+        task = asyncio.create_task(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Key",
+                    "key": "sk-test-created-cancel-cleanup-failure",
+                    "protocol": "anthropic",
+                    "save_unverified": True,
+                }
+            )
+        )
+        while adapter.discovery_started is None:
+            await asyncio.sleep(0)
+        await adapter.discovery_started.wait()
+        task.cancel()
+        with pytest.raises(ModelHubError) as exc_info:
+            await task
+        return exc_info.value
+
+    refusal = asyncio.run(scenario())
+
+    assert (refusal.code, refusal.status) == ("engine_down", 503)
+    assert store.load().sources == []
+    assert service.revocations.list() == []
+
+
 def test_created_source_commit_failure_fails_when_cleanup_is_not_durable(tmp_path):
     adapter = FakeAdapter()
     adapter.revoke_error = True

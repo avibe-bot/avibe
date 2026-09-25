@@ -7537,6 +7537,54 @@ def test_failed_hub_oauth_source_creation_keeps_flow_when_ref_cleanup_is_not_dur
     assert service.oauth_flows.channel(flow["flow_id"]) == "hub"
 
 
+def test_cancelled_hub_oauth_source_creation_fails_when_ref_cleanup_is_not_durable(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_cancelled",
+        }
+    )
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    async def scenario():
+        observing = asyncio.Event()
+
+        async def blocked_observation(*_args, **_kwargs):
+            observing.set()
+            await asyncio.Event().wait()
+
+        adapter.observe_source = blocked_observation
+        task = asyncio.create_task(
+            _create_source(
+                service,
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Cancelled subscription",
+                    "supply_channel": "hub",
+                    "oauth_flow_ref": flow["flow_id"],
+                },
+            )
+        )
+        await observing.wait()
+        task.cancel()
+        with pytest.raises(ModelHubError) as exc_info:
+            await task
+        return exc_info.value
+
+    refusal = asyncio.run(scenario())
+
+    assert (refusal.code, refusal.status) == ("engine_down", 503)
+    assert adapter.revoked == ["cred_oauth_cancelled"]
+    assert store.config.sources == []
+    assert service.revocations.list() == []
+
+
 def test_orphaned_hub_reauth_fails_when_ref_cleanup_is_not_durable(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
