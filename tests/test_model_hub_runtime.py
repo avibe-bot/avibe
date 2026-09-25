@@ -1597,6 +1597,95 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_ensure_installed_reconciles_after_restarting_running_engine(
+    tmp_path: Path,
+) -> None:
+    class Installer:
+        def ensure(self, **kwargs):
+            return {"ok": True, "changed": True}
+
+    class Client:
+        def __init__(self) -> None:
+            self.auth_name = "claude-legacy.json"
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            assert (method, path) == ("GET", "/auth-files")
+            return {
+                "files": [
+                    {
+                        "id": self.auth_name,
+                        "name": self.auth_name,
+                        "provider": "claude",
+                    }
+                ]
+            }
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self.installer = Installer()
+            self.client = client
+            self.restart_calls = 0
+
+        def status(self):
+            return {
+                "host_platform": "fixture",
+                "status": {
+                    "health": "ok",
+                    "installed_version": "v7.3.16",
+                    "verified": True,
+                    "listening": {"host": "127.0.0.1", "port": 15220},
+                    "last_check": None,
+                    "error_key": None,
+                },
+            }
+
+        def ensure_running(self) -> None:
+            return None
+
+        def restart_if_running(self) -> bool:
+            self.restart_calls += 1
+            old_name = "claude-legacy.json"
+            new_name = "claude-hash.json"
+            (self.state_store.auth_dir / old_name).rename(self.state_store.auth_dir / new_name)
+            self.client.auth_name = new_name
+            return True
+
+        def client_if_running(self) -> Client:
+            return self.client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_name = "claude-legacy.json"
+        ref = store.bind_oauth_credential("src_fixture123", "anthropic", auth_name)
+        prefix = store.credential_metadata(ref)["prefix"]
+        store.write_oauth_auth_file(
+            auth_name,
+            {
+                "type": "claude",
+                "prefix": prefix,
+                "email": "user@example.com",
+                "account_uuid": "account-a",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-fixture",
+            },
+        )
+        client = Client()
+        supervisor = Supervisor(store, client)
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+
+        await adapter.start()
+        assert store.credential_metadata(ref)["auth_name"] == auth_name
+
+        await adapter.ensure_installed()
+
+        assert supervisor.restart_calls == 1
+        assert store.credential_metadata(ref)["auth_name"] == "claude-hash.json"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("operation", ["revoke", "cleanup"])
 def test_online_oauth_mutation_fails_closed_on_duplicate_claude_files(
     tmp_path: Path,
@@ -1671,6 +1760,100 @@ def test_online_oauth_mutation_fails_closed_on_duplicate_claude_files(
         assert (store.auth_dir / old_name).is_file()
         assert (store.auth_dir / duplicate_name).is_file()
         assert client.deleted == []
+
+    asyncio.run(run())
+
+
+def test_online_oauth_mutation_ignores_unrelated_damaged_claude_binding(
+    tmp_path: Path,
+) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if (method, path) == ("GET", "/auth-files"):
+                return {
+                    "files": [
+                        {
+                            "id": "claude-primary.json",
+                            "name": "claude-primary.json",
+                            "provider": "claude",
+                        },
+                        {
+                            "id": "claude-damaged.json",
+                            "name": "claude-damaged.json",
+                            "provider": "claude",
+                        },
+                    ]
+                }
+            if (method, path) == ("DELETE", "/auth-files"):
+                self.deleted.append(str((query or {})["name"]))
+                return {"status": "ok"}
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self.client = client
+
+        def with_engine_excluded(self, operation):
+            return operation(self.client)
+
+        def invalidate_configs(self) -> None:
+            return None
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        primary_name = "claude-primary.json"
+        damaged_name = "claude-damaged.json"
+        primary_ref = store.bind_oauth_credential(
+            "src_primary123",
+            "anthropic",
+            primary_name,
+        )
+        damaged_ref = store.bind_oauth_credential(
+            "src_damaged123",
+            "anthropic",
+            damaged_name,
+        )
+        primary_prefix = store.credential_metadata(primary_ref)["prefix"]
+        damaged_prefix = store.credential_metadata(damaged_ref)["prefix"]
+        store.write_oauth_auth_file(
+            primary_name,
+            {
+                "type": "claude",
+                "prefix": primary_prefix,
+                "email": "primary@example.com",
+                "account_uuid": "primary-account",
+                "organization_uuid": "organization-a",
+                "access_token": "private-access-primary",
+            },
+        )
+        store.write_oauth_auth_file(
+            damaged_name,
+            {
+                "type": "claude",
+                "prefix": "foreign-prefix",
+                "email": "damaged@example.com",
+                "account_uuid": "damaged-account",
+                "organization_uuid": "organization-b",
+                "access_token": "private-access-damaged",
+            },
+        )
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        await adapter.revoke_credential(primary_ref)
+
+        assert client.deleted == [primary_name]
+        assert store.credential_metadata_if_present(primary_ref) is None
+        assert store.credential_metadata_if_present(damaged_ref) is not None
+        assert (store.auth_dir / damaged_name).is_file()
 
     asyncio.run(run())
 

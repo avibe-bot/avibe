@@ -1696,7 +1696,10 @@ class CLIProxyEngineAdapter:
                 raise self._install_failure(reason)
             if install.get("changed"):
                 await self._transports_idle.wait()
-                await run_owned_in_thread(self.supervisor.restart_if_running)
+                self._oauth_startup_reconciled = False
+                restarted = await run_owned_in_thread(self.supervisor.restart_if_running)
+                if restarted:
+                    await self._start_and_reconcile_oauth_inventory()
             return EngineEnsureResult(
                 status=await self.status(),
                 changed=bool(install.get("changed")),
@@ -2017,7 +2020,11 @@ class CLIProxyEngineAdapter:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
                 raise EngineStateError("OAuth credential validation could not inspect the engine") from exc
-            await self._reconcile_oauth_inventory(inventory)
+            await asyncio.to_thread(
+                self.state_store.reconcile_oauth_credential,
+                credential_ref,
+                auth_provider=expected_provider,
+            )
             metadata = await asyncio.to_thread(
                 self.state_store.credential_metadata,
                 credential_ref,
@@ -2262,7 +2269,11 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("credential does not match discovery target")
             client = await asyncio.to_thread(self.supervisor.client)
             inventory = await asyncio.to_thread(_auth_inventory, client)
-            await self._reconcile_oauth_inventory(inventory)
+            await asyncio.to_thread(
+                self.state_store.reconcile_oauth_credential,
+                credential_ref,
+                auth_provider=_OAUTH_ENDPOINTS[normalized_vendor][2],
+            )
             metadata = await asyncio.to_thread(
                 self.state_store.credential_metadata,
                 credential_ref,
@@ -2357,7 +2368,11 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("credential does not match observation target")
             client = await asyncio.to_thread(self.supervisor.client)
             inventory = await asyncio.to_thread(_auth_inventory, client)
-            await self._reconcile_oauth_inventory(inventory)
+            await asyncio.to_thread(
+                self.state_store.reconcile_oauth_credential,
+                credential_ref,
+                auth_provider=_OAUTH_ENDPOINTS[normalized_vendor][2],
+            )
             metadata = await asyncio.to_thread(
                 self.state_store.credential_metadata,
                 credential_ref,
@@ -2709,10 +2724,13 @@ class CLIProxyEngineAdapter:
             return str(metadata.get("auth_name") or "")
         if client is not None:
             try:
-                inventory = _auth_inventory(client)
+                _auth_inventory(client)
             except EngineClientError as exc:
                 raise EngineStateError("unable to inspect OAuth auth files") from exc
-            self._reconcile_oauth_inventory_sync(inventory)
+            self.state_store.reconcile_oauth_credential(
+                credential_ref,
+                auth_provider=auth_provider,
+            )
             refreshed = self.state_store.credential_metadata(credential_ref)
             return str(refreshed.get("auth_name") or "")
         return self.state_store.reconcile_oauth_credential(
