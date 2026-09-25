@@ -891,6 +891,7 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_quota.py::test_claude_plan_is_read_from_the_oauth_profile_organization
     related_tests:
+      - tests/test_model_hub_quota.py::test_claude_plan_ignores_an_unreadable_profile
       - tests/test_model_hub_quota.py::test_adapter_adds_the_claude_plan_from_the_profile_and_never_fails_on_it
       - tests/test_model_hub_quota.py::test_a_missing_plan_on_one_read_keeps_the_last_known_plan
   - id: MH-QUOTA-020
@@ -964,13 +965,14 @@ scenarios:
     related_tests:
       - tests/test_model_hub_pricing.py::test_price_table_reads_the_override_file_and_survives_a_bad_one
   - id: MH-PRICE-005
-    name: Each token class takes its own price, a model with no price is excluded and counted, and uncaptured cache writes make a lower bound
+    name: Each token class takes its own price, a model with no price is excluded and counted, and any unknown part (excluded tokens, unreported requests, uncaptured cache writes) makes a lower bound
     status: covered
     kind: observation
     layer: unit
     test: tests/test_model_hub_pricing.py::test_row_cost_prices_each_token_class_and_excludes_unknown_models
     related_tests:
       - tests/test_model_hub_pricing.py::test_usage_metered_before_cache_writes_were_captured_is_a_lower_bound
+      - tests/test_model_hub_pricing.py::test_priced_usage_with_unknown_parts_is_a_floor
   - id: MH-PRICE-006
     name: Every priced usage total is the sum of its rows, with unpriced tokens counted apart
     status: covered

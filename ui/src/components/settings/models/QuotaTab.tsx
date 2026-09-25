@@ -169,14 +169,22 @@ const unreadKey = (source: SourceQuota) => {
   return 'settings.models.quota.unread.error' as const;
 };
 
+/** Whole days from one `YYYY-MM-DD` to another. */
+const calendarDaysBetween = (from: string, to: string) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS);
+
 /** Whether every priced token of a span belongs to a model with no price. */
 const unpriced = (value: PricedUsage) => value.api_cost_usd === 0 && value.excluded_tokens > 0;
 
 /** The account's API-price value: its week, its period against the fee, and the renewal. */
-const ValueStrip: React.FC<{ value: SourceQuotaValue; now: number; text: QuotaText }> = ({ value, now, text }) => {
+const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ value, text }) => {
   const { t } = useTranslation();
   const payback = value.fee_usd !== null ? quotaPayback(value.period.api_cost_usd, value.fee_usd) : null;
-  const renewsOn = value.period.renews_on !== null ? Date.parse(`${value.period.renews_on}T00:00:00`) : NaN;
+  // A floor can prove a payback but never size a shortfall.
+  const floor = value.period.api_cost_lower_bound;
+  // Both days are host-calendar days, so count between them, not from the browser's clock.
+  const renewsIn = value.period.renews_on !== null
+    ? calendarDaysBetween(value.period.to_day, value.period.renews_on)
+    : null;
   const excluded = Math.max(value.week.excluded_tokens, value.period.excluded_tokens);
   return (
     <>
@@ -192,19 +200,21 @@ const ValueStrip: React.FC<{ value: SourceQuotaValue; now: number; text: QuotaTe
             {payback !== null && (
             <em className={cn(payback.kind !== 'short' && 'is-good')} data-quota-payback={payback.kind}>
               {payback.kind === 'paid'
-                  ? t('settings.models.quota.value.paid', { multiple: text.multiple(payback.multiple) })
+                  ? t('settings.models.quota.value.paid', { multiple: `${floor ? '≥ ' : ''}${text.multiple(payback.multiple)}` })
                   : payback.kind === 'even'
                     ? t('settings.models.quota.value.even')
-                    : t('settings.models.quota.value.short', { amount: text.dollars(payback.shortfallUsd) })}
+                    : floor
+                      ? t('settings.models.quota.value.shortUnknown')
+                      : t('settings.models.quota.value.short', { amount: text.dollars(payback.shortfallUsd) })}
             </em>
             )}
           </b>
         </div>
-        {!Number.isNaN(renewsOn) && (
+        {renewsIn !== null && (
           <div>
             <span>{t('settings.models.quota.value.renews')}</span>
             <b>
-              {t('settings.models.quota.value.renewsIn', { count: Math.max(0, Math.ceil((renewsOn - now) / DAY_MS)) })}
+              {t('settings.models.quota.value.renewsIn', { count: Math.max(0, renewsIn) })}
               <em>{value.period.renews_on}</em>
             </b>
           </div>
@@ -301,7 +311,7 @@ const AccountCard: React.FC<{
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}
             </div>
           )}
-      {source.value && <ValueStrip value={source.value} now={now} text={text} />}
+      {source.value && <ValueStrip value={source.value} text={text} />}
     </article>
   );
 };
@@ -441,12 +451,14 @@ export const QuotaTab: React.FC<{
                     label={t('settings.models.quota.stat.payback')}
                     icon={<TrendingUp className="size-[15px]" aria-hidden />}
                     value={value.period && periodPayback
-                      ? <>{t('settings.models.quota.stat.paybackMultiple', { multiple: text.multiple(periodPayback.multiple) })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
+                      ? <>{t('settings.models.quota.stat.paybackMultiple', { multiple: `${value.period.api_cost_lower_bound ? '≥ ' : ''}${text.multiple(periodPayback.multiple)}` })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
                       : '—'}
                     note={value.period && periodPayback
                       ? [
                           periodPayback.kind === 'short'
-                            ? t('settings.models.quota.stat.paybackShort', { amount: text.dollars(periodPayback.shortfallUsd) })
+                            ? value.period.api_cost_lower_bound
+                              ? t('settings.models.quota.stat.paybackShortUnknown')
+                              : t('settings.models.quota.stat.paybackShort', { amount: text.dollars(periodPayback.shortfallUsd) })
                             : t('settings.models.quota.stat.paybackPaid', { amount: text.dollars(periodPayback.surplusUsd) }),
                           rollingPeriod ? t('settings.models.quota.stat.paybackRolling') : null,
                           unfeed > 0 ? t('settings.models.quota.stat.paybackPartial', { count: unfeed }) : null,
@@ -459,9 +471,9 @@ export const QuotaTab: React.FC<{
                 <div className="model-hub-quota-timeline flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface" aria-label={t('settings.models.quota.upcoming') as string}>
                   <span className="model-hub-quota-timeline-title flex items-center gap-1.5"><TimerReset className="size-[13px]" aria-hidden />{t('settings.models.quota.upcoming')}</span>
                   {upcoming.map(({ source, window }) => (
-                    <span key={`${source.source_id}:${window.id}`} className={cn('model-hub-quota-chip flex items-baseline gap-1.5', windowIsExhausted(window, now) && toneClass('danger'))}>
-                      <b>{text.duration((windowResetAt(window) as number) - now)}</b>
-                      {source.display_name} · {text.windowLabel(window)}
+                    <span key={`${source.source_id}:${window.id}`} className={cn('model-hub-quota-chip flex min-w-0 max-w-full items-baseline gap-1.5', windowIsExhausted(window, now) && toneClass('danger'))}>
+                      <b className="shrink-0 whitespace-nowrap">{text.duration((windowResetAt(window) as number) - now)}</b>
+                      <span className="min-w-0 truncate" title={`${source.display_name} · ${text.windowLabel(window)}`}>{source.display_name} · {text.windowLabel(window)}</span>
                     </span>
                   ))}
                 </div>

@@ -70,7 +70,7 @@ def test_model_price_reads_models_dev_cost_and_fills_missing_cache_prices():
     """MH-PRICE-001: A missing cache price is input; a one-hour cache write is twice input unless listed."""
 
     assert model_price({"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25}) == ModelPrice(
-        input=5, output=25, cache_read=0.5, cache_write=6.25, cache_write_1h=10
+        input=5, output=25, cache_read=0.5, cache_write=6.25, cache_write_1h=10, charges_cache_writes=True
     )
     assert model_price({"input": 2, "output": 6}) == ModelPrice(
         input=2, output=6, cache_read=2, cache_write=2, cache_write_1h=4
@@ -197,6 +197,21 @@ def test_usage_metered_before_cache_writes_were_captured_is_a_lower_bound():
     row = {"input_tokens": 1000, "output_tokens": 10, "cache_write_uncaptured_reports": 1}
     assert row_cost(row, _table().price("claude-opus-5")).api_cost_lower_bound is True
     assert row_cost(row, _table().price("grok-4.6")).api_cost_lower_bound is False
+    # A listed one-hour premium counts even when the five-minute write is priced as input.
+    assert row_cost(row, model_price({"input": 2, "output": 6, "cache_write_1h": 4})).api_cost_lower_bound is True
+    assert row_cost(row, model_price({"input": 2, "output": 6})).api_cost_lower_bound is False
+
+
+def test_priced_usage_with_unknown_parts_is_a_floor():
+    """MH-PRICE-005: Requests without a token report, or tokens with no price, make the priced figure a lower bound."""
+
+    grok = _table().price("grok-4.6")
+    reported = {"requests": 2, "token_reports": 2, "input_tokens": 1000, "output_tokens": 10}
+    assert row_cost(reported, grok).api_cost_lower_bound is False
+    unreported = {**reported, "requests": 3}
+    assert row_cost(unreported, grok).api_cost_lower_bound is True
+    assert Cost(1.0, excluded_tokens=5).fields()["api_cost_lower_bound"] is True
+    assert Cost(1.0).fields()["api_cost_lower_bound"] is False
 
 
 def test_usage_report_prices_totals_as_the_sum_of_their_rows(tmp_path):
@@ -264,6 +279,9 @@ def test_rows_written_before_cache_writes_read_as_uncaptured(tmp_path):
         ("openai", "plus", "chatgpt_plus"),
         ("openai", "pro", "chatgpt_pro"),
         ("openai", "team", None),
+        ("codex", "pro", "chatgpt_pro"),
+        ("gemini", "pro", None),
+        ("xai", "plus", None),
         ("anthropic", None, None),
     ],
 )

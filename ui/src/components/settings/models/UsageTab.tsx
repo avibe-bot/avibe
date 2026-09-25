@@ -900,8 +900,11 @@ export const UsageTab: React.FC<{
     (activePinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === activePinnedKey))
       .flatMap((bucket) => filterBucketRows(bucket, filter)),
   );
-  const metricText = (counters: UsageCounters, selectedMetric = metric) =>
-    tokenText(counters, selectedMetric, selectedMetric === metric ? format : count, t('settings.models.usage.blank') as string);
+  const metricText = (counters: UsageCounters, selectedMetric = metric) => {
+    const text = tokenText(counters, selectedMetric, selectedMetric === metric ? format : count, t('settings.models.usage.blank') as string);
+    // A cost that is only a floor keeps its 「≥」 wherever it is itemized.
+    return selectedMetric === 'cost' && counters.api_cost_lower_bound === true ? `≥ ${text}` : text;
+  };
   const priced = reportIsPriced(report);
   const partialHistoryNote = String(t('settings.models.usage.partialHistory'));
   const unknownTokensNote = String(t('settings.models.usage.unknownTokens'));
@@ -1139,7 +1142,7 @@ export const UsageTab: React.FC<{
                         <td>{tokenText(row.counters, 'output', count, t('settings.models.usage.blank') as string)}</td>
                         <td className="model-hub-usage-table-total">{metric === 'cost' && usageHasNoPrice(row.counters)
                           ? t('settings.models.usage.cost.noPrice')
-                          : value === null ? t('settings.models.usage.blank') : format(value)}</td>
+                          : metricText(row.counters)}</td>
                         <td>{share === null ? t('settings.models.usage.blank') : formatPercent(share, i18n.language, 1)}</td>
                       </tr>
                     );

@@ -245,7 +245,7 @@
         },
         "api_cost_lower_bound": {
           "type": "boolean",
-          "description": "True when some priced usage was metered before cache writes were captured on a model that charges for them; api_cost_usd then understates."
+          "description": "True when api_cost_usd is only a floor: some tokens are excluded, some requests have no token report, or some usage was metered before cache writes were captured on a model that lists a cache-write price above input. A floor can show a payback but never a shortfall."
         }
       }
     },
@@ -296,7 +296,7 @@
         },
         "api_cost_lower_bound": {
           "type": "boolean",
-          "description": "True when some priced usage was metered before cache writes were captured on a model that charges for them; api_cost_usd then understates."
+          "description": "True when api_cost_usd is only a floor: some tokens are excluded, some requests have no token report, or some usage was metered before cache writes were captured on a model that lists a cache-write price above input. A floor can show a payback but never a shortfall."
         }
       },
       "additionalProperties": false,

@@ -606,32 +606,65 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
 _PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 
 
+# The profile shape the Claude Code CLI (2.1.280) reads: `organization_type`
+# names the product and `rate_limit_tier` the Max tier; identifiers are fake.
+CLAUDE_PROFILE = {
+    "account": {
+        "uuid": "00000000-0000-4000-8000-000000000001",
+        "email": "someone@example.com",
+        "full_name": "Someone",
+        "display_name": "Someone",
+        "has_claude_max": True,
+        "has_claude_pro": False,
+    },
+    "organization": {
+        "uuid": "00000000-0000-4000-8000-000000000002",
+        "name": "someone@example.com's Organization",
+        "organization_type": "claude_max",
+        "billing_type": "stripe_subscription",
+        "rate_limit_tier": "default_claude_max_20x",
+        "seat_tier": None,
+        "has_extra_usage_enabled": False,
+    },
+}
+
+
 @pytest.mark.parametrize(
     ("organization", "plan"),
     [
-        ({"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_20x"}, "max_20x"),
-        ({"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}, "max_5x"),
+        ({}, "max_20x"),
+        ({"rate_limit_tier": "default_claude_max_5x"}, "max_5x"),
         ({"organization_type": "claude_pro", "rate_limit_tier": "default_claude_ai"}, "pro"),
-        ({"organization_type": "claude_max", "rate_limit_tier": "something_new"}, None),
-        ("not an object", None),
+        ({"organization_type": "claude_team", "rate_limit_tier": "default_claude_max_5x"}, None),
+        ({"organization_type": "claude_enterprise", "rate_limit_tier": "default_claude_max_20x"}, None),
+        ({"rate_limit_tier": "something_new"}, None),
+        ({"rate_limit_tier": None}, None),
     ],
 )
 def test_claude_plan_is_read_from_the_oauth_profile_organization(organization, plan):
-    """MH-QUOTA-019: The profile's rate-limit tier separates the Max tiers; anything unknown is no plan."""
+    """MH-QUOTA-019: The product comes from organization_type, the Max tier from rate_limit_tier; anything else is no plan."""
 
     from core.handlers.model_hub.quota import parse_claude_plan
 
-    assert parse_claude_plan(json.dumps({"account": {"uuid": "u"}, "organization": organization})) == plan
+    body = {**CLAUDE_PROFILE, "organization": {**CLAUDE_PROFILE["organization"], **organization}}
+    assert parse_claude_plan(json.dumps(body)) == plan
+
+
+def test_claude_plan_ignores_an_unreadable_profile():
+    """MH-QUOTA-019: A body that is not a profile yields no plan, never an error."""
+
+    from core.handlers.model_hub.quota import parse_claude_plan
+
     assert parse_claude_plan("<html>") is None
+    assert parse_claude_plan(json.dumps({"account": {}, "organization": "not an object"})) is None
 
 
 async def test_adapter_adds_the_claude_plan_from_the_profile_and_never_fails_on_it():
     """MH-QUOTA-019: The plan is a second, best-effort read with the witness headers; its failure leaves windows intact."""
 
     usage = {"status_code": 200, "header": {}, "body": json.dumps(CLAUDE_LEGACY)}
-    profile = {"status_code": 200, "body": json.dumps(
-        {"account": {"uuid": "u"}, "organization": {"rate_limit_tier": "default_claude_max_5x"}}
-    )}
+    body = {**CLAUDE_PROFILE, "organization": {**CLAUDE_PROFILE["organization"], "rate_limit_tier": "default_claude_max_5x"}}
+    profile = {"status_code": 200, "body": json.dumps(body)}
     adapter, client = _adapter(usage, _METADATA, {_PROFILE_URL: profile})
     parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
     assert parsed["plan"] == "max_5x" and parsed["windows"]

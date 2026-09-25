@@ -391,6 +391,20 @@ describe('UsageTab', () => {
     expect(container.querySelector('.model-hub-usage-cost-note')?.textContent).toBe('At published API prices, not a charge');
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('No price yet');
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('$0.50');
+    expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).not.toContain('≥');
+    cleanup();
+
+    // A floor keeps its 「≥」 in the itemized rows and the table total, not only the card.
+    const floor = pricedReport();
+    const lower = <T extends object>(value: T): T => ({ ...value, api_cost_lower_bound: true });
+    floor.buckets = floor.buckets.map((item) => ({ ...item, rows: item.rows.map((entry, index) => (index === 0 ? lower(entry) : entry)) }));
+    floor.sources = floor.sources.map((source, index) => (index === 0 ? { ...lower(source), models: source.models.map(lower) } : source));
+    floor.totals = lower(floor.totals);
+    const drawn = draw(floor);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    const table = drawn.container.querySelector('.model-hub-usage-table-scroll')!;
+    expect(table.querySelector('tbody')!.textContent).toContain('≥ $0.50');
+    expect(table.querySelector('tfoot')!.textContent).toContain('≥ $0.50');
   });
 
   it('MH-USAGE-031: reads the API-price value in Chinese as a conversion, not a charge', async () => {

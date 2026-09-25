@@ -37,6 +37,15 @@ for (const lang of ['en', 'zh'] as const) {
     expect(await fits(title)).toBe(true);
     expect(titleBox.height).toBeGreaterThan(20);
 
+    // Each upcoming-reset chip stays inside the list; a long window name
+    // truncates rather than pushing the chip, or its time, past the edge.
+    const timeline = await box(page.locator('.model-hub-quota-timeline'));
+    for (const chip of await page.locator('.model-hub-quota-chip').all()) {
+      const [chipBox, timeBox] = await Promise.all([box(chip), box(chip.locator('b'))]);
+      expect(chipBox.x + chipBox.width).toBeLessThanOrEqual(timeline.x + timeline.width);
+      expect(timeBox.height).toBeLessThan(24);
+    }
+
     // The API-price value holds too: two stat cards per row, and each account's
     // value strip stays inside its card.
     const stats = page.locator('.model-hub-quota-stats--valued > *');

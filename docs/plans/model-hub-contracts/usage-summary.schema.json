@@ -188,7 +188,7 @@
           "description": "input_tokens + output_tokens of the usage whose model has no known price, which api_cost_usd therefore leaves out. Present exactly when `pricing` is."
         },
         "api_cost_lower_bound": {
-          "description": "True when some priced usage here was metered before cache writes were captured on a model that charges for them: those writes were priced as ordinary input, so api_cost_usd understates. Present exactly when `pricing` is.",
+          "description": "True when api_cost_usd is only a floor: some tokens are excluded, some requests have no token report, or some priced usage was metered before cache writes were captured on a model that lists a cache-write price above input. Present exactly when `pricing` is.",
           "type": "boolean"
         }
       }

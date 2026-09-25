@@ -333,7 +333,8 @@ describe('QuotaTab', () => {
       expect(within(claudeCard).getByText('本期按 API 价格')).toBeTruthy();
       expect(claudeCard.textContent).toContain('$412.50');
       expect(claudeCard.textContent).toContain('回本 2.0 倍');
-      expect(claudeCard.textContent).toContain('距下次续费');
+      // Counted between host-calendar days (2026-09-25 → 2026-10-05), whatever the browser's zone.
+      expect(claudeCard.textContent).toContain('距下次续费10 天');
       expect(claudeCard.textContent).toContain('2026-10-05');
       expect(codexCard.textContent).toContain('还差 $182.00 回本');
       const foot = container.querySelector('.model-hub-quota-foot')!.textContent!;
@@ -380,6 +381,22 @@ describe('QuotaTab', () => {
       )));
       expect(screen.getByRole('article').textContent).toContain('≥ $40.00');
       expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('500 tokens 暂无价格，未计入');
+      cleanup();
+      // A floor short of the fee names no shortfall; a floor past it still proves the payback.
+      const floor = (cost: number) => priced(cost, { excluded_tokens: 500, api_cost_lower_bound: true });
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(40, 200, { period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...floor(40) } }) })],
+        totals(40, { cost: 40, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 0.2, ...floor(40) } }),
+      )));
+      expect(document.body.textContent).not.toContain('还差');
+      expect(screen.getByRole('article').textContent).toContain('部分用量暂无价格，差额暂不显示');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('≥ 0.2 倍');
+      cleanup();
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(400, 200, { period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...floor(400) } }) })],
+        totals(400, { cost: 400, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 2, ...floor(400) } }),
+      )));
+      expect(screen.getByRole('article').textContent).toContain('回本 ≥ 2.0 倍');
     });
 
     it('MH-QUOTA-025: a Source still being read shows a loading line instead of 「暂时读不到」', () => {

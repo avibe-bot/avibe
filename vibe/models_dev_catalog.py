@@ -210,8 +210,11 @@ _REFRESH_IN_FLIGHT = threading.Event()
 def _refresh_in_background() -> None:
     def refresh() -> None:
         try:
+            # Only the read is locked: request-path readers must not wait on the
+            # network, and the write is atomic on its own.
             with _CACHE_LOCK:
-                _fetch_catalog(_read_cache())
+                cached = _read_cache()
+            _fetch_catalog(cached)
         except Exception:  # noqa: BLE001 - a background refresh has no one to report to
             logger.debug("models.dev background refresh failed", exc_info=True)
         finally:

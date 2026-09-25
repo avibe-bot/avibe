@@ -268,13 +268,13 @@ def parse_claude_quota(body: object) -> dict[str, Any]:
 
 
 # Claude's usage report names no plan; its OAuth profile's organization does.
-_CLAUDE_TIER_PLANS: Final[Mapping[str, str]] = {
+# Claude Code CLI 2.1.280 reads the same profile: `organization_type` names the
+# product (claude_max / claude_pro / claude_team / claude_enterprise) and
+# `rate_limit_tier` separates the Max tiers. Team seats can carry a Max tier, so
+# the tier counts only on a claude_max organization.
+_CLAUDE_MAX_TIER_PLANS: Final[Mapping[str, str]] = {
     "default_claude_max_20x": "max_20x",
     "default_claude_max_5x": "max_5x",
-    "default_claude_pro": "pro",
-}
-_CLAUDE_ORG_PLANS: Final[Mapping[str, str]] = {
-    "claude_pro": "pro",
 }
 
 
@@ -282,8 +282,8 @@ def parse_claude_plan(body: object) -> Optional[str]:
     """Read the plan from `GET https://api.anthropic.com/api/oauth/profile`, or None.
 
     Best effort by design: the plan only prices a fee comparison, so a body we
-    cannot read yields no plan rather than a failure. `rate_limit_tier` separates
-    the two Max tiers; `organization_type` alone does not.
+    cannot read, or a product without a built-in fee (Team, Enterprise, an
+    unknown Max tier), yields no plan rather than a failure.
     """
 
     try:
@@ -293,13 +293,14 @@ def parse_claude_plan(body: object) -> Optional[str]:
     organization = payload.get("organization")
     if not isinstance(organization, dict):
         return None
-    tier = organization.get("rate_limit_tier")
-    if isinstance(tier, str) and tier.strip().lower() in _CLAUDE_TIER_PLANS:
-        return _CLAUDE_TIER_PLANS[tier.strip().lower()]
     kind = organization.get("organization_type")
-    if isinstance(kind, str) and kind.strip().lower() in _CLAUDE_ORG_PLANS:
-        return _CLAUDE_ORG_PLANS[kind.strip().lower()]
-    return None
+    kind = kind.strip().lower() if isinstance(kind, str) else ""
+    if kind == "claude_pro":
+        return "pro"
+    if kind != "claude_max":
+        return None
+    tier = organization.get("rate_limit_tier")
+    return _CLAUDE_MAX_TIER_PLANS.get(tier.strip().lower()) if isinstance(tier, str) else None
 
 
 def _codex_kind(seconds: Optional[int]) -> QuotaWindowKind:

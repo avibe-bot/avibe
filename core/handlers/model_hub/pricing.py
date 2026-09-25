@@ -81,6 +81,10 @@ _PLAN_KEYS: Final[Mapping[tuple[str, str], str]] = {
     ("openai", "chatgpt_pro"): "chatgpt_pro",
 }
 
+# Vendors whose subscriptions have built-in plan names. Any other vendor's plan
+# resolves only through a fee key the override file names outright.
+_PLAN_FAMILIES: Final[Mapping[str, str]] = {"anthropic": "anthropic", "openai": "openai", "codex": "openai"}
+
 _DATE_SUFFIX: Final = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2}|@[^/]*)$")
 _BRACKET_SUFFIX: Final = re.compile(r"\[[^\]]*\]$")
 
@@ -94,16 +98,10 @@ class ModelPrice:
     cache_read: float
     cache_write: float
     cache_write_1h: float
-
-    @property
-    def charges_cache_writes(self) -> bool:
-        """Whether a cache write costs more than the input it would be priced as.
-
-        Read from the listed write price only: the one-hour figure defaults to a
-        multiple of input for every model, so it says nothing about the vendor.
-        """
-
-        return self.cache_write > self.input
+    # Whether the table lists a cache write above input. The one-hour figure
+    # counts only when listed: its default is a multiple of input for every
+    # model, so a defaulted one says nothing about the vendor.
+    charges_cache_writes: bool = False
 
 
 def _price(value: object) -> Optional[float]:
@@ -139,6 +137,7 @@ def model_price(cost: object) -> Optional[ModelPrice]:
         cache_write_1h=(
             input_price * _CACHE_WRITE_1H_INPUT_MULTIPLE if cache_write_1h is None else cache_write_1h
         ),
+        charges_cache_writes=any(price is not None and price > input_price for price in (cache_write, cache_write_1h)),
     )
 
 
@@ -179,7 +178,9 @@ def plan_key(vendor: str, plan: Optional[str]) -> Optional[str]:
 
     if not plan:
         return None
-    family = "anthropic" if vendor.strip().lower() == "anthropic" else "openai"
+    family = _PLAN_FAMILIES.get(vendor.strip().lower())
+    if family is None:
+        return None
     normalized = re.sub(r"[\s-]+", "_", plan.strip().lower())
     return _PLAN_KEYS.get((family, normalized))
 
@@ -323,7 +324,8 @@ class Cost:
         return {
             "api_cost_usd": round(self.api_cost_usd, 6),
             "excluded_tokens": self.excluded_tokens,
-            "api_cost_lower_bound": self.api_cost_lower_bound,
+            # Anything left unpriced makes the priced figure a floor, not the value.
+            "api_cost_lower_bound": self.api_cost_lower_bound or self.excluded_tokens > 0,
         }
 
 
@@ -346,9 +348,11 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
         + output_tokens * price.output
     ) / 1_000_000
     uncaptured = int(row.get("cache_write_uncaptured_reports") or 0) > 0
+    # A request without a token report has usage of unknown size, never zero.
+    unreported = int(row.get("requests") or 0) > int(row.get("token_reports") or 0)
     return Cost(
         api_cost_usd=usd,
-        api_cost_lower_bound=uncaptured and price.charges_cache_writes,
+        api_cost_lower_bound=unreported or (uncaptured and price.charges_cache_writes),
     )
 
 

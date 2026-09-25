@@ -1415,11 +1415,19 @@ as "not reported", never as zero.
   trailing 30 local days (`basis: rolling_30d`). The page labels which it is.
 - `fee_usd` is the plan's monthly fee. The plan comes from what the vendor's usage
   report says (`plan`) or from the override file's per-Source `plan`, and resolves
-  to a fee-table key (`plan_key`). Built-in fees: `claude_pro` 20, `claude_max_5x`
+  to a fee-table key (`plan_key`). Built-in plan names resolve for `anthropic`
+  and `openai` / `codex` Sources only; any other vendor needs the override to
+  name a fee key outright. Claude's plan is read from the OAuth profile the
+  Claude Code CLI also reads: `organization.organization_type` `claude_pro` is
+  Pro, and `claude_max` with `rate_limit_tier` `default_claude_max_5x` or
+  `default_claude_max_20x` is Max 5x or 20x; Team, Enterprise, and unknown tiers
+  are no plan. Built-in fees: `claude_pro` 20, `claude_max_5x`
   100, `claude_max_20x` 200, `chatgpt_plus` 20, `chatgpt_pro` 200 (USD / month). An
   unknown plan leaves `plan_key`, `fee_usd`, and `multiple` null: the page still
   shows the API value but no payback figure.
-- `multiple` is `period.api_cost_usd / fee_usd`.
+- `multiple` is `period.api_cost_usd / fee_usd`. When `period.api_cost_lower_bound`
+  is true the multiple is a floor: the page may say the fee is paid back, marked
+  「≥」, but never names a shortfall.
 - Root `value.period` sums only the Sources with a known fee, so its multiple
   compares like with like; root `value.week` sums every valued Source.
 
@@ -1502,9 +1510,11 @@ five-minute writes × `cache_write` + one-hour writes × `cache_write_1h` +
 `output_tokens` × `output`, where fresh input is `input_tokens` minus cache reads
 and cache writes. A model with no price is left out: its `input_tokens +
 output_tokens` are added to `excluded_tokens` and the page shows it as having no
-price, never as free. `api_cost_lower_bound` is true when priced usage includes
-reports from before cache writes were captured on a model whose cache-write price
-exceeds its input price.
+price, never as free. `api_cost_lower_bound` is true when `api_cost_usd` is only a
+floor: some tokens are excluded, some requests have no token report
+(`requests > token_reports`), or priced usage includes reports from before cache
+writes were captured on a model that lists a cache-write price (five-minute or
+one-hour) above its input price.
 
 The override file is optional and read on every summary; an unreadable file is
 ignored with a warning. Every member is optional:
