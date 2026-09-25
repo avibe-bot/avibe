@@ -397,6 +397,7 @@ describe('QuotaTab', () => {
         totals(400, { cost: 400, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 2, ...floor(400) } }),
       )));
       expect(screen.getByRole('article').textContent).toContain('回本 ≥ 2.0 倍');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('已回本，多薅了 ≥ $200.00');
     });
 
     it('MH-QUOTA-025: a Source still being read shows a loading line instead of 「暂时读不到」', () => {

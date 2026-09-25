@@ -334,8 +334,11 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
 
     input_tokens = int(row.get("input_tokens") or 0)
     output_tokens = int(row.get("output_tokens") or 0)
+    # A request without a token report has usage of unknown size, never zero,
+    # whether or not its model has a price.
+    unreported = int(row.get("requests") or 0) > int(row.get("token_reports") or 0)
     if price is None:
-        return Cost(excluded_tokens=input_tokens + output_tokens)
+        return Cost(excluded_tokens=input_tokens + output_tokens, api_cost_lower_bound=unreported)
     cache_read = min(int(row.get("cached_input_tokens") or 0), input_tokens)
     cache_write = min(int(row.get("cache_write_input_tokens") or 0), input_tokens - cache_read)
     cache_write_1h = min(int(row.get("cache_write_1h_input_tokens") or 0), cache_write)
@@ -348,8 +351,6 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
         + output_tokens * price.output
     ) / 1_000_000
     uncaptured = int(row.get("cache_write_uncaptured_reports") or 0) > 0
-    # A request without a token report has usage of unknown size, never zero.
-    unreported = int(row.get("requests") or 0) > int(row.get("token_reports") or 0)
     return Cost(
         api_cost_usd=usd,
         api_cost_lower_bound=unreported or (uncaptured and price.charges_cache_writes),

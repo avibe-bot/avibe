@@ -210,6 +210,9 @@ def test_priced_usage_with_unknown_parts_is_a_floor():
     assert row_cost(reported, grok).api_cost_lower_bound is False
     unreported = {**reported, "requests": 3}
     assert row_cost(unreported, grok).api_cost_lower_bound is True
+    # An unpriced model's unreported request is a floor too, not $0 exact.
+    silent = {"requests": 1, "token_reports": 0}
+    assert row_cost(silent, None).fields() == {"api_cost_usd": 0, "excluded_tokens": 0, "api_cost_lower_bound": True}
     assert Cost(1.0, excluded_tokens=5).fields()["api_cost_lower_bound"] is True
     assert Cost(1.0).fields()["api_cost_lower_bound"] is False
 

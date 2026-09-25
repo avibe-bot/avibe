@@ -459,7 +459,7 @@ export const QuotaTab: React.FC<{
                             ? value.period.api_cost_lower_bound
                               ? t('settings.models.quota.stat.paybackShortUnknown')
                               : t('settings.models.quota.stat.paybackShort', { amount: text.dollars(periodPayback.shortfallUsd) })
-                            : t('settings.models.quota.stat.paybackPaid', { amount: text.dollars(periodPayback.surplusUsd) }),
+                            : t('settings.models.quota.stat.paybackPaid', { amount: `${value.period.api_cost_lower_bound ? '≥ ' : ''}${text.dollars(periodPayback.surplusUsd)}` }),
                           rollingPeriod ? t('settings.models.quota.stat.paybackRolling') : null,
                           unfeed > 0 ? t('settings.models.quota.stat.paybackPartial', { count: unfeed }) : null,
                         ].filter(Boolean).join(' · ')
