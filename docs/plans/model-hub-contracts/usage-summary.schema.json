@@ -16,11 +16,31 @@
     {
       "not": {
         "anyOf": [
-          {"required": ["window_key"]},
-          {"required": ["granularity"]},
-          {"required": ["from_at"]},
-          {"required": ["to_at"]},
-          {"required": ["buckets"]}
+          {
+            "required": [
+              "window_key"
+            ]
+          },
+          {
+            "required": [
+              "granularity"
+            ]
+          },
+          {
+            "required": [
+              "from_at"
+            ]
+          },
+          {
+            "required": [
+              "to_at"
+            ]
+          },
+          {
+            "required": [
+              "buckets"
+            ]
+          }
         ]
       }
     },
@@ -69,11 +89,19 @@
     },
     "window_key": {
       "description": "Modern report selector served by the API.",
-      "enum": ["24h", "7d", "30d", "60d"]
+      "enum": [
+        "24h",
+        "7d",
+        "30d",
+        "60d"
+      ]
     },
     "granularity": {
       "description": "Temporal granularity of the dense bucket matrix.",
-      "enum": ["hour", "day"]
+      "enum": [
+        "hour",
+        "day"
+      ]
     },
     "from_at": {
       "description": "RFC3339 start of the first dense bucket, with the server-local UTC offset.",
@@ -92,6 +120,9 @@
       "items": {
         "$ref": "#/definitions/UsageBucket"
       }
+    },
+    "pricing": {
+      "$ref": "#/definitions/Pricing"
     }
   },
   "definitions": {
@@ -134,6 +165,31 @@
         },
         "output_tokens": {
           "$ref": "#/definitions/Count"
+        },
+        "cache_write_input_tokens": {
+          "$ref": "#/definitions/Count",
+          "description": "Subset of input_tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`), disjoint from cached_input_tokens. Zero for protocols that report no cache writes. Absent from documents produced before cache writes were metered; read absence as zero."
+        },
+        "cache_write_1h_input_tokens": {
+          "$ref": "#/definitions/Count",
+          "description": "Subset of cache_write_input_tokens written with the one-hour cache lifetime (Anthropic `cache_creation.ephemeral_1h_input_tokens`); the rest used the five-minute lifetime."
+        },
+        "cache_write_uncaptured_reports": {
+          "$ref": "#/definitions/Count",
+          "description": "Subset of token_reports metered before cache writes were captured. Their cache writes, if any, are inside input_tokens but not in cache_write_input_tokens."
+        },
+        "api_cost_usd": {
+          "description": "What this usage would cost at the vendor's list API price, in `pricing.currency`, at the current price table — never the price in force when the call ran. A valuation for comparison, never an amount charged. Present exactly when `pricing` is. Usage whose model has no price is left out and counted in excluded_tokens, never priced as zero.",
+          "type": "number",
+          "minimum": 0
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Count",
+          "description": "input_tokens + output_tokens of the usage whose model has no known price, which api_cost_usd therefore leaves out. Present exactly when `pricing` is."
+        },
+        "api_cost_lower_bound": {
+          "description": "True when some priced usage here was metered before cache writes were captured on a model that charges for them: those writes were priced as ordinary input, so api_cost_usd understates. Present exactly when `pricing` is.",
+          "type": "boolean"
         }
       }
     },
@@ -172,6 +228,24 @@
         },
         "output_tokens": {
           "$ref": "#/definitions/Count"
+        },
+        "cache_write_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_input_tokens"
+        },
+        "cache_write_1h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
+        },
+        "cache_write_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "api_cost_usd": {
+          "$ref": "#/definitions/Counters/properties/api_cost_usd"
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Counters/properties/excluded_tokens"
+        },
+        "api_cost_lower_bound": {
+          "$ref": "#/definitions/Counters/properties/api_cost_lower_bound"
         }
       }
     },
@@ -233,7 +307,10 @@
         },
         "label": {
           "description": "Joined from current Source config; null once the Source is gone.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "requests": {
           "$ref": "#/definitions/Count"
@@ -252,7 +329,10 @@
         },
         "last_metered_at": {
           "description": "When this Source last had a call metered, served or billed-and-failed.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time"
         },
         "models": {
@@ -261,6 +341,24 @@
           "items": {
             "$ref": "#/definitions/ModelUsage"
           }
+        },
+        "cache_write_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_input_tokens"
+        },
+        "cache_write_1h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
+        },
+        "cache_write_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "api_cost_usd": {
+          "$ref": "#/definitions/Counters/properties/api_cost_usd"
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Counters/properties/excluded_tokens"
+        },
+        "api_cost_lower_bound": {
+          "$ref": "#/definitions/Counters/properties/api_cost_lower_bound"
         }
       }
     },
@@ -284,7 +382,10 @@
         },
         "label": {
           "description": "The model identity this row was metered under, joined from current Source config; null once the model is gone.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "requests": {
           "$ref": "#/definitions/Count"
@@ -300,6 +401,28 @@
         },
         "output_tokens": {
           "$ref": "#/definitions/Count"
+        },
+        "cache_write_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_input_tokens"
+        },
+        "cache_write_1h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
+        },
+        "cache_write_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "api_cost_usd": {
+          "$ref": "#/definitions/Counters/properties/api_cost_usd"
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Counters/properties/excluded_tokens"
+        },
+        "api_cost_lower_bound": {
+          "$ref": "#/definitions/Counters/properties/api_cost_lower_bound"
+        },
+        "priced": {
+          "description": "Whether a price was found for this model. Present exactly when `pricing` is; false means the UI shows no price for it and its tokens are in excluded_tokens.",
+          "type": "boolean"
         }
       }
     },
@@ -332,6 +455,49 @@
         },
         "output_tokens": {
           "$ref": "#/definitions/Count"
+        },
+        "cache_write_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_input_tokens"
+        },
+        "cache_write_1h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
+        },
+        "cache_write_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "api_cost_usd": {
+          "$ref": "#/definitions/Counters/properties/api_cost_usd"
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Counters/properties/excluded_tokens"
+        },
+        "api_cost_lower_bound": {
+          "$ref": "#/definitions/Counters/properties/api_cost_lower_bound"
+        }
+      }
+    },
+    "Pricing": {
+      "description": "The price table the cost fields were computed from: models.dev list prices under the local override file. Absent from documents produced before API-price valuation existed, and whenever no price table could be read; the cost fields are then absent too.",
+      "type": "object",
+      "required": [
+        "currency",
+        "price_table_date"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD"
+        },
+        "price_table_date": {
+          "description": "Local date the models.dev price table was last fetched; null when none has been fetched and only local overrides priced anything.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/LocalDay"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     }
@@ -346,7 +512,13 @@
         "token_reports": 9,
         "input_tokens": 148230,
         "cached_input_tokens": 96010,
-        "output_tokens": 4120
+        "output_tokens": 4120,
+        "cache_write_input_tokens": 20100,
+        "cache_write_1h_input_tokens": 0,
+        "cache_write_uncaptured_reports": 0,
+        "api_cost_usd": 0.43723,
+        "excluded_tokens": 0,
+        "api_cost_lower_bound": false
       },
       "sources": [
         {
@@ -366,9 +538,22 @@
               "token_reports": 9,
               "input_tokens": 148230,
               "cached_input_tokens": 96010,
-              "output_tokens": 4120
+              "output_tokens": 4120,
+              "cache_write_input_tokens": 20100,
+              "cache_write_1h_input_tokens": 0,
+              "cache_write_uncaptured_reports": 0,
+              "api_cost_usd": 0.43723,
+              "excluded_tokens": 0,
+              "api_cost_lower_bound": false,
+              "priced": true
             }
-          ]
+          ],
+          "cache_write_input_tokens": 20100,
+          "cache_write_1h_input_tokens": 0,
+          "cache_write_uncaptured_reports": 0,
+          "api_cost_usd": 0.43723,
+          "excluded_tokens": 0,
+          "api_cost_lower_bound": false
         }
       ],
       "days": [
@@ -378,9 +563,19 @@
           "token_reports": 9,
           "input_tokens": 148230,
           "cached_input_tokens": 96010,
-          "output_tokens": 4120
+          "output_tokens": 4120,
+          "cache_write_input_tokens": 20100,
+          "cache_write_1h_input_tokens": 0,
+          "cache_write_uncaptured_reports": 0,
+          "api_cost_usd": 0.43723,
+          "excluded_tokens": 0,
+          "api_cost_lower_bound": false
         }
-      ]
+      ],
+      "pricing": {
+        "currency": "USD",
+        "price_table_date": "2026-08-18"
+      }
     }
   ]
 }
