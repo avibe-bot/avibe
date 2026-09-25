@@ -47,6 +47,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.identifiers import canonical_model_id, usage_ledger_key
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import (
@@ -403,6 +404,16 @@ class FakeAdapter:
         )
 
 
+_PRICE_TABLE = PriceTable(
+    catalog={"anthropic": {"models": {"claude-opus-5": {"cost": {
+        "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25,
+    }}}}},
+    vendor_map={"families": [{"prefix": "claude-", "vendor_id": "anthropic"}]},
+    overrides={},
+    price_table_date="2026-07-22",
+)
+
+
 def _service(tmp_path, adapter=None):
     store = MemoryStore()
     adapter = adapter or FakeAdapter()
@@ -424,6 +435,7 @@ def _service(tmp_path, adapter=None):
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
         requested_model_override=lambda backend: store.requested_model(backend),
         migration_home=tmp_path / "native-home",
+        price_table=lambda: _PRICE_TABLE,
     )
     return service, store, adapter
 
@@ -9628,6 +9640,14 @@ def test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh(m
     assert sources["src_codexsub01"]["state"] == "auth_expired"
     assert "cred_" not in json.dumps(body)
     assert sorted(calls) == ["src_codexsub01", "src_subscribe01"]
+
+    # Each subscription carries its API-price value; an unknown plan hides only the payback.
+    assert sources["src_subscribe01"]["value"]["plan_key"] is None
+    assert sources["src_subscribe01"]["value"]["multiple"] is None
+    assert sources["src_subscribe01"]["value"]["period"]["basis"] == "rolling_30d"
+    assert body["quota"]["value"]["price_table_date"] == "2026-07-22"
+    assert body["quota"]["value"]["period"] is None
+    assert "pending" not in body["quota"]
 
     headers = csrf_headers(client, origin)
     refreshed = client.post("/api/models/quota/refresh", headers=headers, base_url=origin)

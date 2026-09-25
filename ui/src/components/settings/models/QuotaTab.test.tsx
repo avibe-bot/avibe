@@ -11,8 +11,8 @@ import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { degradedRegion, loadingRegion, readyRegion, type RegionRead } from './regionRead';
 import { QuotaTab } from './QuotaTab';
-import { windowLeftPct, windowPace, windowUsedPct } from './quotaProjection';
-import type { QuotaSummary, QuotaWindow, SourceQuota } from './types';
+import { PAYBACK_CLEAR_MULTIPLE, quotaPayback, windowLeftPct, windowPace, windowUsedPct } from './quotaProjection';
+import type { PricedUsage, QuotaSummary, QuotaValueTotals, QuotaWindow, SourceQuota, SourceQuotaValue } from './types';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -126,7 +126,7 @@ describe('QuotaTab', () => {
     expect(screen.getByLabelText('即将重置').textContent).toContain('47 分钟');
     expect(screen.getByText('进度条是已用的部分，细竖线是这个周期已经过去的时间：进度条超过竖线，就是用得比时间快。')).toBeTruthy();
 
-    // Money is out of scope: nothing on the tab states a price or a currency.
+    // A server that predates the value block draws the quota alone: no price, no currency.
     expect(container.textContent).not.toMatch(/\$|USD|API 价格|回本/);
   });
 
@@ -269,5 +269,178 @@ describe('QuotaTab', () => {
     } finally {
       await i18n.changeLanguage('zh');
     }
+  });
+
+  describe('API-price value', () => {
+    const priced = (api_cost_usd: number, over: Partial<PricedUsage> = {}): PricedUsage => ({
+      api_cost_usd, excluded_tokens: 0, api_cost_lower_bound: false, ...over,
+    });
+    const sourceValue = (period: number, fee: number | null, over: Partial<SourceQuotaValue> = {}): SourceQuotaValue => ({
+      currency: 'USD',
+      price_table_date: '2026-09-23',
+      plan_key: fee === null ? null : 'claude_max_20x',
+      fee_usd: fee,
+      multiple: fee === null ? null : period / fee,
+      week: priced(period / 3),
+      period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...priced(period) },
+      ...over,
+    });
+    const totals = (week: number, period: { cost: number; fee: number } | null, over: Partial<QuotaValueTotals> = {}): QuotaValueTotals => ({
+      currency: 'USD',
+      price_table_date: '2026-09-23',
+      week: priced(week),
+      period: period && { sources: 1, fee_usd: period.fee, multiple: period.cost / period.fee, ...priced(period.cost) },
+      ...over,
+    });
+    const valued = (sources: SourceQuota[], value: QuotaValueTotals, pending?: string[]): QuotaSummary => ({
+      ...summary(sources), value, ...(pending ? { pending } : {}),
+    });
+
+    it('MH-QUOTA-021: classifies payback at the 1× and 1.1× thresholds', () => {
+      expect(PAYBACK_CLEAR_MULTIPLE).toBe(1.1);
+      expect(quotaPayback(99, 100)).toMatchObject({ kind: 'short', shortfallUsd: 1 });
+      expect(quotaPayback(100, 100)).toMatchObject({ kind: 'even', surplusUsd: 0 });
+      expect(quotaPayback(109, 100)?.kind).toBe('even');
+      expect(quotaPayback(110, 100)).toMatchObject({ kind: 'paid', surplusUsd: 10 });
+      expect(quotaPayback(50, 0)).toBeNull();
+      expect(quotaPayback(Number.NaN, 20)).toBeNull();
+      // On each account card, in words.
+      const line = (cost: number) => {
+        cleanup();
+        draw(readyRegion(valued([claude({ value: sourceValue(cost, 100) })], totals(cost / 3, { cost, fee: 100 }))));
+        return screen.getByRole('article').querySelector('[data-quota-payback]')!.textContent;
+      };
+      expect(line(99)).toBe('还差 $1.00 回本');
+      expect(line(100)).toBe('刚好回本');
+      expect(line(109)).toBe('刚好回本');
+      expect(line(110)).toBe('回本 1.1 倍');
+      // Rounded down: 1.99× is not claimed as 2.0×.
+      expect(line(199)).toBe('回本 1.9 倍');
+    });
+
+    it('MH-QUOTA-022: states the week and period value against the fee, with the price table date', () => {
+      const { container } = draw(readyRegion(valued(
+        [claude({ value: sourceValue(412.5, 200) }), codex({ value: sourceValue(18, 200, { plan_key: 'chatgpt_pro', week: priced(6) }) })],
+        totals(143.5, { cost: 430.5, fee: 400 }),
+      )));
+      expect(screen.getAllByText('近 7 天按 API 价格').length).toBe(3);
+      const stats = container.querySelector('.model-hub-quota-stats')!;
+      expect(stats.textContent).toContain('$143.50');
+      expect(stats.textContent).toContain('本期回本');
+      expect(stats.textContent).toContain('1.0 倍月费');
+      expect(stats.textContent).toContain('已回本，多薅了 $30.50');
+      const [claudeCard, codexCard] = screen.getAllByRole('article');
+      expect(within(claudeCard).getByText('本期按 API 价格')).toBeTruthy();
+      expect(claudeCard.textContent).toContain('$412.50');
+      expect(claudeCard.textContent).toContain('回本 2.0 倍');
+      // Counted between host-calendar days (2026-09-25 → 2026-10-05), whatever the browser's zone.
+      expect(claudeCard.textContent).toContain('距下次续费10 天');
+      expect(claudeCard.textContent).toContain('2026-10-05');
+      expect(codexCard.textContent).toContain('还差 $182.00 回本');
+      const foot = container.querySelector('.model-hub-quota-foot')!.textContent!;
+      expect(foot).toContain('进度条是已用的部分');
+      expect(foot).toContain('“按 API 价格”指同样的用量按官方 API 标价要花多少钱，用来看订阅值不值，不是实际扣费。');
+      expect(foot).toContain('价格表日期 2026-09-23。');
+    });
+
+    it('MH-QUOTA-023: short of the fee says how much, and an unknown plan hides payback but keeps the value', () => {
+      draw(readyRegion(valued([claude({ value: sourceValue(150, 200) })], totals(50, { cost: 150, fee: 200 }))));
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('还差 $50.00 回本');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('0.7 倍月费');
+      cleanup();
+
+      const { container } = draw(readyRegion(valued(
+        [claude({ plan: null, value: sourceValue(90, null, { period: { basis: 'rolling_30d', from_day: '2026-08-27', to_day: '2026-09-25', renews_on: null, ...priced(90) } }) })],
+        totals(30, null),
+      )));
+      const card = screen.getByRole('article');
+      expect(card.textContent).toContain('$30.00');
+      expect(within(card).getByText('近 30 天按 API 价格')).toBeTruthy();
+      expect(card.textContent).toContain('$90.00');
+      expect(card.querySelector('[data-quota-payback]')).toBeNull();
+      expect(card.textContent).not.toContain('回本');
+      expect(card.textContent).not.toContain('距下次续费');
+      expect(container.querySelector('.model-hub-quota-stats')!.textContent).toContain('套餐未知，暂不计算回本');
+    });
+
+    it('MH-QUOTA-024: a model with no price says so and is counted, never priced as zero', () => {
+      const unknown = priced(0, { excluded_tokens: 12_000 });
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(0, 200, { week: unknown, period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...unknown } }) })],
+        totals(0, { cost: 0, fee: 200 }, { week: unknown }),
+      )));
+      const card = screen.getByRole('article');
+      expect(within(card).getAllByText('暂无价格').length).toBe(2);
+      expect(card.textContent).toContain('12,000 tokens 暂无价格，未计入');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('暂无价格');
+      cleanup();
+      // Partly priced: the figure stands and the leftover is named; a lower bound says ≥.
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(40, 200, { week: priced(40, { excluded_tokens: 500, api_cost_lower_bound: true }) }) })],
+        totals(40, { cost: 40, fee: 200 }, { week: priced(40, { excluded_tokens: 500, api_cost_lower_bound: true }) }),
+      )));
+      expect(screen.getByRole('article').textContent).toContain('≥ $40.00');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('500 tokens 暂无价格，未计入');
+      cleanup();
+      // A floor short of the fee names no shortfall; a floor past it still proves the payback.
+      const floor = (cost: number) => priced(cost, { excluded_tokens: 500, api_cost_lower_bound: true });
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(40, 200, { period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...floor(40) } }) })],
+        totals(40, { cost: 40, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 0.2, ...floor(40) } }),
+      )));
+      expect(document.body.textContent).not.toContain('还差');
+      expect(screen.getByRole('article').textContent).toContain('部分用量暂无价格，差额暂不显示');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('≥ 0.2 倍');
+      cleanup();
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(400, 200, { period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...floor(400) } }) })],
+        totals(400, { cost: 400, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 2, ...floor(400) } }),
+      )));
+      expect(screen.getByRole('article').textContent).toContain('回本 ≥ 2.0 倍');
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('已回本，多薅了 ≥ $200.00');
+      cleanup();
+      // A floor just past the fee is at least paid back, never 「刚好回本」.
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(210, 200, { period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...floor(210) } }) })],
+        totals(210, { cost: 210, fee: 200 }, { period: { sources: 1, fee_usd: 200, multiple: 1.05, ...floor(210) } }),
+      )));
+      expect(screen.getByRole('article').textContent).not.toContain('刚好回本');
+      expect(screen.getByRole('article').textContent).toContain('回本 ≥ 1.0 倍');
+      cleanup();
+      // A floor of zero (calls whose size went unreported) is still a floor: 「≥ $0.00」, never an exact zero or a shortfall.
+      const zero = priced(0, { api_cost_lower_bound: true });
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(0, 200, { week: zero, period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...zero } }) })],
+        totals(0, { cost: 0, fee: 200 }, { week: zero, period: { sources: 1, fee_usd: 200, multiple: 0, ...zero } }),
+      )));
+      expect(document.body.textContent).toContain('≥ $0.00');
+      expect(document.body.textContent).not.toMatch(/(?<!≥ )\$0\.00/);
+      expect(document.body.textContent).not.toContain('还差');
+    });
+
+    it('MH-QUOTA-025: a Source still being read shows a loading line instead of 「暂时读不到」', () => {
+      const unread = claude({ state: 'error', error_key: 'models.quota.error.unavailable', windows: [], fetched_at: null, plan: null });
+      draw(readyRegion({ ...summary([unread]), pending: ['src_claude'] }));
+      const card = screen.getByRole('article');
+      expect(within(card).getByRole('status').textContent).toBe('正在读取额度…');
+      expect(card.textContent).not.toContain('暂时读不到额度');
+      cleanup();
+      draw(readyRegion(summary([unread])));
+      expect(screen.getByRole('article').textContent).toContain('暂时读不到额度');
+    });
+
+    it('MH-QUOTA-026: renders the value copy in English through the same keys', async () => {
+      await i18n.changeLanguage('en');
+      try {
+        const { container } = draw(readyRegion(valued([claude({ value: sourceValue(412.5, 200) })], totals(137.5, { cost: 412.5, fee: 200 }))));
+        expect(container.querySelector('.model-hub-quota-stats')!.textContent).toContain('Last 7 days at API price');
+        expect(container.textContent).toContain('Paid back 2.0×');
+        expect(container.textContent).toContain('Paid back, $212.50 ahead');
+        expect(container.textContent).toContain('Price table from 2026-09-23.');
+        expect(container.textContent).not.toMatch(/[一-鿿]/);
+      } finally {
+        await i18n.changeLanguage('zh');
+      }
+    });
   });
 });

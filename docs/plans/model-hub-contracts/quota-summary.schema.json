@@ -2,9 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/quota-summary.schema.json",
   "title": "Model Hub subscription quota",
-  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report only: no consumer may feed it back into resolution, admission, or cooldown. It carries parsed fields only, never a grant, token, or raw upstream body. Quota only: a monetary `value` block is reserved for a later contract version and is absent here.",
+  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report only: no consumer may feed it back into resolution, admission, or cooldown. It carries parsed fields only, never a grant, token, or raw upstream body. The optional `value` blocks price the Source's own metered usage at list API prices for comparison with the subscription fee; they are a valuation, never an amount charged, and their absence means not reported, never zero.",
   "type": "object",
-  "required": ["refresh_interval_seconds", "sources"],
+  "required": [
+    "refresh_interval_seconds",
+    "sources"
+  ],
   "additionalProperties": false,
   "properties": {
     "refresh_interval_seconds": {
@@ -15,32 +18,80 @@
     "sources": {
       "description": "One entry per hub-held subscription Source, in Source order.",
       "type": "array",
-      "items": { "$ref": "#/definitions/SourceQuota" }
+      "items": {
+        "$ref": "#/definitions/SourceQuota"
+      }
+    },
+    "pending": {
+      "description": "Source IDs whose quota read was still in flight when this response was built. The read keeps running and lands in the cache; a client may re-read shortly instead of presenting those Sources as unavailable. Absent from documents produced before this field existed; read absence as empty.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "value": {
+      "$ref": "#/definitions/ValueTotals"
     }
   },
   "definitions": {
     "SourceQuota": {
       "type": "object",
-      "required": ["source_id", "vendor", "display_name", "account_label", "plan", "fetched_at", "state", "windows"],
+      "required": [
+        "source_id",
+        "vendor",
+        "display_name",
+        "account_label",
+        "plan",
+        "fetched_at",
+        "state",
+        "windows"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source_id": { "type": "string", "minLength": 1 },
-        "vendor": { "type": "string", "minLength": 1 },
-        "display_name": { "type": "string" },
-        "account_label": { "type": ["string", "null"] },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vendor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "account_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "plan": {
           "description": "Plan name the vendor reported, when it reports one.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 64
         },
         "fetched_at": {
           "description": "When `windows` was read. Null until the first good read.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time"
         },
         "state": {
           "description": "ok: fresh windows. stale: the latest read failed and `windows` is the last good snapshot. auth_expired: the vendor refused the grant; `windows` may be the last good snapshot. unsupported: this vendor has no quota report. error: no good read exists yet.",
-          "enum": ["ok", "stale", "auth_expired", "unsupported", "error"]
+          "enum": [
+            "ok",
+            "stale",
+            "auth_expired",
+            "unsupported",
+            "error"
+          ]
         },
         "error_key": {
           "description": "Present exactly when `state` is not ok.",
@@ -55,22 +106,59 @@
         "windows": {
           "type": "array",
           "maxItems": 16,
-          "items": { "$ref": "#/definitions/QuotaWindow" }
+          "items": {
+            "$ref": "#/definitions/QuotaWindow"
+          }
+        },
+        "value": {
+          "$ref": "#/definitions/SourceValue"
         }
       },
-      "if": { "properties": { "state": { "const": "ok" } } },
-      "then": { "not": { "required": ["error_key"] } },
-      "else": { "required": ["error_key"] }
+      "if": {
+        "properties": {
+          "state": {
+            "const": "ok"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "error_key"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "error_key"
+        ]
+      }
     },
     "QuotaWindow": {
       "type": "object",
-      "required": ["id", "kind", "label", "used_pct", "window_seconds", "resets_at"],
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "used_pct",
+        "window_seconds",
+        "resets_at"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
         "kind": {
           "description": "session: the shared short window. weekly: the shared weekly window. model_weekly: a weekly window only one model draws on, named by `scope_model`. other: any window the server does not recognise, rendered from `label`.",
-          "enum": ["session", "weekly", "model_weekly", "other"]
+          "enum": [
+            "session",
+            "weekly",
+            "model_weekly",
+            "other"
+          ]
         },
         "label": {
           "description": "Upstream name, whitespace-collapsed and bounded. Display copy for `other`; the UI composes its own copy for the known kinds.",
@@ -84,13 +172,276 @@
           "minLength": 1,
           "maxLength": 64
         },
-        "used_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "window_seconds": { "type": ["integer", "null"], "minimum": 1 },
-        "resets_at": { "type": ["string", "null"], "format": "date-time" }
+        "used_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "window_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "resets_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
       },
-      "if": { "properties": { "kind": { "const": "model_weekly" } } },
-      "then": { "required": ["scope_model"] },
-      "else": { "not": { "required": ["scope_model"] } }
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "model_weekly"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "scope_model"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "scope_model"
+          ]
+        }
+      }
+    },
+    "Money": {
+      "description": "USD amount, never negative.",
+      "type": "number",
+      "minimum": 0
+    },
+    "Tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "LocalDay": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "PricedUsage": {
+      "description": "API-price valuation of one span of metered usage, at the current price table.",
+      "type": "object",
+      "required": [
+        "api_cost_usd",
+        "excluded_tokens",
+        "api_cost_lower_bound"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "api_cost_usd": {
+          "$ref": "#/definitions/Money",
+          "description": "Sum over priced usage only."
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Tokens",
+          "description": "input + output tokens of usage whose model has no known price, left out of api_cost_usd."
+        },
+        "api_cost_lower_bound": {
+          "type": "boolean",
+          "description": "True when api_cost_usd is only a floor: some tokens are excluded, some requests have no token report, or some usage was metered before cache writes were captured on a model that lists a cache-write price above input. A floor can show a payback but never a shortfall."
+        }
+      }
+    },
+    "Period": {
+      "type": "object",
+      "required": [
+        "basis",
+        "from_day",
+        "to_day",
+        "renews_on",
+        "api_cost_usd",
+        "excluded_tokens",
+        "api_cost_lower_bound"
+      ],
+      "properties": {
+        "basis": {
+          "description": "billing_cycle: the current cycle from the configured renewal day. rolling_30d: no cycle is known, so the trailing 30 local days ending today.",
+          "enum": [
+            "billing_cycle",
+            "rolling_30d"
+          ]
+        },
+        "from_day": {
+          "$ref": "#/definitions/LocalDay"
+        },
+        "to_day": {
+          "$ref": "#/definitions/LocalDay",
+          "description": "Today; usage after today does not exist yet."
+        },
+        "renews_on": {
+          "description": "Next renewal day, present exactly for billing_cycle.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/LocalDay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "api_cost_usd": {
+          "$ref": "#/definitions/Money",
+          "description": "Sum over priced usage only."
+        },
+        "excluded_tokens": {
+          "$ref": "#/definitions/Tokens",
+          "description": "input + output tokens of usage whose model has no known price, left out of api_cost_usd."
+        },
+        "api_cost_lower_bound": {
+          "type": "boolean",
+          "description": "True when api_cost_usd is only a floor: some tokens are excluded, some requests have no token report, or some usage was metered before cache writes were captured on a model that lists a cache-write price above input. A floor can show a payback but never a shortfall."
+        }
+      },
+      "additionalProperties": false,
+      "description": "The span `multiple` compares with the monthly fee, and its valuation (same members as PricedUsage)."
+    },
+    "SourceValue": {
+      "description": "This Source's metered usage priced at list API prices, and how it compares with the plan's monthly fee.",
+      "type": "object",
+      "required": [
+        "currency",
+        "price_table_date",
+        "plan_key",
+        "fee_usd",
+        "multiple",
+        "week",
+        "period"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD"
+        },
+        "price_table_date": {
+          "description": "Local date the models.dev price table was fetched; null when only local overrides priced anything.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/LocalDay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_key": {
+          "description": "Fee-table key the plan resolved to (built-in: claude_pro, claude_max_5x, claude_max_20x, chatgpt_plus, chatgpt_pro; or a key the local override file defines), or null when the plan is unknown.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "fee_usd": {
+          "description": "Monthly fee of the plan, from the built-in table or the local override file. Null when the plan or its fee is unknown; the page then shows no payback.",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "multiple": {
+          "description": "period.api_cost_usd / fee_usd, present exactly when fee_usd is positive.",
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "week": {
+          "$ref": "#/definitions/PricedUsage",
+          "description": "The trailing 7 local days ending today."
+        },
+        "period": {
+          "$ref": "#/definitions/Period"
+        }
+      }
+    },
+    "ValueTotals": {
+      "description": "Sums across every Source that carries a `value` block.",
+      "type": "object",
+      "required": [
+        "currency",
+        "price_table_date",
+        "week",
+        "period"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "const": "USD"
+        },
+        "price_table_date": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/LocalDay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "week": {
+          "$ref": "#/definitions/PricedUsage",
+          "description": "Every valued Source."
+        },
+        "period": {
+          "description": "Only the Sources with a known fee, so the multiple compares like with like. Null when no Source has a known fee.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "sources",
+                "fee_usd",
+                "multiple",
+                "api_cost_usd",
+                "excluded_tokens",
+                "api_cost_lower_bound"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "sources": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "How many Sources the period totals cover."
+                },
+                "fee_usd": {
+                  "$ref": "#/definitions/Money"
+                },
+                "multiple": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "api_cost_usd": {
+                  "$ref": "#/definitions/Money"
+                },
+                "excluded_tokens": {
+                  "$ref": "#/definitions/Tokens"
+                },
+                "api_cost_lower_bound": {
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
+        }
+      }
     }
   }
 }

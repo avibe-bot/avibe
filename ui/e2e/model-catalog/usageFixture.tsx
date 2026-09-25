@@ -21,6 +21,7 @@ const counters = (over: Partial<UsageCounters> = {}): UsageCounters => ({
 
 const row = (over: Partial<UsageBucketRow> = {}): UsageBucketRow => ({
   ...counters(),
+  ...(params.get('priced') === '1' ? { api_cost_usd: 1.5, excluded_tokens: 0, api_cost_lower_bound: false } : {}),
   source_id: 'source-alpha',
   model_id: 'model-shared',
   ...over,
@@ -40,6 +41,11 @@ const rowsFor = (index: number, count: number): UsageBucketRow[] => {
   if (index === count - 2) return [row({ source_id: 'source-alpha', model_id: 'model-second' })];
   return [];
 };
+
+// `?priced=1` serves the report as a server with API-price valuation does.
+const PRICED = params.get('priced') === '1';
+const cost = (api_cost_usd: number): Partial<UsageCounters> =>
+  (PRICED ? { api_cost_usd, excluded_tokens: 0, api_cost_lower_bound: false } : {});
 
 const makeReport = (windowKey: UsageWindowKey): UsageReport => {
   const count = windowKey === '24h' ? 24 : Number(windowKey.slice(0, -1));
@@ -68,24 +74,25 @@ const makeReport = (windowKey: UsageWindowKey): UsageReport => {
       input_tokens: 360,
       cached_input_tokens: 120,
       output_tokens: 180,
+      ...cost(4.5),
     }),
     sources: [
       {
         source_id: 'source-alpha',
         label: 'Same supplier',
         last_metered_at: '2026-09-24T18:00:00+08:00',
-        ...counters({ requests: 6, token_reports: 6, input_tokens: 240, cached_input_tokens: 80, output_tokens: 120 }),
+        ...counters({ requests: 6, token_reports: 6, input_tokens: 240, cached_input_tokens: 80, output_tokens: 120, ...cost(3) }),
         models: [
-          { model_id: 'model-shared', label: 'Same model', ...counters() },
-          { model_id: 'model-second', label: 'Second model', ...counters() },
+          { model_id: 'model-shared', label: 'Same model', ...counters(cost(1.5)) },
+          { model_id: 'model-second', label: 'Second model', ...counters(cost(1.5)) },
         ],
       },
       {
         source_id: 'source-beta',
         label: 'Same supplier',
         last_metered_at: '2026-09-24T10:00:00+08:00',
-        ...counters(),
-        models: [{ model_id: 'model-shared', label: 'Same model', ...counters() }],
+        ...counters(cost(1.5)),
+        models: [{ model_id: 'model-shared', label: 'Same model', ...counters(cost(1.5)) }],
       },
     ],
     days: [],
@@ -94,6 +101,7 @@ const makeReport = (windowKey: UsageWindowKey): UsageReport => {
     from_at: localAt(firstStart),
     to_at: CURRENT_AT,
     buckets,
+    ...(PRICED ? { pricing: { currency: 'USD' as const, price_table_date: '2026-09-23' } } : {}),
   };
 };
 

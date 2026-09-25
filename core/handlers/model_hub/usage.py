@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
+from .pricing import CURRENCY, Cost, ModelPrice, PriceTable, row_cost
 from .state_file import write_state_document
 from .stream_wire import ProtocolUsageReport
 
@@ -113,15 +114,54 @@ _COUNTER_KEYS: Final = (
     "input_tokens",
     "cached_input_tokens",
     "output_tokens",
+    "cache_write_input_tokens",
+    "cache_write_1h_input_tokens",
+    "cache_write_uncaptured_reports",
+)
+# Counters added after files were already written. A released row lacks them, and
+# what it lacks is knowledge, not usage: its cache writes are inside its input but
+# were never split out, so every token report it carries counts as uncaptured.
+# Additive only — no stored row is rewritten to acquire them.
+_CACHE_WRITE_KEYS: Final = (
+    "cache_write_input_tokens",
+    "cache_write_1h_input_tokens",
+    "cache_write_uncaptured_reports",
 )
 # The cross-field guarantees the read contract makes, as (subset, superset).
 # Each one is repaired on read, so a corrupt or hand-edited file degrades into a
 # smaller true statement instead of publishing an impossible one: a coverage
-# figure above 100% is more misleading than a conservative one.
+# figure above 100% is more misleading than a conservative one. Order matters:
+# a superset is repaired before the subsets that are read against it.
 _COUNTER_SUBSETS: Final = (
     ("cached_input_tokens", "input_tokens"),
     ("token_reports", "requests"),
+    ("cache_write_uncaptured_reports", "token_reports"),
+    ("cache_write_1h_input_tokens", "cache_write_input_tokens"),
 )
+
+
+def _released_cache_write_counters(value: dict) -> dict[str, int]:
+    """What a counter set written before cache writes were metered stands for."""
+
+    reports = value.get("token_reports")
+    uncaptured = reports if isinstance(reports, int) and not isinstance(reports, bool) else 0
+    return {
+        "cache_write_input_tokens": 0,
+        "cache_write_1h_input_tokens": 0,
+        "cache_write_uncaptured_reports": max(0, uncaptured),
+    }
+
+
+def _repair_cache_writes(counters: dict) -> None:
+    """Keep cache writes inside the input that cache reads did not already claim."""
+
+    counters["cache_write_input_tokens"] = min(
+        counters["cache_write_input_tokens"],
+        max(0, counters["input_tokens"] - counters["cached_input_tokens"]),
+    )
+    counters["cache_write_1h_input_tokens"] = min(
+        counters["cache_write_1h_input_tokens"], counters["cache_write_input_tokens"]
+    )
 
 
 def _utc_now() -> datetime:
@@ -553,6 +593,8 @@ def _normalize_hourly_totals(value: object) -> Optional[dict]:
 
     if not isinstance(value, dict):
         return None
+    if all(key not in value for key in _CACHE_WRITE_KEYS):
+        value = {**_released_cache_write_counters(value), **value}
     totals: dict[str, int] = {}
     for key in _COUNTER_KEYS:
         counter = value.get(key)
@@ -564,6 +606,8 @@ def _normalize_hourly_totals(value: object) -> Optional[dict]:
     for subset, superset in _COUNTER_SUBSETS:
         if totals[subset] > totals[superset]:
             return None
+    if totals["cache_write_input_tokens"] + totals["cached_input_tokens"] > totals["input_tokens"]:
+        return None
     if totals["token_reports"] == 0 and any(
         totals[key] for key in ("input_tokens", "cached_input_tokens", "output_tokens")
     ):
@@ -595,6 +639,8 @@ def _normalize_row(row: object) -> Optional[dict]:
     calendar_day = _calendar_day(day)
     if calendar_day is None:
         return None
+    if all(key not in row for key in _CACHE_WRITE_KEYS):
+        row = {**_released_cache_write_counters(row), **row}
     counters: dict[str, int] = {}
     for key in _COUNTER_KEYS:
         counter = _counter(row.get(key))
@@ -613,6 +659,8 @@ def _normalize_row(row: object) -> Optional[dict]:
         normalized["history_degraded"] = True
     for subset, superset in _COUNTER_SUBSETS:
         normalized[subset] = min(normalized[subset], normalized[superset])
+    _repair_cache_writes(normalized)
+    counters = {key: normalized[key] for key in _COUNTER_KEYS}
     normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
     raw_hours = row.get("hours")
     if isinstance(raw_hours, list):
@@ -738,6 +786,29 @@ def _keyed_identities(
     return sources, models
 
 
+def _row_price(
+    row: Mapping, prices: PriceTable, keyed_model_labels: Mapping[tuple[str, str], str]
+) -> Optional[ModelPrice]:
+    """Price a row by the identity it was metered under; a folded key is not a model name."""
+
+    return prices.price(keyed_model_labels.get((row["source_id"], row["model_id"]), row["model_id"]))
+
+
+def _priced_bucket_row(
+    row: dict,
+    prices: Optional[PriceTable],
+    keyed_model_labels: Mapping[tuple[str, str], str],
+    *,
+    degraded: bool = False,
+) -> dict:
+    if prices is None:
+        return row
+    cost = row_cost(row, _row_price(row, prices, keyed_model_labels))
+    # A degraded read lost rows of unknown size, so no figure from it is exact.
+    cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
+    return {**row, **cost.fields()}
+
+
 def _recency(
     row: dict, ceiling: datetime, *, utc_owner_days: bool = False,
 ) -> tuple[str, datetime]:
@@ -792,6 +863,14 @@ def _recency(
     if metered is None or metered > ceiling:
         return (row["day"], _OLDEST_INSTANT)
     return (row["day"], metered)
+
+
+def _cache_write_increment(usage: Optional[ProtocolUsageReport]) -> dict[str, int]:
+    return {
+        "cache_write_input_tokens": usage.cache_write_input_tokens if usage else 0,
+        "cache_write_1h_input_tokens": usage.cache_write_1h_input_tokens if usage else 0,
+        "cache_write_uncaptured_reports": 0,
+    }
 
 
 def _row_key(row: dict) -> tuple[str, str, str]:
@@ -1201,6 +1280,7 @@ class BoundedUsageLedger:
                             "input_tokens": usage.input_tokens if usage else 0,
                             "cached_input_tokens": usage.cached_input_tokens if usage else 0,
                             "output_tokens": usage.output_tokens if usage else 0,
+                            **_cache_write_increment(usage),
                             "last_metered_at": metered_at.isoformat(),
                             "hours": [
                                 {
@@ -1210,6 +1290,7 @@ class BoundedUsageLedger:
                                     "input_tokens": usage.input_tokens if usage else 0,
                                     "cached_input_tokens": usage.cached_input_tokens if usage else 0,
                                     "output_tokens": usage.output_tokens if usage else 0,
+                                    **_cache_write_increment(usage),
                                     "last_metered_at": metered_at.isoformat(),
                                 }
                             ],
@@ -1324,6 +1405,43 @@ class BoundedUsageLedger:
         rows, _degraded = self._window_rows(days=days, now=now)
         return rows
 
+    def daily_costs(
+        self,
+        *,
+        days: int,
+        now: datetime,
+        identities: Sequence[SourceIdentity],
+        prices: PriceTable,
+    ) -> dict[str, dict[str, Cost]]:
+        """Price the window's rows per Source and local day, keyed by config Source ID.
+
+        The quota page compares spans the ledger does not know (a billing cycle, a
+        week), so it gets days to sum rather than one total. Only the given
+        identities are answered for; a row keyed to anything else is not theirs.
+        """
+
+        keyed_sources = {
+            key: identity.source_id
+            for identity in identities
+            if (key := usage_ledger_key(identity.source_id)) is not None
+        }
+        _labels, keyed_model_labels = _keyed_identities(identities)
+        rows, degraded = self._window_rows(days=days, now=now)
+        costs: dict[str, dict[str, Cost]] = {}
+        for row in rows:
+            source_id = keyed_sources.get(row["source_id"])
+            if source_id is None:
+                continue
+            cost = row_cost(row, _row_price(row, prices, keyed_model_labels))
+            costs.setdefault(source_id, {}).setdefault(row["day"], Cost()).add(cost)
+        if degraded:
+            # Rows of unknown size were lost, so every Source's value is a floor:
+            # today lies in every span the quota page sums.
+            today = local_usage_day(now).isoformat()
+            for source_id in keyed_sources.values():
+                costs.setdefault(source_id, {}).setdefault(today, Cost()).add(Cost(api_cost_lower_bound=True))
+        return costs
+
     def _hourly_rows(
         self,
         *,
@@ -1384,6 +1502,7 @@ class BoundedUsageLedger:
         days: int = USAGE_DEFAULT_WINDOW_DAYS,
         now: datetime,
         identities: Optional[Sequence[SourceIdentity]] = None,
+        prices: Optional[PriceTable] = None,
     ) -> dict:
         """Aggregate the window into the read shape the settings page consumes.
 
@@ -1409,13 +1528,15 @@ class BoundedUsageLedger:
 
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
-        rows, _degraded = self._window_rows(days=bounded_days, now=now)
+        rows, degraded = self._window_rows(days=bounded_days, now=now)
         return self._summary_from_rows(
             rows,
             window_days=bounded_days,
             from_day=(today - timedelta(days=bounded_days - 1)).isoformat(),
             to_day=today.isoformat(),
             identities=identities,
+            prices=prices,
+            degraded=degraded,
         )
 
     def _summary_from_rows(
@@ -1426,16 +1547,42 @@ class BoundedUsageLedger:
         from_day: str,
         to_day: str,
         identities: Optional[Sequence[SourceIdentity]],
+        prices: Optional[PriceTable] = None,
+        degraded: bool = False,
     ) -> dict:
-        """Aggregate one exact set of daily or hourly rows."""
+        """Aggregate one exact set of daily or hourly rows.
+
+        With a price table, every aggregate also carries its API-price valuation,
+        summed from the same rows so a total always equals the sum of its parts.
+        A `degraded` read lost rows of unknown size, so every valuation is a floor.
+        """
 
         keyed_source_labels, keyed_model_labels = _keyed_identities(identities)
+        costs: dict[int, Cost] = {}
+
+        def priced(target: dict, cost: Optional[Cost]) -> None:
+            if cost is not None:
+                costs.setdefault(id(target), Cost()).add(cost)
+
+        def with_cost(target: dict, *, omit: str = "") -> dict:
+            published = {key: value for key, value in target.items() if key != omit}
+            if prices is None:
+                return published
+            cost = costs.get(id(target), Cost())
+            cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
+            return {**published, **cost.fields()}
 
         totals = _empty_totals()
         sources: dict[str, dict] = {}
         by_day: dict[str, dict] = {}
         for row in rows:
             _accumulate(totals, row)
+            cost = (
+                None
+                if prices is None
+                else row_cost(row, _row_price(row, prices, keyed_model_labels))
+            )
+            priced(totals, cost)
 
             source = sources.setdefault(
                 row["source_id"],
@@ -1448,6 +1595,7 @@ class BoundedUsageLedger:
                 },
             )
             _accumulate(source, row)
+            priced(source, cost)
             source["last_metered_at"] = _newer_timestamp(
                 source["last_metered_at"],
                 row["last_metered_at"],
@@ -1461,30 +1609,40 @@ class BoundedUsageLedger:
                 },
             )
             _accumulate(model, row)
+            priced(model, cost)
+            if prices is not None:
+                model["priced"] = _row_price(row, prices, keyed_model_labels) is not None
 
             day = by_day.setdefault(row["day"], {"day": row["day"], **_empty_totals()})
             _accumulate(day, row)
+            priced(day, cost)
 
-        return {
+        summary = {
             "window_days": window_days,
             "from_day": from_day,
             "to_day": to_day,
-            "totals": totals,
+            "totals": with_cost(totals),
             "sources": [
                 {
-                    **{key: value for key, value in source.items() if key != "models"},
-                    "models": sorted(
-                        source["models"].values(),
-                        key=lambda model: (-model["requests"], model["model_id"]),
-                    ),
+                    **with_cost(source, omit="models"),
+                    "models": [
+                        with_cost(model)
+                        for model in sorted(
+                            source["models"].values(),
+                            key=lambda model: (-model["requests"], model["model_id"]),
+                        )
+                    ],
                 }
                 for source in sorted(
                     sources.values(),
                     key=lambda source: (-source["requests"], source["source_id"]),
                 )
             ],
-            "days": [by_day[day] for day in sorted(by_day)],
+            "days": [with_cost(by_day[day]) for day in sorted(by_day)],
         }
+        if prices is not None:
+            summary["pricing"] = {"currency": CURRENCY, "price_table_date": prices.price_table_date}
+        return summary
 
     def report(
         self,
@@ -1492,13 +1650,14 @@ class BoundedUsageLedger:
         window: str,
         now: datetime,
         identities: Optional[Sequence[SourceIdentity]] = None,
+        prices: Optional[PriceTable] = None,
     ) -> dict:
         """Build one modern dense report without reallocating daily history."""
 
         if window not in USAGE_WINDOW_KEYS:
             raise ValueError(f"unsupported usage window: {window!r}")
         if window == "24h":
-            return self._hourly_report(now=now, identities=identities)
+            return self._hourly_report(now=now, identities=identities, prices=prices)
         days = int(window[:-1])
         bounded_days = max(1, min(days, self.retention_days))
         report_local = _local(now)
@@ -1511,7 +1670,10 @@ class BoundedUsageLedger:
             from_day=from_day.isoformat(),
             to_day=today.isoformat(),
             identities=identities,
+            prices=prices,
+            degraded=read_degraded,
         )
+        _source_labels, keyed_model_labels = _keyed_identities(identities)
         by_day = {
             row["day"]: []
             for row in rows
@@ -1520,11 +1682,16 @@ class BoundedUsageLedger:
         for row in rows:
             if row["day"] in by_day:
                 by_day[row["day"]].append(
-                    {
-                        "source_id": row["source_id"],
-                        "model_id": row["model_id"],
-                        **{key: row[key] for key in _COUNTER_KEYS},
-                    }
+                    _priced_bucket_row(
+                        {
+                            "source_id": row["source_id"],
+                            "model_id": row["model_id"],
+                            **{key: row[key] for key in _COUNTER_KEYS},
+                        },
+                        prices,
+                        keyed_model_labels,
+                        degraded=read_degraded,
+                    )
                 )
         buckets = []
         for index in range(bounded_days):
@@ -1561,8 +1728,11 @@ class BoundedUsageLedger:
         *,
         now: datetime,
         identities: Optional[Sequence[SourceIdentity]],
+        prices: Optional[PriceTable] = None,
     ) -> dict:
         """Project only measured nested slices onto 24 actual consecutive hours."""
+
+        _source_labels, keyed_model_labels = _keyed_identities(identities)
 
         report_instant = _aware(now)
         starts = _hour_starts(now)
@@ -1648,11 +1818,17 @@ class BoundedUsageLedger:
             start_local = start.astimezone()
             end_local = end.astimezone()
             projected_rows = [
-                {
-                    "source_id": row["source_id"],
-                    "model_id": row["model_id"],
-                    **{counter: row[counter] for counter in _COUNTER_KEYS},
-                }
+                _priced_bucket_row(
+                    {
+                        "source_id": row["source_id"],
+                        "model_id": row["model_id"],
+                        **{counter: row[counter] for counter in _COUNTER_KEYS},
+                    },
+                    prices,
+                    keyed_model_labels,
+                    # An incomplete hour holds usage it cannot place, so its cost is a floor.
+                    degraded=index in incomplete,
+                )
                 for row in sorted(
                     measured_by_bucket[index].values(),
                     key=lambda row: (row["source_id"], row["model_id"]),
@@ -1679,6 +1855,8 @@ class BoundedUsageLedger:
             from_day=days[0],
             to_day=days[-1],
             identities=identities,
+            prices=prices,
+            degraded=bool(incomplete),
         )
         return {
             **summary,
@@ -1827,6 +2005,10 @@ class UsageCall:
                 input_tokens=sum(report.input_tokens for report in reports),
                 cached_input_tokens=sum(report.cached_input_tokens for report in reports),
                 output_tokens=sum(report.output_tokens for report in reports),
+                cache_write_input_tokens=sum(report.cache_write_input_tokens for report in reports),
+                cache_write_1h_input_tokens=sum(
+                    report.cache_write_1h_input_tokens for report in reports
+                ),
             )
         return replace(
             self,

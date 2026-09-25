@@ -348,6 +348,105 @@ describe('UsageTab', () => {
     expect(screen.getAllByRole('button', { name: /Usage bucket/ })).toHaveLength(3);
   });
 
+  // API price is a report beside the token counts: offered only when the server
+  // priced the report, never read as a charge, and never $0 for a model with no
+  // price.
+  const pricedReport = (): UsageReport => {
+    const cost = (usd: number, excluded = 0) => ({ api_cost_usd: usd, excluded_tokens: excluded, api_cost_lower_bound: false });
+    const pricedRow = row(cost(0.5));
+    const unpricedRow = row({ source_id: 'source-b', model_id: 'relay-model', ...cost(0, 140) });
+    return report({
+      totals: counters({ requests: 4, token_reports: 4, input_tokens: 200, cached_input_tokens: 50, output_tokens: 80, ...cost(0.5, 140) }),
+      sources: [
+        { source_id: 'source-a', label: 'Claude', last_metered_at: null, ...counters(cost(0.5)),
+          models: [{ model_id: 'model-a', label: 'Opus', ...counters(cost(0.5)) }] },
+        { source_id: 'source-b', label: 'Relay', last_metered_at: null, ...counters(cost(0, 140)),
+          models: [{ model_id: 'relay-model', label: 'Relay model', ...counters(cost(0, 140)) }] },
+      ],
+      buckets: [bucket('00', [pricedRow, unpricedRow])],
+      pricing: { currency: 'USD', price_table_date: '2026-09-23' },
+    });
+  };
+
+  it('MH-USAGE-030: offers the API-price metric only for a priced report', () => {
+    draw(report());
+    const metric = () => screen.getByRole('combobox', { name: 'Metric' }) as HTMLSelectElement;
+    expect([...metric().options].map((option) => option.value)).not.toContain('cost');
+    cleanup();
+    draw(pricedReport());
+    expect([...metric().options].map((option) => option.value)).toContain('cost');
+  });
+
+  it('MH-USAGE-029: states the API-price value, what it leaves out, and its price table', async () => {
+    const { container } = draw(pricedReport());
+    const stats = container.querySelector('.model-hub-usage-stat-grid--priced');
+    expect(stats).not.toBeNull();
+    expect(stats!.textContent).toContain('At API price');
+    expect(stats!.textContent).toContain('$0.50');
+    expect(stats!.textContent).toContain('At published API prices, not a charge');
+    expect(stats!.textContent).toContain('140 tokens have no price and are left out');
+    expect(stats!.textContent).toContain('Price table from 2026-09-23');
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    expect(container.querySelector('.model-hub-usage-cost-note')?.textContent).toBe('At published API prices, not a charge');
+    expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('No price yet');
+    expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('$0.50');
+    expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).not.toContain('≥');
+    expect(container.querySelector('.model-hub-usage-table-scroll tbody')?.textContent).toMatch(/\d%/);
+    cleanup();
+
+    // A floor keeps its 「≥」 in the itemized rows and the table total, not only the card.
+    const floor = pricedReport();
+    const lower = <T extends object>(value: T): T => ({ ...value, api_cost_lower_bound: true });
+    floor.buckets = floor.buckets.map((item) => ({ ...item, rows: item.rows.map((entry, index) => (index === 0 ? lower(entry) : entry)) }));
+    floor.sources = floor.sources.map((source, index) => (index === 0 ? { ...lower(source), models: source.models.map(lower) } : source));
+    floor.totals = lower(floor.totals);
+    const drawn = draw(floor);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    const table = drawn.container.querySelector('.model-hub-usage-table-scroll')!;
+    expect(table.querySelector('tbody')!.textContent).toContain('≥ $0.50');
+    expect(table.querySelector('tfoot')!.textContent).toContain('≥ $0.50');
+    // A share of a floor total is not a known fraction.
+    expect(table.querySelector('tbody')!.textContent).not.toMatch(/\d%/);
+  });
+
+  it('MH-USAGE-032: a floor bucket reads 「≥」 in the chart legend and the bucket detail, an exact one does not', async () => {
+    const floor = pricedReport();
+    floor.buckets = [
+      bucket('00', [row({ api_cost_usd: 0.5, excluded_tokens: 0, api_cost_lower_bound: true })]),
+      bucket('01', [row({ api_cost_usd: 0.25, excluded_tokens: 0, api_cost_lower_bound: false })]),
+    ];
+    const { container } = draw(floor);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    expect(container.querySelector('.model-hub-usage-legend')!.textContent).toContain('≥ $0.75');
+
+    const buckets = screen.getAllByRole('button', { name: /Usage bucket/ });
+    fireEvent.pointerEnter(buckets[0]);
+    const detail = () => screen.getByRole('dialog', { name: 'Usage bucket details' });
+    expect(detail().querySelector('.model-hub-usage-tooltip-total')!.textContent).toContain('≥ $0.50');
+    expect(detail().querySelector('.model-hub-usage-tooltip-lines')!.textContent).toContain('≥ $0.50');
+    fireEvent.pointerEnter(buckets[1]);
+    await screen.findByText('$0.25', { selector: '.model-hub-usage-tooltip-total strong' });
+    expect(detail().textContent).not.toContain('≥');
+  });
+
+  it('MH-USAGE-031: reads the API-price value in Chinese as a conversion, not a charge', async () => {
+    await i18n.addResourceBundle('zh', 'translation', zh, true, true);
+    await i18n.changeLanguage('zh');
+    try {
+      const { container } = draw(pricedReport());
+      const stats = container.querySelector('.model-hub-usage-stat-grid--priced')!;
+      expect(stats.textContent).toContain('折合 API 价格');
+      expect(stats.textContent).toContain('不是实际扣费');
+      expect(stats.textContent).toContain('价格表日期 2026-09-23');
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: '指标' }), 'cost');
+      expect(container.querySelector('.model-hub-usage-cost-note')?.textContent).toContain('不是实际扣费');
+      expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('暂无价格');
+    } finally {
+      await i18n.changeLanguage('en');
+    }
+  });
+
   it('renders exact accounting and preserves source/model pair rows', () => {
     const second = row({ source_id: 'source-b', model_id: 'model-a' });
     const value = report({

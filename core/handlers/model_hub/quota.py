@@ -267,6 +267,42 @@ def parse_claude_quota(body: object) -> dict[str, Any]:
     return {"plan": None, "windows": _ordered(windows)}
 
 
+# Claude's usage report names no plan; its OAuth profile's organization does.
+# Claude Code CLI 2.1.280 reads the same profile: `organization_type` names the
+# product (claude_max / claude_pro / claude_team / claude_enterprise) and
+# `rate_limit_tier` separates the Max tiers. Team seats can carry a Max tier, so
+# the tier counts only on a claude_max organization.
+_CLAUDE_MAX_TIER_PLANS: Final[Mapping[str, str]] = {
+    "default_claude_max_20x": "max_20x",
+    "default_claude_max_5x": "max_5x",
+}
+
+
+def parse_claude_plan(body: object) -> Optional[str]:
+    """Read the plan from `GET https://api.anthropic.com/api/oauth/profile`, or None.
+
+    Best effort by design: the plan only prices a fee comparison, so a body we
+    cannot read, or a product without a built-in fee (Team, Enterprise, an
+    unknown Max tier), yields no plan rather than a failure.
+    """
+
+    try:
+        payload = _load_object(body)
+    except SubscriptionQuotaError:
+        return None
+    organization = payload.get("organization")
+    if not isinstance(organization, dict):
+        return None
+    kind = organization.get("organization_type")
+    kind = kind.strip().lower() if isinstance(kind, str) else ""
+    if kind == "claude_pro":
+        return "pro"
+    if kind != "claude_max":
+        return None
+    tier = organization.get("rate_limit_tier")
+    return _CLAUDE_MAX_TIER_PLANS.get(tier.strip().lower()) if isinstance(tier, str) else None
+
+
 def _codex_kind(seconds: Optional[int]) -> QuotaWindowKind:
     if seconds is None:
         return "other"
@@ -393,6 +429,8 @@ QUOTA_READ_DEADLINE_SECONDS: Final = 12.0
 # queue here instead of all reaching the engine at once.
 QUOTA_MAX_CONCURRENT_FETCHES: Final = 4
 QUOTA_FETCH_TIMEOUT_SECONDS: Final = 10.0
+# The plan read follows the quota read inside the same deadline; it is optional.
+CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS: Final = 5.0
 _RATE_LIMIT_COOLDOWN_FLOOR: Final = timedelta(minutes=5)
 _RATE_LIMIT_COOLDOWN_CEILING: Final = timedelta(hours=1)
 
@@ -456,10 +494,21 @@ class SubscriptionQuotaCache:
             # A slow vendor must not hold the page: whatever has not answered by
             # the deadline keeps running and lands in the next read.
             await asyncio.wait(pending, timeout=QUOTA_READ_DEADLINE_SECONDS)
-        return {
+        payload: dict[str, Any] = {
             "refresh_interval_seconds": int(QUOTA_REFRESH_INTERVAL.total_seconds()),
             "sources": [self._payload(source) for source in sources],
         }
+        # Named so the page can re-read shortly instead of showing a gap as a failure.
+        still_reading = [
+            source.source_id
+            for source in sources
+            if (entry := self._entries.get(source.source_id)) is not None
+            and entry.task is not None
+            and not entry.task.done()
+        ]
+        if still_reading:
+            payload["pending"] = still_reading
+        return payload
 
     def forget(self, source_id: str) -> None:
         """Drop a Source's snapshot, failure, and throttle, e.g. after re-authentication.
@@ -519,7 +568,11 @@ class SubscriptionQuotaCache:
             entry.failure = "unavailable"
             logger.warning("Model Hub quota read failed for %s", source.source_id, exc_info=False)
             return
-        entry.snapshot = {"plan": parsed.get("plan"), "windows": windows}
+        plan = parsed.get("plan")
+        if plan is None and entry.snapshot is not None:
+            # The plan is a best-effort second read; one miss must not blank it.
+            plan = entry.snapshot["plan"]
+        entry.snapshot = {"plan": plan, "windows": windows}
         entry.fetched_at = self._now()
         entry.failure = None
         entry.cooldown_until = None

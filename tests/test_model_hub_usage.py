@@ -62,6 +62,17 @@ from core.handlers.model_hub.usage import (
 NOW = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
 
 
+def _as_released(counts: dict) -> dict:
+    """Totals of rows written before cache writes were metered: every report uncaptured."""
+
+    return {
+        **counts,
+        "cache_write_input_tokens": 0,
+        "cache_write_1h_input_tokens": 0,
+        "cache_write_uncaptured_reports": counts["token_reports"],
+    }
+
+
 def _frame(document: dict) -> bytes:
     """Render one SSE frame the way the protocols that name events do.
 
@@ -110,7 +121,12 @@ def test_every_observed_protocol_declares_a_usage_location() -> None:
                 "cache_creation_input_tokens": 2,
                 "output_tokens": 7,
             },
-            ProtocolUsageReport(input_tokens=17, cached_input_tokens=3, output_tokens=7),
+            ProtocolUsageReport(
+                input_tokens=17,
+                cached_input_tokens=3,
+                output_tokens=7,
+                cache_write_input_tokens=2,
+            ),
         ),
         (
             "openai_responses",
@@ -168,6 +184,7 @@ def test_anthropic_input_total_sums_the_cache_members() -> None:
         input_tokens=1000,
         cached_input_tokens=900,
         output_tokens=40,
+        cache_write_input_tokens=88,
     )
 
 
@@ -617,6 +634,9 @@ def test_modern_hourly_report_is_dense_and_keeps_source_model_identity(
         "input_tokens": 112,
         "cached_input_tokens": 40,
         "output_tokens": 10,
+        "cache_write_input_tokens": 0,
+        "cache_write_1h_input_tokens": 0,
+        "cache_write_uncaptured_reports": 0,
     }
     measured = {
         (row["source_id"], row["model_id"]): row
@@ -876,7 +896,7 @@ def test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write(
                 bucket["history_complete"] == (bucket["start_at"][:10] != owner_day)
                 for bucket in report["buckets"]
             )
-            assert ledger.summary(days=1, now=now)["totals"] == counts
+            assert ledger.summary(days=1, now=now)["totals"] == _as_released(counts)
         else:
             assert all(not bucket["history_complete"] for bucket in report["buckets"])
             assert ledger.summary(days=1, now=now)["totals"]["requests"] == 0
@@ -1141,7 +1161,7 @@ def test_recent_usage_without_its_hour_cannot_claim_complete_hourly_history(
 
         assert report["totals"]["requests"] == 0
         assert any(not bucket["history_complete"] for bucket in report["buckets"])
-        assert ledger.summary(days=1, now=now)["totals"] == counts
+        assert ledger.summary(days=1, now=now)["totals"] == _as_released(counts)
     finally:
         if previous_tz is None:
             os.environ.pop("TZ", None)
@@ -1205,7 +1225,7 @@ def test_missing_in_horizon_hour_cannot_be_hidden_by_a_present_latest_hour(
             for row in bucket["rows"]
         )
         assert any(not bucket["history_complete"] for bucket in report["buckets"])
-        assert ledger.summary(days=1, now=now)["totals"] == counts
+        assert ledger.summary(days=1, now=now)["totals"] == _as_released(counts)
     finally:
         if previous_tz is None:
             os.environ.pop("TZ", None)
@@ -3201,6 +3221,11 @@ def test_a_persisted_report_count_above_its_requests_is_repaired_on_read(
         "input_tokens": 120,
         "cached_input_tokens": 8,
         "output_tokens": 4,
+        # A released row: its reports are repaired first, then all count as
+        # uncaptured cache-write evidence.
+        "cache_write_input_tokens": 0,
+        "cache_write_1h_input_tokens": 0,
+        "cache_write_uncaptured_reports": 3,
     }
 
 
@@ -3494,13 +3519,9 @@ def test_a_persisted_counter_past_the_representation_drops_its_row(
     )
 
     assert ledger.window(days=30, now=NOW) == []
-    assert ledger.summary(days=30, now=NOW)["totals"] == {
-        "requests": 0,
-        "token_reports": 0,
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-    }
+    assert ledger.summary(days=30, now=NOW)["totals"] == _as_released(
+        dict.fromkeys(("requests", "token_reports", "input_tokens", "cached_input_tokens", "output_tokens"), 0)
+    )
 
 
 def test_a_merge_the_file_cannot_hold_is_refused_by_every_surface(

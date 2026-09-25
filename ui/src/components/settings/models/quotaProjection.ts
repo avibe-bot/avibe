@@ -153,3 +153,26 @@ export const windowLeftPct = (window: QuotaWindow, now: number): number =>
 
 /** Whole percent used, the complement of `windowLeftPct`: a limit with headroom never reads as 100% used. */
 export const windowUsedPct = (window: QuotaWindow, now: number): number => 100 - windowLeftPct(window, now);
+
+/**
+ * How an API-price valuation compares with the plan's monthly fee.
+ *
+ * `multiple` is value ÷ fee. From 1.1× the plan has clearly paid for itself; from
+ * 1× to just under 1.1× it has only just done so, and a multiple that rounds to
+ * 「1.0 倍」 is not a figure worth boasting; below 1× the gap is the dollars
+ * still to go.
+ */
+export type QuotaPayback =
+  | { kind: 'paid'; multiple: number; surplusUsd: number }
+  | { kind: 'even'; multiple: number; surplusUsd: number }
+  | { kind: 'short'; multiple: number; shortfallUsd: number };
+
+export const PAYBACK_CLEAR_MULTIPLE = 1.1;
+
+export function quotaPayback(costUsd: number, feeUsd: number): QuotaPayback | null {
+  if (!(feeUsd > 0) || !Number.isFinite(costUsd)) return null;
+  const multiple = costUsd / feeUsd;
+  if (multiple >= PAYBACK_CLEAR_MULTIPLE) return { kind: 'paid', multiple, surplusUsd: costUsd - feeUsd };
+  if (multiple >= 1) return { kind: 'even', multiple, surplusUsd: costUsd - feeUsd };
+  return { kind: 'short', multiple, shortfallUsd: feeUsd - costUsd };
+}

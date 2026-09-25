@@ -294,6 +294,10 @@ const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.React
 
 /** The service refreshes each Source at most this often; polling faster buys nothing. */
 const QUOTA_POLL_MS = 5 * 60_000;
+/** A read the service is still running past its page deadline lands soon after;
+ *  re-read at this pace, a bounded number of times, rather than wait a whole poll. */
+export const QUOTA_PENDING_REREAD_MS = 5_000;
+export const QUOTA_PENDING_REREADS = 3;
 
 /** Back to the re-login button of a quota card, or to the selected tab once a refresh has removed it. */
 const focusQuotaOpener = (opener: HTMLElement) =>
@@ -689,9 +693,14 @@ export const SettingsModelsPage: React.FC = () => {
     await refreshUsage(usageWindow);
   }, [refreshUsage, usageWindow]);
 
+  const quotaPendingRereads = React.useRef(0);
+  // Counts settled reads, so a re-read that lands with the same pending set
+  // still re-arms the timer below.
+  const [quotaSettled, setQuotaSettled] = React.useState(0);
   const [quotaReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<QuotaSummary>>((incoming) => {
     if (!aliveRef.current) return;
     setQuotaRead((previous) => settleRegionRead(previous, incoming));
+    setQuotaSettled((count) => count + 1);
   }));
 
   const readQuota = React.useCallback(async (force: boolean) => {
@@ -708,12 +717,39 @@ export const SettingsModelsPage: React.FC = () => {
    */
   React.useEffect(() => {
     if (tab !== 'quota') return undefined;
+    quotaPendingRereads.current = 0;
     void readQuota(false);
     const timer = window.setInterval(() => { void readQuota(false); }, QUOTA_POLL_MS);
     return () => window.clearInterval(timer);
   }, [tab, readQuota]);
 
+  /**
+   * The Sources the service named as still reading: null while no settled
+   * reading is on screen, '' when none is pending. Each settled reading that
+   * still names one re-arms the timer once.
+   */
+  const quotaPendingKey = foldRegionRead<QuotaSummary, string | null>(quotaRead, {
+    loading: () => null,
+    ready: (data) => (data.pending ?? []).join('\u0000'),
+    unread: () => null,
+    degraded: () => null,
+  });
+  React.useEffect(() => {
+    if (tab !== 'quota' || quotaPendingKey === null) return undefined;
+    if (quotaPendingKey === '') {
+      quotaPendingRereads.current = 0;
+      return undefined;
+    }
+    if (quotaPendingRereads.current >= QUOTA_PENDING_REREADS) return undefined;
+    const timer = window.setTimeout(() => {
+      quotaPendingRereads.current += 1;
+      void readQuota(false);
+    }, QUOTA_PENDING_REREAD_MS);
+    return () => window.clearTimeout(timer);
+  }, [tab, quotaPendingKey, quotaSettled, readQuota]);
+
   const refreshQuotaNow = React.useCallback(async () => {
+    quotaPendingRereads.current = 0;
     setRefreshingQuota(true);
     try {
       await readQuota(true);

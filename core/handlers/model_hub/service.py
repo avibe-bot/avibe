@@ -115,6 +115,7 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     BoundedProvenanceStore,
@@ -151,6 +152,7 @@ from .usage import (
     BoundedUsageLedger,
     SourceIdentity,
     UsageWriter,
+    local_usage_day,
 )
 
 CONTRACT_VERSION = 10
@@ -898,6 +900,7 @@ class ModelHubService:
         ] = None,
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
+        price_table: Callable[[], PriceTable] | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -960,6 +963,10 @@ class ModelHubService:
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
+        # Read per report: the override file is hand-edited and the catalog refreshes itself.
+        self.price_table: Callable[[], PriceTable] = price_table or (
+            lambda: load_price_table(paths.get_state_dir())
+        )
 
     @staticmethod
     @asynccontextmanager
@@ -5486,12 +5493,14 @@ class ModelHubService:
             for source in config.sources
         ]
         now = self.now()
+        prices = self.price_table()
         if window is not None:
-            return self.usage.report(window=window, now=now, identities=identities)
+            return self.usage.report(window=window, now=now, identities=identities, prices=prices)
         return self.usage.summary(
             days=USAGE_DEFAULT_WINDOW_DAYS if days is None else days,
             now=now,
             identities=identities,
+            prices=prices,
         )
 
     async def _fetch_subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> Mapping[str, Any]:
@@ -5536,7 +5545,40 @@ class ModelHubService:
         """
 
         sources = await asyncio.to_thread(self._quota_sources)
-        return await self.quota.summary(sources, force=force)
+        summary = await self.quota.summary(sources, force=force)
+        try:
+            summary["value"] = await asyncio.to_thread(self._quota_values, summary["sources"])
+        except Exception:  # noqa: BLE001 - the valuation is optional; the windows are not
+            logger.warning("Model Hub quota valuation failed", exc_info=True)
+            for source in summary["sources"]:
+                source.pop("value", None)
+        return summary
+
+    def _quota_values(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
+        config = self.store.load()
+        wanted = {source["source_id"] for source in sources}
+        identities = [
+            SourceIdentity(
+                source_id=source.id,
+                label=source.display_name,
+                model_ids=[model.id for model in source.models],
+            )
+            for source in config.sources
+            if source.id in wanted
+        ]
+        prices = self.price_table()
+        now = self.now()
+        return quota_values(
+            sources,
+            daily_costs=self.usage.daily_costs(
+                days=VALUE_WINDOW_DAYS,
+                now=now,
+                identities=identities,
+                prices=prices,
+            ),
+            prices=prices,
+            today=local_usage_day(now),
+        )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         events = self.events.list(limit=limit, before=before)

@@ -55,6 +55,39 @@ export function formatPercent(ratio: number, locale: string, fractionDigits = 0)
 }
 
 /**
+ * A US-dollar figure in the reader's own grouping — 「$1,234.56」.
+ *
+ * Two decimals because an API-price valuation is compared against a monthly fee
+ * quoted in dollars and cents; a sub-cent figure shows as 「<$0.01」 rather than
+ * as a zero that reads as "free".
+ */
+export function formatUsd(value: number, locale: string): string {
+  const format = (amount: number) => new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency: 'USD',
+    currencyDisplay: 'narrowSymbol',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+  if (value > 0 && value < 0.005) return `<${format(0.01)}`;
+  return format(Math.max(0, value));
+}
+
+/**
+ * A priced figure that may be only a floor. Every $ or multiple the value
+ * surfaces show goes through this with the server's `api_cost_lower_bound`, so a
+ * floor never reads as exact, a floor of zero included (「≥ $0.00」).
+ */
+export function atLeast(text: string, lowerBound: boolean | undefined): string {
+  return lowerBound === true ? `≥ ${text}` : text;
+}
+
+/** `formatUsd` for a figure that carries its lower-bound flag. */
+export function formatCost(value: number, lowerBound: boolean | undefined, locale: string): string {
+  return atLeast(formatUsd(value, locale), lowerBound);
+}
+
+/**
  * An instant as a short day-and-time in the reader's own zone — 「8/18 03:14」.
  *
  * The host zone is the frame on purpose: what this answers is "when did this last

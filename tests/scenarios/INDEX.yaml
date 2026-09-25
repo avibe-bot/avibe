@@ -31,6 +31,7 @@ capabilities:
       - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+      - tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py
       - tests/e2e/test_model_hub_guards.py
       - tests/e2e/test_model_hub_migration.py
       - tests/e2e/test_model_hub_migration_persisted.py
@@ -75,11 +76,14 @@ capabilities:
       - tests/test_model_hub_usage.py
       - tests/test_ui_server_fastapi.py
       - tests/test_model_hub_quota.py
+      - tests/test_model_hub_pricing.py
       - tests/test_local_deps.py
       - tests/test_opencode_server.py
       - tests/test_runtime_activation.py
       - ui/src/components/settings/models/UsageTab.test.tsx
       - ui/src/components/settings/models/QuotaTab.test.tsx
+      - ui/src/components/settings/models/usageProjection.test.ts
+      - ui/src/components/settings/models/format.test.ts
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
       - ui/src/components/settings/models/RouteChainDialog.test.tsx
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx

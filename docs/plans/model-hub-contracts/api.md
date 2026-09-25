@@ -62,7 +62,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
-| GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline. Never starts the engine. |
+| GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
@@ -1395,9 +1395,41 @@ failure keeps the last good windows and reports `stale`; a 401/403 reports
 `auth_expired`; a Source with no good read yet reports `error`. A
 re-authenticated Source is a different grant and starts with no snapshot.
 
-`quota-summary.schema.json` reserves no monetary field. A later contract version
-may add an optional `value` block per Source; consumers must treat its absence as
-"not reported", never as zero.
+A read waits for in-flight Source reads only up to a 12-second deadline; a read
+that misses it keeps running and lands in the cache. Those Sources are listed in
+the root `pending` array, and the settings page re-reads after about five seconds,
+with a bounded number of retries, showing them as loading rather than unavailable.
+It stops re-reading once `pending` is empty or absent.
+
+### Subscription value
+
+Each hub-held subscription Source carries an optional `value` block, and the root carries `value` totals. They price the Source's own
+usage-ledger rows at list API prices (see API-price valuation under Usage
+metering) so the page can compare that with what the subscription costs. A
+valuation only, never an amount charged; consumers must treat an absent `value`
+as "not reported", never as zero.
+
+- `week` is the trailing seven local days ending today.
+- `period` is the current billing cycle when the local override file sets a
+  renewal day for the Source (`basis: billing_cycle`, with `renews_on`), else the
+  trailing 30 local days (`basis: rolling_30d`). The page labels which it is.
+- `fee_usd` is the plan's monthly fee. The plan comes from what the vendor's usage
+  report says (`plan`) or from the override file's per-Source `plan`, and resolves
+  to a fee-table key (`plan_key`). Built-in plan names resolve for `anthropic`
+  and `openai` / `codex` Sources only; any other vendor needs the override to
+  name a fee key outright. Claude's plan is read from the OAuth profile the
+  Claude Code CLI also reads: `organization.organization_type` `claude_pro` is
+  Pro, and `claude_max` with `rate_limit_tier` `default_claude_max_5x` or
+  `default_claude_max_20x` is Max 5x or 20x; Team, Enterprise, and unknown tiers
+  are no plan. Built-in fees: `claude_pro` 20, `claude_max_5x`
+  100, `claude_max_20x` 200, `chatgpt_plus` 20, `chatgpt_pro` 200 (USD / month). An
+  unknown plan leaves `plan_key`, `fee_usd`, and `multiple` null: the page still
+  shows the API value but no payback figure.
+- `multiple` is `period.api_cost_usd / fee_usd`. When `period.api_cost_lower_bound`
+  is true the multiple is a floor: the page may say the fee is paid back, marked
+  「≥」, but never names a shortfall.
+- Root `value.period` sums only the Sources with a known fee, so its multiple
+  compares like with like; root `value.week` sums every valued Source.
 
 ## Usage metering
 
@@ -1435,6 +1467,75 @@ publishing an impossible one.
 
 `source_id` and `model_id` are reported in the canonical form configuration admitted,
 so one model is one row rather than one row per spelling.
+
+Cache writes are metered separately from input served from cache.
+`cache_write_input_tokens` is the subset of `input_tokens` written to the prompt
+cache (Anthropic `cache_creation_input_tokens`), disjoint from
+`cached_input_tokens`, and `cache_write_1h_input_tokens` is the part of it written
+with the one-hour lifetime (`cache_creation.ephemeral_1h_input_tokens`). OpenAI
+protocols report no cache writes, so both are zero there. The fields are additive:
+a ledger row written before they existed reads them as zero and counts its token
+reports in `cache_write_uncaptured_reports`, so a consumer can tell "no cache
+writes" from "cache writes not captured". No stored row is rewritten.
+
+### API-price valuation
+
+When a price table can be read, every usage document carries `pricing`
+(`currency: "USD"`, `price_table_date`) and each aggregate carries
+`api_cost_usd`, `excluded_tokens`, and `api_cost_lower_bound`; each model row
+also carries `priced`. `api_cost_usd` is what the same usage would cost at the
+vendor's list API price. It is a valuation for comparing subscriptions, never an
+amount charged, and every day is priced at the current table, not the price in
+force when the call ran; `price_table_date` says which table that is.
+
+Prices come from two places, highest precedence first:
+
+1. The local override file `<state dir>/model_hub_prices.json` (by default
+   `~/.avibe/state/model_hub_prices.json`), which the user edits by hand.
+2. The models.dev catalog Avibe already caches for the model picker
+   (`<state dir>/models_dev_catalog.json`, refreshed at most daily), read from
+   the model's first-party provider (`anthropic`, `openai`, `xai`, …) only.
+
+Before lookup a ledger model ID is normalized: a `[1m]` or other bracketed
+suffix, a trailing `-YYYYMMDD` or `@…` date, and a `provider/` prefix are removed,
+and a built-in alias map covers IDs models.dev does not list under the name Claude
+Code or Codex sends. Prices are USD per million tokens with members `input`,
+`output`, `cache_read`, `cache_write` (five-minute lifetime) and optional
+`cache_write_1h`. A missing `cache_read` prices cache reads as input; a missing
+`cache_write` prices cache writes as input; a missing `cache_write_1h` prices
+one-hour writes at twice `input`. Only the base tier is used.
+
+Cost of one row = fresh input × `input` + `cached_input_tokens` × `cache_read` +
+five-minute writes × `cache_write` + one-hour writes × `cache_write_1h` +
+`output_tokens` × `output`, where fresh input is `input_tokens` minus cache reads
+and cache writes. A model with no price is left out: its `input_tokens +
+output_tokens` are added to `excluded_tokens` and the page shows it as having no
+price, never as free. `api_cost_lower_bound` is true when `api_cost_usd` is only a
+floor: some tokens are excluded, some requests have no token report
+(`requests > token_reports`), or priced usage includes reports from before cache
+writes were captured on a model that lists a cache-write price (five-minute or
+one-hour) above its input price. It is also true for every aggregate of a read
+that could not see all usage: a degraded ledger read (rows dropped), or an hourly
+bucket, and the 24-hour totals over it, whose `history_complete` is false.
+
+The override file is optional and read on every summary; an unreadable file is
+ignored with a warning. Every member is optional:
+
+```json
+{
+  "models": {
+    "claude-opus-5-5": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+    "relay-model": {"alias": "claude-sonnet-5"}
+  },
+  "plans": {"claude_max_20x": {"fee_usd": 200}, "team": {"fee_usd": 30}},
+  "sources": {"src_abc123": {"plan": "claude_max_20x", "renewal_day": 14}}
+}
+```
+
+`models` entries either give prices or alias another model ID. `plans` sets or
+adds a monthly fee per fee-table key. `sources` sets a Source's plan when the
+vendor does not report one (Claude's usage report does not) and its billing-cycle
+renewal day of month (1–31, clamped to the month's length).
 
 Days are local-calendar days on the Avibe host. `from_day` and `to_day` bound the
 requested window even when no turn fell inside it; `days[]` contains only days that

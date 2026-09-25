@@ -14,7 +14,7 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
-import { SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
+import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
@@ -2431,6 +2431,65 @@ describe('SettingsModelsPage quota region', () => {
     const clear = vi.spyOn(window, 'clearInterval');
     await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
     expect(clear).toHaveBeenCalled();
+  });
+
+  // A vendor slower than the page deadline must not read as a failure for a whole
+  // poll: the service names it pending, and the page re-reads soon, a bounded
+  // number of times, until the reading lands.
+  it('MH-QUOTA-020: re-reads a pending Source soon after and stops once nothing is pending', async () => {
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    const slow = {
+      source_id: 'src_slow', vendor: 'anthropic', display_name: 'Slow Claude', account_label: null, plan: null,
+      fetched_at: null, state: 'error' as const, error_key: 'models.quota.error.unavailable', windows: [],
+    };
+    const landed = {
+      ...slow, state: 'ok' as const, error_key: undefined, fetched_at: new Date().toISOString(),
+      windows: [{ id: 'five_hour', kind: 'session' as const, label: 'five_hour', used_pct: 40, window_seconds: 18_000, resets_at: new Date(Date.now() + 3_600_000).toISOString() }],
+    };
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getQuota);
+    read
+      .mockResolvedValueOnce({ refresh_interval_seconds: 300, sources: [slow], pending: ['src_slow'] })
+      .mockResolvedValueOnce({ refresh_interval_seconds: 300, sources: [landed] });
+    await openQuota();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/^Reading quota…$|^正在读取额度…$/)).toBeTruthy();
+    const rereads = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS);
+    await waitFor(() => expect(rereads()).toHaveLength(1));
+    await act(async () => { (rereads()[0][0] as () => void)(); });
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    // The real reading replaces the loading line without a manual refresh.
+    expect((await screen.findAllByText(/^60%$/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^Reading quota…$|^正在读取额度…$/)).toBeNull();
+    // Nothing pending: no further re-read is scheduled.
+    await act(async () => { await Promise.resolve(); });
+    expect(rereads()).toHaveLength(1);
+  });
+
+  it('MH-QUOTA-020: gives up re-reading after a bounded number of tries while a Source stays pending', async () => {
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    const stuck = {
+      refresh_interval_seconds: 300,
+      sources: [{
+        source_id: 'src_slow', vendor: 'anthropic', display_name: 'Slow Claude', account_label: null, plan: null,
+        fetched_at: null, state: 'error' as const, error_key: 'models.quota.error.unavailable', windows: [],
+      }],
+      pending: ['src_slow'],
+    };
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getQuota);
+    read.mockResolvedValue(stuck);
+    await openQuota();
+    const rereads = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS);
+    for (let attempt = 1; attempt <= QUOTA_PENDING_REREADS; attempt += 1) {
+      await waitFor(() => expect(rereads()).toHaveLength(attempt));
+      await act(async () => { (rereads()[attempt - 1][0] as () => void)(); });
+      await waitFor(() => expect(read).toHaveBeenCalledTimes(attempt + 1));
+    }
+    await act(async () => { await Promise.resolve(); });
+    expect(rereads()).toHaveLength(QUOTA_PENDING_REREADS);
   });
 
   // A quota read can be the first to see a refused grant, while the Source row

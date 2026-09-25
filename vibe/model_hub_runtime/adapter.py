@@ -40,8 +40,10 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.quota import (
+    CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
     QUOTA_FETCH_TIMEOUT_SECONDS,
     SubscriptionQuotaError,
+    parse_claude_plan,
     parse_subscription_quota,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
@@ -1239,7 +1241,33 @@ def _fetch_subscription_quota(
         )
     if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
         raise SubscriptionQuotaError("unavailable")
-    return parse_subscription_quota(vendor, payload.get("body"))
+    parsed = parse_subscription_quota(vendor, payload.get("body"))
+    if vendor == "anthropic" and parsed.get("plan") is None:
+        parsed["plan"] = _fetch_claude_plan(client=client, auth=auth)
+    return parsed
+
+
+def _fetch_claude_plan(*, client: EngineClient, auth: _AuthRecord) -> str | None:
+    """Claude's usage report names no plan; read it from the profile, best effort."""
+
+    try:
+        payload = client.management_request(
+            "POST",
+            "/api-call",
+            payload={
+                "auth_index": auth.auth_index,
+                "method": "GET",
+                "url": _OAUTH_CONTROL_PLANE_URLS["anthropic"],
+                "header": _oauth_account_call_headers(auth, "anthropic"),
+            },
+            timeout=CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
+        )
+    except (EngineClientError, OSError):
+        return None
+    status = payload.get("status_code")
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        return None
+    return parse_claude_plan(payload.get("body"))
 
 
 def _probe_oauth_control_plane_witness(

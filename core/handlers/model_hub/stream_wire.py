@@ -394,6 +394,10 @@ class ProtocolUsageReport:
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
+    # Input written to the prompt cache: a subset of input disjoint from cached
+    # input, and the part of it written with the one-hour lifetime.
+    cache_write_input_tokens: int = 0
+    cache_write_1h_input_tokens: int = 0
 
     @classmethod
     def of(
@@ -402,6 +406,8 @@ class ProtocolUsageReport:
         input_tokens: int,
         cached_input_tokens: int,
         output_tokens: int,
+        cache_write_input_tokens: int = 0,
+        cache_write_1h_input_tokens: int = 0,
     ) -> "ProtocolUsageReport":
         """Build one report with the cached-input subset invariant enforced.
 
@@ -410,13 +416,18 @@ class ProtocolUsageReport:
         by. Both numbers come from the same upstream, so the only bound worth
         trusting is the input count this module normalized itself — never a
         total the response declares. Cached input reported without a readable
-        input count is a subset of nothing, so it clamps to zero.
+        input count is a subset of nothing, so it clamps to zero. Cache writes are
+        the input left after cache reads, and one-hour writes are part of them.
         """
 
+        cached = min(cached_input_tokens, input_tokens)
+        cache_write = min(cache_write_input_tokens, input_tokens - cached)
         return cls(
             input_tokens=input_tokens,
-            cached_input_tokens=min(cached_input_tokens, input_tokens),
+            cached_input_tokens=cached,
             output_tokens=output_tokens,
+            cache_write_input_tokens=cache_write,
+            cache_write_1h_input_tokens=min(cache_write_1h_input_tokens, cache_write),
         )
 
     def merge(self, other: "ProtocolUsageReport") -> "ProtocolUsageReport":
@@ -431,6 +442,10 @@ class ProtocolUsageReport:
             input_tokens=max(self.input_tokens, other.input_tokens),
             cached_input_tokens=max(self.cached_input_tokens, other.cached_input_tokens),
             output_tokens=max(self.output_tokens, other.output_tokens),
+            cache_write_input_tokens=max(self.cache_write_input_tokens, other.cache_write_input_tokens),
+            cache_write_1h_input_tokens=max(
+                self.cache_write_1h_input_tokens, other.cache_write_1h_input_tokens
+            ),
         )
 
 
@@ -484,6 +499,9 @@ class ProtocolUsageTaxonomy:
     input_paths: tuple[tuple[str, ...], ...]
     cached_input_paths: tuple[tuple[str, ...], ...]
     output_paths: tuple[tuple[str, ...], ...]
+    # Protocols that report no cache writes leave these empty.
+    cache_write_paths: tuple[tuple[str, ...], ...] = ()
+    cache_write_1h_paths: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -558,6 +576,10 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             ),
             cached_input_paths=(("cache_read_input_tokens",),),
             output_paths=(("output_tokens",),),
+            # Cache writes are priced apart from fresh input; the one-hour
+            # lifetime is split out under `cache_creation`.
+            cache_write_paths=(("cache_creation_input_tokens",),),
+            cache_write_1h_paths=(("cache_creation", "ephemeral_1h_input_tokens"),),
         ),
     ),
     "openai_responses": ProtocolStreamTaxonomy(
@@ -822,6 +844,8 @@ def extract_protocol_usage(
                 input_tokens=input_tokens or 0,
                 cached_input_tokens=cached_input_tokens or 0,
                 output_tokens=output_tokens or 0,
+                cache_write_input_tokens=_usage_sum(container, taxonomy.cache_write_paths) or 0,
+                cache_write_1h_input_tokens=_usage_sum(container, taxonomy.cache_write_1h_paths) or 0,
             )
             report = candidate if report is None else report.merge(candidate)
     return report
@@ -856,6 +880,8 @@ def _usage_from_scalar_paths(
             input_tokens=input_tokens or 0,
             cached_input_tokens=cached_input_tokens or 0,
             output_tokens=output_tokens or 0,
+            cache_write_input_tokens=usage_sum(taxonomy.cache_write_paths) or 0,
+            cache_write_1h_input_tokens=usage_sum(taxonomy.cache_write_1h_paths) or 0,
         )
         report = candidate if report is None else report.merge(candidate)
     return report
@@ -885,6 +911,8 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
             taxonomy.usage.input_paths,
             taxonomy.usage.cached_input_paths,
             taxonomy.usage.output_paths,
+            taxonomy.usage.cache_write_paths,
+            taxonomy.usage.cache_write_1h_paths,
         ):
             paths.update((*container_path, *leaf_path) for leaf_path in leaf_paths)
     return frozenset(paths)
