@@ -1355,7 +1355,7 @@
         "pace": {
           "ok": "够用到重置",
           "slightlyFast": "稍快，仍够用到重置",
-          "fast": "用得偏快，预计 {{time}} 用完",
+          "fast": "用得偏快，预计 {{duration}}后用完",
           "exhausted": "已用完，{{duration}}后恢复",
           "exhaustedUnknown": "已用完",
           "paused": "暂停更新",
@@ -1389,12 +1389,10 @@
         },
         "duration": {
           "days": "{{days}} 天 {{hours}} 小时",
+          "daysOnly": "{{days}} 天",
           "hours": "{{hours}} 小时 {{minutes}} 分",
+          "hoursOnly": "{{hours}} 小时",
           "minutes": "{{minutes}} 分钟"
-        },
-        "clock": {
-          "today": "今天 {{time}}",
-          "tomorrow": "明天 {{time}}"
         },
         "stat": {
           "tightest": "余量最少的额度",
@@ -1404,7 +1402,7 @@
           "exhaustedUnit": "项额度",
           "exhaustedNone": "所有账号都能正常使用",
           "exhaustedNoneObserved": "已读到的额度都没用完",
-          "exhaustedNote": "{{name}} · {{time}} 恢复",
+          "exhaustedNote": "{{name}} · {{duration}}后恢复",
           "resetsIn": "{{duration}}后重置",
           "weekValue": "近 7 天按 API 价格",
           "weekValueNote": "所有订阅账号的用量，按官方 API 标价计算",
@@ -1440,6 +1438,26 @@
           "renewsIn_one": "{{count}} 天",
           "renewsIn_other": "{{count}} 天",
           "excluded": "{{tokens}} tokens 暂无价格，未计入"
+        },
+        "plan": {
+          "openai": {
+            "free": "Free",
+            "go": "Go",
+            "plus": "Plus",
+            "pro": "Pro",
+            "prolite": "Pro 5x",
+            "team": "Team",
+            "business": "Business",
+            "enterprise": "Enterprise",
+            "edu": "Edu"
+          },
+          "anthropic": {
+            "pro": "Pro",
+            "max_5x": "Max 5x",
+            "max_20x": "Max 20x",
+            "team": "Team",
+            "enterprise": "Enterprise"
+          }
         }
       },
       "usage": {

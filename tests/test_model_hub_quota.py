@@ -191,6 +191,26 @@ def test_codex_quota_parser_reads_primary_secondary_and_additional_limits():
     assert windows[2]["scope_model"] == "Spark"
 
 
+def test_codex_quota_parser_classifies_a_lone_weekly_primary_by_length():
+    """MH-QUOTA-003: Pro 5x (`prolite`) reports only a weekly window, in the primary slot."""
+
+    report = {
+        "plan_type": "prolite",
+        "rate_limit": {
+            "allowed": True,
+            "limit_reached": False,
+            "primary_window": {"used_percent": 31, "limit_window_seconds": 604800,
+                               "reset_after_seconds": 400000, "reset_at": 1790400000},
+            "secondary_window": None,
+        },
+        "additional_rate_limits": None,
+    }
+    parsed = parse_codex_quota(json.dumps(report))
+    _validate_windows(parsed)
+    assert parsed["plan"] == "prolite"
+    assert [(window["id"], window["kind"]) for window in parsed["windows"]] == [("primary_window", "weekly")]
+
+
 @pytest.mark.parametrize(
     ("parser", "body"),
     [

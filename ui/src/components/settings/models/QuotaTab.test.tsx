@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // What the 订阅额度 tab says about a quota report: the windows it names, the pace
 // it claims, and what it admits about a reading that is not current.
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -101,16 +101,16 @@ describe('QuotaTab', () => {
     expect(within(card).getByText('单独计算的模型额度')).toBeTruthy();
     expect(within(card).getByText('这些模型也会同时扣每周额度，任一项用完就会暂停')).toBeTruthy();
     expect(within(card).getByText('可用')).toBeTruthy();
-    expect(within(card).getByText('max')).toBeTruthy();
+    expect(within(card).getByText('Max')).toBeTruthy();
     expect(within(card).getByText('alex@example.com')).toBeTruthy();
 
     // Fable at 86% four days before a 7-day reset is spending faster than time.
     const fable = card.querySelector('[data-quota-window="fable"]') as HTMLElement;
-    expect(fable.textContent).toMatch(/用得偏快，预计 .+ 用完/);
+    expect(fable.textContent).toMatch(/用得偏快，预计 .+后用完/);
     expect(within(fable).getByRole('meter', { name: 'Fable 每周额度 已用 86%' })).toBeTruthy();
     expect(fable.textContent).toContain('14%');
     const session = card.querySelector('[data-quota-window="five_hour"]') as HTMLElement;
-    expect(session.textContent).toContain('2 小时 0 分后重置');
+    expect(session.textContent).toContain('2 小时后重置');
     expect(session.querySelector('.model-hub-quota-time-mark')).not.toBeNull();
 
     // A spent window names itself in the status pill and says when it returns.
@@ -271,6 +271,113 @@ describe('QuotaTab', () => {
     }
   });
 
+  it('MH-QUOTA-027: names a reported plan in words, never as a bare upstream id', async () => {
+    const badge = (vendor: string, plan: string) => {
+      cleanup();
+      draw(readyRegion(summary([codex({ vendor, plan, display_name: 'Account' })])));
+      return screen.getByRole('article').querySelector('.model-hub-quota-plan')!.textContent;
+    };
+    // Known ids, whatever their casing or separators, and with or without the vendor's prefix.
+    expect(badge('openai', 'prolite')).toBe('Pro 5x');
+    expect(badge('codex', 'ProLite')).toBe('Pro 5x');
+    expect(badge('openai', 'pro')).toBe('Pro');
+    expect(badge('openai', 'business')).toBe('Business');
+    expect(badge('anthropic', 'claude_max_20x')).toBe('Max 20x');
+    expect(badge('anthropic', 'max-5x')).toBe('Max 5x');
+    // An id another vendor's table names is not borrowed; an unknown id reads as words.
+    expect(badge('anthropic', 'prolite')).toBe('Prolite');
+    expect(badge('openai', 'team_plus-annual')).toBe('Team Plus Annual');
+    expect(badge('xai', 'supergrok')).toBe('Supergrok');
+    await i18n.changeLanguage('en');
+    try {
+      expect(badge('openai', 'prolite')).toBe('Pro 5x');
+    } finally {
+      await i18n.changeLanguage('zh');
+    }
+  });
+
+  it('MH-QUOTA-028: a countdown drops its zero second part', async () => {
+    const reset = (ms: number) => {
+      cleanup();
+      draw(readyRegion(summary([claude({ windows: [window({ used_pct: 1, window_seconds: 604_800, kind: 'weekly', resets_at: iso(NOW + ms) })] })])));
+      return screen.getByRole('article').querySelector('.model-hub-quota-reset')!.textContent;
+    };
+    expect(reset(5 * 24 * HOUR)).toBe('5 天后重置');
+    expect(reset(5 * 24 * HOUR + 3 * HOUR)).toBe('5 天 3 小时后重置');
+    expect(reset(HOUR)).toBe('1 小时后重置');
+    expect(reset(HOUR + 20 * 60_000)).toBe('1 小时 20 分后重置');
+    expect(reset(20 * 60_000)).toBe('20 分钟后重置');
+    await i18n.changeLanguage('en');
+    try {
+      expect(reset(5 * 24 * HOUR)).toBe('Resets in 5d');
+      expect(reset(HOUR)).toBe('Resets in 1h');
+      expect(reset(HOUR + 20 * 60_000)).toBe('Resets in 1h 20m');
+    } finally {
+      await i18n.changeLanguage('zh');
+    }
+  });
+
+  it('MH-QUOTA-029: shows a countdown alone and keeps its exact moment in a tooltip and the accessible name', async () => {
+    const resetAt = NOW + 5 * 24 * HOUR + 7 * 60 * 60_000;
+    const stamp = (at: number) => new Intl.DateTimeFormat('zh', {
+      weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(at);
+    const exact = stamp(resetAt);
+    const { container } = draw(readyRegion(summary([
+      claude({ windows: [window({ id: 'seven_day', kind: 'weekly', used_pct: 20, window_seconds: 604_800, resets_at: iso(resetAt) })] }),
+      codex(),
+    ])));
+    const row = container.querySelector('[data-quota-window="seven_day"]') as HTMLElement;
+    const reset = row.querySelector('.model-hub-quota-reset') as HTMLElement;
+    // The line reads the countdown alone; the clock is not drawn beside it.
+    expect(reset.textContent).toBe('5 天 7 小时后重置');
+    expect(container.querySelector('.model-hub-quota-reset em')).toBeNull();
+    const trigger = within(reset).getByRole('button', { name: `5 天 7 小时后重置 (${exact})` });
+    expect(document.body.textContent).not.toContain(exact);
+
+    // Keyboard focus opens it and blur closes it; a tap toggles it.
+    fireEvent.focus(trigger);
+    expect((await screen.findByRole('dialog')).textContent).toBe(exact);
+    fireEvent.blur(trigger);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' });
+    fireEvent.focus(trigger);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('dialog').textContent).toBe(exact);
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' });
+    fireEvent.click(trigger);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // A mouse hover opens it too.
+    fireEvent.pointerEnter(trigger, { pointerType: 'mouse' });
+    expect(screen.getByRole('dialog').textContent).toBe(exact);
+    fireEvent.pointerLeave(trigger, { pointerType: 'mouse' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // Every other countdown takes the same form: the upcoming-reset chips, the
+    // spent-limit note, and the fast-pace forecast.
+    const chips = within(screen.getByLabelText('即将重置')).getAllByRole('button');
+    expect(chips.map((chip) => chip.textContent)).toContain('47 分钟');
+    expect(chips.find((chip) => chip.textContent === '47 分钟')!.getAttribute('aria-label')).toBe(`47 分钟 (${stamp(NOW + 47 * 60_000)})`);
+    expect(screen.getByRole('button', { name: `ChatGPT Pro · 47 分钟后恢复 (${stamp(NOW + 47 * 60_000)})` })).toBeTruthy();
+    cleanup();
+    draw(readyRegion(summary([claude()])));
+    const fable = document.querySelector('[data-quota-window="fable"] .model-hub-quota-pace') as HTMLElement;
+    expect(fable.textContent).toMatch(/^用得偏快，预计 .+后用完$/);
+    expect(within(fable).getByRole('button').getAttribute('aria-label')).toMatch(/^用得偏快，预计 .+后用完 \(.+\)$/);
+  });
+
+  it('keeps the exact time of a retained reading behind its 「ago」 banner', () => {
+    const fetchedAt = NOW - 3 * HOUR - 12 * 60_000;
+    draw(readyRegion(summary([codex({ state: 'stale', fetched_at: iso(fetchedAt) })])));
+    const banner = within(screen.getByRole('article')).getByRole('status');
+    expect(banner.textContent).toBe('暂时读不到最新额度，下面是 3 小时 12 分前的数据');
+    const stamp = new Intl.DateTimeFormat('zh', {
+      weekday: 'short', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(fetchedAt);
+    expect(within(banner).getByRole('button').getAttribute('aria-label')).toBe(`${banner.textContent} (${stamp})`);
+  });
+
   describe('API-price value', () => {
     const priced = (api_cost_usd: number, over: Partial<PricedUsage> = {}): PricedUsage => ({
       api_cost_usd, excluded_tokens: 0, api_cost_lower_bound: false, ...over,
@@ -335,7 +442,8 @@ describe('QuotaTab', () => {
       expect(claudeCard.textContent).toContain('回本 2.0 倍');
       // Counted between host-calendar days (2026-09-25 → 2026-10-05), whatever the browser's zone.
       expect(claudeCard.textContent).toContain('距下次续费10 天');
-      expect(claudeCard.textContent).toContain('2026-10-05');
+      // The renewal day is a host-calendar day: its weekday is that day's, whatever the browser's zone.
+      expect(within(claudeCard).getByRole('button', { name: '10 天 (2026/10/5周一)' })).toBeTruthy();
       expect(codexCard.textContent).toContain('还差 $182.00 回本');
       const foot = container.querySelector('.model-hub-quota-foot')!.textContent!;
       expect(foot).toContain('进度条是已用的部分');

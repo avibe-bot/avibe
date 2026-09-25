@@ -1422,7 +1422,8 @@ as "not reported", never as zero.
   Pro, and `claude_max` with `rate_limit_tier` `default_claude_max_5x` or
   `default_claude_max_20x` is Max 5x or 20x; Team, Enterprise, and unknown tiers
   are no plan. Built-in fees: `claude_pro` 20, `claude_max_5x`
-  100, `claude_max_20x` 200, `chatgpt_plus` 20, `chatgpt_pro` 200 (USD / month). An
+  100, `claude_max_20x` 200, `chatgpt_plus` 20, `chatgpt_pro_5x` 100 (Codex
+  reports it as `prolite`), `chatgpt_pro` 200 (USD / month). An
   unknown plan leaves `plan_key`, `fee_usd`, and `multiple` null: the page still
   shows the API value but no payback figure.
 - `multiple` is `period.api_cost_usd / fee_usd`. When `period.api_cost_lower_bound`

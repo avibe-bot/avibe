@@ -28,6 +28,27 @@ export function quotaDuration(ms: number): QuotaDuration {
   return { unit: 'minutes', minutes };
 }
 
+/** Vendor families whose plan ids have a display name. */
+const PLAN_FAMILIES: Record<string, 'openai' | 'anthropic'> = { openai: 'openai', codex: 'openai', anthropic: 'anthropic' };
+
+/**
+ * A reported plan id, read for its display name: the family whose names apply
+ * and the id with case, separators, and the vendor's own prefix folded away
+ * (`claude_max_20x` and `Max 20x` are both `max_20x`).
+ */
+export function quotaPlanId(vendor: string, plan: string): { family: 'openai' | 'anthropic' | null; id: string } {
+  const family = PLAN_FAMILIES[vendor.trim().toLowerCase()] ?? null;
+  const id = plan.trim().toLowerCase().replace(/[\s-]+/g, '_').replace(/^(?:claude|chatgpt)_/, '');
+  return { family, id };
+}
+
+/** An unknown plan id in words: `team_plus-annual` → 「Team Plus Annual」. */
+export function titleCasePlan(plan: string): string {
+  return plan.trim().split(/[\s_-]+/).filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
 const instant = (value: string | null): number | null => {
   if (value === null) return null;
   const ms = Date.parse(value);
