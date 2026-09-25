@@ -202,6 +202,7 @@ def test_agent_download_and_metadata_preserve_real_filename(
         ("upload.wav", "audio/vnd.wave"),
         ("upload.mp3", "audio/mp3"),
         ("upload.m4v", "video/x-m4v"),
+        ("legacy.flac", "application/octet-stream"),
     ],
 )
 def test_media_serves_inline_with_range_for_the_web_player(
@@ -238,9 +239,36 @@ def test_media_serves_inline_with_range_for_the_web_player(
     disposition = Message()
     disposition["Content-Disposition"] = response.headers["Content-Disposition"]
     assert disposition.get_content_disposition() == "inline"
+    assert client.get(f"/api/media/{token}/meta").get_json()["content_type"] == response.headers["Content-Type"]
     ranged = client.get(f"/api/media/{token}", headers={"Range": "bytes=16-31"})
     assert ranged.status_code == 206
     assert ranged.content == bytes(range(16, 32))
+    engine.dispose()
+
+
+def test_generic_media_row_is_reinferred_only_to_audio_or_video(tmp_path, monkeypatch, sqlite_schema_db_factory):
+    """A generic stored type falls back to the extension catalog, which only ever yields audio/video:
+    a generic-typed ``.html`` upload must still download, never render on this origin."""
+    from tests.ui_server_test_helpers import _save_config
+    from vibe import ui_server
+
+    _save_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    sqlite_schema_db_factory(db)
+    engine = create_sqlite_engine(db)
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
+    page = tmp_path / "page.html"
+    page.write_text("<script>alert(1)</script>", encoding="utf-8")
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        token = media_service.register(
+            conn, scope_id=scope_id, session_id="sess_x", kind="file", source="user_upload",
+            local_path=str(page.resolve()), file_name="page.html", content_type="application/octet-stream",
+        )
+
+    response = ui_server.app.test_client().get(f"/api/media/{token}")
+    assert response.headers["Content-Type"] == "application/octet-stream"
+    assert response.headers["Content-Disposition"].startswith("attachment;")
     engine.dispose()
 
 

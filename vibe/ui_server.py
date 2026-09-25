@@ -10948,7 +10948,9 @@ def _registered_media_response(
     # file, refuse (closes the mint→click TOCTOU window).
     if str(candidate) != stored or not candidate.is_file():
         return jsonify({"error": "not_found"}), 404
-    mime_type = row.get("content_type") or mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+    from core.media_types import is_inline_safe_type, resolve_media_row_type
+
+    mime_type = resolve_media_row_type(row.get("content_type"), str(candidate))
     response = send_file(candidate, mimetype=mime_type)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -10959,8 +10961,6 @@ def _registered_media_response(
     filename = row.get("file_name") or candidate.name
     # Force download for non-allowlisted (active) types even without ?download=1,
     # so previewing an agent-produced HTML/SVG can't run script on this origin.
-    from core.media_types import is_inline_safe_type
-
     # The same ``mime_type`` is sent as Content-Type (with nosniff), so an inline response is always
     # rendered as exactly the type it was judged by — even when an upload's declared type is wrong.
     force_download = request.args.get("download") == "1" or not is_inline_safe_type(mime_type, _INLINE_SAFE_MEDIA_TYPES)
@@ -10974,6 +10974,7 @@ def media_meta(token: str):
     """Lightweight metadata for a media token so the UI file card can show the
     name / type / size without downloading the file. Same token gate as the
     file route."""
+    from core.media_types import resolve_media_row_type
     from storage import media_service
 
     engine = _projects_engine()
@@ -10987,7 +10988,7 @@ def media_meta(token: str):
         {
             "kind": row.get("kind"),
             "name": row.get("file_name"),
-            "content_type": row.get("content_type"),
+            "content_type": resolve_media_row_type(row.get("content_type"), row.get("file_name") or ""),
             "ext": row.get("file_ext"),
             "size": row.get("size_bytes"),
             "width": row.get("width_px"),

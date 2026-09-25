@@ -33,3 +33,22 @@ def is_inline_safe_type(mime: str | None, allowlist: set[str]) -> bool:
     ``text/html``) must be listed explicitly in ``allowlist``."""
     base = (mime or "").split(";", 1)[0].strip().lower()
     return base.split("/", 1)[0] in INLINE_SAFE_MEDIA_MAJOR_TYPES or base in allowlist
+
+
+_GENERIC_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
+
+
+def resolve_media_row_type(stored: str | None, file_name: str) -> str:
+    """The content type to serve for a stored media row.
+
+    A row may carry a generic type: the browser declared none for an upload, or the row predates the
+    catalog registration above on a host whose ``mimetypes`` table lacked the extension. For those rows
+    the catalog extension decides, so a known audio/video file still plays inline. Only a catalog
+    (audio/video) guess replaces a generic type; any other stored value is served unchanged."""
+    base = (stored or "").split(";", 1)[0].strip().lower()
+    if base not in _GENERIC_TYPES:
+        return stored  # type: ignore[return-value]
+    guessed = mimetypes.guess_type(file_name)[0]
+    if guessed and guessed.split("/", 1)[0] in INLINE_SAFE_MEDIA_MAJOR_TYPES:
+        return guessed
+    return stored or guessed or "application/octet-stream"

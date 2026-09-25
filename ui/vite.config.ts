@@ -53,7 +53,7 @@ export default defineConfig({
       // one tracked file each rather than from a copy per reader:
       // ``src/lib/messageTypes.ts`` imports ``vibe/message_types.json``, and
       // ``src/components/settings/models/apiKeyVendors.ts`` imports
-      // ``vibe/data/api_key_vendors.json``.
+      // ``vibe/data/api_key_vendors.json``, and ``vibe/data/media_types.json``.
       // ``ui/package-lock.json`` makes Vite infer ``ui/`` as the workspace root, which
       // would put both files outside the dev server's default allow list; production
       // builds inline the JSON and are unaffected. Allow the UI root plus those exact
@@ -63,6 +63,7 @@ export default defineConfig({
         fileURLToPath(new URL('.', import.meta.url)),
         fileURLToPath(new URL('../vibe/message_types.json', import.meta.url)),
         fileURLToPath(new URL('../vibe/data/api_key_vendors.json', import.meta.url)),
+        fileURLToPath(new URL('../vibe/data/media_types.json', import.meta.url)),
       ],
     },
     proxy: {
