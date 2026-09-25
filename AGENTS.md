@@ -202,7 +202,7 @@ Source-of-truth rule:
 - use the `background-watch-hook` skill for managed review and CI waits
 - keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
 - the change contract names intended behavior, affected boundaries, and
-  validation evidence; use the Skill's circuit breaker when findings repeat
+  validation evidence
 - only an explicit owner decision may make Codex findings advisory for an
   architecture/spec-only PR; ordinary documentation and every product or test
   code PR retain the Skill's normal gates
