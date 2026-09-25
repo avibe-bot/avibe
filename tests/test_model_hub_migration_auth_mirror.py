@@ -400,7 +400,7 @@ class TestTakeoverMirrorConsumers:
             save(record)
         monkeypatch.setattr(service.migration_journal, "save", save_checked)
         ids = [item["id"] for item in service.migration_scan()["items"] if item["backend"] == "claude"]
-        assert asyncio.run(service.migration_apply(ids))["applied"] == 1
+        assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
         assert service.migration_journal.load() is None
         assert not runtime.admissions and not runtime.turns
         _assert_mirrored(runtime, service.store.native_auth_snapshot(("claude",)))

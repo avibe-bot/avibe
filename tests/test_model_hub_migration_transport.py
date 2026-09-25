@@ -111,13 +111,21 @@ def _scan(service, roots=(), legacy=None):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-@pytest.mark.parametrize("base_url,secret", [
-    (CUSTOM, KEY), (OFFICIAL, "fixture-sk-ant-oat-static"),
-])
-def test_all_anthropic_native_producers_refuse_unpreservable_transport(
-    tmp_path, native, entry, base_url, secret,
-):
-    paths, roots, legacy = _seed(native, entry, base_url=base_url, secret=secret)
+def test_custom_anthropic_key_is_offered_as_the_bearer_the_engine_sends(tmp_path, native, entry):
+    _, roots, legacy = _seed(native, entry, base_url=CUSTOM)
+    service, store, _ = _service(tmp_path, migration_home=native)
+    if legacy:
+        store.native_auth_snapshot = lambda backends: legacy
+    rows = _scan(service, roots, legacy)
+    assert rows
+    assert all(row.proposed_action == "import" and row.selected for row in rows)
+    assert all(row.auth_scheme == "bearer" for row in rows)
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_all_anthropic_native_producers_refuse_unpreservable_transport(tmp_path, native, entry):
+    secret = "fixture-sk-ant-oat-static"
+    paths, roots, legacy = _seed(native, entry, base_url=OFFICIAL, secret=secret)
     before = {path: path.read_bytes() for path in paths}
     service, store, adapter = _service(tmp_path, migration_home=native)
     if legacy:
@@ -128,7 +136,7 @@ def test_all_anthropic_native_producers_refuse_unpreservable_transport(
     assert all(row.notes_key == BLOCKED for row in rows)
     assert secret not in json.dumps([row.to_payload() for row in rows])
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row.id for row in rows]))
+        asyncio.run(service.migration_apply([row.id for row in rows], clean_api_keys=True))
     assert {path: path.read_bytes() for path in paths} == before
     assert not store.config.sources
     assert not adapter.provisioned and not adapter.transient_refs
@@ -145,7 +153,7 @@ def test_official_api_key_still_migrates_from_every_native_producer(tmp_path, na
         store.native_auth_snapshot = lambda backends: legacy
     rows = _scan(service, roots, legacy)
     assert rows and all(row.proposed_action == "import" for row in rows)
-    result = asyncio.run(service.migration_apply([row.id for row in rows]))
+    result = asyncio.run(service.migration_apply([row.id for row in rows], clean_api_keys=True))
     assert result["applied"] == len(rows)
     assert all(source.protocol == "anthropic" for source in store.config.sources)
     assert all(scheme is None for scheme in adapter.auth_schemes.values())
@@ -189,7 +197,8 @@ def test_migration_oauth_heuristic_is_never_reinterpreted_as_static(secret):
     ("anthropic", "https://api.anthropic.com:0443", "bearer", True),
     ("anthropic", OFFICIAL, "bearer", False),
     ("anthropic", CUSTOM, "unknown", False),
-    ("custom", CUSTOM, "bearer", False),
+    ("custom", CUSTOM, "bearer", True),
+    ("openai", CUSTOM, "bearer", False),
     ("minimax", None, None, False),
     ("custom", None, None, False),
     ("custom", OFFICIAL, None, True),
@@ -259,7 +268,7 @@ def test_observation_cannot_change_native_auth_semantics(
     [row] = service.migration_scan()["items"]
     assert row["proposed_action"] == "import"
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"]]))
+        asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert path.read_bytes() == before
     assert not adapter.provisioned
     assert service.migration_journal.load() is None
@@ -274,7 +283,7 @@ def test_observation_may_change_openai_dialect_without_changing_bearer_auth(tmp_
     service, store, adapter = _service(tmp_path, migration_home=native)
     adapter.observed_protocols["custom"] = "openai_responses"
     [row] = service.migration_scan()["items"]
-    assert asyncio.run(service.migration_apply([row["id"]]))["applied"] == 1
+    assert asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))["applied"] == 1
     assert store.config.sources[0].protocol == "openai_responses"
 
 
@@ -330,7 +339,7 @@ def _real_http_adapter(service, tmp_path):
 
 @pytest.mark.parametrize("entry", ["claude-settings", "shell", "opencode-custom"])
 @pytest.mark.parametrize("reuse", [False, True])
-def test_strict_custom_x_api_key_never_becomes_successful_migration(
+def test_custom_endpoint_refusing_bearer_fails_proof_and_keeps_native_files(
     tmp_path, native, entry, reuse,
 ):
     async def scenario():
@@ -352,19 +361,14 @@ def test_strict_custom_x_api_key_never_becomes_successful_migration(
                     async with client.post(origin + "/v1/messages", headers=headers, json={"model": "claude-fixture"}) as response:
                         assert response.status == status
             requests.clear()
-            # Demonstrate the old observation path can prove this key using
-            # x-api-key. That proof must not license destructive migration.
-            proof = await service._require_proven_source_payload({
-                "vendor": "anthropic", "key": KEY, "base_url": origin,
-            })
-            assert proof.authenticated and proof.protocol == "anthropic"
-            assert any(headers.get("x-api-key") == KEY for _, headers in requests)
-            requests.clear()
+            # Offered as the Bearer the engine would send; a native x-api-key
+            # proof never licenses the migration.
             rows = service.migration_scan()["items"]
+            assert rows and all(row["proposed_action"] == "import" for row in rows)
             with pytest.raises(ModelHubError):
                 await service.migration_apply([row["id"] for row in rows])
-            assert all(row["notes_key"] == BLOCKED for row in rows)
-            assert requests == []
+            assert requests
+            assert all("x-api-key" not in headers for _, headers in requests)
             assert {path: path.read_bytes() for path in paths} == before
             assert store.config.to_payload() == config_before
             assert set((runtime.state_store.root / "credentials").glob("*.json")) == credentials_before
@@ -387,7 +391,7 @@ def test_real_observation_cannot_promote_custom_key_to_anthropic_transport(tmp_p
             [row] = service.migration_scan()["items"]
             assert row["proposed_action"] == "import"
             with pytest.raises(ModelHubError):
-                await service.migration_apply([row["id"]])
+                await service.migration_apply([row["id"]], clean_api_keys=True)
             assert any(headers.get("x-api-key") == KEY for _, headers in requests)
             assert path.read_bytes() == before
             assert not store.config.sources
@@ -397,15 +401,18 @@ def test_real_observation_cannot_promote_custom_key_to_anthropic_transport(tmp_p
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("entry", ["claude-settings", "shell"])
-def test_custom_bearer_keeps_actual_proof_discovery_and_cleanup(tmp_path, native, entry):
+@pytest.mark.parametrize("entry,bearer", [
+    ("claude-settings", True), ("shell", True),
+    ("claude-settings", False), ("shell", False),
+])
+def test_custom_bearer_keeps_actual_proof_discovery_and_cleanup(tmp_path, native, entry, bearer):
     async def scenario():
         async with _upstream("bearer") as (origin, requests):
-            paths, _, _ = _seed(native, entry, base_url=origin, bearer=True)
+            paths, _, _ = _seed(native, entry, base_url=origin, bearer=bearer)
             service, store, _ = _service(tmp_path, migration_home=native)
             runtime = _real_http_adapter(service, tmp_path)
             rows = service.migration_scan()["items"]
-            result = await service.migration_apply([row["id"] for row in rows])
+            result = await service.migration_apply([row["id"] for row in rows], clean_api_keys=True)
             assert result["applied"] == 1
             [source] = store.config.sources
             assert await runtime.credential_auth_scheme(source.credential_ref) == "bearer"

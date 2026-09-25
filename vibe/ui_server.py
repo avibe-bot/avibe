@@ -5121,8 +5121,9 @@ async def model_hub_migration_apply():
     from core.handlers.model_hub import ModelHubError
 
     try:
+        payload = _model_hub_json_object("migration_item_conflict", status=409)
         result = await _model_hub_service().migration_apply(
-            _model_hub_json_object("migration_item_conflict", status=409).get("item_ids")
+            payload.get("item_ids"), payload.get("clean_api_keys", False),
         )
         return _model_hub_success(**result)
     except ModelHubError as exc:

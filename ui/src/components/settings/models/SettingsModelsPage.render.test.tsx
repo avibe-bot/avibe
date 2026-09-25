@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -13,9 +14,19 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
-import { SettingsModelsPage } from './SettingsModelsPage';
+import { SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageReport } from './types';
+
+// The page navigates to Agents when the user clicks an Agent that needs
+// attention, so it needs a router in scope. Every render site wants the same
+// throwaway one — these tests assert on the page, not on where it routes — so
+// the harness supplies it once instead of asking 23 call sites to remember.
+const SettingsModelsPage = () => (
+  <MemoryRouter>
+    <SettingsModelsRoute />
+  </MemoryRouter>
+);
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -313,19 +324,15 @@ describe('SettingsModelsPage surface branches', () => {
     expect(apply).not.toHaveBeenCalled();
   });
 
-  it('keeps Direct mode and blocks migration when only unsupported native auth exists', async () => {
+  it('switches straight to the gateway when only native auth it cannot carry exists', async () => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [blockedMigrationCandidate] });
     const setMode = vi.spyOn(modelsApi, 'setAgentMode')
       .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
     renderPage([], [directAgent('claude')]);
 
     await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/Use the existing Add flow|现有的添加流程/)).toBeTruthy();
-    expect(
-      (within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(setMode).not.toHaveBeenCalled();
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('opens the same migration dialog from an existing Hub user entry', async () => {
@@ -344,6 +351,47 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: /Later|稍后/i }));
 
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['nothing at all', []],
+    ['only native auth the Hub cannot carry', 'blocked'],
+  ] as const)('offers no migrate entry when the scan finds %s', async (_, items) => {
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const scan = vi.spyOn(modelsApi, 'scanMigration')
+      .mockResolvedValue({ items: items === 'blocked' ? [blockedMigrationCandidate] : [] });
+    renderPage([retainedSource], [{
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+    }]);
+
+    await waitFor(() => expect(scan).toHaveBeenCalled());
+    // Settled, so the absence below is the answer rather than a scan in flight.
+    await act(async () => { await scan.mock.results[0].value; });
+    expect(screen.queryByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeNull();
+  });
+
+  it('rescans on refresh so a native login made since the page opened can be migrated', async () => {
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const hubClaude = { ...directAgent('claude'), mode: 'hub' as const, sources: { order: [], eligibility: [] } };
+    vi.spyOn(modelsApi, 'refreshAgentPresence').mockResolvedValue([hubClaude]);
+    const scan = vi.spyOn(modelsApi, 'scanMigration')
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValue({ items: [migrationCandidate] });
+    renderPage([retainedSource], [{
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+    }]);
+
+    await waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
+    await act(async () => { await scan.mock.results[0].value; });
+    expect(screen.queryByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeNull();
+    const refresh = screen.getByRole('button', { name: 'Detect Agent backends again' });
+    await waitFor(() => expect(refresh).toHaveProperty('disabled', false));
+    await userEvent.click(refresh);
+    expect(await screen.findByRole('button', { name: /Migrate configuration|迁移配置/i })).toBeTruthy();
   });
 
   it('installs and starts the runtime inline without an install confirmation dialog', async () => {
@@ -539,7 +587,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
-    expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeTruthy();
+    expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeTruthy();
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
     // overview leaks in beside it.
@@ -796,7 +844,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getAllByRole('tab')).toHaveLength(3);
-    expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，你会多出三件事$/i)).toBeNull();
+    expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeNull();
   });
 
   it('keeps manual-model draft Escape local to the provider dialog', async () => {
@@ -1961,6 +2009,34 @@ describe('SettingsModelsPage surface branches', () => {
     }
   });
 
+  it('MH-ROUTING-007 returns focus to the model row after a route-to-catalog handoff', async () => {
+    const catalogModel: BackendModel = {
+      id: 'gpt-5.6-sol', display_name: null, origin: 'manual', models_dev_id: null, context_window: null,
+      max_output_tokens: null, input_modalities: ['text'], output_modalities: ['text'], supports_tools: true,
+      supports_reasoning: false, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    const agent = { ...takeoverAgent, catalog_models: [catalogModel] };
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    renderPage([
+      { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+      { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+    ], [agent]);
+    const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
+    await userEvent.click(opener);
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$|^编辑模型$/i }));
+    await waitFor(() => expect(document.querySelector('.model-hub-route-head')).toBeNull());
+    // Edit opens the model editor over the catalog; leave both by keyboard.
+    for (let open = 0; open < 3 && screen.queryAllByRole('dialog').length; open += 1) {
+      await userEvent.keyboard('{Escape}');
+      await flushRouteFocus();
+    }
+    await waitFor(() => expect(screen.queryAllByRole('dialog')).toHaveLength(0));
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(opener);
+  });
+
   it('MH-ROUTING-007 keeps the previous retry fallback when another route opens', async () => {
     const { opener } = await saveRouteForFocusTest();
     const agentsRead = deferred<AgentSupply[]>();
@@ -1978,7 +2054,7 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i });
     await userEvent.click(
       screen.getAllByRole('button', { name: /^Close$|^关闭$/i })
-        .find((button) => button.classList.contains('model-hub-dialog-action'))!,
+        .find((button) => button.classList.contains('model-hub-route-close'))!,
     );
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await flushRouteFocus();
@@ -2041,7 +2117,7 @@ describe('SettingsModelsPage surface branches', () => {
         expect(document.activeElement?.closest('[role="dialog"]')).toBeTruthy();
         await userEvent.click(
           within(screen.getByRole('dialog')).getAllByRole('button', { name: /^Close$/i })
-            .find((button) => button.classList.contains('model-hub-dialog-action'))!,
+            .find((button) => button.classList.contains('model-hub-route-close'))!,
         );
         await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
         await flushRouteFocus();

@@ -131,6 +131,7 @@ export type ModelsApi = {
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
   getAgentProvenance(backend: AgentBackend, model: string): Promise<TurnProvenance | null>;
+  getTurnProvenance(turnId: string): Promise<TurnProvenance>;
   /** Complete overview chain projection for one Hub backend. */
   getAgentChains(backend: AgentBackend): Promise<AgentChain[]>;
   /** Total replacement of the exact stored chain. */
@@ -155,7 +156,8 @@ export type ModelsApi = {
   updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]): Promise<Source>;
   deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
-  applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
+  /** API keys are copied and kept natively unless `cleanApiKeys`. */
+  applyMigration(itemIds: string[], cleanApiKeys?: boolean): Promise<MigrationApplyResult>;
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   /** Usage analytics over the explicit modern window selector. */
@@ -604,6 +606,7 @@ export const modelsApi: ModelsApi = {
     jsonInit('POST', order === undefined ? undefined : { order }),
   ).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  getTurnProvenance: (turnId) => call<{ provenance: TurnProvenance }>(`/api/models/turns/${encodeURIComponent(turnId)}/provenance`).then((r) => r.provenance),
   getAgentProvenance: (backend, model) => call<{ provenance: TurnProvenance | null }>(`/api/models/agents/${backend}/provenance?model=${encodeURIComponent(model)}`).then((r) => r.provenance),
   getAgentChains: (backend) => call<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`).then((r) => r.chains),
   putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),
@@ -632,7 +635,10 @@ export const modelsApi: ModelsApi = {
   updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then((r) => (r.source ?? r) as Source),
   deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
-  applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
+  applyMigration: (itemIds, cleanApiKeys = false) => call<MigrationApplyResult>(
+    '/api/models/migration/apply',
+    jsonInit('POST', { item_ids: itemIds, clean_api_keys: cleanApiKeys }),
+  ),
   listEvents: (limit = 20, before) =>
     call<{ events: ResolutionEvent[] }>(
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,

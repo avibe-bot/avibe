@@ -8,7 +8,7 @@ import i18n from '@/i18n';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { blankBackendModel, candidateBackendModel } from './backendCatalog';
 import { ApiCallError, modelsApi } from './modelsApi';
-import type { AgentSupply, BackendModel, ModelCandidate, RouteHop } from './types';
+import type { AgentSupply, BackendModel, ModelCandidate, ModelsDevMatch, RouteHop } from './types';
 
 const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel => ({
   ...blankBackendModel(),
@@ -135,6 +135,119 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.queryByRole('button', { name: 'Edit claude-default' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove claude-default' })).toBeNull();
     expect(screen.getByText('2 models')).toBeTruthy();
+  });
+
+  it('opens the named row\'s editor alone and saves its answer, never on a locked row', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([locked, model('alpha', { display_name: 'Alpha' })]));
+    const { onClose, onSaved } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    expect(await screen.findByRole('button', { name: 'Save model' })).toBeTruthy();
+    // The editor is the whole dialog: the list is not shown behind it.
+    expect(screen.queryByRole('heading', { name: 'Claude Code models' })).toBeNull();
+    await user.type(screen.getByLabelText('Display name'), 'Alpha');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(onSaved).toHaveBeenCalled();
+    cleanup();
+
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    renderDialog({ focus: { modelId: 'claude-default', action: 'edit' } });
+    await screen.findByText('claude-default');
+    expect(screen.queryByRole('button', { name: 'Save model' })).toBeNull();
+  });
+
+  it('closes a focused editor without writing or showing the list', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels');
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose.mock.calls[0][0]?.removed).toBeFalsy();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['routed', { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } }],
+    ['unrouted', {}],
+  ])('removes a %s focused row straight from one confirmation', async (_, routes) => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], { routes }));
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    if (Object.keys(routes).length > 0) expect(within(confirm).getByRole('alert').textContent).toContain('beta-air');
+    expect(screen.queryByText('2 models')).toBeNull();
+    expect(write).not.toHaveBeenCalled();
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0][1].models.map((entry: BackendModel) => entry.id)).toEqual(['alpha']);
+  });
+
+  it('does not ask a focused removal twice about the route its one confirmation covered', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
+      ))
+      .mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove', route: [{ source_id: 'src_a', model_id: 'beta-air' }] } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(write.mock.calls[1][1]).toMatchObject({ force: true, would_remove_hops: hops, would_interrupt: [] });
+  });
+
+  it('asks a focused removal again when the refused route is not the one it showed', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_b', model_id: 'beta-max', position: 1 }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
+      ))
+      .mockResolvedValue(agent([model('alpha')]));
+    renderDialog({ focus: { modelId: 'beta', action: 'remove', route: [{ source_id: 'src_a', model_id: 'beta-air' }] } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    const again = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await waitFor(() => expect(within(again).getByRole('button', { name: 'Remove' })).toHaveProperty('disabled', false));
+    expect(write).toHaveBeenCalledTimes(1);
+    await user.click(within(again).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    expect(write.mock.calls[1][1]).toMatchObject({ force: true, would_remove_hops: hops });
+  });
+
+  it('keeps a focused editor on screen and inert while its save is pending', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    let settle: (value: ReturnType<typeof agent>) => void = () => {};
+    vi.spyOn(modelsApi, 'putAgentModels').mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    await user.click(await screen.findByRole('button', { name: 'Save model' }));
+    expect(screen.getByRole('button', { name: 'Save model' })).toHaveProperty('disabled', true);
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => { settle(agent([model('alpha')])); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
+  });
+
+  it('cancels a focused removal without writing', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels');
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose.mock.calls[0][0]?.removed).toBeFalsy();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('renders Claude models without inventing a native default choice', async () => {
@@ -298,6 +411,61 @@ describe('BackendModelCatalogDialog', () => {
       baseline: catalog,
       models: [model('glm-4.7', { native_protocol: 'openai_responses' }), { ...FOO, max_output_tokens: 8000 }],
     }));
+  });
+
+  it('keeps the recorded origin of a row re-added under an ID the editor only lands on at the end', async () => {
+    const user = userEvent.setup();
+    // The row the server already stores, and the creation path it recorded.
+    const GROK = model('grok-4.6', {
+      origin: 'provider',
+      display_name: 'Grok 4.6',
+      native_protocol: 'openai_responses',
+    });
+    const catalog = [model('glm-4.7', { native_protocol: 'openai_responses' }), GROK];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, { backend: 'opencode' }));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    // models.dev publishes this model under exactly the id the list already
+    // holds, which is the whole point: the typed query does not name the saved
+    // row, and the chosen suggestion does.
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([{
+      provider_id: 'xai',
+      provider_name: 'xAI',
+      model_id: 'grok-4.6',
+      models_dev_id: 'xai/grok-4.6',
+      display_name: 'Grok 4.6',
+      context_window: 256000,
+      max_output_tokens: 64000,
+      input_modalities: ['text'],
+      output_modalities: ['text'],
+      supports_tools: true,
+      supports_reasoning: true,
+      reasoning_efforts: ['low', 'high'],
+      native_protocol: 'openai_responses',
+    } satisfies ModelsDevMatch]);
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog({ backend: 'opencode' });
+
+    await user.click(await screen.findByRole('button', { name: 'Remove Grok 4.6' }));
+    await user.click(screen.getByRole('button', { name: 'Add models' }));
+    await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
+    // A query that is not the saved id, so nothing resolves it to the saved row
+    // on the way in — the editor opens in add mode and stamps `models_dev`.
+    await user.type(await screen.findByLabelText('Search models or providers'), 'grok 4.6');
+    await user.click(await screen.findByRole('button', { name: 'Add "grok 4.6" as a custom model…' }));
+    await user.click(await screen.findByRole('option', { name: /Grok 4\.6/ }));
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    // `origin` is how the row was FIRST created and the server holds it
+    // immutable, so the only list this can be saved as is one that still says
+    // `provider`. Sending `models_dev` is refused outright, and the user is
+    // left with a row they cannot re-add by hand at all.
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    const [, body] = write.mock.calls[0];
+    expect(body.models.find((entry) => entry.id === 'grok-4.6')?.origin).toBe('provider');
+    // And the fill itself still landed: inheriting the origin is not reverting
+    // the row to the one that was removed.
+    expect(body.models.find((entry) => entry.id === 'grok-4.6')?.context_window).toBe(256000);
   });
 
   it('edits an existing row without renaming it', async () => {

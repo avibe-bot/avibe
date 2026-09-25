@@ -468,6 +468,13 @@ export type MigrationItem = {
   /** Server-computed transitive closure of backends sharing persisted shell
    *  assignments. They must migrate together. Missing/empty means this backend. */
   required_backends?: AgentBackend[];
+  /** The backend's native config cannot be parsed, so Hub mode would fail every
+   *  launch: the row blocks its whole consent group. Optional for older servers. */
+  config_blocker?: boolean;
+  /** Whether applying this row may copy a native API key, including an
+   *  opaque credential store that resolves only after consent. Older servers
+   *  omit it; then only non-subscription rows hold keys. */
+  may_hold_api_key?: boolean;
 };
 
 export type MigrationScan = { items: MigrationItem[] };
@@ -593,7 +600,7 @@ export type TurnProvenance = {
   agent: AgentBackend;
   requested_model_id: string;
   outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
-  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason }>;
+  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null }>;
   served: RecordedAttempt | null;
   canceled_attempt: RecordedAttempt | null;
   terminal_error: {

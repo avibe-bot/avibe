@@ -225,14 +225,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
       if (current(generation)) { owner.current.submitting = false; setSubmitting(false); }
     }
   };
-  const copy = async (text: string | null, event?: React.MouseEvent) => {
-    event?.preventDefault(); event?.stopPropagation();
-    if (!text) return;
-    try { await navigator.clipboard.writeText(text); showToast(t('common.copied'), 'success'); }
-    catch { showToast(t('common.copyFailed'), 'error'); }
-  };
   const isActive = state === 'starting' || state === 'awaiting_code' || state === 'verifying';
   return { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError, hubOwnedAuth,
-    isActive, startFlow, cancelFlow, submitCallback, resetToIdle,
-    copyUrl: (e?: React.MouseEvent) => copy(url, e), copyDeviceCode: (e?: React.MouseEvent) => copy(deviceCode, e) };
+    isActive, startFlow, cancelFlow, submitCallback, resetToIdle };
 }

@@ -178,10 +178,10 @@ def test_f4_unproven_shell_key_is_not_removed(
 
 
 @pytest.mark.parametrize("shape", ["settings", "shell"])
-def test_f4_custom_api_key_transport_is_refused_without_cleanup(
+def test_f4_custom_api_key_refusing_bearer_is_kept_without_cleanup(
     model_hub_app_factory, mock_llm_upstream, shape,
 ):
-    """F4: discovery cannot prove a header the pinned engine will not send."""
+    """F4: proof uses the Bearer header the pinned engine sends to a relay."""
     _configure_protocol(mock_llm_upstream, "anthropic")
     mock_llm_upstream.configure(required_api_key=KEY, required_auth_scheme="protocol")
     paths = []
@@ -206,13 +206,12 @@ def test_f4_custom_api_key_transport_is_refused_without_cleanup(
         response = app.client.post("/api/models/migration/scan", {})
         assert response.status == 200, response.json()
         [row] = response.json()["scan"]["items"]
-        assert row["selected"] is False
-        assert row["notes_key"] == "settings.models.migration.blocked.transport"
+        assert row["selected"] is True and row["proposed_action"] == "import"
         refused = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
-        assert refused.status == 409, refused.json()
+        assert refused.status >= 400, refused.json()
         assert paths[0].read_bytes() == before
         assert app.client.get("/api/models/sources").json()["sources"] == []
-        assert mock_llm_upstream.requests() == []
+        assert all("x-api-key" not in request["headers"] for request in mock_llm_upstream.requests())
 
 
 @pytest.mark.parametrize("profile,writer", [

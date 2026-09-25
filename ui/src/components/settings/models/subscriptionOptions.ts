@@ -77,10 +77,15 @@ export const recommendedSubscriptionChannel = (vendor: string): SupplyChannel =>
 export const initialSubscriptionChannel = (vendor: string, sources: Source[]): SupplyChannel =>
   nativeSubscriptionSlotTaken(vendor, sources) ? 'hub' : recommendedSubscriptionChannel(vendor);
 
+/** The channels the chooser offers, recommended first. A ChatGPT subscription is
+ *  offered to the gateway only: Codex signing in natively is still honoured when it
+ *  is already there (detection, reauth), it is just no longer a choice to make. */
 export const subscriptionOptionOrder = (vendor: string): SupplyChannel[] =>
-  recommendedSubscriptionChannel(vendor) === 'hub'
-    ? ['hub', 'native_cli']
-    : ['native_cli', 'hub'];
+  vendor === 'openai'
+    ? ['hub']
+    : recommendedSubscriptionChannel(vendor) === 'hub'
+      ? ['hub', 'native_cli']
+      : ['native_cli', 'hub'];
 
 /** Which channel the menu recommends, or `null` when the vendor has no native
  *  channel to recommend against. A hub-held row carries no badge: 网关推荐 over the

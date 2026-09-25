@@ -64,7 +64,7 @@ def test_mh_mig_005_runtime_auth_cannot_disable_saved_opencode_keys(
     assert len(rows) == 2
     assert all(row["proposed_action"] == "import" and row["selected"] for row in rows)
     assert all(row["source_paths"] == [str(path)] for row in rows)
-    result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    result = asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert result["applied"] == 2
     assert len(adapter.provisioned) == 2
     assert "fixture-runtime" not in json.dumps(adapter.keys)
@@ -90,13 +90,13 @@ def test_shell_saved_key_takeover_keeps_unrelated_bytes_and_runtime(
     assert rows[0]["source_paths"] == [str(profile)]
     assert "fixture-shell-key" not in json.dumps(rows)
     ids = [row["id"] for row in rows]
-    asyncio.run(service.migration_apply(ids))
+    asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert profile.read_bytes() == retained.encode()
     assert len(store.load().sources) == 1
     assert store.load().sources[0].base_url == "https://fixture.example"
     assert list(adapter.keys.values())[0][2] == "fixture-shell-key"
     assert service.migration_scan()["items"] == []
-    asyncio.run(service.migration_apply(ids))
+    asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert len(adapter.provisioned) == 1
     assert os.environ["ANTHROPIC_API_KEY"] == "fixture-runtime-preserved"
 
@@ -119,7 +119,7 @@ def test_new_shell_layer_during_provision_cannot_escape_consent(
 
     monkeypatch.setattr(adapter, "provision_credential", new_layer)
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert profile.read_bytes() == original
     assert "fixture-new-key" in (home / ".profile").read_text()
     assert not store.load().sources
@@ -140,10 +140,10 @@ def test_shared_shell_key_requires_both_backend_consents(
     assert all(set(row["required_backends"]) == {"codex", "opencode"} for row in rows)
     before = profile.read_bytes(), config_path.read_bytes()
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply([row["id"] for row in rows if row["backend"] == "opencode"]))
+        asyncio.run(service.migration_apply([row["id"] for row in rows if row["backend"] == "opencode"], clean_api_keys=True))
     assert adapter.provisioned == []
     assert (profile.read_bytes(), config_path.read_bytes()) == before
-    asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    asyncio.run(service.migration_apply([row["id"] for row in rows], clean_api_keys=True))
     assert profile.read_bytes() == b""
     assert "apiKey" not in json.dumps(json.loads(config_path.read_text()))
     assert len(store.load().sources) == 1
@@ -194,7 +194,7 @@ def test_external_noop_guard_change_never_owns_rollback_bytes(
     adapter.ensure_installed = install
     adapter.start = start
     with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(ids))
+        asyncio.run(service.migration_apply(ids, clean_api_keys=True))
     assert profile.read_text() == f"# external preference during {boundary}\n"
     assert service.migration_journal.completed() is None
     if has_grant and boundary == "start":
@@ -223,7 +223,7 @@ def test_receipt_replay_requires_same_grant_target_and_current_hub_ref(
     write(path, payload)
     service, store, adapter = _service(tmp_path, migration_home=home)
     [original] = service.migration_scan()["items"]
-    asyncio.run(service.migration_apply([original["id"]]))
+    asyncio.run(service.migration_apply([original["id"]], clean_api_keys=True))
     original_ref = store.config.sources[0].credential_ref
     if changed_identity == "new-grant":
         payload["env"]["ANTHROPIC_AUTH_TOKEN"] = "fixture-new"
@@ -235,14 +235,14 @@ def test_receipt_replay_requires_same_grant_target_and_current_hub_ref(
     [current] = service.migration_scan()["items"]
     if changed_identity == "replaced-hub-ref":
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply([current["id"]]))
+            asyncio.run(service.migration_apply([current["id"]], clean_api_keys=True))
         assert len(adapter.provisioned) == 1
         assert json.loads(path.read_text()) == payload
     else:
         assert current["id"] != original["id"]
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply([original["id"]]))
-        asyncio.run(service.migration_apply([current["id"]]))
+            asyncio.run(service.migration_apply([original["id"]], clean_api_keys=True))
+        asyncio.run(service.migration_apply([current["id"]], clean_api_keys=True))
         assert len(adapter.provisioned) == 2
         assert store.config.sources[0].credential_ref == original_ref
         assert len(store.config.sources) == 2

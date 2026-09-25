@@ -1,6 +1,8 @@
 import { createContext, useContext } from 'react';
 import type { Location, NavigateFunction } from 'react-router-dom';
 
+import { MODEL_HUB_SETTINGS_PATH } from '../components/settings/models/modelHubRoutes';
+import { SETTINGS_LANDING_PATH } from './adminNavigation';
 import { inAppHistoryIndex } from './navigationHistory';
 import { isLegacySettingsEntryPath } from './settingsRoutes';
 
@@ -52,6 +54,18 @@ export const isSettingsEntryPath = (pathname: string): boolean =>
  * has an app sidebar to sit beside.
  */
 export const isChromelessShellPath = (pathname: string): boolean => pathname === '/setup';
+
+/**
+ * The Settings sections a setup visit opens over the wizard without leaving it:
+ * General, which holds the interface language the desktop shell's setup screens
+ * leave to it, and Model Hub, the setup's own repair route. The route guard keeps
+ * the wizard mounted behind exactly these, and a Settings menu opened from the
+ * wizard offers exactly these, so nothing on screen leads out of the setup.
+ */
+export const SETUP_VISIT_SETTINGS_PATHS: ReadonlySet<string> = new Set([
+  SETTINGS_LANDING_PATH,
+  MODEL_HUB_SETTINGS_PATH,
+]);
 
 export const settingsOverlayOriginFromState = (state: unknown): SettingsOverlayOrigin | null => {
   if (!state || typeof state !== 'object') return null;

@@ -104,11 +104,9 @@ describe('providerSlots', () => {
     expect(slots.map((slot) => slot.vendor)).toEqual(['openai', 'anthropic']);
   });
 
-  it('keeps a detected candidate on the stage when its consent group is blocked, and says why', () => {
-    // A backend whose linked rows include something this entry cannot import is
-    // reviewed in Settings. What it is not is invisible: the key is on the machine,
-    // and replacing it with an empty 「add Anthropic」 invitation is how a person
-    // adds a second copy of the key they already have.
+  it('does not let a row the Hub cannot carry hold back the key beside it', () => {
+    // A row the server does not propose importing stays native and is shadowed by
+    // the Hub launch. It is not shown, and it never blocks its group.
     const slots = providerSlots({
       sources: [],
       scan: scanOf(
@@ -118,11 +116,8 @@ describe('providerSlots', () => {
     });
 
     expect(slots.map((slot) => [slot.vendor, slot.kind])).toEqual([['anthropic', 'detected'], ['openai', 'empty']]);
-    // Found, with a reason, and no permission: nothing in the card's `backends` is a
-    // backend anything here may take over. The reason is the migration feature's own
-    // note for that row — a server note nobody recognises still reads as a sentence.
-    expect(slots[0].reasons).toEqual(['settings.models.migration.blocked.fallback']);
-    expect(slots[0].backends).toEqual([]);
+    expect(slots[0].reasons).toEqual([]);
+    expect(slots[0].backends).toEqual(['claude']);
   });
 
   it('keeps the card and names setup’s own scope when the group holds an importable subscription', () => {
@@ -151,7 +146,7 @@ describe('providerSlots', () => {
       row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
       row({ id: 'mig_b', backend: 'claude', vendor: 'anthropic', kind: 'oauth_native' }),
       row({ id: 'mig_c', backend: 'opencode', kind: 'opencode_provider', vendor: 'zhipuai' }),
-      row({ id: 'mig_d', backend: 'opencode', kind: 'oauth_native', proposed_action: 'keep_native', vendor: undefined }),
+      row({ id: 'mig_d', backend: 'opencode', kind: 'oauth_native', vendor: undefined }),
     );
     const slots = providerSlots({ sources: [], scan });
 
@@ -180,7 +175,7 @@ describe('providerSlots', () => {
       scan: scanOf(
         row({ id: 'mig_a', backend: 'codex', vendor: 'openai' }),
         row({ id: 'mig_b', backend: 'opencode', kind: 'opencode_provider', vendor: 'openai' }),
-        row({ id: 'mig_c', backend: 'opencode', kind: 'oauth_native', proposed_action: 'keep_native' }),
+        row({ id: 'mig_c', backend: 'opencode', kind: 'oauth_native' }),
       ),
     });
 
@@ -380,33 +375,19 @@ describe('pendingImportRows', () => {
     expect(rows.map((item) => item.id)).toEqual(['mig_1', 'mig_2']);
   });
 
-  it('submits nothing for a group holding any row it cannot import', () => {
-    // Consent is per group, never per row: one row the server does not propose
-    // importing blocks the whole custody boundary, so the batch is empty rather
-    // than partial. Settings is where a mixed group gets resolved.
+  it('submits the carried rows and leaves the rest native', () => {
+    // A row the server does not propose importing stays where it is; it neither
+    // joins the batch nor keeps the rows beside it from moving.
     const rows = pendingImportRows({
       scan: scanOf(
         row({ id: 'mig_1', backend: 'codex' }),
         row({ id: 'mig_2', backend: 'codex', proposed_action: 'keep_native' }),
+        row({ id: 'mig_3', backend: 'codex', kind: 'oauth_native', proposed_action: 'reauth' }),
       ),
       selectedBackends: ['codex'],
     });
 
-    expect(rows).toEqual([]);
-  });
-
-  it('refuses a backend this entry point cannot consent to, however it got selected', () => {
-    // A blocked group is Settings' to resolve. Naming it in the selection must not
-    // make the CTA promise a batch the dialog would decline to build.
-    const rows = pendingImportRows({
-      scan: scanOf(
-        row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
-        row({ id: 'mig_b', backend: 'claude', kind: 'oauth_native', proposed_action: 'reauth' }),
-      ),
-      selectedBackends: ['claude'],
-    });
-
-    expect(rows).toEqual([]);
+    expect(rows.map((item) => item.id)).toEqual(['mig_1']);
   });
 
   it('never submits a subscription store alongside the key it is linked to', () => {
@@ -440,7 +421,7 @@ describe('offeredImportKeys', () => {
       selectedBackends: [],
     });
 
-    expect(offered.map((item) => item.id)).toEqual(['mig_1']);
+    expect(offered.map((item) => item.id)).toEqual(['mig_a', 'mig_1']);
   });
 
   it('does not count a key it could only take by taking a subscription too', () => {
@@ -482,11 +463,11 @@ describe('defaultSelection', () => {
     ))).toEqual(['codex']);
   });
 
-  it('never opens on a blocked group', () => {
+  it('opens on a key whose neighbour the Hub cannot carry', () => {
     expect(defaultSelection(scanOf(
       row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
       row({ id: 'mig_b', backend: 'claude', kind: 'oauth_native', proposed_action: 'reauth' }),
-    ))).toEqual([]);
+    ))).toEqual(['claude']);
   });
 
   it('never opens on a group setup itself cannot take whole', () => {

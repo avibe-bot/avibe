@@ -169,7 +169,7 @@ async def test_real_store_http_takeover_recovers_rotated_grant(monkeypatch, tmp_
     async with management_fixture(state, service, native_path, backend) as fixture:
         service.adapter = real_adapter(state, fixture.origin)
         with pytest.raises(ModelHubError) as failure:
-            await service.migration_apply(ids)
+            await service.migration_apply(ids, clean_api_keys=True)
         assert failure.value.code == "migration_recovery_pending"
         assert service.migration_journal.load()["phase"] == "exposed"
         assert not native_path.exists()
@@ -182,7 +182,7 @@ async def test_real_store_http_takeover_recovers_rotated_grant(monkeypatch, tmp_
         reopened = EngineStateStore(tmp_path / "engine")
         restarted.adapter = real_adapter(reopened, fixture.origin)
         fixture.fail_validation = False
-        result = await restarted.migration_apply(ids)
+        result = await restarted.migration_apply(ids, clean_api_keys=True)
 
         assert result["applied"] == 1
         assert not restarted.migration_blocked_backends

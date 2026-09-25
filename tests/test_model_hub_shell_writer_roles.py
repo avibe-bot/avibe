@@ -329,13 +329,13 @@ def test_builtin_roles_reach_scan_and_apply(home, tmp_path, filename, name, line
         assert row["proposed_action"] == "reauth"
         assert not row["selected"]
         with pytest.raises(ModelHubError):
-            asyncio.run(service.migration_apply([row["id"]]))
+            asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
         assert path.read_bytes() == before
         assert not adapter.provisioned and not adapter.oauth_provisioned and not adapter.transient_refs
         assert not store.config.sources
     else:
         assert row["proposed_action"] == "import"
-        assert asyncio.run(service.migration_apply([row["id"]]))["applied"] == 1
+        assert asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))["applied"] == 1
         assert len(adapter.provisioned) == len(store.config.sources) == 1
         assert path.read_bytes() == ("# 保留偏好\r\n" + line).encode()
 
@@ -376,7 +376,7 @@ def test_unrelated_consented_backend_can_still_migrate(home, tmp_path, writer):
     rows = {row["backend"]: row for row in service.migration_scan()["items"]}
     assert rows["codex"]["notes_key"].endswith(".dynamic_shell")
     assert rows["claude"]["proposed_action"] == "import"
-    result = asyncio.run(service.migration_apply([rows["claude"]["id"]]))
+    result = asyncio.run(service.migration_apply([rows["claude"]["id"]], clean_api_keys=True))
     assert result["applied"] == 1
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert path.read_text() == kept

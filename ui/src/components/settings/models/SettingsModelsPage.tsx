@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { ArrowDownToLine, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,7 +12,7 @@ import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
-import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
+import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
 import { MigrationDialog } from './MigrationDialog';
@@ -65,6 +66,7 @@ import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { handOffProviderTab } from './providerTab';
 import { resumeGatewayAdoption } from './gatewayAdoption';
+import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
@@ -353,6 +355,13 @@ const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
 export const SettingsModelsPage: React.FC = () => {
   const { t } = useModelsTranslation();
   const { showToast } = useToast();
+  const navigate = useNavigate();
+  // An Agent named in the warning list is a destination, not a label: the page
+  // that can fix it is Agents, and it has to open on the one that needs the fix.
+  const openAgentDefinition = React.useCallback(
+    (name: string) => navigate(`/agents?tab=definitions&agent=${encodeURIComponent(name)}`),
+    [navigate],
+  );
   /** The catalog's 「Add models」 action reads the candidates endpoint, which
    *  names Sources — so it is offered on the same capability that lets a role
    *  administer this instance's Agents, and read here rather than in the dialog
@@ -372,6 +381,13 @@ export const SettingsModelsPage: React.FC = () => {
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [migrationOpen, setMigrationOpen] = React.useState(false);
   const [migrationBackend, setMigrationBackend] = React.useState<AgentBackend | null>(null);
+  /** Whether the header's migrate entry has anything to open onto: the same
+   *  groups the dialog would list, so the button and the dialog cannot
+   *  disagree. `null` until a scan answers; a failed scan keeps the entry,
+   *  because the dialog is where that failure is explained. */
+  const [migrationAvailable, setMigrationAvailable] = React.useState<boolean | null>(null);
+  /** Bumped by the explicit refresh, so a native login made since is noticed. */
+  const [migrationScanEpoch, setMigrationScanEpoch] = React.useState(0);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
@@ -399,6 +415,10 @@ export const SettingsModelsPage: React.FC = () => {
   const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
+  const [catalogFocus, setCatalogFocus] = React.useState<CatalogFocus | null>(null);
+  // The route the catalog was opened from. Its action unmounted with the route
+  // dialog, so closing the catalog returns focus to that model row instead.
+  const catalogOriginRef = React.useRef<RouteTarget | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<RouteTarget | null>(null);
   const pendingRouteOpenersRef = React.useRef(new Map<RouteReport, HTMLElement | null>());
@@ -486,6 +506,20 @@ export const SettingsModelsPage: React.FC = () => {
   const runtimeConfigurationVisible = (
     runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing')
   ) && !stoppingRuntime;
+  React.useEffect(() => {
+    // Re-asked whenever the dialog closes, since applying it is what empties
+    // the scan.
+    if (!runtimeConfigurationVisible || migrationOpen) return;
+    let cancelled = false;
+    modelsApi.scanMigration()
+      .then((scan) => {
+        if (!cancelled) setMigrationAvailable(groupMigrationCandidates(scan.items, () => true).length > 0);
+      })
+      .catch(() => {
+        if (!cancelled) setMigrationAvailable(true);
+      });
+    return () => { cancelled = true; };
+  }, [migrationOpen, migrationScanEpoch, runtimeConfigurationVisible]);
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
       || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
@@ -1358,7 +1392,7 @@ export const SettingsModelsPage: React.FC = () => {
                 stopping={stoppingRuntime}
                 directCount={directEmpty ? installedAgents.length : undefined}
               />
-              {runtimeConfigurationVisible && (
+              {runtimeConfigurationVisible && migrationAvailable === true && (
                 <Button
                   type="button"
                   variant="outline"
@@ -1379,7 +1413,7 @@ export const SettingsModelsPage: React.FC = () => {
                 disabled={presenceRefreshing}
                 aria-label={t('settings.models.direct.action.refreshAgents')}
                 title={t('settings.models.direct.action.refreshAgents')}
-                onClick={() => void retrySupply()}
+                onClick={() => { setMigrationScanEpoch((epoch) => epoch + 1); void retrySupply(); }}
               ><RefreshCw aria-hidden className={cn('size-3.5', presenceRefreshing && 'animate-spin')} /></Button>}
               <span title={runtimeSwitchLabel}>
                 <ToggleSwitch
@@ -1507,7 +1541,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1583,7 +1617,17 @@ export const SettingsModelsPage: React.FC = () => {
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} focus={catalogFocus} onClose={(result) => {
+        setMenuBackend(null);
+        setCatalogFocus(null);
+        const origin = catalogOriginRef.current;
+        catalogOriginRef.current = null;
+        if (!origin) return;
+        // The route dialog handed its model over and comes back once the
+        // catalog answers, unless the answer removed the model it was showing.
+        if (result?.removed) focusRouteDestination(origin);
+        else setRouteTarget(origin);
+      }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}
         covered={orderBackend !== null}
@@ -1593,6 +1637,16 @@ export const SettingsModelsPage: React.FC = () => {
           const target = routeTarget;
           setRouteTarget(null);
           if (target) focusRouteDestination(target);
+        }}
+        onManageModel={(action, route) => {
+          // The catalog dialog is the one writer of the model list; the route
+          // dialog steps aside while it edits or removes the model it was
+          // showing, then reopens on that model.
+          if (!routeTarget) return;
+          catalogOriginRef.current = routeTarget;
+          setRouteTarget(null);
+          setCatalogFocus({ modelId: routeTarget.modelId, action, route });
+          setMenuBackend(routeTarget.agent.backend);
         }}
         onCommitted={(result) => routeCommitted(result, routeTarget?.opener ?? null)}
         commitReconciliation={routeCommitReconciliation}

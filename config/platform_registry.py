@@ -56,7 +56,6 @@ class PlatformDescriptor:
     formatter_class: str
     credential_fields: tuple[str, ...]
     capabilities: PlatformCapabilities
-    runtime_reconcile_fields: tuple[str, ...] = ()
     # Structural distinction between real IM transports ("im") and the
     # always-on in-process Avibe Workbench ("workbench"), which lives in the
     # same registry but is never a configurable IM platform. IM-only code paths
@@ -70,12 +69,10 @@ class PlatformDescriptor:
     # therefore asserts that this transport's send id was minted by a platform that
     # actually reached a person. A transport that mints its own id locally (as
     # ``AvibeBot.send_message`` does) must NOT be "im", or an owed notice can be
-    # marked delivered when nobody was told. The default stays for the sake of
-    # constructors outside the registry, but every descriptor IN ``PLATFORM_REGISTRY``
-    # states its kind, and ``test_every_registry_platform_declares_its_kind_explicitly``
-    # fails if a new one inherits it instead — a claim this strong should be made,
-    # not defaulted into.
-    kind: str = "im"
+    # marked delivered when nobody was told. ``kind`` therefore has no default:
+    # a claim this strong must be made by every constructor, not defaulted into.
+    kind: str
+    runtime_reconcile_fields: tuple[str, ...] = ()
 
     @property
     def title_key(self) -> str:

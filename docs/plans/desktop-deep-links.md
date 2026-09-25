@@ -39,7 +39,7 @@ spelling (`avibe:session/...`); one form only.
 | --------------------------------- | -------------------------------------------- |
 | `avibe://session/<session_id>`    | `/chat/<session_id>`                         |
 | `avibe://show/<session_id>`       | `/apps/show/<session_id>`                    |
-| `avibe://settings`                | `/admin/settings/service`                    |
+| `avibe://settings`                | `/settings/general`                          |
 | `avibe://vaults/request/<request_id>` | `/vaults?request_id=<request_id>`        |
 
 Parse as a URL. Accept only when `scheme == avibe`, `host` is one of
@@ -106,6 +106,20 @@ URL it already implements". There is **no new Tauri command, no new
 capability, no `remote` grant**. A Workbench page still cannot invoke
 bootstrap IPC; the shell pushing a same-origin path into its own
 WebView is not an IPC grant.
+
+One narrow exception keeps an in-app gesture from costing the user
+their place: the native **Settings…** item (menu, tray, `CmdOrCtrl+,`)
+opens General Settings over whatever the Workbench is showing, so
+closing Settings returns to that session, project, or draft. While the
+window shows the adopted origin, the shell evaluates one constant
+script that dispatches the cancelable `avibe:desktop-open-settings`
+event; the SPA cancels it and opens its Settings overlay in place. An
+uncancelled event (an older Workbench) falls back to
+`location.assign('/settings/general')`, and a window not showing the
+Workbench, or a failed evaluation, falls back to delivering
+`avibe://settings` through this path. The script is shell-owned and
+carries no page data; the page gains no command and no capability.
+External `avibe://settings` links keep the ordinary navigation.
 
 If the Runtime is not yet ready (bootstrap screen still up), the
 stashed target waits. Bootstrap failure discards it and stays on the

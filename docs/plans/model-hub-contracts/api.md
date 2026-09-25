@@ -64,7 +64,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
-| POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
+| POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. A value the provider refuses before writing anything (not a callback address, no `code`) is the non-terminal `422 submission_rejected`: the flow stays `awaiting_action` and accepts another submission until its `expires_at`. |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels provider work. A committed flow with `client_nonce` remains the same bounded terminal `OAuthFlow` with `state: "cancelled"` until its existing `expires_at`; a flow without a nonce is forgotten. |
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It validates selected items before withdrawal, upgrades an existing native Source in place when present, commits Source/Routes/backend mode atomically, and removes only replaced native material. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
@@ -1448,7 +1448,7 @@ strand the state permanently.
 
 Minimum v5 set:
 
-`source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
+`source_not_found`, `flow_not_found`, `flow_expired`, `submission_rejected`, `discovery_failed`,
 `invalid_source_order`, `source_create_in_progress`, `source_nonce_conflict`, `source_last_supplier`,
 `source_in_route_chain`,
 `source_model_in_route_chain`, `backend_model_in_route`,

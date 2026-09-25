@@ -90,7 +90,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   const { showToast } = useToast();
 
   const { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
-    startFlow, cancelFlow, submitCallback, resetToIdle, copyUrl, copyDeviceCode, isActive, hubOwnedAuth } =
+    startFlow, cancelFlow, submitCallback, resetToIdle, isActive, hubOwnedAuth } =
     useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange });
   const [removing, setRemoving] = useState(false);
   const [removeHubOwnedAuth, setRemoveHubOwnedAuth] = useState(false);
@@ -251,11 +251,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <Label className="text-[11px] font-medium uppercase tracking-wide text-muted">
             {t('settings.backends.oauthAuthUrlLabel')}
           </Label>
-          <OAuthLinkRow
-            url={url}
-            onCopy={(e) => void copyUrl(e)}
-            copyLabel={t('common.copy') as string}
-          />
+          <OAuthLinkRow url={url} />
         </div>
       )}
 
@@ -264,11 +260,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <Label className="text-[11px] font-medium uppercase tracking-wide text-muted">
             {t('settings.backends.codexDeviceCodeLabel')}
           </Label>
-          <OAuthDeviceCodeRow
-            code={deviceCode ?? ''}
-            onCopy={(e) => void copyDeviceCode(e)}
-            copyLabel={t('common.copy') as string}
-          />
+          <OAuthDeviceCodeRow code={deviceCode ?? ''} />
           <p className="text-[12px] leading-relaxed text-muted">
             {t('settings.backends.codexDeviceInstructions')}
           </p>

@@ -1,105 +1,37 @@
 # Scenario Testing Standard
 
-This directory is a portable standard package for capability-first, scenario-driven testing.
+This directory is the portable entrypoint for capability-first,
+scenario-driven testing. It adds a reusable middle layer between focused unit
+tests and full end-to-end checks.
 
-Treat this folder as the entrypoint when you are doing any of the following:
+## When to use it
 
-- designing or refactoring a project's testing architecture
-- introducing scenario-harness or closed-loop flow testing
-- defining reusable testing standards that should survive beyond one repository
-- translating recurring manual regressions into stable automated coverage
+Use this standard when designing or refactoring testing architecture,
+introducing a scenario harness, defining reusable scenario metadata, or turning
+recurring manual regression into automated coverage.
 
-## Mission
+Start with:
 
-Build a testing system where feature work and bug fixes are validated as user-visible capability flows, not only as isolated unit behaviors.
+- `ADOPTION.md` when adopting the standard in a new repository
+- `tests/scenarios/INDEX.yaml` when working in an already-adopted project
+- the target capability's `catalog.yaml`, `observations.yaml`, and scenario tests
 
-The goal is not to replace unit tests or E2E tests.
-The goal is to add a reusable middle layer that answers:
+Read `STANDARD.md` for methodology and `WORKFLOW.md` for day-to-day delivery
+rules. The project-specific implementation remains under the project's
+`tests/scenarios/` and `tests/scenario_harness/` directories.
 
-- what capability is being changed
-- what scenarios define its success and failure boundaries
-- what parts can be simulated deterministically
-- what still requires contract, smoke, or manual verification
+## Canonical project layout
 
-## Operating Rules
+- `tests/scenarios/INDEX.yaml` — capability index
+- `tests/scenarios/<capability>/catalog.yaml` — stable scenario IDs
+- `tests/scenarios/<capability>/observations.yaml` — dependency observations
+- `tests/scenarios/<capability>/test_*.py` — executable scenario evidence
+- `tests/scenario_harness/` — shared harness primitives
 
-1. Start from capabilities, not files, modules, or bugs.
-2. Require stable scenario IDs and reusable scenario catalogs.
-3. Prefer shared harness primitives over one-off mocks.
-4. Keep the harness light enough for everyday development use.
-5. Turn the standard into delivery rules, not just reference docs.
+Scenario work starts from user-visible capabilities, uses stable IDs, prefers
+shared harness primitives, and keeps simulations deterministic. It supplements
+unit and E2E tests; it does not replace either or require every real-world
+check to become automated.
 
-## Folder Map
-
-- `README.md`
-  Overview and intended reuse model.
-- `STANDARD.md`
-  The core methodology and testing pyramid.
-- `ADOPTION.md`
-  The onboarding workflow for a testing-owner agent adopting this standard in a new project.
-- `WORKFLOW.md`
-  The day-to-day workflow for feature work, bug fixes, reviews, and CI.
-- `templates/`
-  Reusable templates for capability specs, scenario catalogs, dependency observations, and PR checklists.
-- `examples/`
-  Concrete project mappings. These explain how one repo applies the standard without redefining the standard itself.
-
-## Deterministic Navigation Rule
-
-Assume the next agent starts from zero memory and only has this file as its prompt.
-
-That agent must be able to find the project's scenario assets through fixed locations, not through guesswork.
-
-Preferred project layout:
-
-- `tests/scenarios/INDEX.yaml`
-  Project capability index. Read this first.
-- `tests/scenarios/<capability>/catalog.yaml`
-  Canonical scenario IDs and coverage state for that capability.
-- `tests/scenarios/<capability>/observations.yaml`
-  Historical dependency observations and reality-feedback notes for that capability.
-- `tests/scenarios/<capability>/test_*.py`
-  Executable scenario evidence.
-- `tests/scenario_harness/`
-  Shared harness primitives.
-
-Human-facing docs may still exist elsewhere, but the project should make one location canonical for scenario metadata.
-
-## Expected Outputs
-
-For a project adopting this standard, the normal outputs are:
-
-- a product and capability summary
-- a capability map
-- a capability spec
-- a scenario catalog with stable IDs
-- a harness boundary inventory
-- a reusable scenario harness layer
-- a dependency observation log
-- project-specific reference scenarios
-- PR/CI rules that enforce the standard
-
-## Starting Rule
-
-When adopting this standard in a new repository, start with `ADOPTION.md` before changing tests.
-
-Use `WORKFLOW.md` only after the adoption baseline exists.
-
-When working inside an already-adopted repository:
-
-1. read the project's `tests/scenarios/INDEX.yaml`
-2. open the target capability's `catalog.yaml`
-3. open the same capability's `observations.yaml`
-4. read the listed scenario test files
-5. only then change production code, harness primitives, or docs
-
-## Non-Goals
-
-- inventing a heavy generic workflow engine up front
-- forcing all real-world verification into automation
-- replacing focused unit tests with giant scenario tests
-- coupling the standard to Vibe Remote specifics
-
-## Adoption Rule
-
-When you add or modify a testing standard in this repository, update the project-specific guidance to point back to this folder rather than duplicating the standard elsewhere.
+When changing this standard, update project guidance to point here instead of
+copying the standard into another `AGENTS.md`.

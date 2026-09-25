@@ -455,11 +455,9 @@ LADDER_PLATFORM_KIND_UNREGISTERED = "unregistered"
 #: locally does not qualify, however IM-shaped it looks — the workbench is exactly that
 #: case (``AvibeBot.send_message`` returns a synthetic ``msg_<hex>`` unconditionally),
 #: which is why it has a kind of its own rather than a platform-id exception here.
-#: ``PlatformDescriptor.kind`` DEFAULTS to ``"im"``, so a transport added to the
-#: registry without stating its kind would silently take the permissive rows and no
-#: structural test here would notice: the kind axis would be unchanged, the table would
-#: still be total. ``test_every_registry_platform_declares_its_kind_explicitly``
-#: guards that specific accident at the registry, where the claim is made.
+#: ``PlatformDescriptor.kind`` has no default, so a transport cannot enter the
+#: registry without stating its kind and silently take the permissive rows; the table's
+#: totality alone would not notice, because the kind axis would be unchanged.
 LADDER_ACK_SOURCES: Mapping[tuple[str, str], str] = MappingProxyType(
     {
         # A real IM conversation: the send id came from Slack/Discord/Telegram/

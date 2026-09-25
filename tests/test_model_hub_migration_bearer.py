@@ -108,7 +108,7 @@ async def _relay(*, public_models=False, protocol_success=False, scheme="bearer"
 
 @pytest.mark.parametrize("changes", [
     {"auth_scheme": "auto"}, {"auth_scheme": "x-api-key"}, {"auth_scheme": ""},
-    {"auth_scheme": []}, {"vendor": "custom"}, {"vendor": "openai"},
+    {"auth_scheme": []}, {"vendor": ""}, {"vendor": "openai"},
     {"protocol": "openai_chat"}, {"protocol": "openai_responses"},
     {"base_url": None}, {"base_url": "https://api.anthropic.com"},
     {"base_url": "https://API.ANTHROPIC.COM:443/v1"},

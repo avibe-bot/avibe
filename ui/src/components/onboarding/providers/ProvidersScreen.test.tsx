@@ -167,7 +167,11 @@ const OPENCODE_LEGACY: MigrationItem = {
 };
 
 /** The one sentence the migration feature has for a row it cannot take. */
-const BLOCKED_SENTENCE = 'This credential cannot be imported.';
+// Setup takes API keys only, so an importable sign-in beside a key sends that
+// backend to Settings; a row the Hub cannot carry is never shown at all.
+const CLAUDE_IMPORTABLE_SUBSCRIPTION: MigrationItem = { ...CLAUDE_SUBSCRIPTION, proposed_action: 'import' };
+
+const BLOCKED_SENTENCE = 'This credential can be migrated, but not from here.';
 
 // ── The fake server ───────────────────────────────────────────────────────
 
@@ -679,7 +683,7 @@ describe('ProvidersScreen — the stage', () => {
 // capsule counting a key its own review would refuse is the quiet one.
 describe('ProvidersScreen — what it found but may not take', () => {
   it('keeps a blocked credential on the stage, with its reason and no way to consent', async () => {
-    serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION] });
+    serve({ scan: [CLAUDE_KEY, CLAUDE_IMPORTABLE_SUBSCRIPTION] });
     renderScreen();
     await settled();
     const user = userEvent.setup();
@@ -703,7 +707,7 @@ describe('ProvidersScreen — what it found but may not take', () => {
   });
 
   it('counts the takeable group beside it, and only that one', async () => {
-    serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION, CODEX_KEY] });
+    serve({ scan: [CLAUDE_KEY, CLAUDE_IMPORTABLE_SUBSCRIPTION, CODEX_KEY] });
     renderScreen();
     await settled();
     const user = userEvent.setup();
@@ -731,7 +735,7 @@ describe('ProvidersScreen — what it found but may not take', () => {
   });
 
   it('MH-MIG-004: submits the batch it counted, and keeps the blocked card after the rescan', async () => {
-    serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION, CODEX_KEY] });
+    serve({ scan: [CLAUDE_KEY, CLAUDE_IMPORTABLE_SUBSCRIPTION, CODEX_KEY] });
     const { handle } = renderScreen();
     await settled();
     const user = userEvent.setup();
