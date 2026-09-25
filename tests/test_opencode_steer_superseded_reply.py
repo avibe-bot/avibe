@@ -47,7 +47,7 @@ def _turn(reply_a, reply_b, *, finish_a="stop"):
     ]
 
 
-def _agent(results):
+def _agent(results, persisted=None):
     controller = SimpleNamespace(
         config=SimpleNamespace(language="en"),
         agent_auth_service=SimpleNamespace(
@@ -63,7 +63,11 @@ def _agent(results):
     return SimpleNamespace(
         controller=controller,
         opencode_config=SimpleNamespace(error_retry_limit=1, active_turn_timeout_seconds=0),
-        sessions=SimpleNamespace(update_active_poll_state=lambda *_a, **_k: None),
+        sessions=SimpleNamespace(
+            update_active_poll_state=lambda _session_id, **state: (
+                persisted.update(state) if persisted is not None else None
+            )
+        ),
         record_model_hub_native_failure=AsyncMock(),
         _extract_response_text=lambda m: "".join(p.get("text", "") for p in m["parts"]),
         emit_result_message=_emit_result,
@@ -105,7 +109,7 @@ async def _live_poll(messages, agent):
     return final_text
 
 
-async def _restored_poll(messages, agent, results):
+async def _restored_poll(messages, agent, results, *, emitted=()):
     server = _server(messages)
     agent._get_server = AsyncMock(return_value=server)
     poll = ActivePollInfo(
@@ -117,6 +121,7 @@ async def _restored_poll(messages, agent, results):
         working_path="/tmp/opencode-steer-fixture",
         platform="discord",
         user_id="user",
+        emitted_assistant_messages=list(emitted),
         prompt_started_at=time.time(),
     )
     assert await asyncio.wait_for(OpenCodePollLoop(agent).run_restored_poll_loop(poll), timeout=2)
@@ -176,3 +181,21 @@ async def test_tool_call_step_text_is_not_emitted_twice(monkeypatch):
 
     assert final_text == SILENT
     assert _assistant_emits(agent) == ["Checking the report first."]
+
+
+async def test_restored_poll_does_not_resend_a_persisted_superseded_reply(monkeypatch):
+    """A restart after the superseded reply was delivered must not deliver it again."""
+
+    monkeypatch.setattr("modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0)
+    messages = _turn(REPORT, "Callbacks noted.")
+    persisted: dict = {}
+    await _live_poll(messages, _agent([], persisted))
+
+    results: list[str] = []
+    restored = _agent(results)
+    final_text = await _restored_poll(
+        messages, restored, results, emitted=persisted["emitted_assistant_messages"]
+    )
+
+    assert final_text == "Callbacks noted."
+    assert _assistant_emits(restored) == []

@@ -499,6 +499,7 @@ class OpenCodePollLoop:
     async def _settle_final_text(
         self,
         context: MessageContext,
+        session_id: str,
         messages: list[Dict[str, Any]],
         baseline_message_ids: set[str],
         settlement_message: Dict[str, Any],
@@ -511,7 +512,8 @@ class OpenCodePollLoop:
         replies in the Turn are not the result, but they must still reach the
         user: the last visible reply is the result, earlier visible replies
         are emitted as intermediate assistant messages, and a silent reply
-        never displaces a visible one.
+        never displaces a visible one. Emitted IDs are persisted so a
+        restored poll does not deliver the same reply again.
         """
 
         settlement_id = _message_info(settlement_message).get("id")
@@ -557,7 +559,21 @@ class OpenCodePollLoop:
                 parse_mode="markdown",
             )
             emitted_message_ids.add(message_id)
+            self._persist_emitted_assistant_messages(session_id, emitted_message_ids)
         return final_text
+
+    def _persist_emitted_assistant_messages(
+        self, session_id: str, emitted_message_ids: set[str]
+    ) -> None:
+        """Record delivered assistant messages so a restored poll skips them."""
+
+        update_active_poll = getattr(
+            getattr(self._agent, "sessions", None), "update_active_poll_state", None
+        )
+        if callable(update_active_poll):
+            update_active_poll(
+                session_id, emitted_assistant_messages=sorted(emitted_message_ids)
+            )
 
     async def run_prompt_poll(
         self,
@@ -735,6 +751,9 @@ class OpenCodePollLoop:
                             parse_mode="markdown",
                         )
                     emitted_assistant_messages.add(message_id)
+                    self._persist_emitted_assistant_messages(
+                        session_id, emitted_assistant_messages
+                    )
 
             if messages:
                 remaining = deadline - time.monotonic()
@@ -849,6 +868,7 @@ class OpenCodePollLoop:
                             error_retry_count = 0
                         final_text = await self._settle_final_text(
                             request.context,
+                            session_id,
                             messages,
                             baseline_message_ids,
                             last_message,
@@ -1129,6 +1149,7 @@ class OpenCodePollLoop:
                                     error_retry_count = 0
                                 final_text = await self._settle_final_text(
                                     context,
+                                    session_id,
                                     messages,
                                     baseline_message_ids,
                                     last_message,
