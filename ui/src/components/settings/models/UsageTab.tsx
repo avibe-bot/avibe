@@ -268,8 +268,14 @@ function UsageChart({
   const [dismissed, setDismissed] = React.useState(false);
   const [hidden, setHidden] = React.useState<string[]>([]);
   const [width, setWidth] = React.useState(920);
+  const [keyboardActivation, setKeyboardActivation] = React.useState(0);
   const hostRef = React.useRef<HTMLDivElement>(null);
-  const svgRef = React.useRef<SVGSVGElement>(null);
+  const pinButtonRef = React.useRef<HTMLButtonElement>(null);
+  const bucketButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
+  const invokingBucketKeyRef = React.useRef<string | null>(null);
+  const suppressNextBucketFocusRef = React.useRef(false);
+  const focusPinAfterOpenRef = React.useRef(false);
+  const previousUsageInputRef = React.useRef({ report, scopeKey, group, metric });
   const hoverClearTimer = React.useRef<number | null>(null);
   const pendingHoverTimer = React.useRef<number | null>(null);
   const [escapeDismissed, setEscapeDismissed] = React.useState(false);
@@ -345,29 +351,61 @@ function UsageChart({
     }
   };
   const handleEscape = React.useCallback(() => {
-    cancelPendingHover();
-    cancelHoverClear();
+    if (pendingHoverTimer.current !== null) {
+      window.clearTimeout(pendingHoverTimer.current);
+      pendingHoverTimer.current = null;
+    }
+    if (hoverClearTimer.current !== null) {
+      window.clearTimeout(hoverClearTimer.current);
+      hoverClearTimer.current = null;
+    }
+    const invokingButton = invokingBucketKeyRef.current === null
+      ? null
+      : bucketButtonRefs.current.get(invokingBucketKeyRef.current) ?? null;
     if (pinnedKey !== null) {
       onPin(null);
-      setEscapeDismissed(true);
-      setHovered(null);
-      setInspected(null);
-      setDismissed(true);
-      return;
     }
     setEscapeDismissed(true);
     setHovered(null);
     setInspected(null);
     setDismissed(true);
-  }, [onPin, pinnedKey]);
+    focusPinAfterOpenRef.current = false;
+    invokingBucketKeyRef.current = null;
+    if (activeIndex !== null && invokingButton !== null) {
+      suppressNextBucketFocusRef.current = true;
+      invokingButton.focus();
+    }
+  }, [activeIndex, onPin, pinnedKey]);
 
   React.useEffect(() => {
+    const previousInput = previousUsageInputRef.current;
+    const inputChanged = previousInput.report !== report
+      || previousInput.scopeKey !== scopeKey
+      || previousInput.group !== group
+      || previousInput.metric !== metric;
+    if (!inputChanged) return;
+    const scopeChanged = previousInput.scopeKey !== scopeKey;
+    previousUsageInputRef.current = { report, scopeKey, group, metric };
+    const invokingKey = invokingBucketKeyRef.current;
+    const invokingDetailSurvives = !scopeChanged
+      && pinnedKey !== null
+      && invokingKey !== null
+      && report.buckets.some((currentBucket) => currentBucket.key === invokingKey);
     setHovered(null);
     setInspected(null);
     setDismissed(false);
     setEscapeDismissed(false);
     setHidden([]);
-  }, [report, scopeKey, group, metric]);
+    if (!invokingDetailSurvives) invokingBucketKeyRef.current = null;
+    suppressNextBucketFocusRef.current = false;
+    focusPinAfterOpenRef.current = false;
+  }, [group, metric, pinnedKey, report, scopeKey]);
+
+  React.useEffect(() => {
+    if (!focusPinAfterOpenRef.current || activeIndex === null) return;
+    focusPinAfterOpenRef.current = false;
+    pinButtonRef.current?.focus();
+  }, [activeIndex, keyboardActivation]);
 
   React.useEffect(() => {
     if (!hostRef.current || typeof ResizeObserver === 'undefined') return undefined;
@@ -384,11 +422,12 @@ function UsageChart({
       setHovered(null);
       setInspected(null);
       setDismissed(true);
+      invokingBucketKeyRef.current = null;
+      focusPinAfterOpenRef.current = false;
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       handleEscape();
-      if (hostRef.current?.contains(document.activeElement)) svgRef.current?.focus();
     };
     document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -432,10 +471,29 @@ function UsageChart({
   };
   const openDetail = (index: number) => {
     if (pinnedKey !== null) return;
+    invokingBucketKeyRef.current = null;
+    focusPinAfterOpenRef.current = false;
     setEscapeDismissed(false);
     setDismissed(false);
     setInspected(index);
     setHovered(null);
+  };
+  const openKeyboardDetail = (index: number) => {
+    if (pinnedKey !== null) return;
+    invokingBucketKeyRef.current = report.buckets[index]?.key ?? null;
+    focusPinAfterOpenRef.current = true;
+    setKeyboardActivation((value) => value + 1);
+    setEscapeDismissed(false);
+    setDismissed(false);
+    setInspected(index);
+    setHovered(null);
+  };
+  const handleBucketFocus = (index: number) => {
+    if (suppressNextBucketFocusRef.current) {
+      suppressNextBucketFocusRef.current = false;
+      return;
+    }
+    setHover(index, true);
   };
   const toggleHidden = (key: string) => {
     setHidden((current) => {
@@ -469,7 +527,6 @@ function UsageChart({
       />
       <div className="model-hub-usage-chart-wrap" ref={hostRef}>
         <svg
-          ref={svgRef}
           className="model-hub-usage-svg"
           viewBox={`0 0 ${width} ${height}`}
           aria-hidden="true"
@@ -579,17 +636,18 @@ function UsageChart({
             <button
               type="button"
               key={`accessible-${currentBucket.key}`}
+              ref={(element) => {
+                if (element) bucketButtonRefs.current.set(currentBucket.key, element);
+                else bucketButtonRefs.current.delete(currentBucket.key);
+              }}
               aria-label={t('settings.models.usage.chart.bucket', {
                 bucket: formatBucketRange(currentBucket, i18n.language, true),
               }) as string}
               onPointerEnter={() => {
                 setHover(index, true);
               }}
-              onFocus={() => setHover(index, true)}
-              onClick={() => {
-                setEscapeDismissed(false);
-                openDetail(index);
-              }}
+              onFocus={() => handleBucketFocus(index)}
+              onClick={() => openKeyboardDetail(index)}
             >
               {formatBucketRange(currentBucket, i18n.language, true)}
             </button>
@@ -611,10 +669,6 @@ function UsageChart({
               event.stopPropagation();
               handleEscape();
             }}
-            onKeyDown={(event) => {
-              if (event.key !== 'Escape') return;
-              handleEscape();
-            }}
           >
             <div className="model-hub-usage-tooltip-head">
               <span>{formatBucketRange(bucket, i18n.language, true)}</span>
@@ -622,16 +676,12 @@ function UsageChart({
                 {pinnedKey !== null && <span>{t('settings.models.usage.chart.pinned')}</span>}
                 <button
                   type="button"
+                  ref={pinButtonRef}
                   className="model-hub-usage-pin"
                   aria-label={pinLabel as string}
                   aria-pressed={pinnedKey !== null}
                   title={pinLabel as string}
                   onClick={() => onPin(pinnedKey !== null ? null : bucket.key)}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Escape') return;
-                    event.stopPropagation();
-                    handleEscape();
-                  }}
                 >
                   {pinnedKey !== null ? <PinOff aria-hidden className="size-3.5" /> : <Pin aria-hidden className="size-3.5" />}
                 </button>

@@ -1,8 +1,16 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const openUsage = async (page: Page, theme: 'light' | 'dark' = 'dark') => {
   await page.goto(`/e2e/model-catalog/fixture.html?view=usage&lang=en&theme=${theme}`);
   await expect(page.getByRole('heading', { name: 'Usage', level: 2 })).toBeVisible();
+};
+
+const focusWithKeyboard = async (page: Page, target: Locator) => {
+  for (let step = 0; step < 40; step += 1) {
+    await page.keyboard.press('Tab');
+    if (await target.evaluate((element) => element === document.activeElement)) return;
+  }
+  throw new Error('Keyboard focus did not reach the usage bucket');
 };
 
 test.describe('hermetic UsageTab', () => {
@@ -47,6 +55,35 @@ test.describe('hermetic UsageTab', () => {
     await dialog.getByRole('button', { name: 'Unpin this bucket' }).focus();
     await page.locator('body').press('Escape');
     await expect(dialog).toHaveCount(0);
+  });
+
+  test('keyboard activation owns detail focus, preserves it through hover, and clears pin on scope change', async ({ page }) => {
+    await openUsage(page);
+    const bucket = page.getByRole('button', { name: /Usage bucket/ }).nth(0);
+    const dialog = page.getByRole('dialog', { name: 'Usage bucket details' });
+
+    await focusWithKeyboard(page, bucket);
+    await page.keyboard.press('Enter');
+    const pin = dialog.getByRole('button', { name: 'Pin this bucket' });
+    await expect(pin).toBeFocused();
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(bucket).toBeFocused();
+
+    await page.locator('.model-hub-usage-hit-area').nth(1).hover();
+    await expect(bucket).toBeFocused();
+
+    await page.keyboard.press('Space');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Pin this bucket' })).toBeFocused();
+    await page.keyboard.press('Space');
+    await expect(dialog).toHaveAttribute('data-pinned', 'true');
+
+    const nextWindow = page.getByRole('radio', { name: '7 days' });
+    await nextWindow.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(nextWindow).toBeFocused();
   });
 
   test('window switching renders coherent line and bar reports', async ({ page }) => {

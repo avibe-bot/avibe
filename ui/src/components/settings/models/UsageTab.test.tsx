@@ -329,17 +329,47 @@ describe('UsageTab', () => {
     expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
   });
 
-  it('reopens a dismissed bucket when it regains keyboard focus', () => {
-    draw(report());
+  it('moves keyboard focus into detail and restores the bucket without reopening on Escape', async () => {
+    const rendered = draw(report());
     const bucketButton = screen.getAllByRole('button', { name: /Usage bucket/ })[0]!;
+    const user = userEvent.setup();
 
-    fireEvent.pointerEnter(bucketButton);
-    expect(screen.getByRole('dialog', { name: 'Usage bucket details' })).toBeTruthy();
-    fireEvent.keyDown(document, { key: 'Escape' });
+    for (let step = 0; step < 32 && document.activeElement !== bucketButton; step += 1) {
+      await user.tab();
+    }
+    expect(document.activeElement).toBe(bucketButton);
+
+    await user.keyboard('{Enter}');
+    const pin = screen.getByRole('button', { name: 'Pin this bucket' });
+    expect(document.activeElement).toBe(pin);
+
+    await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+    expect(document.activeElement).toBe(bucketButton);
 
-    fireEvent.focus(bucketButton);
-    expect(screen.getByRole('dialog', { name: 'Usage bucket details' })).toBeTruthy();
+    await user.keyboard(' ');
+    const repinned = screen.getByRole('button', { name: 'Pin this bucket' });
+    expect(document.activeElement).toBe(repinned);
+
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('dialog', { name: 'Usage bucket details' }).getAttribute('data-pinned')).toBe('true');
+
+    rendered.rerender(
+      <I18nextProvider i18n={i18n}>
+        <UsageTab
+          usage={readyRegion(report({ buckets: [bucket('00', [row({ requests: 3 })]), bucket('01'), bucket('02')] }))}
+          windowKey="24h"
+          onWindowChange={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByRole('dialog', { name: 'Usage bucket details' }).getAttribute('data-pinned')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Unpin this bucket' }));
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Usage bucket details' })).toBeNull();
+    expect(document.activeElement).toBe(bucketButton);
   });
 
   it('dismisses pinned details on the first Escape', async () => {
