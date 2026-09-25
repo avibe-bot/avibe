@@ -17,7 +17,6 @@ capabilities:
       - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
       - tests/e2e/test_retired_updater_bridge.py
       - tests/test_memory_removal.py
-      - tests/test_memory_runtime_release_guard.py
     unit_or_contract_tests:
       - tests/test_release_verification.py
   - id: model_hub
