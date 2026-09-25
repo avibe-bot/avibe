@@ -2000,6 +2000,41 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
         agent._start_thread.assert_not_awaited()
 
+    async def test_blocked_runtime_change_holds_unwritten_input_without_hub_cooldown(self):
+        """#2148: a blocked runtime switch settles as a visible, retryable prewrite failure."""
+        agent = object.__new__(CodexAgent)
+        context = SimpleNamespace(platform_specific={})
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        request = SimpleNamespace(
+            base_session_id="session-1", working_path="/tmp/work",
+            context=context, session_key="settings-1", ack_message_id=None,
+        )
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(language="en"), emit_agent_message=AsyncMock(),
+        )
+        agent._session_locks = {}
+        agent._session_mgr = SimpleNamespace(set_session_key=Mock(), set_cwd=Mock())
+        agent.ensure_agent_session_id = Mock()
+        agent._bind_runtime_agent_session_id = Mock()
+        agent._get_or_create_transport = AsyncMock(
+            side_effect=_MODULE.CodexRuntimeChangeBlockedError("blocked")
+        )
+        agent._record_model_hub_native_failure = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent._event_handler = SimpleNamespace(_release_stream_turn=Mock())
+
+        await agent.handle_message(request)
+
+        self.assertEqual(
+            prewrite_failure_evidence(context),
+            {"reason": "transport_runtime_change_blocked", "requires_explicit_retry": True},
+        )
+        agent._record_model_hub_native_failure.assert_not_awaited()
+        notify = agent.controller.emit_agent_message.await_args_list[0]
+        self.assertEqual(notify.args[1], "notify")
+        self.assertIn("different model runtime", notify.args[2])
+        agent._event_handler._release_stream_turn.assert_called_once_with(context)
+
     async def test_permanent_resume_failure_holds_only_proven_unwritten_input(self):
         for error in (
             CodexResponseTooLargeError(), _MODULE.CodexResumeUnavailableError("thread-old"),
@@ -6476,6 +6511,72 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             prepare_catalog.assert_not_called()
             existing.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], existing)
+
+    async def test_runtime_change_wait_for_active_neighbour_is_bounded(self):
+        """#2148: a Hub runtime change never waits forever on another Session's turn."""
+        for releases in (False, True):
+            with self.subTest(releases=releases):
+                agent = self._agent()
+                with tempfile.TemporaryDirectory() as cwd:
+                    existing = SimpleNamespace(
+                        is_initialized=True,
+                        is_alive=True,
+                        runtime_fingerprint="direct",
+                        stop=AsyncMock(),
+                    )
+                    agent._transports[cwd] = existing
+                    agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+                    agent._session_mgr = SimpleNamespace(
+                        sessions_for_cwd=Mock(return_value=["long-job"]),
+                        invalidate_thread=Mock(),
+                    )
+                    active = {"long-job": "turn-running"}
+                    agent._turn_registry = SimpleNamespace(
+                        get_active_turn=lambda base_session_id: active.get(base_session_id),
+                        has_pending_turn_start=lambda _base_session_id: False,
+                        clear_session=Mock(),
+                    )
+                    agent._clear_thread_developer_instructions = Mock()
+                    launch = SimpleNamespace(
+                        channel="hub",
+                        fingerprint="hub:replacement",
+                        gateway_base_url="http://127.0.0.1:8317",
+                        gateway_token="ephemeral-token",
+                    )
+                    agent._model_hub_catalog = _catalog_reference(Path(cwd) / "codex-hub-catalog.json")
+                    fresh = SimpleNamespace(
+                        is_initialized=True,
+                        runtime_fingerprint="hub:replacement",
+                        start=AsyncMock(),
+                        on_notification=Mock(),
+                        on_server_request=Mock(),
+                    )
+                    if releases:
+                        asyncio.get_running_loop().call_later(0.1, active.clear)
+
+                    with (
+                        patch.object(_MODULE, "_RUNTIME_CHANGE_WAIT_SECONDS", 0.3),
+                        patch.object(_MODULE, "CodexTransport", return_value=fresh),
+                        patch(
+                            "modules.agents.model_hub.build_codex_hub_launch",
+                            return_value=([], {}),
+                        ),
+                    ):
+                        acquire = agent._get_or_create_transport(cwd, launch)
+                        if releases:
+                            result = await asyncio.wait_for(acquire, timeout=2)
+                        else:
+                            with self.assertRaises(_MODULE.CodexRuntimeChangeBlockedError):
+                                await asyncio.wait_for(acquire, timeout=2)
+
+                    if releases:
+                        self.assertIs(result, fresh)
+                        existing.stop.assert_awaited_once()
+                    else:
+                        existing.stop.assert_not_awaited()
+                        self.assertIs(agent._transports[cwd], existing)
+                        agent._session_mgr.invalidate_thread.assert_not_called()
+                        self.assertEqual(active, {"long-job": "turn-running"})
 
     async def test_runtime_config_switches_binary_without_catalog_export(self):
         agent = self._agent()

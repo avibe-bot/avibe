@@ -425,6 +425,7 @@
     "sessionGeneric": "发生错误：{error}",
     "codexPromptRefreshUnavailable": "Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
     "codexForkBoundaryUnavailable": "Codex 无法确定此次分叉的安全历史边界。请等待源会话当前回合结束后重试；如果问题持续，请检查或升级 Codex。",
+    "codexRuntimeChangeBlocked": "此工作目录中另一个 Codex 回合仍在使用不同的模型运行时，所选模型暂时无法启动。请在该回合结束后重试这条输入，或改用其他工作目录。",
     "codexResponseTooLarge": "Codex 返回的响应超过 {limitMiB} MiB，此连接无法继续。请检查或升级 Codex 后重试。",
     "opencodeModelHubOverlayRequired": "OpenCode 仍在准备 Gateway 模式，请稍后重试。",
     "opencodePolicyRefreshPending": "OpenCode 仍在完成已有回合，暂时无法按 Avibe 当前的 Skill 策略重启。请在该回合结束后重试。",
