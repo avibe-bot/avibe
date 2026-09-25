@@ -135,7 +135,9 @@ do not load them routinely. They introduce no additional delivery gates.
   continues when the smallest complete fix is clear, reversible, and preserves
   contracts. Escalate to the user only under the ownership criteria above.
   The breaker stops blind patching; it neither proves a design rewrite necessary
-  nor transfers the decision automatically to the user.
+  nor transfers the decision automatically to the user. It changes the work, not
+  whether work continues: no turn ends tripped without a next action or a
+  delivered report.
 - Fix actionable findings, reply, then resolve each addressed thread. If another
   person's pending review prevents a reply, never delete/dismiss it: preserve
   their drafts, report the blocker, keep observation live, and continue safe
