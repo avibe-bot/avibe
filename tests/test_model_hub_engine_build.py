@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts import build_model_hub_engine as builder
 from scripts import model_hub_engine_release_guard as guard
 
@@ -72,15 +74,20 @@ def test_build_source_release_applies_patch_and_materializes_four_targets(
 
     monkeypatch.setattr(builder, "_run", fake_run)
     output = tmp_path / "output"
-    generated_manifest = builder.build_source_release(
-        manifest,
-        output,
-        patch_path=patch,
-        source_dir=source,
-        go_binary="go",
-    )
+    with pytest.raises(
+        guard.ReleaseGuardError,
+        match="manifest differs from the packaged manifest",
+    ):
+        builder.build_source_release(
+            manifest,
+            output,
+            patch_path=patch,
+            source_dir=source,
+            go_binary="go",
+        )
 
-    assert generated_manifest == output / "model-hub-engine-manifest.json"
+    generated_manifest = output / "model-hub-engine-manifest.json"
+    assert generated_manifest.exists()
     assert len(list(output.glob("*.tar.gz"))) == 4
     generated = json.loads(generated_manifest.read_text(encoding="utf-8"))
     assert generated["build"]["cgo_enabled"] is False
@@ -91,4 +98,18 @@ def test_build_source_release_applies_patch_and_materializes_four_targets(
     assert {env["GOOS"] for env in build_envs} == {"darwin", "linux"}
     assert {env["GOARCH"] for env in build_envs} == {"amd64", "arm64"}
     assert {env["CGO_ENABLED"] for env in build_envs} == {"0"}
-    guard.verify_release_assets(generated_manifest, output)
+
+    manifest.write_text(
+        json.dumps(generated, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    verified_output = tmp_path / "verified-output"
+    verified_manifest = builder.build_source_release(
+        manifest,
+        verified_output,
+        patch_path=patch,
+        source_dir=source,
+        go_binary="go",
+    )
+    assert verified_manifest.read_bytes() == manifest.read_bytes()
+    guard.verify_release_assets(manifest, verified_output)

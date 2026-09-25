@@ -229,6 +229,30 @@ def test_claude_credential_reconciliation_scans_renamed_auth_file(tmp_path):
     assert store.credential_metadata(ref)["auth_name"] == new_name
 
 
+def test_claude_identity_requires_account_level_evidence(tmp_path):
+    store = EngineStateStore(tmp_path / "engine")
+    organization_only = {
+        "type": "claude",
+        "organization_uuid": "organization-a",
+    }
+    first_ref = store.bind_oauth_credential(
+        "src_identity001",
+        "anthropic",
+        "claude-first.json",
+        identity=organization_only,
+    )
+
+    assert store.oauth_credential_ref_for_identity("anthropic", organization_only) is None
+
+    second_ref = store.bind_oauth_credential(
+        "src_identity002",
+        "anthropic",
+        "claude-second.json",
+        identity=organization_only,
+    )
+    assert second_ref != first_ref
+
+
 def test_claude_exact_filename_rewrite_rejects_identity_change(tmp_path):
     store = EngineStateStore(tmp_path / "engine")
     auth_name = "claude-user@example.com.json"

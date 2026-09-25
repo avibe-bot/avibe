@@ -291,7 +291,10 @@ def build_source_release(
             raise
         from model_hub_engine_release_guard import verify_release_assets
 
-    verify_release_assets(generated_manifest, output_dir)
+    # The checked-in manifest is the publication contract. A generated
+    # manifest may describe what this runner produced, but it must not replace
+    # the pinned sizes, digests, or metadata used by installed clients.
+    verify_release_assets(manifest_path, output_dir)
     return generated_manifest
 
 

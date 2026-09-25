@@ -51,7 +51,9 @@ CPA's canonical `max_completion_tokens` conversion.
 
 - Build all four assets from the exact upstream source with the Avibe-owned
   patch, record archive and executable digests, and verify the complete
-  manifest asset set with the release guard.
+  manifest asset set with the release guard. The build metadata records only
+  host-independent toolchain identity, and the builder validates against the
+  checked-in manifest rather than self-verifying a generated one.
 - Update the frozen packaged-manifest test together with the production pin.
 - Run focused runtime, OAuth/source-identity, release-guard, dependency,
   release-helper, routing, lint, and diff checks.

@@ -1702,25 +1702,17 @@ def _oauth_identity_matches(
     target_identity = _normalized_oauth_identity(target)
     if not stored_identity or not target_identity:
         return False
-    if stored_identity.get("email") != target_identity.get("email"):
+    shared_account_fields = (
+        stored_identity.keys()
+        & target_identity.keys()
+        & {"email", "account_uuid"}
+    )
+    if not shared_account_fields:
         return False
-    stored_org = stored_identity.get("organization_uuid")
-    target_org = target_identity.get("organization_uuid")
-    stored_account = stored_identity.get("account_uuid")
-    target_account = target_identity.get("account_uuid")
-    if target_org:
-        if stored_org:
-            return stored_org == target_org and (
-                not stored_account
-                or not target_account
-                or stored_account == target_account
-            )
-        # CPA itself permits an account-hashed predecessor to migrate when a
-        # later login first exposes the organization UUID.
-        return bool(stored_account and target_account and stored_account == target_account)
-    if stored_org:
+    if any(stored_identity[field] != target_identity[field] for field in shared_account_fields):
         return False
-    return bool(stored_account and target_account and stored_account == target_account)
+    shared_org = stored_identity.keys() & target_identity.keys() & {"organization_uuid"}
+    return not shared_org or stored_identity["organization_uuid"] == target_identity["organization_uuid"]
 
 
 def _oauth_vendor_for_provider(provider: str) -> str:
