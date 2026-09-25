@@ -2801,6 +2801,92 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
     assert isinstance(results[0][1]["started_at"], float)
 
 
+def test_opencode_restored_poll_emits_intermediate_assistant_once():
+    """A turn restored after restart still surfaces its tool-calls narration.
+
+    ``msg-old`` was already emitted before the restart (persisted id), so only
+    ``msg-new`` is emitted, and the persisted id set grows to cover it.
+    """
+    emitted = []
+    persisted = []
+
+    class _Controller:
+        def __init__(self):
+            self.config = type("Config", (), {"language": "en"})()
+            self.processing_indicator = ProcessingIndicatorService(self)
+
+        def _t(self, key, **kwargs):
+            return f"translated:{key}"
+
+        async def emit_agent_message(self, context, message_type, text, parse_mode=None, **kwargs):
+            emitted.append((message_type, text))
+
+    class _Sessions:
+        def update_active_poll_state(self, session_id, **kwargs):
+            persisted.append(kwargs)
+
+        def remove_active_poll(self, session_id):
+            return None
+
+    def _narration(message_id):
+        return {
+            "info": {"id": message_id, "role": "assistant", "time": {"completed": 1}, "finish": "tool-calls"},
+            "parts": [{"type": "text", "text": message_id}],
+        }
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            return [
+                _narration("msg-old"),
+                _narration("msg-new"),
+                {
+                    "info": {"id": "msg-final", "role": "assistant", "time": {"completed": 2}, "finish": "stop"},
+                    "parts": [{"type": "text", "text": "done"}],
+                },
+            ]
+
+        async def get_session_status(self, session_id, directory):
+            return {"type": "idle"}
+
+    server = _Server()
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+        sessions = _Sessions()
+
+        async def _get_server(self):
+            return server
+
+        def _extract_response_text(self, message):
+            return "".join(part.get("text", "") for part in message.get("parts", []))
+
+        async def emit_result_message(self, context, text, **kwargs):
+            emitted.append(("result", text))
+
+        async def _remove_ack_reaction(self, request):
+            return None
+
+    poll = ActivePollInfo(
+        opencode_session_id="oc-session",
+        base_session_id="base",
+        channel_id="c",
+        thread_id="t",
+        settings_key="c",
+        working_path="/tmp/work",
+        baseline_message_ids=[],
+        platform="avibe",
+        emitted_assistant_messages=["msg-old"],
+        prompt_started_at=time.time(),
+    )
+
+    assert asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll)) is True
+
+    assert [item for item in emitted if item[0] == "assistant"] == [("assistant", "msg-new")]
+    assert ("result", "done") in emitted
+    assert {"emitted_assistant_messages": ["msg-new", "msg-old"]} in persisted
+
+
 def test_opencode_restored_poll_settles_after_consecutive_transport_failures(
     monkeypatch,
 ):

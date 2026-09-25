@@ -30,6 +30,7 @@ _ENUM_PROPERTIES = {
         "harness",
         "annotation",
         "agent",
+        "muted",
         "status",
         "activity",
     },

@@ -322,6 +322,11 @@
       "message": "This one-shot Task's schedule has already ended.",
       "hint": "Set a new future time with `vibe task update {id} --at <time>`, then resume it."
     },
+    "cronNumericWeekday": {
+      "message": "Cron weekday field uses numbers: {field}",
+      "readings": "Avibe (APScheduler) reads it as {avibe}; crontab(5) reads it as {crontab}.",
+      "hint": "Write weekday names (mon, tue, wed, thu, fri, sat, sun); they mean the same day everywhere."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
@@ -1149,6 +1154,7 @@
       "noExtraServiceProcess": "No extra Avibe service process detected",
       "deepScanSkipped": "Deep service process scan skipped in fast diagnostics",
       "showGitUnavailable": "Show Page checkpointing is degraded because Git is unavailable",
+      "cronNumericWeekday": "{count} cron task(s) name weekdays by number, which Avibe reads as 0=Mon through 6=Sun (crontab(5) reads 0 as Sun), so they may run a day later than intended: {tasks}",
       "dependencyHttp404": "{label} release asset is missing (HTTP 404): {url}",
       "dependencyHttpError": "{label} request returned HTTP {status}: {url}",
       "dependencyHttpErrorRetried": "{label} request returned HTTP {status} after {attempts} attempts: {url}",
@@ -1305,6 +1311,7 @@
       "slackValidationFailed": "Check your Slack tokens in the setup wizard",
       "agentCliMissing": "Install {agent} or update CLI path",
       "workingDirectoryMissing": "Update default_cwd in settings",
+      "cronNumericWeekday": "Confirm each intended day, then rewrite the weekday with names, for example vibe task update <id> --cron '0 9 * * mon-fri'",
       "cliMissing": "Install Avibe with uv tool or add the intended vibe executable to PATH.",
       "cliPathPrecedence": "Put ~/.local/bin before system Python bin directories when using the uv tool installation.",
       "cliNotUvTool": "uv tool package-integrity checks are skipped for this executable.",

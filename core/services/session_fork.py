@@ -41,10 +41,16 @@ ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
 _DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
+# Muted ``interim`` narration is a copy of process log, not a Turn boundary, so
+# it never becomes the anchor a fork resumes from.
 _FORK_ANCHOR_TYPES = tuple(
     dict.fromkeys(
         (
-            *types_with("transcript"),
+            *(
+                message_type
+                for message_type in types_with("transcript")
+                if spec_for(message_type)["render"] != "muted"
+            ),
             *(
                 message_type
                 for message_type in types_with("activityRole")

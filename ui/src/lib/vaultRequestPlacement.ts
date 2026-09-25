@@ -23,6 +23,9 @@ export type VaultProvisionPlacement = {
 };
 
 function isAgentReplyWithExplicitProvenance(message: WorkbenchMessage): boolean {
+  // Muted ``interim`` narration shares the boundary card but is not a reply that
+  // owns the Turn's requests.
+  if (specFor(message.type).render === 'muted') return false;
   const kind = chatRowKind(message).kind;
   return kind === 'agent' || kind === 'boundary';
 }

@@ -322,6 +322,11 @@
       "message": "这个一次性 Task 的计划已经结束。",
       "hint": "请先用 `vibe task update {id} --at <time>` 设置新的未来时间，再恢复它。"
     },
+    "cronNumericWeekday": {
+      "message": "cron 的星期字段使用了数字：{field}",
+      "readings": "Avibe（APScheduler）解析为 {avibe}；标准 crontab(5) 解析为 {crontab}。",
+      "hint": "请改用星期英文名（mon、tue、wed、thu、fri、sat、sun），它们在两种规则下含义一致。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
@@ -1149,6 +1154,7 @@
       "noExtraServiceProcess": "未发现额外 Avibe 服务进程",
       "deepScanSkipped": "快速诊断已跳过深度服务进程扫描",
       "showGitUnavailable": "Git 不可用，Show Page 检查点功能已降级",
+      "cronNumericWeekday": "{count} 个 cron 任务用数字表示星期；Avibe 按 0=周一 到 6=周日 解析（标准 crontab 的 0 是周日），这些任务可能比预期晚一天运行：{tasks}",
       "dependencyHttp404": "{label} 发布资源不存在（HTTP 404）：{url}",
       "dependencyHttpError": "{label} 请求返回 HTTP {status}：{url}",
       "dependencyHttpErrorRetried": "{label} 请求经过 {attempts} 次尝试后返回 HTTP {status}：{url}",
@@ -1305,6 +1311,7 @@
       "slackValidationFailed": "在设置向导中检查 Slack token",
       "agentCliMissing": "安装 {agent} 或更新 CLI 路径",
       "workingDirectoryMissing": "在设置中更新 default_cwd",
+      "cronNumericWeekday": "确认每个任务原本想要的日期后，改用星期英文名，例如 vibe task update <id> --cron '0 9 * * mon-fri'",
       "cliMissing": "使用 uv tool 安装 Avibe，或将预期的 vibe 可执行文件加入 PATH。",
       "cliPathPrecedence": "使用 uv tool 安装时，将 ~/.local/bin 放在系统 Python bin 目录之前。",
       "cliNotUvTool": "此可执行文件将跳过 uv tool 包完整性检查。",
