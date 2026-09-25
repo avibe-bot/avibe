@@ -322,6 +322,11 @@
       "message": "这个一次性 Task 的计划已经结束。",
       "hint": "请先用 `vibe task update {id} --at <time>` 设置新的未来时间，再恢复它。"
     },
+    "cronNumericWeekday": {
+      "message": "cron 的星期字段使用了数字：{field}",
+      "readings": "Avibe（APScheduler）解析为 {avibe}；标准 crontab(5) 解析为 {crontab}。",
+      "hint": "请改用星期英文名（mon、tue、wed、thu、fri、sat、sun），它们在两种规则下含义一致。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",

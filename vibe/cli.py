@@ -4481,23 +4481,6 @@ def _resolve_definition_name_update(args, task, *, help_command: str) -> Optiona
 def _validate_task_cron(cron: str, timezone: ZoneInfo, *, help_command: str) -> None:
     """Refuse a cron the scheduler cannot parse or whose weekday digits are ambiguous."""
 
-    weekday = ambiguous_weekday_field(cron)
-    if weekday is not None:
-        readings = []
-        for label, reading in zip(("Avibe (APScheduler)", "crontab(5)"), weekday_readings(weekday)):
-            if reading is not None:
-                readings.append(f"{label} reads it as {reading}")
-        hint = "Write weekday names (mon, tue, wed, thu, fri, sat, sun); they mean the same day everywhere."
-        if readings:
-            hint = f"{'; '.join(readings)}. {hint}"
-        raise TaskCliError(
-            f"cron weekday field uses numbers: {weekday}",
-            code="ambiguous_cron_weekday",
-            hint=hint,
-            example="0 9 * * mon-fri",
-            help_command=help_command,
-            details={"cron": cron, "day_of_week": weekday},
-        )
     try:
         CronTrigger.from_crontab(cron, timezone=timezone)
     except ValueError as exc:
@@ -4509,6 +4492,28 @@ def _validate_task_cron(cron: str, timezone: ZoneInfo, *, help_command: str) -> 
             help_command=help_command,
             details={"cron": cron},
         ) from exc
+    weekday = ambiguous_weekday_field(cron)
+    if weekday is None:
+        return
+    lang = _configured_cli_language()
+    hint = i18n_t("error.cronNumericWeekday.hint", lang)
+    avibe_reading, crontab_reading = weekday_readings(weekday)
+    if avibe_reading is not None and crontab_reading is not None:
+        readings = i18n_t(
+            "error.cronNumericWeekday.readings",
+            lang,
+            avibe=avibe_reading,
+            crontab=crontab_reading,
+        )
+        hint = f"{readings} {hint}"
+    raise TaskCliError(
+        i18n_t("error.cronNumericWeekday.message", lang, field=weekday),
+        code="ambiguous_cron_weekday",
+        hint=hint,
+        example="0 9 * * mon-fri",
+        help_command=help_command,
+        details={"cron": cron, "day_of_week": weekday},
+    )
 
 
 def _resolve_definition_schedule_update(

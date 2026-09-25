@@ -37,10 +37,16 @@ def ambiguous_weekday_field(cron: str) -> Optional[str]:
 def _rename(field: str, names: tuple[str, ...]) -> Optional[str]:
     if "*" in field:
         return None
-    try:
-        return _DIGITS.sub(lambda match: names[int(match.group())], field)
-    except IndexError:
-        return None
+    items = []
+    for item in field.split(","):
+        base, slash, step = item.partition("/")
+        try:
+            base = _DIGITS.sub(lambda match: names[int(match.group())], base)
+        except IndexError:
+            return None
+        # The step after ``/`` is a count of days, not a day, so it keeps its digits.
+        items.append(f"{base}{slash}{step}")
+    return ",".join(items)
 
 
 def weekday_readings(field: str) -> tuple[Optional[str], Optional[str]]:

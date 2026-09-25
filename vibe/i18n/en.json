@@ -322,6 +322,11 @@
       "message": "This one-shot Task's schedule has already ended.",
       "hint": "Set a new future time with `vibe task update {id} --at <time>`, then resume it."
     },
+    "cronNumericWeekday": {
+      "message": "Cron weekday field uses numbers: {field}",
+      "readings": "Avibe (APScheduler) reads it as {avibe}; crontab(5) reads it as {crontab}.",
+      "hint": "Write weekday names (mon, tue, wed, thu, fri, sat, sun); they mean the same day everywhere."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
