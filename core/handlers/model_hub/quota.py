@@ -73,11 +73,22 @@ def _label(value: object) -> Optional[str]:
     return text[:_MAX_LABEL_CHARS] or None
 
 
-def _percent(value: object) -> Optional[float]:
+def _number(value: object) -> Optional[float]:
+    """The one numeric coercion for upstream values: anything unreadable is missing."""
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
-    if not math.isfinite(number):
+    try:
+        # JSON integers are unbounded; one too large for a float is unreadable, not a crash.
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _percent(value: object) -> Optional[float]:
+    number = _number(value)
+    if number is None:
         return None
     rounded = round(min(100.0, max(0.0, number)), 1)
     # 100 means spent; rounding must not promote a limit with headroom to it.
@@ -85,11 +96,10 @@ def _percent(value: object) -> Optional[float]:
 
 
 def _seconds(value: object) -> Optional[int]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    number = _number(value)
+    if number is None or number < 1:
         return None
-    if not math.isfinite(value) or value < 1:
-        return None
-    return int(value)
+    return int(number)
 
 
 def _iso(moment: datetime) -> str:

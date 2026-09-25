@@ -141,5 +141,5 @@ export function upcomingResets(sources: SourceQuota[], now: number, limit = 5): 
     .slice(0, limit);
 }
 
-/** Whole percent left, never negative. */
-export const windowLeftPct = (window: QuotaWindow): number => Math.max(0, Math.round(100 - window.used_pct));
+/** Whole percent left, never negative; any headroom rounds up so it never reads as 0% left. */
+export const windowLeftPct = (window: QuotaWindow): number => Math.max(0, Math.ceil(100 - window.used_pct));

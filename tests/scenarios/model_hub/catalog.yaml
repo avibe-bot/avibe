@@ -770,6 +770,8 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-015
+    related_tests:
+      - ui/e2e/model-catalog/quota-layout.spec.ts
   - id: MH-QUOTA-016
     name: The quota report is read when its tab is opened and refreshed only while it stays open
     status: covered
@@ -782,6 +784,12 @@ scenarios:
     kind: recovery
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-017
+  - id: MH-QUOTA-018
+    name: A grant routing blocks as needs_action is re-read instead of showing its pre-block quota
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_routing_blocker_drops_the_blocked_grants_quota_reading
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

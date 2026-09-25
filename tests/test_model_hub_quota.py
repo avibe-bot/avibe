@@ -81,6 +81,28 @@ def _validate_windows(parsed):
         validator.validate(window)
 
 
+@pytest.mark.parametrize(
+    ("state", "error_key", "valid"),
+    [
+        ("ok", None, True),
+        ("ok", "models.quota.error.unavailable", False),
+        *[(state, "models.quota.error.unavailable", True) for state in ("stale", "auth_expired", "unsupported", "error")],
+        *[(state, None, False) for state in ("stale", "auth_expired", "unsupported", "error")],
+    ],
+)
+def test_quota_contract_carries_a_reason_exactly_when_not_ok(state, error_key, valid):
+    """A non-ok Source without a reason, or an ok Source with one, violates the contract."""
+
+    source = {
+        "source_id": "src_claude", "vendor": "anthropic", "display_name": "Claude Max", "account_label": None,
+        "plan": None, "fetched_at": None, "state": state, "windows": [],
+    }
+    if error_key is not None:
+        source["error_key"] = error_key
+    errors = list(Draft7Validator(QUOTA_SCHEMA).iter_errors({"refresh_interval_seconds": 300, "sources": [source]}))
+    assert (not errors) is valid
+
+
 def test_claude_quota_parser_reads_legacy_windows_and_skips_nulls():
     """MH-QUOTA-001: Claude's fixed windows parse; null and app-only windows are skipped."""
 
@@ -205,6 +227,15 @@ def test_quota_parsers_bound_values_from_a_hostile_body():
     parsed = parse_codex_quota(json.dumps(codex))
     _validate_windows(parsed)
     assert [(w["used_pct"], w["window_seconds"], w["resets_at"]) for w in parsed["windows"]] == [(99.9, None, None)]
+
+    # A JSON integer too large for a float is a missing value, not a failed Source.
+    huge = 10**4000
+    parsed = parse_claude_quota(json.dumps({"five_hour": {"utilization": huge}, "seven_day": {"utilization": 3}}))
+    assert [w["id"] for w in parsed["windows"]] == ["seven_day"]
+    codex = {"rate_limit": {"primary_window": {"used_percent": 5, "limit_window_seconds": huge, "reset_at": huge}}}
+    parsed = parse_codex_quota(json.dumps(codex))
+    _validate_windows(parsed)
+    assert [(w["used_pct"], w["window_seconds"], w["resets_at"]) for w in parsed["windows"]] == [(5.0, None, None)]
 
     # Unknown metadata ahead of Claude's fixed keys does not crowd them out.
     padded = {f"meta{i}": {} for i in range(100)} | {"five_hour": {"utilization": 7}}

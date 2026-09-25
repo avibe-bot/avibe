@@ -3,9 +3,6 @@
 // it claims, and what it admits about a reading that is not current.
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import postcss from 'postcss';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,7 +11,7 @@ import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { degradedRegion, loadingRegion, readyRegion, type RegionRead } from './regionRead';
 import { QuotaTab } from './QuotaTab';
-import { windowPace } from './quotaProjection';
+import { windowLeftPct, windowPace } from './quotaProjection';
 import type { QuotaSummary, QuotaWindow, SourceQuota } from './types';
 
 const i18n = createInstance();
@@ -80,16 +77,6 @@ const draw = (quota: RegionRead<QuotaSummary>, over: { onRefresh?: () => void; o
       <QuotaTab quota={quota} now={NOW} onRefresh={over.onRefresh} onRequestReauth={over.onRequestReauth} />
     </I18nextProvider>,
   );
-
-const css = readFileSync(join(__dirname, 'modelHubSurface.css'), 'utf8');
-const narrowRule = (selector: string) => {
-  let body = '';
-  postcss.parse(css).walkAtRules('media', (rule) => {
-    if (!rule.params.includes('max-width: 767px')) return;
-    rule.walkRules(selector, (inner) => { body += inner.toString(); });
-  });
-  return body;
-};
 
 afterEach(() => {
   cleanup();
@@ -175,6 +162,13 @@ describe('QuotaTab', () => {
     expect(onRequestReauth).toHaveBeenCalledWith('src_codex');
   });
 
+  it('never shows a limit with headroom as 0% left beside its usable status', () => {
+    expect(windowLeftPct(window({ used_pct: 99.9 }))).toBe(1);
+    expect(windowLeftPct(window({ used_pct: 100 }))).toBe(0);
+    draw(readyRegion(summary([claude({ windows: [window({ used_pct: 99.9, resets_at: iso(NOW + HOUR) })] })])));
+    expect(screen.getByRole('article').textContent).not.toContain('0%');
+  });
+
   it('states an unread Source in words instead of an empty bar', () => {
     draw(readyRegion(summary([
       claude({ state: 'error', error_key: 'models.quota.error.unavailable', fetched_at: null, windows: [] }),
@@ -232,18 +226,10 @@ describe('QuotaTab', () => {
     expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 
-  it('MH-QUOTA-015: holds the narrow layout — one account per line, stacked footers, wrapping labels', () => {
-    draw(readyRegion(summary([claude({ windows: [window({ id: 'x', kind: 'other', label: '非常长的上游额度名称'.repeat(4) })] }), codex()])));
-
-    // jsdom has no layout engine; the narrow property is the stylesheet's.
-    expect(narrowRule('.model-hub-quota-grid')).toContain('grid-template-columns: minmax(0, 1fr)');
-    expect(narrowRule('.model-hub-quota-row-foot')).toContain('flex-direction: column');
-    expect(narrowRule('.model-hub-quota-reset')).toContain('white-space: normal');
-    expect(css).toMatch(/\.model-hub-quota-row-title \{[^}]*overflow-wrap: anywhere/);
-    expect(css).toMatch(/\.model-hub-quota-row \{ min-width: 0; \}/);
-    for (const card of screen.getAllByRole('article')) expect(card.classList.contains('min-w-0')).toBe(true);
-    // An unrecognised window renders by its upstream name, with no invented hint.
+  it('MH-QUOTA-015: renders an unrecognised window by its upstream name, with no invented hint; the 360px layout is held by ui/e2e/model-catalog/quota-layout.spec.ts', () => {
+    draw(readyRegion(summary([claude({ windows: [window({ id: 'x', kind: 'other', label: '非常长的上游额度名称'.repeat(4) })] })])));
     expect(screen.getByText('非常长的上游额度名称'.repeat(4))).toBeTruthy();
+    expect(screen.getByRole('article').querySelector('[data-quota-window="x"] small')).toBeNull();
   });
 
   it('renders the English copy through the same keys', async () => {

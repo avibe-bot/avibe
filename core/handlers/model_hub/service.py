@@ -2004,6 +2004,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source_id)
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -2978,6 +2979,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source.id)
         return config
 
     async def _materialize_failed_hub_reauth(
@@ -5924,6 +5926,9 @@ class ModelHubService:
             detail_key=detail_key,
         )
         persisted = self._save_runtime_config(previous, config)
+        if persisted:
+            # A blocked grant must not keep reporting the windows it had while usable.
+            self.quota.forget(source.id)
         if persisted and emit_event:
             self._record_event(
                 agent=cast(EventAgent, backend),

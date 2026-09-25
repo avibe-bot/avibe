@@ -6998,6 +6998,14 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
+    quota_reads = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        quota_reads.append(source_id)
+        return {"plan": None, "windows": []}
+
+    adapter.subscription_quota = subscription_quota
+    assert asyncio.run(service.quota_summary())["sources"][0]["state"] == "ok"
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
@@ -7036,6 +7044,9 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     assert adapter.revoked == []
     assert adapter.orphan_cleanup_calls == []
     assert service.revocations.list() == []
+    # The fail-closed grant does not keep its pre-failure quota reading inside the refresh window.
+    asyncio.run(service.quota_summary())
+    assert quota_reads == [source.id, source.id]
 
 
 @pytest.mark.parametrize(
