@@ -3,8 +3,7 @@
 ## Background and goal
 
 The removed Memory implementation must not reappear in persisted configuration,
-but historical user data, released updater compatibility, and published Runtime
-recovery assets remain supported. A normal startup and the official release path
+but historical user data and released updater compatibility remain supported. A normal startup and the official release path
 are separate gates: an explicit config save and an opt-in local E2E do not cover
 either one by themselves.
 
@@ -23,15 +22,11 @@ either one by themselves.
   Package wheels come from the target tag; the gate and all of its helpers come
   from the running workflow revision, including on older-tag dispatches. A
   target at or before v3.1.0 has no forward retirement upgrade to exercise.
-- MUC-005: the historical Runtime backup guard selects only non-draft GitHub
-  releases. Published prereleases with self-pinned manifests are included; the
-  existing inert bridge policy and invalid-manifest exclusions still apply.
 
 ## Evidence and residual checks
 
 Unit/contract: config migration, concurrent writer/retry, recovery, workflow
-ordering and fail-closed prerequisites, and published/draft/prerelease guard
-selection. Scenario: stable IDs in `tests/scenarios/memory_upgrade_compatibility/`,
+ordering and fail-closed prerequisites. Scenario: stable IDs in `tests/scenarios/memory_upgrade_compatibility/`,
 with the real four-case updater test gated at official release build time.
 Manually confirm a future official release's four Docker upgrade cases and
 GitHub assets before accepting its PyPI publication. No host service restart,
@@ -49,6 +44,8 @@ Memory data deletion, or regression-state reset is part of this change.
 - Published historical GitHub release assets are byte-immutable. A dispatch
   replay of an already published v3.1.0 cannot replace its real Memory wheel
   with an inert bridge: the existing asset comparison must reject that attempt.
-- The release-only historical Runtime guard continues backing up published
-  manifests; it does not install, upgrade, or roll back a Memory package.
+- The historical Memory Runtime release guard was retired (owner decision,
+  2026-09-25). Published Runtime assets stay on their GitHub Releases but are no
+  longer re-verified or restored from backup; only already installed pre-removal
+  versions fetch them, and current releases never do.
 - The old user-owned Memory directories and their contents are left untouched.
