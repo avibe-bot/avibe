@@ -6,6 +6,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../../i18n/en.json';
+import zh from '../../../i18n/zh.json';
 import { readyRegion } from './regionRead';
 import type { UsageBucket, UsageBucketRow, UsageCounters, UsageReport, UsageWindowKey } from './types';
 import { UsageTab } from './UsageTab';
@@ -393,6 +394,33 @@ describe('UsageTab', () => {
     expect(screen.queryByText('No usage in this window')).toBeNull();
     expect(container.querySelectorAll('.model-hub-usage-unknown-point')).toHaveLength(9);
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['en', 'Includes historical usage without hourly time'],
+    ['zh', '含无具体小时记录的历史用量'],
+  ])('shows one localized historical-hourly notice in %s, only for incomplete hourly reports', async (language, note) => {
+    const translated = createInstance();
+    await translated.use(initReactI18next).init({
+      lng: language,
+      fallbackLng: 'en',
+      resources: { en: { translation: en }, zh: { translation: zh } },
+      interpolation: { escapeValue: false },
+    });
+    const page = (value: UsageReport) => (
+      <I18nextProvider i18n={translated}>
+        <UsageTab usage={readyRegion(value)} windowKey={value.window_key} onWindowChange={vi.fn()} />
+      </I18nextProvider>
+    );
+    const partial = report({ buckets: [bucket('00', [row()], { history_complete: false })] });
+    const { rerender } = render(page(partial));
+
+    expect(screen.getAllByText(note)).toHaveLength(1);
+    expect(within(screen.getByRole('status')).getByText(note)).toBeTruthy();
+    rerender(page(report()));
+    expect(screen.queryByText(note)).toBeNull();
+    rerender(page({ ...partial, window_key: '7d', granularity: 'day' }));
+    expect(screen.queryByText(note)).toBeNull();
   });
 
   it('keeps ordinary detail dismissible and pins directly from hover', async () => {

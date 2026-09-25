@@ -991,7 +991,9 @@ export const UsageTab: React.FC<{
             <div className="model-hub-usage-notice" role="status">
               <CircleHelp aria-hidden className="size-3.5 shrink-0" />
               <span>
-                {partialHistory && t('settings.models.usage.partialHistory')}
+                {partialHistory && t(report.granularity === 'hour'
+                  ? 'settings.models.usage.historicalHourly'
+                  : 'settings.models.usage.partialHistory')}
                 {partialHistory && reportHasUnknownTokens(report, filter) && ' '}
                 {reportHasUnknownTokens(report, filter) && t('settings.models.usage.unknownTokens')}
               </span>

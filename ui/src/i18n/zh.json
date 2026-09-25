@@ -1504,6 +1504,7 @@
         },
         "unknownTokens": "部分请求没有回报 token，相关 token 数值不可用",
         "partialHistory": "部分时间桶的历史记录不完整",
+        "historicalHourly": "含无具体小时记录的历史用量",
         "unknownModel": "未知模型",
         "granularity": {
           "hour": "按小时",

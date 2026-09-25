@@ -94,6 +94,11 @@ Legacy daily usage must never be allocated to an invented hour using its
 last-metered timestamp. Preserve it in daily reports, report only measured
 hourly counts, and mark affected hourly buckets incomplete. The UI renders
 gaps/partial-history language rather than claiming zero historical usage.
+Timestamp-less legacy mass uses the conservative UTC envelope of its persisted
+owner day (UTC+14 through UTC-12), never an inferred timestamp from another call.
+Every intersecting hourly bucket remains incomplete even after an exact call is
+merged into the same row. The hourly notice states, once, "Includes historical
+usage without hourly time"; daily totals remain exact.
 A completely idle, fully observed bucket can display zero. A bucket containing
 requests but no token reports displays an unavailable token value, not zero.
 
@@ -292,28 +297,25 @@ out before the unknown historical usage, and read selection discarded the row
 before its envelope reached projection. Selection, retention, and projection
 therefore still had competing owners of temporal evidence.
 
-The coordinating owner approved a final structural attempt on September 25:
-one row-level evidence resolver is the only owner of what a timestamp proves.
-Hourly read selection, write retention, capacity ranking, and uncertainty
-windows consume its unresolved mass/conservative envelope and exact known
-slices, with no independent horizon pre-filter. Audit direct timestamp and
-owner-day reads in those paths; parsing and ordinary daily calendar presentation
-do not become alternate evidence authorities.
+At 13:32 CST on September 25, the coordinating owner superseded the proposed
+final precision attempt and selected the conservative contract immediately:
 
-The consuming invariant is that adding an exact call never turns unrelated
-unknown in-horizon mass into complete zero or shrinks its incomplete-bucket set.
-Exercise fixed and advancing report times, delayed writes, reopened ledgers,
-retention with room, capacity one, both duplicate-row orders, both timezone
-directions, and actual expiry. Tests explicitly select and restore their timezone.
+- Timestamp-less legacy mass does not contribute to hourly series. Only actual
+  measured hourly slices contribute; do not reverse-engineer old counts.
+- Every bucket intersecting that mass's conservative owner-day UTC envelope is
+  incomplete. A fresh component timestamp never narrows the envelope of old mass.
+- Show one hourly notice: "Includes historical usage without hourly time", with
+  matching English and Chinese translations. Daily totals remain exact.
+- Delete precision-only machinery the contract does not need. No new persisted
+  metadata, storage rewrite, or pending-queue policy change is allowed.
 
-This is the last attempt at hourly precision for timestamp-less legacy mass.
-If the class recurs in local or remote review, stop precision patches and use the
-owner-authorized conservative contract: exclude that mass from hourly series,
-mark every bucket intersecting its conservative owner-day envelope incomplete,
-and disclose that historical usage lacks hourly timestamps. Daily totals stay
-exact. The coordinating owner pre-authorized this fallback without another
-approval round. No new persisted metadata, storage rewrite, or pending-queue
-policy change is allowed; review, CI, thread, and merge-authority gates remain.
+The invariant is that adding an exact call cannot remove incomplete marking
+from any bucket the legacy mass could occupy. Test the relevant merge,
+reopen, delayed-write, timezone, retention, capacity, and expiry boundaries with
+explicit timezone selection and restoration; do not build another precision
+subsystem. The timestamp-less-legacy review thread is dispositioned by this
+contract after the implementation is pushed. Frontend locale/sort fixes ship in
+the same push. Review, CI, thread, and merge-authority gates remain unchanged.
 
 ## Known by design
 

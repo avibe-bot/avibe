@@ -1504,6 +1504,7 @@
         },
         "unknownTokens": "Some requests have no token report; token values are unavailable",
         "partialHistory": "Some buckets have incomplete history",
+        "historicalHourly": "Includes historical usage without hourly time",
         "unknownModel": "Unknown model",
         "granularity": {
           "hour": "hourly",
