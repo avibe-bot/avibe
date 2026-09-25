@@ -2551,12 +2551,14 @@
   padding: 12px 16px 13px;
 }
 
+/* UsageChart sets the left margin to the plot's axis gutter, so the first
+ * swatch sits over the plot's left edge. */
 .model-hub-usage-legend {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 5px 8px;
-  margin-bottom: 6px;
+  gap: 5px 6px;
+  margin-bottom: 8px;
 }
 
 .model-hub-usage-legend-item {
@@ -2565,18 +2567,35 @@
   align-items: center;
   gap: 5px;
   padding: 4px 6px;
+  border: 1px solid transparent;
   border-radius: 6px;
   color: var(--model-hub-ink-73);
   font-size: 10.5px;
+  transition: background-color .12s ease, border-color .12s ease, opacity .12s ease;
 }
 
-.model-hub-usage-legend-item:hover,
-.model-hub-usage-legend-item[aria-pressed="false"] {
+.model-hub-usage-legend-item:hover {
+  border-color: var(--border);
   background: var(--model-hub-wash-05);
 }
 
+.model-hub-usage-legend-item:focus-visible {
+  border-color: var(--model-hub-gold-4d);
+  outline: none;
+}
+
 .model-hub-usage-legend-item.is-hidden {
-  opacity: .42;
+  opacity: .5;
+}
+
+.model-hub-usage-legend-item.is-hidden > span:not(.model-hub-usage-legend-swatch),
+.model-hub-usage-legend-item.is-hidden strong {
+  text-decoration: line-through;
+}
+
+.model-hub-usage-legend-item.is-hidden .model-hub-usage-legend-swatch {
+  background: transparent !important;
+  box-shadow: inset 0 0 0 1.5px var(--model-hub-muted-b3);
 }
 
 .model-hub-usage-legend-swatch {
@@ -2607,25 +2626,36 @@
   touch-action: pan-y;
 }
 
+/* Every grid line, the baseline included, is the same quiet dash. */
 .model-hub-usage-grid {
   stroke: var(--border);
-  opacity: .8;
+  stroke-dasharray: 2 5;
+  opacity: .7;
 }
 
 .model-hub-usage-tick {
   fill: var(--model-hub-muted-b3);
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-tick--y {
+  opacity: .78;
 }
 
 .model-hub-usage-highlight {
-  fill: var(--model-hub-wash-08);
+  fill: var(--model-hub-wash-05);
+}
+
+/* The non-active columns keep ~.6 of their ink (.88 × .68). */
+.model-hub-usage-series.is-dimmed {
+  opacity: .68;
 }
 
 .model-hub-usage-crosshair {
   stroke: var(--model-hub-gold);
-  stroke-dasharray: 3 4;
   stroke-width: 1;
-  opacity: .75;
+  opacity: .6;
 }
 
 .model-hub-usage-hit-area {
@@ -2646,19 +2676,35 @@
   stroke-width: 1.5;
 }
 
+/* Placed beside the crosshair by UsageChart through left:0 + translateX, so a
+ * bucket change moves it on the compositor. The transition is short enough to
+ * read as following, never as lagging. */
 .model-hub-usage-tooltip {
   position: absolute;
   z-index: 10;
-  top: 10px;
-  right: 10px;
-  width: min(340px, calc(100% - 20px));
+  top: 14px;
+  left: 0;
+  width: 264px;
   pointer-events: auto;
-  padding: 10px 11px;
+  padding: 9px 10px;
+  transition: transform 90ms ease-out;
   border: 1px solid var(--model-hub-gold-4d);
   border-radius: 9px;
   background: color-mix(in srgb, var(--surface) 96%, var(--gold) 4%);
   box-shadow: var(--model-hub-menu-shadow);
   color: var(--foreground);
+}
+
+.model-hub-usage-tooltip.is-docked {
+  top: 5px;
+  right: 5px;
+  left: auto;
+  width: calc(100% - 10px);
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-hub-usage-tooltip { transition: none; }
 }
 
 .model-hub-usage-tooltip.is-pinned {
@@ -2670,8 +2716,20 @@
   justify-content: space-between;
   gap: 10px;
   color: var(--model-hub-ink-73);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.35;
+}
+
+.model-hub-usage-tooltip-range {
+  min-width: 0;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-tooltip-range small {
+  margin-left: 6px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10px;
 }
 
 .model-hub-usage-tooltip-actions {
@@ -2684,8 +2742,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 25px;
-  height: 25px;
+  width: 24px;
+  height: 24px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--model-hub-wash-08);
@@ -3108,7 +3166,6 @@
   .model-hub-usage-group-control > div { width: 100%; }
   .model-hub-usage-group-control button { flex: 1; }
   .model-hub-usage-details-actions { width: 100%; justify-content: flex-start; }
-  .model-hub-usage-tooltip { top: 5px; right: 5px; width: calc(100% - 10px); }
   /* One account per line; the pace and reset lines stack so neither truncates. */
   .model-hub-quota-grid { grid-template-columns: minmax(0, 1fr); }
   .model-hub-quota-row-foot { flex-direction: column; gap: 4px; }

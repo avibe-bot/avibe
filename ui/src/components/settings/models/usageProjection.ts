@@ -163,6 +163,59 @@ export function formatBucketRange(bucket: UsageBucket, locale: string, includeOf
   return `${formatRfc3339(bucket.start_at, locale, includeOffsets)} – ${formatRfc3339(bucket.end_at, locale, includeOffsets)}`;
 }
 
+type LocalStamp = { year: number; month: number; day: number; hour: string; minute: string };
+
+const localStamp = (value: string): LocalStamp | null => {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute] = match;
+  return { year: Number(year), month: Number(month), day: Number(day), hour, minute };
+};
+
+const offsetMinutes = (value: string): number | null => {
+  const match = value.match(/(Z|([+-])(\d{2}):(\d{2}))$/);
+  if (!match) return null;
+  if (match[1] === 'Z') return 0;
+  return (match[2] === '-' ? -1 : 1) * (Number(match[3]) * 60 + Number(match[4]));
+};
+
+/**
+ * A bucket's range as a tooltip heading: 「9月23日 22:00–23:00」, one date when the
+ * range stays on one day, and only the date for a whole day. The zone is set
+ * apart so the heading can mute it; it is named only when the two ends differ
+ * (a DST change) or the report's offset is not the viewer's own.
+ */
+export function formatBucketHeading(bucket: UsageBucket, locale: string): { range: string; zone: string | null } {
+  const start = localStamp(bucket.start_at);
+  const end = localStamp(bucket.end_at);
+  if (!start || !end) return { range: formatBucketRange(bucket, locale, true), zone: null };
+  const date = ({ year, month, day }: LocalStamp) => (locale.startsWith('zh')
+    ? `${month}月${day}日`
+    : new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+      .format(new Date(Date.UTC(year, month - 1, day))));
+  const separator = locale.startsWith('zh') ? ' ' : ', ';
+  const time = (stamp: LocalStamp) => `${stamp.hour}:${stamp.minute}`;
+  const dayOf = (stamp: LocalStamp) => Date.UTC(stamp.year, stamp.month - 1, stamp.day);
+  const endsAtMidnight = end.hour === '00' && end.minute === '00';
+  const nextDay = dayOf(end) - dayOf(start) === 24 * 60 * 60 * 1000;
+  let range: string;
+  if (dayOf(start) === dayOf(end)) {
+    range = `${date(start)}${separator}${time(start)}–${time(end)}`;
+  } else if (nextDay && endsAtMidnight) {
+    range = time(start) === '00:00' ? date(start) : `${date(start)}${separator}${time(start)}–24:00`;
+  } else {
+    range = `${date(start)}${separator}${time(start)} – ${date(end)}${separator}${time(end)}`;
+  }
+  const startZone = formatOffset(bucket.start_at);
+  const endZone = formatOffset(bucket.end_at);
+  const reportOffset = offsetMinutes(bucket.start_at);
+  const hostOffset = -new Date(bucket.start_at).getTimezoneOffset();
+  const zone = startZone !== endZone
+    ? `${startZone} – ${endZone}`
+    : reportOffset !== null && reportOffset !== hostOffset ? startZone : null;
+  return { range, zone };
+}
+
 export function sourceLabel(report: UsageReport, sourceId: string): string {
   const source = report.sources.find((candidate) => candidate.source_id === sourceId);
   return source?.label?.trim() || sourceId;
