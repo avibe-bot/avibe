@@ -73,17 +73,17 @@ Verify against the current machine; these are starting points.
 | Layer | Where | How it changes |
 | --- | --- | --- |
 | Avibe runtime prompt | `vibe debug prompt export --format json` lists every source; `vibe debug prompt export --format json --context-file <file>` renders a composition from the inputs you supply (backend, Agent instructions, Skill directory, context), so it approximates the target only as well as those inputs match (history in the Avibe repo `core/prompts/`, if checked out) | Proposal to the Avibe repository |
-| Global rules and native backend config | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, Codex `developer_instructions` in `~/.codex/config.toml`, … | Edit the source if the file is generated or imports others |
+| Global rules and native backend config | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, Codex `developer_instructions` in `$CODEX_HOME/config.toml` (default `~/.codex`), … | Edit the source if the file is generated or imports others |
 | Project rules | nearest `AGENTS.md` / `CLAUDE.md` chain | The repository's own delivery process |
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
 | Skills | user skill dirs (follow symlinks), Avibe `skills/`, project `.agents/skills/` | The directory's owner |
 | Task and Watch messages (re-sent every fire) | `vibe task list` / `vibe watch list` for ids, then `vibe task show <id>` / `vibe watch show <id>` for the full text | `vibe task update`, `vibe watch update` |
 | Delegation briefs and callbacks | `agent_runs.message` / `result_text` | The prompt or Skill that writes them |
 
-Only Skill descriptions on the injected catalog page (`vibe skill list`,
-page 1, run as `AVIBE_SKILL_WORKING_DIR=<target-workdir> vibe skill list` so
-project Skills resolve from the target Session rather than yours) are loaded every turn; later pages, `disable-model-invocation` Skills,
-Skill bodies, and references load on demand.
+Only Skill descriptions on the first catalog page are loaded every turn;
+later pages, `disable-model-invocation` Skills, Skill bodies, and references
+load on demand. Project Skills in that catalog resolve from the target
+Session's working directory, not yours, so read them from there.
 
 ## Finding evidence
 
@@ -101,8 +101,11 @@ no history covers it, say the attribution is unconfirmed.
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
 `messages`. Keep evidence to the Session the user reported, plus any others they point
 to — a channel's `scope_id` can hold other people's threads; the user's
-own corrections in `messages` are usually the sharpest evidence. Two starting
-points:
+own corrections in `messages` are usually the sharpest evidence. For a
+recurring Task or Watch, `vibe runs list --definition-id <id>` gathers its
+fires across per-run Sessions. A stuck turn stays `running`, so include
+long-running rows when the complaint is a stall. Two starting points, each run
+with `vibe data query --sql-file <file>` (or `--sql-file -` for stdin):
 
 ```sql
 -- The reported session, with the backend and model that actually ran
