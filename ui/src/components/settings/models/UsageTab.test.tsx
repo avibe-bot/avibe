@@ -407,6 +407,26 @@ describe('UsageTab', () => {
     expect(table.querySelector('tfoot')!.textContent).toContain('≥ $0.50');
   });
 
+  it('MH-USAGE-032: a floor bucket reads 「≥」 in the chart legend and the bucket detail, an exact one does not', async () => {
+    const floor = pricedReport();
+    floor.buckets = [
+      bucket('00', [row({ api_cost_usd: 0.5, excluded_tokens: 0, api_cost_lower_bound: true })]),
+      bucket('01', [row({ api_cost_usd: 0.25, excluded_tokens: 0, api_cost_lower_bound: false })]),
+    ];
+    const { container } = draw(floor);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    expect(container.querySelector('.model-hub-usage-legend')!.textContent).toContain('≥ $0.75');
+
+    const buckets = screen.getAllByRole('button', { name: /Usage bucket/ });
+    fireEvent.pointerEnter(buckets[0]);
+    const detail = () => screen.getByRole('dialog', { name: 'Usage bucket details' });
+    expect(detail().querySelector('.model-hub-usage-tooltip-total')!.textContent).toContain('≥ $0.50');
+    expect(detail().querySelector('.model-hub-usage-tooltip-lines')!.textContent).toContain('≥ $0.50');
+    fireEvent.pointerEnter(buckets[1]);
+    await screen.findByText('$0.25', { selector: '.model-hub-usage-tooltip-total strong' });
+    expect(detail().textContent).not.toContain('≥');
+  });
+
   it('MH-USAGE-031: reads the API-price value in Chinese as a conversion, not a charge', async () => {
     await i18n.addResourceBundle('zh', 'translation', zh, true, true);
     await i18n.changeLanguage('zh');

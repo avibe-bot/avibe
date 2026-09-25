@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, formatCount, formatDayTime, formatNameList, formatPercent, formatTokensCompact, formatUsd } from './format';
+import { atLeast, cooldownEtaMinutes, formatCost, formatCount, formatDayTime, formatNameList, formatPercent, formatTokensCompact, formatUsd } from './format';
 
 describe('formatCount', () => {
   it('groups so a figure can be read against a vendor console', () => {
@@ -106,5 +106,16 @@ describe('formatUsd', () => {
     expect(formatUsd(0, 'en-US')).toBe('$0.00');
     expect(formatUsd(0.001, 'en-US')).toBe('<$0.01');
     expect(formatUsd(-3, 'en-US')).toBe('$0.00');
+  });
+});
+
+describe('formatCost', () => {
+  it('MH-USAGE-032: marks a floor 「≥」, a floor of zero included, and leaves an exact figure bare', () => {
+    expect(formatCost(0, true, 'en-US')).toBe('≥ $0.00');
+    expect(formatCost(0, false, 'en-US')).toBe('$0.00');
+    expect(formatCost(12.5, true, 'en-US')).toBe('≥ $12.50');
+    expect(formatCost(12.5, undefined, 'en-US')).toBe('$12.50');
+    expect(atLeast('2.0×', true)).toBe('≥ 2.0×');
+    expect(atLeast('2.0×', false)).toBe('2.0×');
   });
 });

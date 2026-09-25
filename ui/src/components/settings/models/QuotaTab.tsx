@@ -15,7 +15,7 @@ import { AlertTriangle, CircleDollarSign, Clock3, Gauge, LoaderCircle, RefreshCw
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { formatCount, formatUsd } from './format';
+import { atLeast, formatCost, formatCount, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue } from './types';
 import { VendorGlyph } from './vendorGlyph';
@@ -90,11 +90,12 @@ const useQuotaText = (now: number) => {
       default: return t('settings.models.quota.pace.ok') as string;
     }
   }, [clock, duration, t]);
-  /** A priced figure: 「≥」 when part of it predates cache-write capture. */
+  /** Plain dollars, for a figure only shown when its period is exact (a shortfall). */
   const dollars = React.useCallback((amount: number) => formatUsd(amount, i18n.language), [i18n.language]);
+  /** A priced figure, 「≥」 whenever the server marks it a floor. */
   const usd = React.useCallback((value: PricedUsage) => (
-    `${value.api_cost_lower_bound ? '≥ ' : ''}${dollars(value.api_cost_usd)}`
-  ), [dollars]);
+    formatCost(value.api_cost_usd, value.api_cost_lower_bound, i18n.language)
+  ), [i18n.language]);
   const tokens = React.useCallback((value: number) => formatCount(value, i18n.language), [i18n.language]);
   /** A multiple to one decimal, rounded down so 0.99× never reads as 「1.0 倍」. */
   const multiple = React.useCallback((value: number) => new Intl.NumberFormat(i18n.language, {
@@ -200,7 +201,7 @@ const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ va
             {payback !== null && (
             <em className={cn(payback.kind !== 'short' && 'is-good')} data-quota-payback={payback.kind}>
               {payback.kind === 'paid'
-                  ? t('settings.models.quota.value.paid', { multiple: `${floor ? '≥ ' : ''}${text.multiple(payback.multiple)}` })
+                  ? t('settings.models.quota.value.paid', { multiple: atLeast(text.multiple(payback.multiple), floor) })
                   : payback.kind === 'even'
                     ? t('settings.models.quota.value.even')
                     : floor
@@ -451,7 +452,7 @@ export const QuotaTab: React.FC<{
                     label={t('settings.models.quota.stat.payback')}
                     icon={<TrendingUp className="size-[15px]" aria-hidden />}
                     value={value.period && periodPayback
-                      ? <>{t('settings.models.quota.stat.paybackMultiple', { multiple: `${value.period.api_cost_lower_bound ? '≥ ' : ''}${text.multiple(periodPayback.multiple)}` })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
+                      ? <>{t('settings.models.quota.stat.paybackMultiple', { multiple: atLeast(text.multiple(periodPayback.multiple), value.period.api_cost_lower_bound) })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
                       : '—'}
                     note={value.period && periodPayback
                       ? [
@@ -459,7 +460,7 @@ export const QuotaTab: React.FC<{
                             ? value.period.api_cost_lower_bound
                               ? t('settings.models.quota.stat.paybackShortUnknown')
                               : t('settings.models.quota.stat.paybackShort', { amount: text.dollars(periodPayback.shortfallUsd) })
-                            : t('settings.models.quota.stat.paybackPaid', { amount: `${value.period.api_cost_lower_bound ? '≥ ' : ''}${text.dollars(periodPayback.surplusUsd)}` }),
+                            : t('settings.models.quota.stat.paybackPaid', { amount: atLeast(text.dollars(periodPayback.surplusUsd), value.period.api_cost_lower_bound) }),
                           rollingPeriod ? t('settings.models.quota.stat.paybackRolling') : null,
                           unfeed > 0 ? t('settings.models.quota.stat.paybackPartial', { count: unfeed }) : null,
                         ].filter(Boolean).join(' · ')

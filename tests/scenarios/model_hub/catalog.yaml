@@ -712,6 +712,15 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-031
+  - id: MH-USAGE-032
+    name: A floor API price reads 「≥」 in the chart legend and bucket detail, a floor of zero included
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-032
+    related_tests:
+      - ui/src/components/settings/models/format.test.ts::MH-USAGE-032
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
   - id: MH-USAGE-BACKEND-001
     name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
     status: covered
@@ -1014,6 +1023,12 @@ scenarios:
     kind: observation
     layer: unit
     test: tests/test_model_hub_pricing.py::test_priced_usage_reads_match_the_usage_summary_contract
+  - id: MH-PRICE-012
+    name: Any unpriced, unreported, or uncaptured part reaches every usage aggregate and quota value above it as a floor
+    status: covered
+    kind: safety
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_no_aggregate_over_an_unknown_part_is_published_as_exact
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

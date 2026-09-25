@@ -74,6 +74,20 @@ export function formatUsd(value: number, locale: string): string {
 }
 
 /**
+ * A priced figure that may be only a floor. Every $ or multiple the value
+ * surfaces show goes through this with the server's `api_cost_lower_bound`, so a
+ * floor never reads as exact, a floor of zero included (「≥ $0.00」).
+ */
+export function atLeast(text: string, lowerBound: boolean | undefined): string {
+  return lowerBound === true ? `≥ ${text}` : text;
+}
+
+/** `formatUsd` for a figure that carries its lower-bound flag. */
+export function formatCost(value: number, lowerBound: boolean | undefined, locale: string): string {
+  return atLeast(formatUsd(value, locale), lowerBound);
+}
+
+/**
  * An instant as a short day-and-time in the reader's own zone — 「8/18 03:14」.
  *
  * The host zone is the frame on purpose: what this answers is "when did this last

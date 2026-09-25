@@ -38,6 +38,8 @@ export type UsageSeries = {
   label: string;
   colorIndex: number;
   values: Array<number | null>;
+  /** Per bucket, whether the value is only a floor (`api_cost_lower_bound`); cost only. */
+  floors: boolean[];
 };
 
 export const PAIR_SEPARATOR = '\u0000';
@@ -367,6 +369,11 @@ const typeSeries = (
   ];
 };
 
+/** Whether these rows' cost is only a floor, as the server marked it. */
+export const costIsFloor = (rows: readonly UsageCounters[], metric: UsageMetric): boolean => (
+  metric === 'cost' && aggregateCounters(rows).api_cost_lower_bound === true
+);
+
 const bucketMetricValue = (
   bucket: UsageBucket,
   rows: UsageBucketRow[],
@@ -398,11 +405,13 @@ export function seriesFor(
       requests: 'Requests',
       cost: 'API price',
     };
+    const floors = report.buckets.map((bucket) => costIsFloor(filterBucketRows(bucket, filter), metric));
     return [...valuesByKey.entries()].map(([key, values], index) => ({
       key,
       label: labels[key],
       colorIndex: index,
       values,
+      floors,
     }));
   }
 
@@ -416,6 +425,7 @@ export function seriesFor(
         filterBucketRows(bucket, filter),
         metric,
       )),
+      floors: report.buckets.map((bucket) => costIsFloor(filterBucketRows(bucket, filter), metric)),
     }];
   }
 
@@ -430,6 +440,10 @@ export function seriesFor(
         const rowsForSource = filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId);
         return bucketMetricValue(bucket, rowsForSource, metric);
       }),
+      floors: report.buckets.map((bucket) => costIsFloor(
+        filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId),
+        metric,
+      )),
     }));
   }
 
@@ -445,6 +459,12 @@ export function seriesFor(
       ));
       return bucketMetricValue(bucket, rowsForIdentity, metric);
     }),
+    floors: report.buckets.map((bucket) => costIsFloor(
+      filterBucketRows(bucket, filter).filter((row) => (
+        row.source_id === identity.sourceId && row.model_id === identity.modelId
+      )),
+      metric,
+    )),
   }));
 }
 

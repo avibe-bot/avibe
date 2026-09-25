@@ -419,3 +419,70 @@ def test_priced_usage_reads_match_the_usage_summary_contract(tmp_path):
         report = ledger.report(window=window, now=now, identities=identities, prices=_table())
         _assert_valid("usage-summary.schema.json", report)
         assert report["totals"]["excluded_tokens"] == 11
+
+
+def _priced_aggregates(document: dict):
+    """Every priced aggregate a usage read publishes: totals, sources, models, days, buckets, rows."""
+
+    yield document["totals"]
+    for source in document.get("sources", []):
+        yield source
+        yield from source.get("models", [])
+    yield from document.get("days", [])
+    for bucket in document.get("buckets", []):
+        yield from bucket.get("rows", [])
+
+
+@pytest.mark.parametrize(
+    ("model_id", "usage"),
+    [
+        # Unpriced: the model has no price anywhere.
+        ("relay-model", ProtocolUsageReport.of(input_tokens=1000, cached_input_tokens=0, output_tokens=10)),
+        # Unreported: the call happened, its size is unknown.
+        ("grok-4.6", None),
+        ("relay-model", None),
+        # Uncaptured write: a row metered before cache writes were counted, on a model that charges for them.
+        ("claude-opus-5", "uncaptured"),
+    ],
+    ids=["unpriced", "unreported-priced", "unreported-unpriced", "uncaptured-write"],
+)
+def test_no_aggregate_over_an_unknown_part_is_published_as_exact(tmp_path, model_id, usage):
+    """MH-PRICE-012: Any unknown part reaches every aggregate and quota value above it as a floor."""
+
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "usage.json"
+    if usage == "uncaptured":
+        path.write_text(json.dumps([{
+            "day": "2026-09-25", "source_id": "src_a", "model_id": model_id,
+            "requests": 1, "token_reports": 1, "input_tokens": 1000, "cached_input_tokens": 0,
+            "output_tokens": 10, "last_metered_at": "2026-09-25T10:00:00+00:00",
+        }]), encoding="utf-8")
+    ledger = BoundedUsageLedger(path, now=lambda: now)
+    known = ProtocolUsageReport.of(input_tokens=1_000_000, cached_input_tokens=0, output_tokens=0)
+    calls = [UsageCall(source_id="src_a", model_id="grok-4.6", usage=known, at=now)]
+    if usage != "uncaptured":
+        calls.append(UsageCall(source_id="src_a", model_id=model_id, usage=usage, at=now))
+    ledger.record_many(calls)
+    identities = [SourceIdentity("src_a", "A", ["grok-4.6", model_id])]
+    documents = [ledger.summary(days=7, now=now, identities=identities, prices=_table())]
+    # A legacy daily row has no hours, so only daily windows cover an uncaptured write.
+    windows = ("7d",) if usage == "uncaptured" else ("24h", "7d")
+    documents += [ledger.report(window=w, now=now, identities=identities, prices=_table()) for w in windows]
+    for document in documents:
+        covering = [
+            aggregate for aggregate in _priced_aggregates(document)
+            if aggregate.get("model_id", model_id) == model_id and aggregate.get("requests", 1) > 0
+        ]
+        assert covering
+        assert all(aggregate["api_cost_lower_bound"] is True for aggregate in covering), covering
+
+    costs = ledger.daily_costs(days=31, now=now, identities=identities, prices=_table())
+    sources = [{"source_id": "src_a", "vendor": "xai", "plan": None}]
+    table = _table({"plans": {"xai_seat": {"fee_usd": 1000}}, "sources": {"src_a": {"plan": "xai_seat"}}})
+    totals = quota_values(sources, daily_costs=costs, prices=table, today=date(2026, 9, 25))
+    value = sources[0]["value"]
+    assert value["multiple"] is not None
+    assert value["week"]["api_cost_lower_bound"] is True
+    assert value["period"]["api_cost_lower_bound"] is True
+    assert totals["week"]["api_cost_lower_bound"] is True
+    assert totals["period"]["api_cost_lower_bound"] is True

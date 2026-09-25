@@ -20,11 +20,12 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
-import { formatPercent, formatUsd } from './format';
+import { atLeast, formatCost, formatPercent, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import type { UsageCounters, UsageReport, UsageWindowKey } from './types';
 import {
   aggregateCounters,
+  costIsFloor,
   filterBucketRows,
   filteredRows,
   formatBucketAxisLabel,
@@ -247,6 +248,7 @@ const ChartLegend: React.FC<{
     {series.map((item) => {
       const values = item.values.filter((value): value is number => value !== null);
       const total = values.reduce((sum, value) => sum + value, 0);
+      const floor = item.floors.some(Boolean);
       const isHidden = hidden.includes(item.key);
       return (
         <button
@@ -258,7 +260,7 @@ const ChartLegend: React.FC<{
         >
           <span className="model-hub-usage-legend-swatch" style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />
           <span>{labels.get(item.key) ?? item.label}</span>
-          <strong>{values.length === 0 ? blank : count(total)}</strong>
+          <strong>{values.length === 0 ? blank : atLeast(count(total), floor)}</strong>
         </button>
       );
     })}
@@ -716,14 +718,16 @@ function UsageChart({
               </div>
             </div>
             <div className="model-hub-usage-tooltip-total">
-              <strong>{activeValue === null ? t('settings.models.usage.blank') : format(activeValue)}</strong>
+              <strong>{activeValue === null ? t('settings.models.usage.blank') : atLeast(format(activeValue), costIsFloor(bucketRows, metric))}</strong>
               <span>{metricLabel(metric, t)}</span>
             </div>
             <div className="model-hub-usage-tooltip-lines">
               {visibleSeries.map((item) => (
                 <div key={item.key}>
                   <span><i style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />{labels.get(item.key) ?? item.label}</span>
-                  <b>{item.values[activeIndex as number] === null ? t('settings.models.usage.blank') : format(item.values[activeIndex as number] ?? 0)}</b>
+                  <b>{item.values[activeIndex as number] === null
+                    ? t('settings.models.usage.blank')
+                    : atLeast(format(item.values[activeIndex as number] ?? 0), item.floors[activeIndex as number])}</b>
                 </div>
               ))}
             </div>
@@ -903,7 +907,7 @@ export const UsageTab: React.FC<{
   const metricText = (counters: UsageCounters, selectedMetric = metric) => {
     const text = tokenText(counters, selectedMetric, selectedMetric === metric ? format : count, t('settings.models.usage.blank') as string);
     // A cost that is only a floor keeps its 「≥」 wherever it is itemized.
-    return selectedMetric === 'cost' && counters.api_cost_lower_bound === true ? `≥ ${text}` : text;
+    return selectedMetric === 'cost' ? atLeast(text, counters.api_cost_lower_bound) : text;
   };
   const priced = reportIsPriced(report);
   const partialHistoryNote = String(t('settings.models.usage.partialHistory'));
@@ -1026,7 +1030,7 @@ export const UsageTab: React.FC<{
                   ? t('settings.models.usage.blank')
                   : usageHasNoPrice(totals)
                     ? t('settings.models.usage.cost.noPrice')
-                    : `${totals.api_cost_lower_bound ? '≥ ' : ''}${formatUsd(totals.api_cost_usd ?? 0, i18n.language)}`}
+                    : formatCost(totals.api_cost_usd ?? 0, totals.api_cost_lower_bound, i18n.language)}
                 note={[
                   t('settings.models.usage.cost.notBilled'),
                   (totals.excluded_tokens ?? 0) > 0 && !usageHasNoPrice(totals)
