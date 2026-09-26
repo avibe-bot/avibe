@@ -959,6 +959,54 @@ class EngineStateStore:
         value = payload.get("auth_name") if payload.get("kind") == "oauth" else None
         return str(value) if value else None
 
+    def reconcile_claude_login(self, auth_name: str) -> None:
+        """Follow a login's preserved prefix, never infer ownership from account fields.
+
+        CPA c404af96 saveTokenRecord saves the new canonical name with the
+        previous file's metadata, then deletes that previous file. Only the
+        OAuth-completion path calls this; ordinary loads/refreshes keep names.
+        """
+        auth_name = _validated_oauth_auth_name(auth_name)
+        with self._lock:
+            payload = self._read_json(self.auth_dir / auth_name)
+            if payload is None:
+                raise EngineStateError("OAuth credential is unavailable")
+            prefix = payload.get("prefix")
+            if not isinstance(prefix, str) or not prefix:
+                return
+            if payload.get("type") != "claude":
+                raise EngineStateError("OAuth auth record provider conflicts")
+            credentials = self._oauth_credentials()
+            owners = [
+                (ref, metadata) for ref, metadata in credentials
+                if metadata.get("vendor") == "anthropic" and metadata.get("prefix") == prefix
+            ]
+            if not owners:
+                return
+            if len(owners) != 1:
+                raise EngineStateError("OAuth auth record binding is ambiguous")
+            credential_ref, metadata = owners[0]
+            if any(
+                ref != credential_ref and record.get("auth_name") == auth_name
+                for ref, record in credentials
+            ):
+                raise EngineStateError("OAuth auth record binding is ambiguous")
+            previous_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            if previous_name == auth_name:
+                return
+            # A failed legacy-file deletion leaves two grants. Keep both and
+            # the original binding; do not choose or clean up either one.
+            try:
+                (self.auth_dir / previous_name).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise EngineStateError("OAuth auth record binding is ambiguous")
+            self._secure_write_json(
+                self._credential_path(credential_ref),
+                {**metadata, "auth_name": auth_name},
+            )
+
     def oauth_account_label(
         self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
     ) -> str | None:

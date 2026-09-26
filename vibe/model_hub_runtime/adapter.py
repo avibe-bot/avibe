@@ -108,7 +108,7 @@ _OAUTH_ENDPOINTS = {
 # rather than an endpoint Avibe may synthesize a request against.
 #
 # Read from the engine at the commit `cliproxyapi_manifest.json` pins
-# (v7.2.149, `2a6b87ac`); each row is one of its serving surfaces, not a guess:
+# (v7.3.16, `c404af96`); each row is one of its serving surfaces, not a guess:
 #
 #   gemini  `internal/translator/antigravity/openai/chat-completions/init.go:9`
 #           registers `translator.Register(OpenAI, Antigravity, ...)`, so an
@@ -1998,7 +1998,7 @@ class CLIProxyEngineAdapter:
             ]
             if len(matches) != 1:
                 raise EngineStateError("OAuth credential validation is inconclusive")
-            # CPA v7.2.149 loses refresh failure details ("token expired") and
+            # CPA v7.3.16 loses refresh failure details ("token expired") and
             # also puts request failures in status_message. None of those
             # inventory strings proves that a refresh grant was rejected.
             try:
@@ -2873,6 +2873,18 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
+        if flow.auth_provider == "claude":
+            try:
+                # CPA only migrates Claude names while saving a new login.
+                # Restore the existing ref before ownership or cleanup decisions.
+                await asyncio.to_thread(self.state_store.reconcile_claude_login, auth.name)
+                foreign = await asyncio.to_thread(
+                    self._foreign_bound_identities, provider_records, flow.source_id,
+                )
+            except (EngineStateError, OSError):
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+                self._fail_flow(flow, "models.oauth.binding_failed")
+                return
         foreign_accounts = {
             record.account_id for record in provider_records if record.identity in foreign and record.account_id
         }
@@ -2880,10 +2892,10 @@ class CLIProxyEngineAdapter:
             # The same account is already a Source. A new file for it is this
             # flow's own material and is removed; an existing one belongs to the
             # other Source and is never touched.
-            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
-                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
-            elif auth.identity in foreign:
+            if auth.identity in foreign:
                 self._set_retained_material(flow, RetainedMaterialDisposition.FOREIGN_SOURCE_REF)
+            elif auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
+                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
             else:
                 self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
             self._fail_flow(flow, "models.oauth.account_already_added")
