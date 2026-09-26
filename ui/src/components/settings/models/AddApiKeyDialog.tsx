@@ -186,7 +186,9 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         );
       } catch (error) {
         const failure = apiFailure(error);
-        const refusal = guardedFailure(error);
+        // Only an unconfirmed attempt asks: a confirmed one already resent the
+        // moving plan within its bound, and ends as the failure below.
+        const refusal = plan === null ? guardedFailure(error) : null;
         if (refusal) {
           settlement.release();
           continuation.settle(seq, () => {

@@ -225,11 +225,14 @@ export const SourceDetailPanel: React.FC<{
       } catch (error) {
         if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
         else {
-          const refusal = guardedFailure(error);
+          // A confirmed refetch was already answered: a plan that kept moving
+          // past the resend bound ends as a failure, never a second question.
+          const refusal = plan === null ? guardedFailure(error) : null;
           if (refusal) {
             setGuard({ kind: 'refetch', plan: refusal });
             settlement.release();
           } else {
+            setGuard(null);
             setRefetchFailed(true);
             try {
               const inventory = await settlement.readInventory();
@@ -362,11 +365,14 @@ export const SourceDetailPanel: React.FC<{
       } catch (error) {
         if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
         else {
-          const refusal = guardedFailure(error);
+          const refusal = plan === null ? guardedFailure(error) : null;
           if (refusal) {
             setGuard({ kind: 'removeModel', model, plan: refusal });
             settlement.release();
-          } else await reconcileRemoval(latest.id, model, settlement);
+          } else {
+            setGuard(null);
+            await reconcileRemoval(latest.id, model, settlement);
+          }
         }
       }
     }).finally(() => setPendingAction(null));
@@ -499,7 +505,7 @@ export const SourceDetailPanel: React.FC<{
         } else if (classifyModelHubFailure(failure) === 'inconclusive') {
           await reconcileEditWrite(latest, draft, patch, sent, settlement);
         } else {
-          const refusal = guardedFailure(error);
+          const refusal = forced ? null : guardedFailure(error);
           if (refusal) {
             dispatchManageStage({ type: 'guard_edit', draft, patch, plan: refusal });
             settlement.release();

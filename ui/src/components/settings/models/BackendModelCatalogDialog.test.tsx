@@ -209,6 +209,30 @@ describe('BackendModelCatalogDialog', () => {
     expect(write.mock.calls[2][1]).toMatchObject({ force: true, would_remove_hops: moved, would_interrupt: gaps });
   });
 
+  it('keeps a confirmed focused removal on screen until its forced resend lands', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], {
+      routes: { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } },
+    }));
+    let settle: (value: ReturnType<typeof agent>) => void = () => {};
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
+      ))
+      .mockReturnValueOnce(new Promise((resolve) => { settle = resolve; }));
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    // The forced resend is still out: the question that started it is the only
+    // surface this focused save has, so it stays, inert, until the answer lands.
+    expect(screen.getByRole('dialog', { name: 'Remove beta?' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove' })).toHaveProperty('disabled', true);
+    await act(async () => { settle(agent([model('alpha')])); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
+  });
+
   it('keeps a focused editor on screen and inert while its save is pending', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
@@ -547,6 +571,58 @@ describe('BackendModelCatalogDialog', () => {
     expect(second.force).toBe(true);
     expect(JSON.stringify(second.would_remove_hops)).toBe(JSON.stringify(hops));
     expect(JSON.stringify(second.would_interrupt)).toBe(JSON.stringify([]));
+  });
+
+  it('keeps the confirmed guard mounted and busy until the forced save lands', async () => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    let settle: (value: ReturnType<typeof agent>) => void = () => {};
+    vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
+      ))
+      .mockReturnValueOnce(new Promise((resolve) => { settle = resolve; }));
+    let pending = false;
+    const { onClose } = renderDialog({
+      catalogWrite: {
+        get pending() { return pending; },
+        track: async (work) => { pending = true; try { await work(); } finally { pending = false; } },
+      },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    const guard = await screen.findByRole('dialog', { name: 'Save the model list?' });
+    await user.click(within(guard).getByRole('button', { name: 'Remove anyway' }));
+    expect(screen.getByRole('dialog', { name: 'Save the model list?' })).toBeTruthy();
+    await act(async () => { settle(agent([model('alpha')])); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
+  });
+
+  it('ends a confirmed save whose plan never settles as a failure, not a second question', async () => {
+    const user = userEvent.setup();
+    const hops = (position: number) => [
+      { backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position },
+    ];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    let refusals = 0;
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockImplementation(async () => {
+      refusals += 1;
+      throw new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops(refusals), 409,
+      );
+    });
+    const { onClose } = renderDialog();
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    const guard = await screen.findByRole('dialog', { name: 'Save the model list?' });
+    await user.click(within(guard).getByRole('button', { name: 'Remove anyway' }));
+    expect(await screen.findByText(i18n.t('settings.models.gateway.catalog.saveRouted'))).toBeTruthy();
+    // One question, then the initial write plus the bounded resends: the plan
+    // that kept moving is reported, not asked about a second time.
+    expect(screen.queryByRole('dialog', { name: 'Save the model list?' })).toBeNull();
+    expect(write).toHaveBeenCalledTimes(4);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('re-asks with the current suppliers when the ones it displayed went stale', async () => {

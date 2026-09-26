@@ -527,23 +527,38 @@ export const BackendModelCatalogDialog: React.FC<{
    * this save — the guard dialog's confirm, or the focused removal's own. With
    * it, a guard refusal is resent forced with the server's plan; without it,
    * the refusal opens the one guard dialog. `confirmed` is the plan the forced
-   * write echoes, and `resends` bounds how often a moving plan is chased.
+   * write echoes.
+   *
+   * Every resend runs inside this one tracked write, so the promise it returns
+   * — and the confirmation surface waiting on it — spans the whole sequence.
+   * The guard stays mounted, busy, until the save settles, and only an
+   * unanswered refusal leaves it open.
    */
-  const save = (agreed = false, confirmed?: GuardPlan, resends = 0): Promise<void> | undefined => {
+  const save = (agreed = false, confirmed?: GuardPlan): Promise<void> | undefined => {
     const base = baselineRef.current;
     // A pre-catalog server has no baseline to send, so there is nothing this
     // branch could honestly PUT.
     if (!base || base.models === null) return;
     const baselineModels = base.models;
-    const requested = draftRef.current;
-    const intent = backendCatalogIntent(baselineModels, requested);
     setSaveFailedKey(null);
-    setGuardPlan(null);
-    const body = putBody(baselineModels, requested, confirmed);
     return catalogWrite.track(async () => {
+      setGuardPlan(await sendCatalog(baselineModels, agreed, confirmed));
+    });
+  };
+
+  /** Runs the save to its end; resolves with the question still owed, if any. */
+  const sendCatalog = async (
+    baselineModels: BackendModel[],
+    agreed: boolean,
+    confirmed: GuardPlan | undefined,
+  ): Promise<GuardPlan | null> => {
+    let plan = confirmed;
+    for (let resends = 0; ;) {
+      const requested = draftRef.current;
+      const intent = backendCatalogIntent(baselineModels, requested);
       let echoed: AgentSupply;
       try {
-        echoed = await modelsApi.putAgentModels(backend, body);
+        echoed = await modelsApi.putAgentModels(backend, putBody(baselineModels, requested, plan));
       } catch (error) {
         const failure = apiFailure(error);
         if (failure?.code === CANDIDATES_CHANGED) {
@@ -610,7 +625,7 @@ export const BackendModelCatalogDialog: React.FC<{
           if (withdrawn.size > 0) mutate(draftRef.current.filter((model) => !withdrawn.has(model.id)));
           if (reask.length > 0) {
             setPicking({ seed: new Set(reask) });
-            return;
+            return null;
           }
           // Nothing left to ask, and the list already shows what changed: a drop
           // is its own answer, and a sentence about it would be this dialog
@@ -620,8 +635,8 @@ export const BackendModelCatalogDialog: React.FC<{
           // did not make. It terminates: every pass either drops at least one
           // pick from the map that `disputed` is drawn from, or asks instead.
           if (withdrawn.size > 0) {
-            void save(agreed);
-            return;
+            plan = undefined;
+            continue;
           }
           // Nothing to ask and nothing to drop: a refusal about ids this write
           // promised nothing for is not one this dialog can answer, so it keeps
@@ -632,17 +647,18 @@ export const BackendModelCatalogDialog: React.FC<{
         // missing. A user who already agreed is not asked again — the write goes
         // again echoing the server's plan, even when that plan differs from the
         // one they saw, because what they agreed to was removing these models.
-        // Otherwise the plan opens the one guard dialog, and the draft stays
-        // exactly as the user left it behind that question.
+        // A plan that keeps moving past the bound ends as the refusal below,
+        // never as a second question. Otherwise the plan opens the one guard
+        // dialog, and the draft stays exactly as the user left it behind it.
         const refusal = failure?.code === MODEL_IN_ROUTE ? failure : null;
         if (refusal && (refusal.wouldRemoveHops.length > 0 || refusal.wouldInterrupt.length > 0)) {
-          const plan: GuardPlan = { hops: refusal.wouldRemoveHops, gaps: refusal.wouldInterrupt };
-          if (agreed && resends < FORCED_RESENDS) {
-            void save(true, plan, resends + 1);
-            return;
+          const next: GuardPlan = { hops: refusal.wouldRemoveHops, gaps: refusal.wouldInterrupt };
+          if (!agreed) return next;
+          if (resends < FORCED_RESENDS) {
+            plan = next;
+            resends += 1;
+            continue;
           }
-          setGuardPlan(plan);
-          return;
         }
         // A route that named its failure has decided what it did, and for this
         // endpoint 「decided」 can still mean 「wrote」: the server commits the
@@ -665,7 +681,7 @@ export const BackendModelCatalogDialog: React.FC<{
             applyBaseline(observed, current);
             await Promise.resolve(onSaved(observed.agent)).catch(() => {});
             closeSaved();
-            return;
+            return null;
           }
           applyBaseline(observed, current ? applyBackendCatalogIntent(current, intent) : []);
           await Promise.resolve(onObserved(observed.agent)).catch(() => {});
@@ -674,16 +690,17 @@ export const BackendModelCatalogDialog: React.FC<{
           // its own sentence even when the re-read happens to agree with the
           // draft, because that write never landed at all.
           setSaveFailedKey(landed && unloaded ? 'settings.models.gateway.catalog.saveNotApplied' : reason);
-          return;
+          return null;
         } catch {
           setReadState('error');
         }
         setSaveFailedKey(reason);
-        return;
+        return null;
       }
       await Promise.resolve(onSaved(echoed)).catch(() => {});
       closeSaved();
-    });
+      return null;
+    }
   };
 
   const rowActions = (model: BackendModel) => (

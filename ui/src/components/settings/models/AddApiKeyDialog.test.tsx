@@ -399,6 +399,29 @@ describe('AddApiKeyDialog · replacement', () => {
     expect(screen.queryByText(/^Removed hops$|^已移除的路由项$/i)).toBeNull();
   });
 
+  it('ends a confirmed replacement whose plan never settles as a failure, not a second question', async () => {
+    const replace = vi.spyOn(modelsApi, 'replaceCredential').mockImplementation(async () => {
+      throw new ApiCallError('source_model_in_route_chain', undefined, true, [], [], [{
+        backend: 'claude',
+        menu_model: 'sonnet',
+        position: replace.mock.calls.length,
+        source_id: blockedSource.id,
+        model_id: 'claude-sonnet-4-5',
+      }]);
+    });
+    const { onClose } = renderReplacement();
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-never-settles');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+
+    expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Replace anyway$|^仍要更换$/i })).toBeNull();
+    expect(replace).toHaveBeenCalledTimes(4);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('resends a confirmed replacement with the recomputed plan instead of asking again', async () => {
     const firstHop: RouteHopRef = {
       backend: 'claude',

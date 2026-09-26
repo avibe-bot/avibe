@@ -1120,6 +1120,70 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByText(/menu-b/)).toBeNull();
   });
 
+  it.each([
+    {
+      flow: 'refetch',
+      path: `/api/models/sources/${source.id}/refresh`,
+      error: 'source_in_route_chain',
+      guard: /^Refetch models from|^从.*重新拉取模型/,
+      failure: /fetch did not come back|拉取没有回来/,
+      start: async () => {
+        await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+        await userEvent.click(await screen.findByRole('button', { name: /^Refetch anyway$|^仍要拉取$/i }));
+      },
+    },
+    {
+      flow: 'remove',
+      path: `/api/models/sources/${source.id}/models/model-a`,
+      error: 'source_model_in_route_chain',
+      guard: /^Remove model-a from|^从.*移除 model-a/,
+      failure: /model was not removed|这个模型没有移除/,
+      start: async () => {
+        await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
+        await userEvent.click(await screen.findByRole('button', { name: /^Remove anyway$|^仍要移除$/i }));
+      },
+    },
+    {
+      flow: 'edit',
+      path: `/api/models/sources/${source.id}`,
+      error: 'source_last_supplier',
+      guard: /save changes|保存.*更改/i,
+      failure: /source was not saved|供应商没有保存/,
+      start: async () => {
+        await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+        const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+        await userEvent.clear(name);
+        await userEvent.type(name, 'Moving plan');
+        await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+        await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
+      },
+    },
+  ])('ends a confirmed $flow whose plan never settles as a failure, not a second question', async ({ path, error, guard, failure, start }) => {
+    let refusals = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input).split('?')[0];
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === '/api/models/sources') return Response.json({ sources: [source] });
+      if (url === path) {
+        refusals += 1;
+        const hops = [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: refusals, source_id: source.id, model_id: 'model-a' }];
+        return Response.json({ error, would_remove_hops: hops, would_interrupt: [] }, { status: 409 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await start();
+
+    // One question, then the initial write plus the bounded resends: the plan
+    // that kept moving is reported, not asked about a second time.
+    expect(await screen.findByText(failure)).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: guard })).toBeNull();
+    expect(refusals).toBe(4);
+  });
+
   it('names every model and Agent that a guarded change would interrupt', () => {
     render(
       <I18nextProvider i18n={i18n}>
