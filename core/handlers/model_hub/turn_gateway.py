@@ -9,8 +9,8 @@ import math
 import socket
 import tempfile
 from collections import deque
-from collections.abc import Callable, Mapping
-from contextlib import AsyncExitStack, contextmanager, suppress
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
@@ -69,6 +69,24 @@ from .service import (
 _MAX_REQUEST_BYTES: Final = 128 * 1024 * 1024
 _BUFFERED_RESPONSE_MEMORY_BYTES: Final = 256 * 1024
 _RESPONSE_CHUNK_BYTES: Final = 64 * 1024
+# Claude Code aborts a stream whose response headers miss its first-byte window
+# and treats a byte-silent body as stalled. Resolution can outlast both through
+# recovery waits, Source failover, or an upstream that sends nothing before its
+# first model output, so a Claude stream commits its headers once resolution is
+# slow and then sends SSE comments, which carry no event, until it resolves.
+_EARLY_STREAM_COMMIT_SECONDS: Final = 2.0
+# Below the CLI's 10s heartbeat so every tick observes bytes.
+_STREAM_KEEPALIVE_SECONDS: Final = 5.0
+_STREAM_KEEPALIVE_FRAME: Final = b": keepalive\n\n"
+_SSE_RESPONSE_HEADERS: Final = {
+    "Cache-Control": "no-store",
+    "Content-Type": "text/event-stream",
+    "X-Accel-Buffering": "no",
+    "X-Content-Type-Options": "nosniff",
+}
+# The ending a local error response carries, so a stream whose headers already
+# left can still deliver it as the protocol's terminal event.
+_LOCAL_ENDING: Final = "model_hub_local_ending"
 _SUPPORTED_PATHS: Final = frozenset(
     {
         "messages",
@@ -185,6 +203,9 @@ class _TurnExecution:
     # OpenCode owns its public tool names; the gateway may use collision-free
     # upstream aliases, but those names must never escape back to OpenCode.
     response_tool_aliases: Mapping[str, str] = field(default_factory=dict)
+    # The downstream event stream once its headers left before resolution
+    # finished. From then on every ending of this turn travels inside it.
+    stream_response: web.StreamResponse | None = None
 
     @property
     def upstream_observation(self) -> ProtocolSSEState | None:
@@ -906,27 +927,35 @@ class ModelHubTurnGateway:
                 decision=decision,
             )
 
+        protocol = _REQUEST_PROTOCOLS[endpoint]
         try:
             protocol_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in _PROTOCOL_HEADERS
             }
-            if backend == "opencode" and _REQUEST_PROTOCOLS[endpoint] == "openai_chat":
+            if backend == "opencode" and protocol == "openai_chat":
                 translation = translate_opencode_tool_names(payload)
                 payload = translation.request
                 execution.response_tool_aliases = translation.response_aliases
-            resolved = await self.service.resolve_with_recovery(
-                backend=backend,
-                model_id=resolution_model,
-                request=ModelHubRequest(
-                    payload,
-                    protocol=_REQUEST_PROTOCOLS[endpoint],
-                    headers=protocol_headers,
-                ),
-                stream=stream,
-                supply_channel="hub",
-                attempt_observer=observe_attempt,
-                recovery_observer=terminalizer.update_recovery,
-            )
+            async with self._stream_kept_alive(request, execution, protocol=protocol, stream=stream):
+                resolved = await self.service.resolve_with_recovery(
+                    backend=backend,
+                    model_id=resolution_model,
+                    request=ModelHubRequest(
+                        payload,
+                        protocol=protocol,
+                        headers=protocol_headers,
+                    ),
+                    stream=stream,
+                    supply_channel="hub",
+                    attempt_observer=observe_attempt,
+                    recovery_observer=terminalizer.update_recovery,
+                )
+                # Owned before the keepalive stops, so a cancellation while it
+                # stops still closes and meters a Source stream already won.
+                execution.resolved = resolved
+                if resolved.handle is not None and resolved.handle.stream is not None:
+                    execution.handle = resolved.handle
+                    resources.push_async_callback(resolved.handle.close_stream)
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -939,7 +968,7 @@ class ModelHubTurnGateway:
                 self._commit_and_render_turn_outcome(execution, terminalizer, turn_outcome)
                 # Native compatibility is keyed by the caller backend. Keep its
                 # transport result separate from actual upstream provenance.
-                return web.json_response(
+                response = web.json_response(
                     {
                         "type": "error",
                         "error": {
@@ -951,32 +980,109 @@ class ModelHubTurnGateway:
                     status=400 if backend == "codex" else 424,
                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
                 )
-            return self._terminal_error_response(
+                response[_LOCAL_ENDING] = _RenderedTurnOutcome(RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE)
+                return await self._through_committed_stream(execution, protocol, response)
+            return await self._through_committed_stream(
                 execution,
-                terminalizer,
-                status=exc.status,
-                code=exc.code,
-                turn_outcome=turn_outcome,
+                protocol,
+                self._terminal_error_response(
+                    execution,
+                    terminalizer,
+                    status=exc.status,
+                    code=exc.code,
+                    turn_outcome=turn_outcome,
+                ),
             )
 
-        execution.resolved = resolved
-        if resolved.handle is not None and resolved.handle.stream is not None:
-            execution.handle = resolved.handle
-            resources.push_async_callback(resolved.handle.close_stream)
+        if execution.handle is not None:
             # The execution boundary must own cleanup before an awaited health
             # write: cancellation here still settles and meters this handle.
             await self.service._observe_handle_recovery(
                 resolved.source_id, resolved.settlement_generation, resolved.handle,
                 backend=resolved.backend, model_id=resolved.requested_model_id,
             )
-        return await self._resolved_response(
-            request,
-            resolved,
-            protocol=_REQUEST_PROTOCOLS[endpoint],
-            stream=stream,
-            terminalizer=terminalizer,
-            execution=execution,
+        return await self._through_committed_stream(
+            execution,
+            protocol,
+            await self._resolved_response(
+                request,
+                resolved,
+                protocol=protocol,
+                stream=stream,
+                terminalizer=terminalizer,
+                execution=execution,
+            ),
         )
+
+    @asynccontextmanager
+    async def _stream_kept_alive(
+        self,
+        request: web.Request,
+        execution: _TurnExecution,
+        *,
+        protocol: str,
+        stream: bool,
+    ) -> AsyncIterator[None]:
+        """Keep a Claude stream visibly alive while its resolution is slow.
+
+        Codex and OpenCode key recovery handling on the HTTP status, so only
+        Claude streams trade it for a connection kept alive. Resolution still
+        runs in the caller with its own cancellation semantics; the keepalive
+        only writes while it waits, and it has stopped before anything else
+        writes to the response.
+        """
+
+        if not stream or protocol != "anthropic":
+            yield
+            return
+        resolution_ended = asyncio.get_running_loop().create_future()
+        keepalive = asyncio.create_task(self._write_keepalive(request, execution, resolution_ended))
+        try:
+            yield
+        finally:
+            resolution_ended.set_result(None)
+            await keepalive
+
+    async def _write_keepalive(
+        self,
+        request: web.Request,
+        execution: _TurnExecution,
+        resolution_ended: asyncio.Future[None],
+    ) -> None:
+        delay = _EARLY_STREAM_COMMIT_SECONDS
+        # A lost client cancels the request itself, and whatever writes next
+        # reports the disconnect at its own boundary.
+        with suppress(_DownstreamDisconnected):
+            while not (await asyncio.wait({resolution_ended}, timeout=delay))[0]:
+                delay = _STREAM_KEEPALIVE_SECONDS
+                if execution.stream_response is None:
+                    response = web.StreamResponse(status=200, headers=_SSE_RESPONSE_HEADERS)
+                    await self._downstream_io(response.prepare(request))
+                    execution.stream_response = response
+                else:
+                    await self._downstream_io(execution.stream_response.write(_STREAM_KEEPALIVE_FRAME))
+
+    async def _through_committed_stream(
+        self,
+        execution: _TurnExecution,
+        protocol: str,
+        response: web.StreamResponse,
+    ) -> web.StreamResponse:
+        """Deliver a local ending inside a stream whose headers already left.
+
+        The status line already promised an event stream, so the ending the
+        response would have carried travels as the protocol's terminal event.
+        """
+
+        committed = execution.stream_response
+        if committed is None or response is committed:
+            return response
+        ending = response.get(_LOCAL_ENDING)
+        if ending is not None:
+            frame = self._terminal_frame(protocol, ending.key, ending.message, ProtocolSSEState(protocol))
+            await self._downstream_io(committed.write(frame))
+        await self._downstream_io(committed.write_eof())
+        return committed
 
     async def _resolved_response(
         self,
@@ -1071,16 +1177,10 @@ class ModelHubTurnGateway:
                     if rewritten_payload is not None:
                         await run_owned_in_thread(rewritten_payload.close)
 
-        response = web.StreamResponse(
-            status=200,
-            headers={
-                "Cache-Control": "no-store",
-                "Content-Type": "text/event-stream",
-                "X-Accel-Buffering": "no",
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
-        await self._downstream_io(response.prepare(request))
+        response = execution.stream_response
+        if response is None:
+            response = web.StreamResponse(status=200, headers=_SSE_RESPONSE_HEADERS)
+            await self._downstream_io(response.prepare(request))
         wire_state = ProtocolSSEState(protocol)
         execution.wire_state = wire_state
         tool_name_rewriter = StreamingToolNameRewriter(execution.response_tool_aliases)
@@ -1192,18 +1292,23 @@ class ModelHubTurnGateway:
             return
         if rendered.key is None or rendered.message is None:
             return
+        frame = self._terminal_frame(protocol, rendered.key, rendered.message, wire_state)
+        await self._downstream_io(response.write(frame))
+
+    @staticmethod
+    def _terminal_frame(protocol: str, key: str, message: str, wire_state: ProtocolSSEState) -> bytes:
         frame_prefix = wire_state.invalidate_partial_frame()
         payload = json.dumps(
             render_protocol_terminal_event(
                 protocol,
-                rendered.key,
-                rendered.message,
+                key,
+                message,
                 wire_state.next_sequence_number,
             ),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        await self._downstream_io(response.write(frame_prefix + render_protocol_terminal_frame(protocol, payload)))
+        return frame_prefix + render_protocol_terminal_frame(protocol, payload)
 
     @staticmethod
     async def _downstream_io(operation):
@@ -1474,7 +1579,7 @@ class ModelHubTurnGateway:
         headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
         if retry_after is not None and status in {429, 503}:
             headers["Retry-After"] = str(max(1, retry_after))
-        return web.json_response(
+        response = web.json_response(
             {
                 "error": {
                     "type": code,
@@ -1485,3 +1590,5 @@ class ModelHubTurnGateway:
             status=status,
             headers=headers,
         )
+        response[_LOCAL_ENDING] = _RenderedTurnOutcome(code, message)
+        return response
