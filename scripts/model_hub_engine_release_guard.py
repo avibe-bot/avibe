@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -240,6 +241,70 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
     return spec
 
 
+def _gh_release(repository: str, *arguments: str) -> str:
+    try:
+        result = subprocess.run(
+            ["gh", "release", *arguments, "--repo", repository],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise ReleaseGuardError(f"unable to invoke GitHub CLI: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise ReleaseGuardError(
+            f"GitHub release {arguments[0]} failed ({exc.returncode}): "
+            f"{(exc.stderr or '').strip()}"
+        ) from exc
+    return result.stdout
+
+
+def publish_draft_release(
+    manifest_path: Path, asset_dir: Path, *, repository: str,
+) -> ReleaseSpec:
+    """Repair an unpublished asset set, verify its bytes, then publish it.
+
+    Both first publication and backup recovery use this boundary. Published
+    releases are immutable here. Verified local bytes can replace an incomplete
+    or unreadable draft; publication still requires a successful remote check.
+    """
+    spec = verify_release_assets(manifest_path, asset_dir)
+    snapshot = json.loads(
+        _gh_release(repository, "view", spec.asset_release_tag, "--json", "isDraft,assets")
+    )
+    if snapshot.get("isDraft") is not True:
+        raise ReleaseGuardError("refusing to replace assets on a published release")
+    current_names = {asset["name"] for asset in snapshot["assets"]}
+
+    with tempfile.TemporaryDirectory(prefix="avibe-engine-draft-") as temporary:
+        draft_dir = Path(temporary) / "assets"
+
+        def download() -> None:
+            draft_dir.mkdir()
+            _gh_release(
+                repository, "download", spec.asset_release_tag, "--dir", str(draft_dir),
+            )
+
+        try:
+            download()
+            verify_release_assets(manifest_path, draft_dir)
+        except ReleaseGuardError as exc:
+            print(f"Repairing unverified draft assets: {exc}", file=sys.stderr)
+            # Replacement owns the entire unpublished set, including names
+            # that are absent from the manifest. Never leave extra draft bytes.
+            for name in sorted(current_names):
+                _gh_release(repository, "delete-asset", spec.asset_release_tag, name, "--yes")
+            _gh_release(
+                repository, "upload", spec.asset_release_tag,
+                *(str(asset_dir / name) for name in sorted(spec.expected_asset_names)),
+            )
+            shutil.rmtree(draft_dir)
+            download()
+            verify_release_assets(manifest_path, draft_dir)
+        _gh_release(repository, "edit", spec.asset_release_tag, "--draft=false")
+    return spec
+
+
 def _download(url: str, destination: Path, *, max_bytes: int, attempts: int = 3) -> None:
     request = urllib.request.Request(
         url,
@@ -344,6 +409,11 @@ def _build_parser() -> argparse.ArgumentParser:
     fetch_source.add_argument("--output-dir", type=Path, required=True)
     verify = subparsers.add_parser("verify", help="Verify a materialized release directory.")
     verify.add_argument("--asset-dir", type=Path, required=True)
+    publish_draft = subparsers.add_parser(
+        "publish-draft", help="Repair and verify a draft using manifest-pinned assets before publication.",
+    )
+    publish_draft.add_argument("--asset-dir", type=Path, required=True)
+    publish_draft.add_argument("--repo", required=True)
     return parser
 
 
@@ -354,6 +424,8 @@ def main(argv: list[str] | None = None) -> int:
             spec = fetch_release_assets(args.manifest, args.output_dir)
         elif args.command == "fetch-source":
             spec = fetch_upstream_assets(args.manifest, args.output_dir)
+        elif args.command == "publish-draft":
+            spec = publish_draft_release(args.manifest, args.asset_dir, repository=args.repo)
         else:
             spec = verify_release_assets(args.manifest, args.asset_dir)
     except ReleaseGuardError as exc:

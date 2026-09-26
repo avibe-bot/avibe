@@ -1527,6 +1527,7 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(
     class Client:
         def __init__(self) -> None:
             self.inventory_calls = 0
+            self.damaged_name = "claude-damaged.json"
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             assert (method, path) == ("GET", "/auth-files")
@@ -1543,8 +1544,8 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(
                         "provider": "claude",
                     },
                     {
-                        "id": "claude-damaged.json",
-                        "name": "claude-damaged.json",
+                        "id": self.damaged_name,
+                        "name": self.damaged_name,
                         "provider": "claude",
                     },
                 ]
@@ -1648,8 +1649,32 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(
         assert store.credential_metadata(ref)["auth_name"] == new_name
         assert store.credential_metadata(damaged_ref)["auth_name"] == "claude-damaged.json"
 
+        # A partially successful pass is not complete: repair the rejected
+        # auth file and observe its migration on the same adapter, without stop.
+        store.write_oauth_auth_file(
+            "claude-damaged.json",
+            {
+                "type": "claude",
+                "prefix": store.credential_metadata(damaged_ref)["prefix"],
+                "email": "damaged@example.com",
+                "account_uuid": "damaged-account",
+                "organization_uuid": "organization-b",
+                "access_token": "private-access-damaged",
+            },
+        )
+        client.damaged_name = "claude-repaired.json"
+        (store.auth_dir / "claude-damaged.json").rename(store.auth_dir / client.damaged_name)
+        assert (await adapter.start()).health is EngineHealth.OK
+        assert client.inventory_calls == previous_inventory_calls + 2
+        assert store.credential_metadata(damaged_ref)["auth_name"] == client.damaged_name
+
+        # The separately skipped credential document must also keep the pass
+        # retryable, even after every auth-file reconciliation succeeds.
+        malformed_path.unlink()
+        assert (await adapter.start()).health is EngineHealth.OK
+        assert client.inventory_calls == previous_inventory_calls + 3
         await adapter.start()
-        assert client.inventory_calls == previous_inventory_calls + 1
+        assert client.inventory_calls == previous_inventory_calls + 3
 
     asyncio.run(run())
 

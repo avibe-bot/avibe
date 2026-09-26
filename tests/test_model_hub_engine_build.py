@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tarfile
@@ -28,7 +29,7 @@ FIXTURE_TARGETS = {
 }
 
 
-def _manifest(tmp_path: Path, *, source_sha: str) -> Path:
+def _manifest(tmp_path: Path, *, source_sha: str, patch: Path) -> Path:
     version = "v7.3.16"
     release_tag = "model-hub-engine-v7.3.16-3"
     assets = [
@@ -61,7 +62,12 @@ def _manifest(tmp_path: Path, *, source_sha: str) -> Path:
                 "asset_release_tag": release_tag,
                 "license": "MIT",
                 "assets": assets,
-                "build": {"go_version": "go1.26.0", "source_date_epoch": 123},
+                "build": {
+                    "go_version": "go1.26.0",
+                    "source_date_epoch": 123,
+                    "patch": patch.name,
+                    "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+                },
             }
         ),
         encoding="utf-8",
@@ -69,11 +75,15 @@ def _manifest(tmp_path: Path, *, source_sha: str) -> Path:
     return path
 
 
-@pytest.mark.parametrize("wrong_pinned_size", [False, True])
+@pytest.mark.parametrize(
+    ("patch_mode", "wrong_pinned_size"),
+    [("explicit", False), ("default", False), ("explicit", True), ("changed", False)],
+)
 def test_build_source_release_applies_patch_and_materializes_four_targets(
     tmp_path: Path,
     monkeypatch,
     wrong_pinned_size: bool,
+    patch_mode: str,
 ) -> None:
     source = tmp_path / "source"
     (source / "cmd" / "server").mkdir(parents=True)
@@ -113,7 +123,12 @@ def test_build_source_release_applies_patch_and_materializes_four_targets(
         ),
         encoding="utf-8",
     )
-    manifest = _manifest(tmp_path, source_sha=source_sha)
+    manifest = _manifest(tmp_path, source_sha=source_sha, patch=patch)
+    monkeypatch.setattr(builder, "REPO_ROOT", tmp_path)
+    if patch_mode == "changed":
+        # A provenance-only change leaves all compiled/archive bytes intact.
+        # Output hash validation alone cannot detect this changed build input.
+        patch.write_bytes(b"# changed provenance\n" + patch.read_bytes())
     if wrong_pinned_size:
         pinned = json.loads(manifest.read_text(encoding="utf-8"))
         pinned["assets"][0]["size_bytes"] = 1
@@ -136,6 +151,16 @@ def test_build_source_release_applies_patch_and_materializes_four_targets(
 
     monkeypatch.setattr(builder, "_run", fake_run)
     output = tmp_path / "output"
+    if patch_mode == "changed":
+        with pytest.raises(builder.BuildError, match="patch.*checksum"):
+            builder.build_source_release(
+                manifest,
+                output,
+                patch_path=patch,
+                source_repository=str(source),
+            )
+        assert not commands
+        return
     if wrong_pinned_size:
         with pytest.raises(guard.ReleaseGuardError, match="archive size mismatch"):
             builder.build_source_release(
@@ -150,9 +175,9 @@ def test_build_source_release_applies_patch_and_materializes_four_targets(
     generated_manifest = builder.build_source_release(
         manifest,
         output,
-        patch_path=patch,
         source_repository=str(source),
         go_binary="go",
+        **({"patch_path": patch} if patch_mode == "explicit" else {}),
     )
 
     assert {path.name for path in output.glob("*.tar.gz")} == {

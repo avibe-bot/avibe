@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import json
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -205,6 +206,85 @@ def test_manifest_rejects_non_owned_release_url(tmp_path: Path) -> None:
         guard.load_release_spec(manifest_path)
 
 
+@pytest.mark.parametrize(
+    "remote_state",
+    ["valid", "missing", "extra", "corrupt", "bad_upload", "published", "download_once", "unavailable"],
+)
+def test_draft_publication_repairs_exact_asset_set_before_becoming_public(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_state: str,
+) -> None:
+    # Contract: either publish the exact pinned bytes, or preserve the draft.
+    # The old workflow deleted only expected names, so an extra asset survived
+    # every recovery. Source-text assertions never exercised this transition.
+    manifest, owned, _upstream = _manifest(tmp_path)
+    monkeypatch.setattr(guard, "_download", _fake_download(owned))
+    verified = tmp_path / "verified"
+    guard.fetch_release_assets(manifest, verified)
+    expected = {path.name: path.read_bytes() for path in verified.iterdir()}
+    remote = dict(expected)
+    target = next(name for name in expected if name.endswith(".tar.gz"))
+    if remote_state == "missing":
+        del remote[target]
+    elif remote_state == "extra":
+        remote["unexpected.txt"] = b"interrupted draft"
+    elif remote_state in {"corrupt", "bad_upload"}:
+        remote[target] = b"corrupt upload"
+    is_draft = remote_state != "published"
+    calls = []
+
+    def fake_gh(command, **kwargs):
+        nonlocal is_draft
+        assert command[:2] == ["gh", "release"]
+        assert command[-2:] == ["--repo", "fixture/engine"]
+        assert command[3] == "model-hub-engine-v7.2.149-1"
+        calls.append(command[2])
+        action = command[2]
+        stdout = ""
+        if action == "view":
+            stdout = json.dumps({"isDraft": is_draft, "assets": [{"name": name} for name in remote]})
+        elif action == "download":
+            if remote_state == "unavailable" or (
+                remote_state == "download_once" and calls.count("download") == 1
+            ):
+                raise subprocess.CalledProcessError(1, command)
+            destination = Path(command[command.index("--dir") + 1])
+            for name, data in remote.items():
+                (destination / name).write_bytes(data)
+        elif action == "delete-asset":
+            del remote[command[4]]
+        elif action == "upload":
+            for filename in command[4:-2]:
+                path = Path(filename)
+                remote[path.name] = path.read_bytes()
+            if remote_state == "bad_upload":
+                remote[target] = b"corrupt upload"
+        elif action == "edit":
+            assert "--draft=false" in command
+            is_draft = False
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    monkeypatch.setattr(guard.subprocess, "run", fake_gh)
+    result = guard.main([
+        "--manifest", str(manifest), "publish-draft",
+        "--asset-dir", str(verified), "--repo", "fixture/engine",
+    ])
+    if remote_state in {"bad_upload", "published", "unavailable"}:
+        assert result == 1
+        assert is_draft is (remote_state != "published")
+        assert "edit" not in calls
+        if remote_state == "published":
+            assert "delete-asset" not in calls and "upload" not in calls
+    else:
+        assert result == 0
+        assert not is_draft
+        assert remote == expected
+        assert calls[-2:] == ["download", "edit"]
+        if remote_state == "valid":
+            assert "delete-asset" not in calls and "upload" not in calls
+
+
 def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
     workflow = (
         guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml"
@@ -220,11 +300,8 @@ def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
     assert "missing_assets" in workflow
     assert "--clobber" not in workflow
     assert "--json isDraft" in workflow
-    assert 'gh release edit "$release_tag"' in workflow
-    assert "--draft=false" in workflow
-    assert "gh release download \"$release_tag\"" in workflow
+    assert workflow.count("model_hub_engine_release_guard.py publish-draft") == 2
     assert "model_hub_engine_release_guard.py verify" in workflow
-    assert "gh release delete-asset" in workflow
     assert "publish-patched-source:" in workflow
     assert "needs: build-patched-source" in workflow
     assert "needs: [publish-patched-source]" in workflow

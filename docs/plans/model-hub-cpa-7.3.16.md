@@ -49,6 +49,11 @@ after successful engine startup around the entire compatibility pass:
   A subsequent start retries the pass without a background retry loop.
 - Individual damaged metadata and ownership conflicts remain isolated so
   healthy bindings can migrate; targeted operations still report those conflicts.
+- Completion means the whole optional pass succeeded, not merely that errors
+  were isolated. Auth-file reconciliation returns completeness, and a final
+  strict metadata scan prevents skipped documents (including an entirely
+  unreadable Claude inventory) from being cached as success. Repaired records
+  are retried by the same adapter on the next start, without stopping CPA.
 - Targeted credential validation and revocation retain strict ownership checks;
   this startup policy does not authorize guessing or deleting ambiguous grants.
 
@@ -56,6 +61,27 @@ The consuming startup test covers unavailable inventory, invalid inventory
 shape, missing management client, unavailable metadata, recovery, and actual
 engine startup failure. Build tests use an independently declared archive
 fixture and platform set, not expectations learned from a prior build.
+
+### Release publication and provenance boundary
+
+Review through `df6fef95c` exposed another recurrence: both publication and
+backup recovery implemented draft repair independently, and name-intersection
+replacement could never recover an unexpected asset. Both jobs now invoke one
+guard-owned draft operation. It verifies the local pinned set, requires an
+unpublished release, downloads and verifies the remote set, replaces the entire
+draft set when it is unreadable or mismatched, and re-downloads before publication.
+This includes interrupted uploads whose listed assets cannot be downloaded;
+an already-public release is never rewritten by this operation.
+
+The consuming publication test covers valid, missing, extra and corrupt draft
+assets, a corrupt replacement upload, transient and persistent download failures,
+and refusal to modify a published release. The old expected-name-only replacement fails the
+extra-asset case; the exact-set replacement passes it.
+
+The builder resolves `build.patch` from the manifest, or accepts a local copy
+only when its bytes match `build.patch_sha256`. It validates this input before
+checkout/build, independently of output hashes: a provenance-only patch change
+can leave all binary/archive hashes unchanged and must still be rejected.
 
 ### Native Chat token fields
 
@@ -97,6 +123,16 @@ CPA's canonical `max_completion_tokens` conversion.
 
 ## Evidence and limits
 
+- The follow-up completion/provenance/draft-repair changes passed 525 focused
+  tests across runtime, source identity, builder, release guard and inference
+  waiting, plus Ruff and diff checks. An independent read-only review found no
+  remaining defects after exercising unreadable-draft recovery. Exact-head
+  hosted review and CI remain delivery gates.
+- Workflow run `36213312402` built and published `model-hub-engine-v7.3.16-3`
+  from `df6fef95c078536c4406d1357ea676daaba7160b`. The first guard hit a
+  transient public-download 404; failed-job rerun attempt 2 completed
+  successfully, including the verified backup. An independent public download
+  subsequently verified all nine assets against the unchanged packaged manifest.
 - The four patched archive sizes, archive SHA-256 values, and extracted binary
   SHA-256 values are recorded in the packaged manifest.
 - The patch is limited to the helper shared by CPA's buffered and streaming

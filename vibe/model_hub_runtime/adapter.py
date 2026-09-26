@@ -1737,21 +1737,25 @@ class CLIProxyEngineAdapter:
                 self.state_store._oauth_credentials,
                 isolate_errors=True,
             )
-            if not any(
+            if any(
                 str(metadata.get("vendor") or "").strip().lower() == "anthropic"
                 for _credential_ref, metadata in oauth_credentials
             ):
-                self._oauth_startup_reconciled = True
-                return
+                client_getter = getattr(self.supervisor, "client_if_running", None)
+                if not callable(client_getter):
+                    raise EngineStateError("OAuth startup reconciliation is unavailable")
+                client = await asyncio.to_thread(client_getter)
+                if client is None:
+                    raise EngineStateError("OAuth startup reconciliation is unavailable")
+                inventory = await run_owned_in_thread(_auth_inventory, client)
+                if not await self._reconcile_oauth_inventory(inventory, isolate_errors=True):
+                    return
 
-            client_getter = getattr(self.supervisor, "client_if_running", None)
-            if not callable(client_getter):
-                raise EngineStateError("OAuth startup reconciliation is unavailable")
-            client = await asyncio.to_thread(client_getter)
-            if client is None:
-                raise EngineStateError("OAuth startup reconciliation is unavailable")
-            inventory = await run_owned_in_thread(_auth_inventory, client)
-            await self._reconcile_oauth_inventory(inventory, isolate_errors=True)
+            # Isolation lets healthy bindings migrate, but a skipped metadata
+            # document must not turn that partial pass into cached completion.
+            # Reuse strict enumeration as the final completeness check, also
+            # when every Claude record was unreadable in the initial scan.
+            await asyncio.to_thread(self.state_store._oauth_credentials)
         except (EngineClientError, EngineStateError, OSError) as exc:
             logger.warning("Model Hub OAuth startup reconciliation deferred: %s", type(exc).__name__)
             return
@@ -2704,8 +2708,8 @@ class CLIProxyEngineAdapter:
         inventory: Mapping[str, _AuthRecord],
         *,
         isolate_errors: bool = False,
-    ) -> None:
-        await asyncio.to_thread(
+    ) -> bool:
+        return await asyncio.to_thread(
             self._reconcile_oauth_inventory_sync,
             inventory,
             isolate_errors=isolate_errors,
@@ -2716,7 +2720,8 @@ class CLIProxyEngineAdapter:
         inventory: Mapping[str, _AuthRecord],
         *,
         isolate_errors: bool = False,
-    ) -> None:
+    ) -> bool:
+        complete = True
         for auth in inventory.values():
             if auth.provider != "claude":
                 continue
@@ -2729,11 +2734,13 @@ class CLIProxyEngineAdapter:
             except EngineStateError as exc:
                 if not isolate_errors:
                     raise
+                complete = False
                 logger.warning(
                     "Model Hub OAuth startup reconciliation skipped %s: %s",
                     auth.name,
                     exc,
                 )
+        return complete
 
     def _reconcile_oauth_credential_for_mutation(
         self,

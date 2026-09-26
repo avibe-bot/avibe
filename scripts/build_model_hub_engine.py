@@ -20,7 +20,6 @@ from typing import Any, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "vibe" / "model_hub_runtime" / "cliproxyapi_manifest.json"
-DEFAULT_PATCH = REPO_ROOT / "patches" / "model-hub-cpa-v7.3.16" / "openai-compat-native-token-field.patch"
 DEFAULT_SOURCE_REPOSITORY = "https://github.com/router-for-me/CLIProxyAPI.git"
 
 TARGETS = {
@@ -208,7 +207,7 @@ def build_source_release(
     output_dir: Path,
     *,
     source_repository: str = DEFAULT_SOURCE_REPOSITORY,
-    patch_path: Path = DEFAULT_PATCH,
+    patch_path: Path | None = None,
     go_binary: str = "go",
 ) -> Path:
     """Build all pinned targets and return the checked-in manifest path."""
@@ -224,6 +223,22 @@ def build_source_release(
     build_metadata = payload.get("build")
     if not isinstance(build_metadata, dict):
         build_metadata = {}
+    recorded_patch = build_metadata.get("patch")
+    patch_digest = build_metadata.get("patch_sha256")
+    if (
+        not isinstance(recorded_patch, str)
+        or not recorded_patch
+        or Path(recorded_patch).is_absolute()
+        or ".." in Path(recorded_patch).parts
+        or not isinstance(patch_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", patch_digest) is None
+    ):
+        raise BuildError("Model Hub manifest compatibility patch identity is invalid")
+    patch_path = patch_path if patch_path is not None else REPO_ROOT / recorded_patch
+    if not patch_path.is_file() or patch_path.is_symlink():
+        raise BuildError("Model Hub compatibility patch is missing or unsafe")
+    if _sha256(patch_path) != patch_digest:
+        raise BuildError("Model Hub compatibility patch checksum differs from pinned manifest")
     source_date_epoch = build_metadata.get("source_date_epoch", 0)
     if isinstance(source_date_epoch, bool) or not isinstance(source_date_epoch, int) or source_date_epoch < 0:
         raise BuildError("Model Hub build source_date_epoch is invalid")
@@ -324,7 +339,10 @@ def build_source_release(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--patch", type=Path, default=DEFAULT_PATCH)
+    parser.add_argument(
+        "--patch", type=Path,
+        help="Use a local copy of the manifest-pinned patch (checksum must match).",
+    )
     parser.add_argument("--source-repository", default=DEFAULT_SOURCE_REPOSITORY)
     parser.add_argument("--go", default="go", dest="go_binary")
     parser.add_argument("output_dir", type=Path)
