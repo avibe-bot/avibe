@@ -1114,7 +1114,19 @@ class ModelHubService:
             raise ModelHubError("submission_rejected", status=422) from None
         except ModelHubError:
             raise
-        except Exception:
+        except Exception as error:
+            from core.backend_restart import NativeMigrationBlockedError
+
+            # A native writer refusal is an answered state, not an engine
+            # outage: reporting it as engine_down sends the user retrying a
+            # start that the same refusal will block again.
+            if isinstance(error, NativeMigrationBlockedError):
+                code = (
+                    error.reason
+                    if error.reason in {"config_recovery", "migration_recovery_pending"}
+                    else "migration_native_busy"
+                )
+                raise ModelHubError(code, status=409) from None
             raise ModelHubError("engine_down", status=503) from None
 
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:

@@ -30,6 +30,7 @@ class AgentAuthService(Protocol):
         *,
         force_reset: bool = True,
         owner_ref: str | None = None,
+        new_source: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -131,6 +132,7 @@ class AgentAuthNativeOAuthAdapter:
             source_id,
             vendor,
             force_reset=False,
+            new_source=True,
         )
 
     async def start_reauth(
@@ -155,6 +157,7 @@ class AgentAuthNativeOAuthAdapter:
         vendor: str,
         *,
         force_reset: bool,
+        new_source: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -167,6 +170,7 @@ class AgentAuthNativeOAuthAdapter:
             backend,
             force_reset=force_reset,
             owner_ref=source_id,
+            new_source=new_source,
             on_irreversible_start=on_irreversible_start,
         )
         flow_id = getattr(flow, "flow_id", None)

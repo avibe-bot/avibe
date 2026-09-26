@@ -17,6 +17,7 @@ from config import paths
 from config.v2_config import ModelHubSourceConfig, ModelHubSourceStateConfig, V2Config
 from core.agent_auth_service import AgentAuthService, BackendLoginInProgressError
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError
+from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
 from modules.im import MessageContext
 from tests.test_native_takeover_lifecycle import controller_fixture
 from vibe import api, claude_config, opencode_config
@@ -109,6 +110,63 @@ def test_retained_subscription_requires_matching_source_binding(backend, vendor)
     with NativeCredentialLease((backend,)) as lease:
         with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
             lease.assert_auth_custody(backend, source_id=source.id)
+
+
+@pytest.mark.parametrize("backend,vendor", [("codex", "openai"), ("claude", "anthropic")])
+def test_hub_backend_admits_creating_the_empty_native_subscription_slot(backend, vendor):
+    saved_config(enabled=False)
+    with NativeCredentialLease((backend,)) as lease:
+        lease.assert_auth_custody(backend, source_id="src_new000001", new_source=True)
+        # Generic Settings/IM login carries no Source to create.
+        for source_id, new_source in ((None, True), ("src_new000001", False)):
+            with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
+                lease.assert_auth_custody(backend, source_id=source_id, new_source=new_source)
+    source = native_source(vendor=vendor)
+    saved_config(source=source)
+    with NativeCredentialLease((backend,)) as lease:
+        # The vendor's single native credential already belongs to a Source.
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
+            lease.assert_auth_custody(backend, source_id="src_new000001", new_source=True)
+    source.supply_channel = "hub"
+    source.credential_ref = "fixture-ref"
+    saved_config(source=source)
+    with NativeCredentialLease((backend,)) as lease:
+        # A Hub Source id cannot be reused as a new native Source.
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
+            lease.assert_auth_custody(backend, source_id=source.id, new_source=True)
+        lease.assert_auth_custody(backend, source_id="src_new000001", new_source=True)
+
+
+@pytest.mark.asyncio
+async def test_model_hub_native_subscription_start_is_admitted_in_hub_mode():
+    """Scenario: AUTH-SETUP-910 — Web add-subscription reaches the CLI login on a Hub install."""
+    config = saved_config()
+    service = AgentAuthService(SimpleNamespace(config=config))
+    client = SimpleNamespace(disconnect=AsyncMock())
+    service._start_claude_control_flow = AsyncMock(
+        return_value=(client, "https://claude.ai/oauth/authorize?fixture=1", None)
+    )
+    waiting = asyncio.Event()
+
+    async def wait(flow):
+        waiting.set()
+        await asyncio.Event().wait()
+
+    service._wait_for_claude_completion_web = wait
+    service._terminate_web_flow = AsyncMock()
+    adapter = AgentAuthNativeOAuthAdapter(
+        service,
+        auth_status_reader=lambda _backend: {"active_auth_mode": "oauth"},
+    )
+
+    state = await adapter.start_oauth("src_new000001", "anthropic")
+    await asyncio.wait_for(waiting.wait(), 2)
+    try:
+        assert state.source_id == "src_new000001"
+        assert state.auth_url == "https://claude.ai/oauth/authorize?fixture=1"
+        service._start_claude_control_flow.assert_awaited_once()
+    finally:
+        await adapter.cancel_oauth(state.flow_id)
 
 
 def test_other_vendor_source_cannot_authorize_backend():

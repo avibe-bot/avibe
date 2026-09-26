@@ -28,6 +28,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.backend_restart import NativeMigrationBlockedError
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     EngineEnsureResult,
@@ -5879,6 +5880,28 @@ def test_native_oauth_preserves_transient_login_conflict_identity(tmp_path):
     assert exc_info.value.code == "native_login_in_progress"
     assert exc_info.value.detail == "modelHub.errors.native_login_in_progress"
     assert exc_info.value.data == {}
+
+
+@pytest.mark.parametrize(
+    "reason,code",
+    [
+        ("native_auth_hub_owned", "migration_native_busy"),
+        ("migration_recovery_pending", "migration_recovery_pending"),
+        ("config_recovery", "config_recovery"),
+    ],
+)
+def test_native_oauth_custody_refusal_is_not_reported_as_engine_down(tmp_path, reason, code):
+    class CustodyRefusedAdapter(FakeAdapter):
+        async def start_oauth(self, source_id, vendor):
+            raise NativeMigrationBlockedError(reason, ("claude",))
+
+    service, _, _ = _service(tmp_path, CustodyRefusedAdapter())
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == code
 
 
 def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tmp_path):

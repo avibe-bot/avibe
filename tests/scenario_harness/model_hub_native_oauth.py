@@ -109,6 +109,7 @@ class FakeAgentAuthService:
         *,
         force_reset: bool = True,
         owner_ref: str | None = None,
+        new_source: bool = False,
         on_irreversible_start=None,
     ):
         if force_reset and on_irreversible_start is not None:

@@ -33,8 +33,8 @@ export type SubscriptionVendor = (typeof SUBSCRIPTION_VENDORS)[number];
  *  gains a chooser when Avibe sanctions a CLI for it and someone writes what the
  *  choice costs, and a vendor without either is hub-held and starts straight into
  *  its flow. Two tables would let them disagree, and the disagreement is not
- *  cosmetic — the gesture that allocates the provider tab lives in the menu for a
- *  vendor with no chooser and in the dialog for one with a chooser (PD-1).
+ *  cosmetic — a vendor with a chooser shows its channel choice before any login
+ *  starts, and one without starts its login as the dialog opens.
  */
 const SUBSCRIPTION_CHOOSER = {
   anthropic: { copy: 'claude', brand: 'Claude' },

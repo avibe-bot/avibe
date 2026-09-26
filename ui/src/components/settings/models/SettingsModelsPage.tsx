@@ -66,11 +66,10 @@ import {
 } from './regionRead';
 import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, runtimeCanAttemptInstall, runtimeIsRunning } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
-import { handOffProviderTab } from './providerTab';
 import { canReauth, reauthBodyKey, reauthCost } from './repair';
 import { resumeGatewayAdoption } from './gatewayAdoption';
 import { groupMigrationCandidates } from './migrationGrouping';
-import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
+import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
 import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
@@ -1656,12 +1655,6 @@ export const SettingsModelsPage: React.FC = () => {
                                   tabIndex={subscriptionPickerIndex === index ? 0 : -1}
                                   onClick={() => {
                                     subscriptionPickerHandoffRef.current = true;
-                                    // A hub-only vendor opens §1.4 straight into its flow — no
-                                    // chooser phase, so no 去登录 gesture inside the dialog to
-                                    // allocate the provider tab. This click is the journey's only
-                                    // gesture, exactly as the re-auth confirm is, so the tab is
-                                    // handed off here or the handoff is popup-blocked (PD-1).
-                                    if (!hasNativeSubscriptionCustody(vendor)) handOffProviderTab();
                                     setSubscriptionPickerOpen(false);
                                     setSubscriptionVendor(vendor);
                                   }}
@@ -1766,9 +1759,6 @@ export const SettingsModelsPage: React.FC = () => {
           confirmLabel={t('settings.models.repair.reauthConfirm') as string}
           destructive={reauthCost(quotaReauthSource) === 'immediate'}
           onConfirm={() => {
-            // The journey's only user gesture, as in the detail panel: allocate
-            // the provider tab here so the dialog's POST is not popup-blocked.
-            handOffProviderTab();
             const target = quotaReauthSource;
             setQuotaReauthSource(null);
             setReauthSource(target);
