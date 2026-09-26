@@ -5,7 +5,7 @@ import { expect, test } from './support/gateway';
 import { labelledButton } from './support/hub';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
 
-test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route intent', async ({ api, gateway, hub, page }) => {
+test('MH-ROUTING-007 follow-defaults switch, undo, cancel, and save preserve explicit route intent', async ({ api, gateway, hub, page }) => {
   const original = await captureAgentChain(api, gateway);
   const originalOrder = await api.defaultSourceOrder(gateway.backend);
   const manual = { hops: [{ source_id: gateway.sources[0].id, model_id: `${gateway.model}/manual-original` }] };
@@ -43,20 +43,23 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
       expect(body.chain.manual_override).toBeNull();
       expect(body.chain.route_origin).toBe(inherited.route_origin);
       expect(identities(body.chain)).toEqual(identities(inherited));
-      await expect(dialog.locator('.model-hub-route-preview')).toHaveAttribute('data-origin', inherited.route_origin!);
+      await expect(dialog.locator('.model-hub-route-pending')).toHaveAttribute('data-origin', inherited.route_origin!);
       await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText(inherited.chain.map((hop) => hop.model_id));
-      await expect(labelledButton(dialog, copy('routing.undoRestore'))).toBeEnabled();
+      await expect(undo()).toBeEnabled();
       await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeEnabled();
       expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual(manual);
       expect(mutations).toEqual([]);
     };
+    const follow = dialog.getByRole('radio', { name: copy('routeDialog.mode.follow'), exact: true });
+    const custom = dialog.getByRole('radio', { name: copy('routeDialog.mode.custom'), exact: true });
+    const undo = () => labelledButton(dialog.locator('.model-hub-route-pending'), copy('routeDialog.mode.undo'));
     const removeLast = async () => {
       await expect(dialog.locator('.model-hub-route-hop')).toHaveCount(1);
       await preview(() => dialog.getByRole('button', { name: copy('routeDialog.removeHop'), exact: true }).press('Enter'));
     };
-    await preview(() => labelledButton(dialog, copy('routing.restoreAutomatic')).click());
-    await labelledButton(dialog, copy('routing.undoRestore')).click();
-    await expect(labelledButton(dialog, copy('routing.restoreAutomatic'))).toBeVisible();
+    await preview(() => follow.click());
+    await undo().click();
+    await expect(custom).toHaveAttribute('aria-checked', 'true');
     await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText([manual.hops[0].model_id]);
     expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual(manual);
     expect(mutations).toEqual([]);
@@ -75,7 +78,7 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
     await expect(dialog.locator('.model-hub-route-hop-name')).toHaveText([gateway.sources[0].display_name]);
     await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText([unsavedModel]);
     await removeLast();
-    await labelledButton(dialog, copy('routing.undoRestore')).click();
+    await undo().click();
     await expect(dialog.locator('.model-hub-route-hop-name')).toHaveText([gateway.sources[0].display_name]);
     await expect(dialog.locator('.model-hub-route-hop-model')).toHaveText([unsavedModel]);
     await removeLast();
@@ -122,8 +125,8 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
     expect(identities(reloaded)).toEqual(identities(inherited));
     await expect(hub.routeRow(gateway.backend, gateway.model).locator('button.model-hub-route-origin')).toHaveText(copy(`routing.origin.${reloaded.route_origin}`));
     await hub.openRoute(gateway.backend, gateway.model);
-    await expect(labelledButton(dialog, copy('routing.pinRoute'))).toBeVisible();
-    await expect(dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first()).toBeVisible();
+    await expect(follow).toHaveAttribute('aria-checked', 'true');
+    await expect(dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true })).toHaveCount(0);
     await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
     await labelledButton(dialog, copy('routing.close')).click();
   } finally {

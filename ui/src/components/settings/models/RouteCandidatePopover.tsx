@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/command";
 import {
   Popover,
+  PopoverAnchor,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
@@ -35,6 +36,10 @@ export const RouteCandidatePopover: React.FC<{
   onReturnFocus?: () => void;
   trigger: React.ReactElement;
   width: "route" | "trigger";
+  /** Opened by another control (a phone's row menu) instead of `trigger`,
+   *  which is then only the anchor the panel hangs from. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }> = ({
   candidates,
   sources,
@@ -45,9 +50,17 @@ export const RouteCandidatePopover: React.FC<{
   onReturnFocus,
   trigger,
   width,
+  open: controlledOpen,
+  onOpenChange,
 }) => {
   const { t } = useTranslation();
-  const [open, setOpen] = React.useState(false);
+  const [innerOpen, setInnerOpen] = React.useState(false);
+  const controlled = controlledOpen !== undefined;
+  const open = controlled ? controlledOpen : innerOpen;
+  const setOpen = (next: boolean) => {
+    if (!controlled) setInnerOpen(next);
+    onOpenChange?.(next);
+  };
   const [query, setQuery] = React.useState("");
   const [candidate, setCandidate] = React.useState<RouteCandidate | null>(null);
   const [customModel, setCustomModel] = React.useState('');
@@ -102,6 +115,31 @@ export const RouteCandidatePopover: React.FC<{
     });
   }, [matched, open]);
 
+  const prime = () => {
+    setCustomModel('');
+    setManualOpen(false);
+    setCustomSource(typedSources.find((source) => source.id === initialHop?.source_id)?.id ?? typedSources[0]?.id ?? '');
+    setQuery("");
+    setCandidate(
+      (initialHop
+        ? candidates.find(
+            (item) => candidateKey(item.hop) === candidateKey(initialHop),
+          )
+        : null) ??
+        candidates[0] ??
+        null,
+    );
+  };
+  // A controlled open arrives as a prop, not through Radix's onOpenChange, so
+  // it is primed here — before paint, so the panel never shows a stale pick.
+  const primeRef = React.useRef(prime);
+  React.useLayoutEffect(() => { primeRef.current = prime; });
+  const primedOpen = React.useRef(false);
+  React.useLayoutEffect(() => {
+    if (controlled && controlledOpen && !primedOpen.current) primeRef.current();
+    primedOpen.current = Boolean(controlled && controlledOpen);
+  }, [controlled, controlledOpen]);
+
   const chooseCandidate = (next: string) => {
     setCandidate(
       matched.find((item) => candidateKey(item.hop) === next) ?? null,
@@ -114,19 +152,7 @@ export const RouteCandidatePopover: React.FC<{
       open={open}
       onOpenChange={(nextOpen) => {
         if (nextOpen) {
-          setCustomModel('');
-          setManualOpen(false);
-          setCustomSource(typedSources.find((source) => source.id === initialHop?.source_id)?.id ?? typedSources[0]?.id ?? '');
-          setQuery("");
-          setCandidate(
-            (initialHop
-              ? candidates.find(
-                  (item) => candidateKey(item.hop) === candidateKey(initialHop),
-                )
-              : null) ??
-              candidates[0] ??
-              null,
-          );
+          prime();
         } else {
           pendingCandidateRef.current = null;
           setQuery("");
@@ -135,7 +161,9 @@ export const RouteCandidatePopover: React.FC<{
         setOpen(nextOpen);
       }}
     >
-      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+      {controlled
+        ? <PopoverAnchor asChild>{trigger}</PopoverAnchor>
+        : <PopoverTrigger asChild>{trigger}</PopoverTrigger>}
       {/* This picker is body-portalled inside a scroll-locked dialog. A modal
           popover owns the nested scroll lock, while a bounded downward panel
           stays attached to either the full-width Add trigger or a row action. */}

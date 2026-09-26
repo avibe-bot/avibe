@@ -8,6 +8,22 @@ const settled = (panel: Locator) => panel.evaluate(async (element: HTMLElement) 
   await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished));
 });
 
+// Rows are editable only on a custom route. On a phone the two row actions fold
+// into one menu, so every spec reaches them through the same path either way.
+const enterCustom = async (dialog: Locator, copy: (key: string) => string) => {
+  const custom = dialog.getByRole('radio', { name: copy('routeDialog.mode.custom'), exact: true });
+  if (await custom.getAttribute('aria-checked') !== 'true') await custom.click();
+  await expect(custom).toHaveAttribute('aria-checked', 'true');
+};
+const hopAction = async (dialog: Locator, copy: (key: string) => string, action: 'editHop' | 'removeHop', index = 0) => {
+  const page = dialog.page();
+  const direct = dialog.getByRole('button', { name: copy(`routeDialog.${action}`), exact: true });
+  if (await dialog.getByRole('button', { name: copy('routeDialog.hopActions'), exact: true }).count()) {
+    await dialog.getByRole('button', { name: copy('routeDialog.hopActions'), exact: true }).nth(index).click();
+    await page.getByRole('menuitem', { name: copy(`routeDialog.${action}`), exact: true }).click();
+  } else await direct.nth(index).click();
+};
+
 for (const backend of ['claude', 'codex', 'opencode']) {
   for (const lang of ['en', 'zh'] as const) {
     for (const origin of ['automatic', 'passthrough', 'manual']) {
@@ -24,18 +40,26 @@ for (const backend of ['claude', 'codex', 'opencode']) {
         const save = foot.getByRole('button', { name: copy('routeDialog.save'), exact: true });
         const state = async () => JSON.parse(await page.getByTestId('route-state').innerText());
         const baseline = (await state()).saved;
-        await expect(dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true })).toHaveCount(2);
+        await expect(dialog.locator('.model-hub-route-hop')).toHaveCount(2);
         await expect(save).toBeDisabled();
+        // An inherited route is read only until the explicit Custom switch.
+        const inherited = origin !== 'manual';
+        await expect(dialog.locator('.model-hub-route-hop[data-editable]')).toHaveCount(inherited ? 0 : 2);
+        await enterCustom(dialog, copy);
+        await expect(dialog.locator('.model-hub-route-hop[data-editable]')).toHaveCount(2);
+        if (inherited) await expect(save).toBeEnabled();
+        else await expect(save).toBeDisabled();
 
         // Real nested portal/touch dismissal must leave the parent and intent intact.
-        await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+        await hopAction(dialog, copy, 'editHop');
         await expect(page.locator('.model-hub-route-selector')).toBeVisible();
         await page.keyboard.press('Escape');
         await expect(page.locator('.model-hub-route-selector')).toHaveCount(0);
         await expect(dialog).toBeVisible();
-        await expect(save).toBeDisabled();
+        if (inherited) await expect(save).toBeEnabled();
+        else await expect(save).toBeDisabled();
 
-        await dialog.getByRole('button', { name: copy('routeDialog.removeHop'), exact: true }).first().click();
+        await hopAction(dialog, copy, 'removeHop');
         await expect(dialog.locator('.model-hub-route-hop-name')).toHaveText(['Provider B']);
         await expect(save).toBeEnabled();
         await foot.getByRole('button', { name: copy('routing.cancelChanges'), exact: true }).click();
@@ -46,7 +70,8 @@ for (const backend of ['claude', 'codex', 'opencode']) {
         expect((await state()).saved).toEqual(baseline);
         expect((await state()).writes).toEqual([]);
 
-        await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+        await enterCustom(dialog, copy);
+        await hopAction(dialog, copy, 'editHop');
         const selector = page.locator('.model-hub-route-selector');
         await selector.getByRole('button', { name: copy('routeDialog.add.manual'), exact: true }).click();
         await selector.getByLabel(copy('routing.exactModel'), { exact: true }).fill('exact/model-中文');
@@ -88,7 +113,7 @@ for (const lang of ['en', 'zh'] as const) {
         expect(footBox!.y + footBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
         const overflow = await dialog.evaluate((element) => {
           const box = element.getBoundingClientRect();
-          return [...element.querySelectorAll<HTMLElement>('.model-hub-route-foot button, .model-hub-route-hop, .model-hub-route-origin-line, .model-hub-route-title')]
+          return [...element.querySelectorAll<HTMLElement>('.model-hub-route-foot button, .model-hub-route-hop, .model-hub-route-mode, .model-hub-route-pending, .model-hub-route-title')]
             .filter((node) => {
               const rect = node.getBoundingClientRect();
               return rect.left < box.left - 1 || rect.right > box.right + 1
@@ -100,7 +125,8 @@ for (const lang of ['en', 'zh'] as const) {
       };
       await checkGeometry();
       await page.screenshot({ path: test.info().outputPath(`route-${lang}-${theme}-clean.png`), scale: 'css' });
-      await foot.getByRole('button', { name: copy('routing.pinRoute'), exact: true }).click();
+      await enterCustom(dialog, copy);
+      await expect(dialog.locator('.model-hub-route-pending')).toBeVisible();
       await expect(save).toBeEnabled();
       await checkGeometry();
       await page.screenshot({ path: test.info().outputPath(`route-${lang}-${theme}-dirty.png`), scale: 'css' });
@@ -136,6 +162,7 @@ for (const lang of ['en', 'zh'] as const) {
     const dialogBox = (await dialog.boundingBox())!;
     expect(Math.abs(dialogBox.y + dialogBox.height / 2 - viewport.height / 2)).toBeLessThanOrEqual(1);
 
+    await enterCustom(dialog, copy);
     await dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true }).click();
     const selector = page.locator('.model-hub-route-selector');
     await expect(selector).toBeVisible();
@@ -177,6 +204,7 @@ test('MH-ROUTING-007: a panel with nothing to type by hand is a band shorter', a
   await page.getByRole('button', { name: 'Open route', exact: true }).click();
   const dialog = page.locator('.model-hub-route-dialog');
   await expect(dialog.locator('.model-hub-route-hop')).toHaveCount(2);
+  await enterCustom(dialog, (key) => hub(key, {}, 'en'));
   await dialog.getByRole('button', { name: hub('routeDialog.addHop', {}, 'en'), exact: true }).click();
   const selector = page.locator('.model-hub-route-selector');
   await expect(selector).toBeVisible();
@@ -216,6 +244,7 @@ for (const lang of ['en', 'zh'] as const) {
     await page.getByRole('button', { name: 'Open route', exact: true }).click();
     const dialog = page.locator('.model-hub-route-dialog');
     await expect(dialog.locator('.model-hub-route-hop')).toHaveCount(2);
+    await enterCustom(dialog, copy);
     await dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true }).click();
     const selector = page.locator('.model-hub-route-selector');
     await expect(selector).toBeVisible();
@@ -292,7 +321,8 @@ for (const [label, width] of [['small', 390], ['large', 430]] as const) {
     await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
     await page.getByRole('button', { name: 'Open route', exact: true }).click();
     const dialog = page.locator('.model-hub-route-dialog');
-    await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+    await enterCustom(dialog, copy);
+    await hopAction(dialog, copy, 'editHop');
     const selector = page.locator('.model-hub-route-selector');
     await expect(selector).toBeVisible();
     await settled(selector);
@@ -350,7 +380,8 @@ test('MH-ROUTING-007: the picker keeps each source beside its own models', async
   await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
   await page.getByRole('button', { name: 'Open route', exact: true }).click();
   const dialog = page.locator('.model-hub-route-dialog');
-  await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+  await enterCustom(dialog, copy);
+  await hopAction(dialog, copy, 'editHop');
   const selector = page.locator('.model-hub-route-selector');
   await expect(selector).toBeVisible();
   await settled(selector);
@@ -407,7 +438,8 @@ test('MH-ROUTING-007: the pinned source does not take the row\'s clicks', async 
   await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
   await page.getByRole('button', { name: 'Open route', exact: true }).click();
   const dialog = page.locator('.model-hub-route-dialog');
-  await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+  await enterCustom(dialog, copy);
+  await hopAction(dialog, copy, 'editHop');
   const selector = page.locator('.model-hub-route-selector');
   await expect(selector).toBeVisible();
   await settled(selector);
@@ -446,7 +478,8 @@ test('MH-ROUTING-007: a candidate row reads as clickable', async ({ page }) => {
   await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
   await page.getByRole('button', { name: 'Open route', exact: true }).click();
   const dialog = page.locator('.model-hub-route-dialog');
-  await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+  await enterCustom(dialog, copy);
+  await hopAction(dialog, copy, 'editHop');
   const selector = page.locator('.model-hub-route-selector');
   await expect(selector).toBeVisible();
 
