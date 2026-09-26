@@ -3048,6 +3048,36 @@ def test_cloud_token_for_request_mints_for_authorized_remote_asr(
     }
 
 
+@pytest.mark.parametrize(
+    ("declared", "relayed"),
+    (
+        (["realtime_reply_context", 7, None, {"x": 1}], ["realtime_reply_context"]),
+        ("realtime_reply_context", []),
+        (None, []),
+        ([f"feature_{index}" for index in range(40)], [f"feature_{index}" for index in range(32)]),
+    ),
+)
+def test_cloud_token_relays_only_bounded_string_capabilities(
+    monkeypatch,
+    declared,
+    relayed,
+) -> None:
+    """The browser gates optional realtime protocol fields on these values, so
+    a malformed or missing backend field must never enable one."""
+    config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config, role="editor")
+    minted = {"access_token": "ct_xyz", "expires_in": 43200}
+    if declared is not None:
+        minted["capabilities"] = declared
+    monkeypatch.setattr(remote_access, "_json_request", lambda *a, **k: minted)
+
+    token = remote_access.cloud_token_for_request(config, cookie)
+
+    assert token is not None
+    assert token["capabilities"] == relayed
+
+
 def test_cloud_token_for_request_rejects_non_asr_scope(monkeypatch) -> None:
     config = _cloud_broker_config()
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)

@@ -419,6 +419,9 @@ export interface ComposerProps {
    *  unset keeps the plain textarea (e.g. the Workbench home). */
   onSearchAgents?: (query: string) => Promise<AgentSearchResult[]>;
   onSearchSessions?: (query: string) => Promise<SessionSearchResult[]>;
+  /** The chat's latest Agent reply, read once when dictation starts and sent to
+   *  realtime recognition as context. Surfaces without one leave it unset. */
+  readLatestAgentReply?: () => string | undefined;
 }
 
 export interface ComposerHandle {
@@ -463,6 +466,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   autoFocus = false,
   onSearchAgents,
   onSearchSessions,
+  readLatestAgentReply,
 }, ref) {
   const { t } = useTranslation();
   const { voiceInput: voiceInputShortcut } = useActionShortcuts();
@@ -1065,6 +1069,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     const insertion = capturedInsertion ?? captureVoiceInsertion();
+    const reply = readLatestAgentReply?.();
     recordingStartRef.current = true;
     setRecordingStarting(true);
     let stream: MediaStream | null = null;
@@ -1107,6 +1112,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       session.realtime = new VoiceRealtimeSession({
         before: insertion.before,
         after: insertion.after,
+        reply,
         signal: abortController.signal,
         onPreview: (preview) => {
           if (recordingSessionRef.current !== session || unmountedRef.current) return;

@@ -1858,8 +1858,9 @@ def cloud_token_for_request(
 ) -> dict[str, Any] | None:
     """Mint a short-lived, subject-bound Cloud ASR token for a remote editor.
 
-    Returns ``{base_url, token, expires_at, scope}`` for the frontend, or ``None``
-    when the request is not an eligible remote ASR request or the mint fails.
+    Returns ``{base_url, token, expires_at, scope, capabilities}`` for the
+    frontend, or ``None`` when the request is not an eligible remote ASR request
+    or the mint fails.
 
     This deliberately does not reuse ``can_chat``: that capability authorizes a
     local Agent turn and must remain false for every remote caller. New Cloud
@@ -1902,7 +1903,25 @@ def cloud_token_for_authorization(
         "token": str(minted["access_token"]),
         "expires_at": int(time.time()) + int(minted.get("expires_in", 0) or 0),
         "scope": scope,
+        "capabilities": _cloud_token_capabilities(minted.get("capabilities")),
     }
+
+
+# Bound on the backend-declared optional features relayed to the browser.
+_MAX_CLOUD_TOKEN_CAPABILITIES = 32
+
+
+def _cloud_token_capabilities(value: Any) -> list[str]:
+    """Relay the optional cloud features avibe.bot declared for this token.
+
+    The browser gates optional protocol fields on them (for example
+    ``realtime_reply_context`` for the realtime voice ``start`` frame), so only
+    a bounded list of strings passes; a backend that predates the field yields
+    no capabilities.
+    """
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)][:_MAX_CLOUD_TOKEN_CAPABILITIES]
 
 
 def _resource_acl_sync_configured(config: V2Config | None) -> bool:

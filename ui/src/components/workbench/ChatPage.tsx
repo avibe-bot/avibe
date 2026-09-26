@@ -592,6 +592,21 @@ export const ChatPage: React.FC = () => {
   const [historicalWindow, setHistoricalWindow] = useState(false);
   const historicalWindowRef = useRef(false);
   historicalWindowRef.current = historicalWindow;
+  // Realtime dictation context: the body of the latest Agent reply in this chat,
+  // without Avibe's generated footer. A result row is persisted whole, so a
+  // running Turn still reads the previous reply. A window detached from the live
+  // tail may not hold the latest reply, so it offers none.
+  const readLatestAgentReply = useCallback((): string | undefined => {
+    if (historicalWindowRef.current) return undefined;
+    const rows = messagesRef.current;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      if (row.author === 'agent' && row.type === 'result') {
+        return resultFooterParts(row).body || undefined;
+      }
+    }
+    return undefined;
+  }, []);
   const oldestLoadedIdRef = useRef<string | null>(null);
   const newestLoadedIdRef = useRef<string | null>(null);
   // Owned here but driven by the Transcript scroller (which reads/writes it in
@@ -3030,6 +3045,7 @@ export const ChatPage: React.FC = () => {
         {(writable || readOnlyReason !== null) && <Compose
           key={sessionId}
           composerRef={composerRef}
+          readLatestAgentReply={readLatestAgentReply}
           onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
           onStop={stopMessage}
           busy={working}
@@ -3504,6 +3520,7 @@ export const QueueStrip: React.FC<{
 
 interface ComposeProps {
   composerRef: React.Ref<ComposerHandle>;
+  readLatestAgentReply: ComposerProps['readLatestAgentReply'];
   onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[]) => void;
   onStop: () => void;
   busy: boolean;
@@ -3518,7 +3535,7 @@ interface ComposeProps {
   readOnlyReason: SessionReadOnlyReason | null;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3540,6 +3557,7 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, se
         onDraftChange={onDraftChange}
         onSearchAgents={onSearchAgents}
         onSearchSessions={onSearchSessions}
+        readLatestAgentReply={readLatestAgentReply}
         // Read-only archived session: reuse the composer's own disabled +
         // placeholder props rather than swapping in a notice bar. ``busy`` is NOT
         // reliably false here — archive commits before the controller turn is

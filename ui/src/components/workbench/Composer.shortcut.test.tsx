@@ -23,6 +23,7 @@ const voiceMocks = vi.hoisted(() => ({
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
   realtimeStart: vi.fn(),
+  realtimeOptions: [] as Array<{ reply?: string }>,
 }));
 vi.hoisted(() => {
   Range.prototype.getBoundingClientRect = () => new DOMRect();
@@ -55,6 +56,10 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
 vi.mock('../../lib/voiceRealtime', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/voiceRealtime')>(),
   VoiceRealtimeSession: class {
+    constructor(options: { reply?: string }) {
+      voiceMocks.realtimeOptions.push(options);
+    }
+
     start = voiceMocks.realtimeStart;
     finish = voiceMocks.realtimeFinish;
     abort = voiceMocks.realtimeAbort;
@@ -83,6 +88,7 @@ type ComposerTestState = {
   initialDraft?: string;
   mentions?: boolean;
   onSend?: (text: string) => void;
+  readLatestAgentReply?: () => string | undefined;
   shortcutStartEnabled?: boolean;
 };
 
@@ -118,6 +124,7 @@ const ComposerShortcutHarness = ({
         initialDraft={state.initialDraft}
         onSearchAgents={state.mentions ? async () => [] : undefined}
         onSearchSessions={state.mentions ? async () => [] : undefined}
+        readLatestAgentReply={state.readLatestAgentReply}
       />
     </>
   );
@@ -150,6 +157,7 @@ beforeEach(() => {
   voiceMocks.realtimeAbort.mockReset();
   voiceMocks.realtimeFinish.mockReset();
   voiceMocks.realtimeStart.mockReset().mockReturnValue(new Promise(() => undefined));
+  voiceMocks.realtimeOptions = [];
   voiceMocks.getUserMedia.mockResolvedValue({
     getTracks: () => [{ stop: vi.fn() }],
   });
@@ -373,5 +381,18 @@ describe('Composer voice shortcut', () => {
     voiceMocks.finish.mockReset();
     fireEvent.keyDown(window, { code: 'Escape', key: 'Escape' });
     expect(voiceMocks.abort).toHaveBeenCalledOnce();
+  });
+
+  it('gives realtime recognition the chat reply present when dictation starts', async () => {
+    let latestReply = 'Run make release on prod-7.';
+    renderComposer('reply-context-session', { readLatestAgentReply: () => latestReply });
+    const mic = await screen.findByRole('button', { name: en.chat.compose.voice });
+    await act(async () => undefined);
+
+    fireEvent.click(mic);
+    latestReply = 'A reply that arrived after dictation started';
+    await waitFor(() => expect(voiceMocks.realtimeOptions).toHaveLength(1));
+
+    expect(voiceMocks.realtimeOptions[0].reply).toBe('Run make release on prod-7.');
   });
 });
