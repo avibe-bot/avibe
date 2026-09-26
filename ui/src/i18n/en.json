@@ -94,6 +94,7 @@
       "checkFailed": "Could not verify an update. Check your connection and try again. This release may require manual installation.",
       "installFailed": "The update could not be installed. The previous application has been retained. Please retry or reinstall the previous release.",
       "install": "Download and Install",
+      "skip": "Skip This Version",
       "cancel": "Later",
       "confirm": "An update is available. Download and install it now? Avibe will restart. Your sessions and settings will be kept.",
       "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",

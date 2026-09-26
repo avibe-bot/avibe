@@ -13,7 +13,7 @@ use tauri::{
     menu::{CheckMenuItem, MenuItem},
     AppHandle, Manager,
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 pub const MENU_ID: &str = "desktop-update";
@@ -54,6 +54,7 @@ pub struct Catalog {
     check_failed: String,
     pub(super) install_failed: String,
     install: String,
+    skip: String,
     cancel: String,
 }
 fn catalog() -> Catalog {
@@ -81,6 +82,7 @@ pub struct Updater {
     state: Mutex<State>,
     busy: AtomicBool,
     channel_path: PathBuf,
+    skipped_path: PathBuf,
     pub menu: MenuItem<tauri::Wry>,
     pub channel_menu: CheckMenuItem<tauri::Wry>,
 }
@@ -112,6 +114,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         }),
         busy: AtomicBool::new(false),
         channel_path,
+        skipped_path: app.path().app_local_data_dir()?.join("update-skipped.json"),
         menu: MenuItem::with_id(app, MENU_ID, &c.menu, true, None::<&str>)?,
         channel_menu: CheckMenuItem::with_id(
             app,
@@ -168,6 +171,42 @@ fn show(app: &AppHandle, message: &str, latest: Option<&str>) {
         text.push_str(&format!("\n{}: {version}", c.latest));
     }
     app.dialog().message(text).title(c.title).show(|_| {});
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Choice {
+    Install,
+    Skip,
+    Later,
+}
+/// Closing the dialog (Esc, window close) is never an implicit install or skip.
+fn choice(result: &MessageDialogResult, c: &Catalog) -> Choice {
+    match result {
+        MessageDialogResult::Custom(label) if *label == c.install => Choice::Install,
+        MessageDialogResult::Custom(label) if *label == c.skip => Choice::Skip,
+        _ => Choice::Later,
+    }
+}
+/// Only the automatic startup check honours a skipped version; an explicit menu
+/// check always offers it, and any newer release prompts again.
+fn should_prompt(interactive: bool, skipped: Option<&str>, version: &str) -> bool {
+    interactive || skipped != Some(version)
+}
+fn skipped_version(updater: &Updater) -> Option<String> {
+    std::fs::read(&updater.skipped_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+fn skip_version(app: &AppHandle, version: &str) {
+    let path = &app.state::<Updater>().skipped_path;
+    let result = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing config directory"))
+        .and_then(std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(path, serde_json::to_vec(version).expect("version JSON")));
+    if let Err(error) = result {
+        eprintln!("desktop update skip: {error}");
+    }
 }
 
 #[derive(Deserialize)]
@@ -323,6 +362,11 @@ pub fn check(app: AppHandle, interactive: bool) {
         match find_update(&app, channel).await {
             Ok(Some((update, manifest))) => {
                 set_state(&app, Phase::Available, Some(manifest.version.clone()));
+                let skipped = skipped_version(&app.state::<Updater>());
+                if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
+                    finish(&app);
+                    return;
+                }
                 let c = catalog();
                 let confirmation = app.clone();
                 app.dialog()
@@ -334,14 +378,21 @@ pub fn check(app: AppHandle, interactive: bool) {
                         manifest.version,
                         c.confirm
                     ))
-                    .title(c.title)
-                    .buttons(MessageDialogButtons::OkCancelCustom(c.install, c.cancel))
-                    .show(move |confirmed| {
-                        if confirmed {
-                            install(confirmation, update, manifest);
-                        } else {
+                    .title(c.title.clone())
+                    // The dialog plugin reports Esc/close as the third label, so
+                    // that slot must be the harmless "Later", never "Skip".
+                    .buttons(MessageDialogButtons::YesNoCancelCustom(
+                        c.install.clone(),
+                        c.skip.clone(),
+                        c.cancel.clone(),
+                    ))
+                    .show_with_result(move |result| match choice(&result, &c) {
+                        Choice::Install => install(confirmation, update, manifest),
+                        Choice::Skip => {
+                            skip_version(&confirmation, &manifest.version);
                             finish(&confirmation);
                         }
+                        Choice::Later => finish(&confirmation),
                     });
             }
             Ok(None) => {
@@ -443,6 +494,44 @@ mod tests {
                 assert_eq!(release.signature(key).unwrap(), &manifest.platforms[*key].signature);
             }
         }
+    }
+
+    #[test]
+    fn dialog_buttons_map_to_one_choice_and_dismissal_is_later() {
+        for locale in ["en", "zh"] {
+            let c = super::super::native_catalog_for_locales([locale.to_owned()]).updater;
+            let labels = [&c.install, &c.skip, &c.cancel];
+            assert_eq!(
+                labels.iter().collect::<std::collections::HashSet<_>>().len(),
+                3,
+                "button labels identify the choice"
+            );
+            assert_eq!(
+                choice(&MessageDialogResult::Custom(c.install.clone()), &c),
+                Choice::Install
+            );
+            assert_eq!(choice(&MessageDialogResult::Custom(c.skip.clone()), &c), Choice::Skip);
+            assert_eq!(
+                choice(&MessageDialogResult::Custom(c.cancel.clone()), &c),
+                Choice::Later
+            );
+            for dismissed in [
+                MessageDialogResult::Cancel,
+                MessageDialogResult::Ok,
+                MessageDialogResult::Yes,
+                MessageDialogResult::No,
+            ] {
+                assert_eq!(choice(&dismissed, &c), Choice::Later);
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_startup_check_honours_a_skipped_version() {
+        assert!(!should_prompt(false, Some("1.2.3"), "1.2.3"));
+        assert!(should_prompt(false, Some("1.2.3"), "1.2.4"));
+        assert!(should_prompt(false, None, "1.2.3"));
+        assert!(should_prompt(true, Some("1.2.3"), "1.2.3"));
     }
 
     #[test]

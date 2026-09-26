@@ -957,7 +957,7 @@ fn updates_have_one_native_owner_and_no_remote_install_permission() {
     assert!(source.contains("updater::check(app.handle().clone(), false)"));
     assert!(source.contains("updater::MENU_ID => updater::check(app.clone(), true)"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
-    assert!(updater.contains("MessageDialogButtons::OkCancelCustom"));
+    assert!(updater.contains("MessageDialogButtons::YesNoCancelCustom"));
     assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
     assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));
     assert!(!include_str!("../build.rs").contains("update_install"));

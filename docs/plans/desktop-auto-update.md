@@ -10,6 +10,14 @@ Stable builds default to stable; prerelease builds default to TEST. Channel choi
 is local to the shell. No downgrade, Python in-place upgrade, backend update, or
 mutation of `~/.avibe` / private Runtime slots is part of application replacement.
 
+## Skip this version
+
+The update prompt offers Install, Skip This Version, and Later. Skip records only
+that exact version in the shell's local data directory; the automatic startup
+check stays silent for it, while an explicit menu check and any newer release
+prompt again. Dismissing the dialog (Esc or close) always means Later. There is
+no silent auto-install option: installation keeps its native confirmation.
+
 ## Distribution contract
 
 GitHub Releases in `avibe-bot/avibe` are the discovery source. Canonical stable
