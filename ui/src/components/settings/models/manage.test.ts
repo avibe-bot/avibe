@@ -167,7 +167,7 @@ describe('source management capabilities', () => {
       submitting_edit: { kind: 'submitting_edit', draft, patch, plan: null, forced: false, surface: 'edit' },
       confirming_edit: { kind: 'confirming_edit', draft, patch, plan },
       edit_failed: { kind: 'edit_failed', draft, patch, plan, forced: true, retryRead: true, before },
-      confirming_delete: { kind: 'confirming_delete', plan },
+      confirming_delete: { kind: 'confirming_delete' },
       submitting_delete: { kind: 'submitting_delete', plan, forced: true },
       delete_failed: { kind: 'delete_failed', plan, forced: true, retryRead: true, before },
       committed_edit: { kind: 'committed_edit' },

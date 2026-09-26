@@ -359,7 +359,7 @@ describe('Source entity landing through the shared authority', () => {
     const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retrySupply'));
     const supplyRetry = page.slice(page.indexOf('const retrySupply'), page.indexOf('const retryEvents'));
 
-    expect(detail).toMatch(/trackMutation\(async \(latest, settlement\)[\s\S]*?modelsApi\.refreshSource\(latest\.id, confirmation\)/);
+    expect(detail).toMatch(/trackMutation\(async \(latest, settlement\)[\s\S]*?modelsApi\.refreshSource\(latest\.id, next \? confirmGuardPlan\(next\) : undefined\)/);
     expect(detail).toMatch(/await settlement\.source\(answer\.source\)/);
     expect(page).toMatch(/sourceWriteRegistry\.track\(sourceId[\s\S]*?sourceEntityAuthority\.current\(sourceId\)[\s\S]*?sourceEntityAuthority\.begin\(sourceId\)[\s\S]*?const settlement: SourceMutationSettlement/);
     expect(page).toMatch(/source: async \(echoed, scope\)[\s\S]*?sourceEntityAuthority\.settle\(generation/);

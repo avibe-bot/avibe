@@ -80,8 +80,12 @@ export interface MentionEditorHandle {
    *  previews replace one another without persisting as draft edits. */
   showVoicePreview: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
   /** Replace the active preview, or the original captured range, with the final
-   *  cleaned transcript as one ordinary draft edit. */
-  commitVoicePreview: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
+   *  cleaned transcript as one ordinary draft edit. Returns the committed
+   *  insertion so callers can preserve the caret at its end. */
+  commitVoicePreview: (
+    snapshot: VoiceInsertionSnapshot,
+    text: string,
+  ) => VoiceInsertionSnapshot | null;
   /** Restore the rich editor state captured before the first voice preview.
    *  Refuses to restore if the user has changed the draft since that preview. */
   restoreVoicePreview: () => boolean;
@@ -491,6 +495,17 @@ function BootstrapPlugin({
           selection.focus.set(end.key, end.offset, end.type);
           $setSelection(selection);
           selection.insertText(result.insertion);
+          // Lexical normally collapses an inserted range to its end, but the
+          // editor may be blurred while voice transcription is finishing.
+          // Rebuild the caret from the serialized insertion boundary so the
+          // later focus return cannot restore the pre-voice selection.
+          const caret = serializedPointAtOffset(result.snapshot.end);
+          if (caret) {
+            const caretSelection = $createRangeSelection();
+            caretSelection.anchor.set(caret.key, caret.offset, caret.type);
+            caretSelection.focus.set(caret.key, caret.offset, caret.type);
+            $setSelection(caretSelection);
+          }
           inserted = result.snapshot;
         }, {
           tag,
@@ -575,7 +590,7 @@ function BootstrapPlugin({
             true,
           );
           if (inserted !== null) voicePreviewRef.current = null;
-          return inserted !== null;
+          return inserted;
         },
         restoreVoicePreview: () => {
           const active = voicePreviewRef.current;

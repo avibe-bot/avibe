@@ -13,7 +13,9 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
 import { classifyModelHubFailure } from './asyncLifetime';
 import { Field } from './dialogFields';
+import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
+import { confirmGuardPlan, guardedFailure, sendAgreed } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
 import { useSourceDetailsHidden } from './sourcePrivacyPreference';
@@ -33,7 +35,7 @@ import type {
   ManageStage,
   SourceEditDraft,
 } from './manage';
-import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
+import { apiFailure, modelsApi } from './modelsApi';
 import {
   SOURCE_PROVIDER_COPY_KEYS,
   sourceProviderIdentity,
@@ -129,12 +131,6 @@ type GuardedAction =
   | { kind: 'refetch'; plan: ManageGuardPlan }
   | { kind: 'removeModel'; model: SuppliedModel; plan: ManageGuardPlan };
 
-const confirmGuardPlan = (plan: ManageGuardPlan): GuardConfirmation => ({
-  force: true,
-  would_remove_hops: plan.hops,
-  would_interrupt: plan.gaps,
-});
-
 const GUARD_COPY_KIND: Record<GuardedAction['kind'], 'refetch' | 'removeModel'> = {
   refetch: 'refetch',
   removeModel: 'removeModel',
@@ -208,12 +204,7 @@ export const SourceDetailPanel: React.FC<{
     dispatchManageStage({ type: 'begin_delete' });
   };
 
-  const guardedFailure = (error: unknown): ManageGuardPlan | null => {
-    const failure = apiFailure(error);
-    if (!failure || (failure.wouldRemoveHops.length === 0 && failure.wouldInterrupt.length === 0)) return null;
-    return { hops: failure.wouldRemoveHops, gaps: failure.wouldInterrupt };
-  };
-  const refetch = (confirmation?: GuardConfirmation) => {
+  const refetch = (plan: ManageGuardPlan | null = null) => {
     if (busy) return Promise.resolve();
     setResult(null);
     setRefetchFailed(false);
@@ -221,7 +212,9 @@ export const SourceDetailPanel: React.FC<{
     return trackMutation(async (latest, settlement) => {
       const before = new Set(latest.models.map((model) => model.id));
       try {
-        const answer = await modelsApi.refreshSource(latest.id, confirmation);
+        const answer = await sendAgreed(plan !== null, plan, (next) => (
+          modelsApi.refreshSource(latest.id, next ? confirmGuardPlan(next) : undefined)
+        ));
         const after = new Set(answer.source.models.map((model) => model.id));
         const added = [...after].filter((id) => !before.has(id));
         const removed = [...before].filter((id) => !after.has(id));
@@ -231,11 +224,14 @@ export const SourceDetailPanel: React.FC<{
       } catch (error) {
         if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
         else {
-          const refusal = guardedFailure(error);
+          // A confirmed refetch was already answered: a plan that kept moving
+          // past the resend bound ends as a failure, never a second question.
+          const refusal = plan === null ? guardedFailure(error) : null;
           if (refusal) {
             setGuard({ kind: 'refetch', plan: refusal });
             settlement.release();
           } else {
+            setGuard(null);
             setRefetchFailed(true);
             try {
               const inventory = await settlement.readInventory();
@@ -347,7 +343,7 @@ export const SourceDetailPanel: React.FC<{
     settlement.release();
     setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
   };
-  const remove = (model: SuppliedModel, confirmation?: GuardConfirmation) => {
+  const remove = (model: SuppliedModel, plan: ManageGuardPlan | null = null) => {
     if (busy) return Promise.resolve();
     setResult(null);
     setRefetchFailed(false);
@@ -360,17 +356,22 @@ export const SourceDetailPanel: React.FC<{
         return;
       }
       try {
-        const echoed = await modelsApi.deleteCustomModel(latest.id, model.id, confirmation);
+        const echoed = await sendAgreed(plan !== null, plan, (next) => (
+          modelsApi.deleteCustomModel(latest.id, model.id, next ? confirmGuardPlan(next) : undefined)
+        ));
         setGuard(null);
         await settlement.source(echoed);
       } catch (error) {
         if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
         else {
-          const refusal = guardedFailure(error);
+          const refusal = plan === null ? guardedFailure(error) : null;
           if (refusal) {
             setGuard({ kind: 'removeModel', model, plan: refusal });
             settlement.release();
-          } else await reconcileRemoval(latest.id, model, settlement);
+          } else {
+            setGuard(null);
+            await reconcileRemoval(latest.id, model, settlement);
+          }
         }
       }
     }).finally(() => setPendingAction(null));
@@ -477,11 +478,13 @@ export const SourceDetailPanel: React.FC<{
     });
     setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
+      // A plan here is the guard's question already answered.
+      let sent = plan;
       try {
-        const answer = await modelsApi.patchSource(
-          latest.id,
-          plan ? { ...patch, ...confirmGuardPlan(plan) } : patch,
-        );
+        const answer = await sendAgreed(forced, plan, (next) => {
+          sent = next;
+          return modelsApi.patchSource(latest.id, next ? { ...patch, ...confirmGuardPlan(next) } : patch);
+        });
         const impact = committedPlan(answer.removed_hops, answer.interrupted);
         await commitManagementMutation(
           'edit',
@@ -499,9 +502,9 @@ export const SourceDetailPanel: React.FC<{
             (scope) => settlement.gone(latest.id, undefined, scope),
           );
         } else if (classifyModelHubFailure(failure) === 'inconclusive') {
-          await reconcileEditWrite(latest, draft, patch, plan, settlement);
+          await reconcileEditWrite(latest, draft, patch, sent, settlement);
         } else {
-          const refusal = guardedFailure(error);
+          const refusal = forced ? null : guardedFailure(error);
           if (refusal) {
             dispatchManageStage({ type: 'guard_edit', draft, patch, plan: refusal });
             settlement.release();
@@ -510,8 +513,8 @@ export const SourceDetailPanel: React.FC<{
               type: 'fail_edit',
               draft,
               patch,
-              plan,
-              forced,
+              plan: sent,
+              forced: sent !== null,
               retryRead: false,
               before: latest,
             });
@@ -523,15 +526,18 @@ export const SourceDetailPanel: React.FC<{
   };
   const submitDelete = (plan: ManageGuardPlan | null) => {
     if (busy) return Promise.resolve();
-    const forced = plan !== null;
     dispatchManageStage({ type: 'submit_delete', plan });
     setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
+      // Deleting is confirmed before the first attempt, and that confirmation
+      // says it removes the source from every route that uses it — so whatever
+      // plan the guard names is already agreed to.
+      let sent = plan;
       try {
-        const answer = await modelsApi.deleteSource(
-          latest.id,
-          plan ? confirmGuardPlan(plan) : undefined,
-        );
+        const answer = await sendAgreed(true, plan, (next) => {
+          sent = next;
+          return modelsApi.deleteSource(latest.id, next ? confirmGuardPlan(next) : undefined);
+        });
         const impact = committedPlan(answer.removed_hops, answer.interrupted);
         await commitManagementMutation(
           'delete',
@@ -551,16 +557,10 @@ export const SourceDetailPanel: React.FC<{
             (scope) => settlement.gone(latest.id, undefined, scope),
           );
         } else if (classifyModelHubFailure(failure) === 'inconclusive') {
-          await reconcileDeleteWrite(latest, plan, settlement);
+          await reconcileDeleteWrite(latest, sent, settlement);
         } else {
-          const refusal = guardedFailure(error);
-          if (refusal) {
-            dispatchManageStage({ type: 'guard_delete', plan: refusal });
-            settlement.release();
-          } else {
-            dispatchManageStage({ type: 'fail_delete', plan, forced, retryRead: false, before: latest });
-            settlement.release();
-          }
+          dispatchManageStage({ type: 'fail_delete', plan: sent, forced: sent !== null, retryRead: false, before: latest });
+          settlement.release();
         }
       }
     }).finally(() => setPendingAction(null));
@@ -621,12 +621,12 @@ export const SourceDetailPanel: React.FC<{
     if (manageStage.kind === 'confirming_edit') {
       void submitEdit(manageStage.draft, manageStage.patch, manageStage.plan);
     }
-    if (manageStage.kind === 'confirming_delete') void submitDelete(manageStage.plan);
+    if (manageStage.kind === 'confirming_delete') void submitDelete(null);
   };
   const confirmGuard = () => {
     if (!guard) return;
-    if (guard.kind === 'refetch') void refetch(confirmGuardPlan(guard.plan));
-    if (guard.kind === 'removeModel') void remove(guard.model, confirmGuardPlan(guard.plan));
+    if (guard.kind === 'refetch') void refetch(guard.plan);
+    if (guard.kind === 'removeModel') void remove(guard.model, guard.plan);
   };
   const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
   const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
@@ -835,38 +835,23 @@ export const SourceDetailPanel: React.FC<{
           </DialogPrimitive.Content>
         </DialogPrimitive.Portal>
       </DialogPrimitive.Root>
-      <DialogPrimitive.Root open={guard !== null || manageGuardOpen} onOpenChange={(open) => {
-        if (!open && !busy) {
-          if (manageGuardOpen) cancelManage();
-          else setGuard(null);
-        }
-      }}>
-        <DialogPrimitive.Portal>
-          <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
-          <DialogPrimitive.Content
-            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none"
-            onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-            onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
-          >
-            <header className="model-hub-guard-head">
-              <div className="flex items-center justify-between gap-3">
-                <DialogPrimitive.Title className="model-hub-guard-title text-foreground">{manageGuardOpen
-                    ? t(`settings.models.guard.title.${manageCopyKind}`, { source: source.display_name })
-                    : t(`settings.models.guard.title.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`, { model: guard?.kind === 'removeModel' ? guard.model.id : undefined, source: source.display_name })}</DialogPrimitive.Title>
-                <DialogPrimitive.Close asChild><Button type="button" variant="ghost" size="icon" className="model-hub-guard-close" disabled={busy} aria-label={t('settings.models.guard.cancel')} title={t('settings.models.guard.cancel')}><X aria-hidden /></Button></DialogPrimitive.Close>
-              </div>
-              <DialogPrimitive.Description className="model-hub-guard-subtitle">{manageGuardOpen
-                  ? t(`settings.models.guard.subtitle.${manageCopyKind}`)
-                  : t(`settings.models.guard.subtitle.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`)}</DialogPrimitive.Description>
-            </header>
-            {manageGuardOpen && managePlan && <div className="model-hub-guard-body"><GuardImpact hops={managePlan.hops} gaps={managePlan.gaps} /></div>}
-            {!manageGuardOpen && guard?.plan && <div className="model-hub-guard-body"><GuardImpact hops={guard.plan.hops} gaps={guard.plan.gaps} /></div>}
-            {manageGuardOpen
-              ? <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={cancelManage} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmManage} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${manageCopyKind}`)}</Button></footer>
-              : <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={() => setGuard(null)} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmGuard} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`)}</Button></footer>}
-          </DialogPrimitive.Content>
-        </DialogPrimitive.Portal>
-      </DialogPrimitive.Root>
+      <GuardDialog
+        open={guard !== null || manageGuardOpen}
+        title={manageGuardOpen
+          ? t(`settings.models.guard.title.${manageCopyKind}`, { source: source.display_name })
+          : t(`settings.models.guard.title.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`, { model: guard?.kind === 'removeModel' ? guard.model.id : undefined, source: source.display_name })}
+        subtitle={manageGuardOpen
+          ? t(`settings.models.guard.subtitle.${manageCopyKind}`)
+          : t(`settings.models.guard.subtitle.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`)}
+        confirmLabel={t(`settings.models.guard.confirm.${manageGuardOpen ? manageCopyKind : guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`)}
+        busy={busy}
+        onCancel={manageGuardOpen ? cancelManage : () => setGuard(null)}
+        onConfirm={manageGuardOpen ? confirmManage : confirmGuard}
+      >
+        {manageGuardOpen
+          ? managePlan && <GuardImpact hops={managePlan.hops} gaps={managePlan.gaps} />
+          : guard?.plan && <GuardImpact hops={guard.plan.hops} gaps={guard.plan.gaps} />}
+      </GuardDialog>
     </div>
   );
 };
