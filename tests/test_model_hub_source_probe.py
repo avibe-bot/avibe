@@ -10,6 +10,7 @@ import pytest
 
 from config.v2_config import ModelHubSourceStateConfig
 from core.handlers.model_hub.adapter import DiscoveredModel, RawOutcomeKind, SOURCE_PROTOCOLS, SourceBinding
+from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub import service as service_module
 from tests.test_model_hub_api import FakeAdapter, FakeInvokeHandle, _service
@@ -92,7 +93,7 @@ def test_probe_invokes_selected_source_even_without_agent_routes_and_isolates_fa
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("case", ["success", "unverified_success", "failure", "newer_attempt"])
+@pytest.mark.parametrize("case", ["success", "unverified_success", "failure", "newer_attempt", "older_attempt"])
 def test_successful_test_lifts_cooldown_only_for_its_own_current_attempt(tmp_path, case):
     service, store, adapter = _service(tmp_path)
 
@@ -102,6 +103,8 @@ def test_successful_test_lifts_cooldown_only_for_its_own_current_attempt(tmp_pat
             status="cooldown", retry_at="2026-07-23T02:59:00+00:00",
             detail_key="models.source.cooldown.server_error",
         )
+        # Inference admitted before the test and still in flight.
+        older = service._reserve_settlement_generation(source["id"])
         original = adapter.invoke
 
         async def invoke(*args, **kwargs):
@@ -116,9 +119,15 @@ def test_successful_test_lifts_cooldown_only_for_its_own_current_attempt(tmp_pat
 
         adapter.invoke = AsyncMock(side_effect=invoke)
         await service.probe_source(source["id"], {"model": source["models"][0]["id"]})
+        if case == "older_attempt":
+            # The earlier attempt fails after the later test already succeeded.
+            await service._settle_fallback_source(
+                store.config.sources[0], ResolutionDecision("fallback", reason="server_error"),
+                backend="claude", model_id=source["models"][0]["id"], settlement_generation=older,
+            )
         state = store.config.sources[0].state
         recovered = [event for event in service.events.list() if event["kind"] == "recover"]
-        if case == "success":
+        if case in {"success", "older_attempt"}:
             assert state == ModelHubSourceStateConfig(status="standby")
             assert [(event["agent"], event["to_source"]) for event in recovered] == [("system", source["id"])]
         else:

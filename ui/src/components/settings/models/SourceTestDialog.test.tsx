@@ -69,6 +69,19 @@ describe('SourceTestDialog', () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['lifted', 'standby', false],
+    ['kept', 'cooldown', true],
+  ] as const)('reports a passing test that %s the cooldown', async (_case, landed, warned) => {
+    const cooling: Source = { ...source, state: { status: 'cooldown', retry_at: null, detail_key: 'models.source.cooldown.server_error' } };
+    vi.mocked(settlement.unread).mockResolvedValue(landing([{ ...cooling, state: { ...cooling.state, status: landed } }]));
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    render(view(cooling));
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    const reported = await screen.findByText(/responded successfully/);
+    expect(reported.textContent?.includes('still marked unavailable')).toBe(warned);
+  });
+
   it('keeps the result when success clears pending verification', async () => {
     vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
     const rendered = render(view());

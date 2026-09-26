@@ -1216,15 +1216,17 @@ class ModelHubService:
             return False
         return True
 
-    def _reserve_settlement_generation(self, source_id: str) -> int:
+    def _mint_settlement_generation(self) -> int:
         self._next_settlement_generation += 1
-        self._latest_source_attempt_generation[source_id] = (
-            self._next_settlement_generation
-        )
+        return self._next_settlement_generation
+
+    def _reserve_settlement_generation(self, source_id: str) -> int:
+        generation = self._mint_settlement_generation()
+        self._latest_source_attempt_generation[source_id] = generation
         source = next((item for item in self.store.load().sources if item.id == source_id), None)
         if source is not None:
             self._source_attempt_identities[source_id] = source_identity(source)
-        return self._next_settlement_generation
+        return generation
 
     def _settlement_current(self, source: ModelHubSourceConfig, generation: int | None) -> bool:
         return (
@@ -5873,10 +5875,10 @@ class ModelHubService:
         outcome = None
         source = None
         admitted_at = None
-        attempt_floor = PRE_ATTEMPT_SETTLEMENT_GENERATION
+        attempt_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
 
         async def invoke_selected() -> None:
-            nonlocal source, handle, outcome, admitted_at, attempt_floor
+            nonlocal source, handle, outcome, admitted_at, attempt_generation
             # Bound local waiting too, but never call it a model failure before
             # the adapter has actually admitted this Source/model invocation.
             async with self._mutation_lock:
@@ -5893,12 +5895,12 @@ class ModelHubService:
                         self._mutation_lock.release()
 
                 def admitted() -> None:
-                    nonlocal admitted_at, attempt_floor
+                    nonlocal admitted_at, attempt_generation
                     admitted_at = time.monotonic()
-                    # A test reserves no generation: its failure must not displace
-                    # another attempt's verdict. Its success ranks as of admission,
-                    # so any attempt admitted afterwards keeps authority.
-                    attempt_floor = self._next_settlement_generation
+                    # Ordered at admission but not reserved: a failed test must
+                    # not displace another attempt's verdict, while a successful
+                    # one supersedes attempts admitted before it.
+                    attempt_generation = self._mint_settlement_generation()
                     release_owner()
 
                 try:
@@ -5934,7 +5936,7 @@ class ModelHubService:
                     # The explicit test is the retry a cooldown waits for.
                     if self._verified_recovery_outcome(outcome):
                         await self._record_recovery_success(
-                            source.id, attempt_floor, backend="system", model_id=model_id,
+                            source.id, attempt_generation, backend="system", model_id=model_id,
                         )
                     await self._verify_successful_source(
                         source.id, source.credential_ref, source.verification_pending, outcome,
@@ -6970,6 +6972,8 @@ class ModelHubService:
                 or source.state.status in {"needs_action", "error"}
             ):
                 return
+            # A current success outranks every attempt admitted before it.
+            self._latest_source_attempt_generation[source_id] = generation
             recovered = self.recovery.succeeded(source)
             if recovered and source.state.status == "cooldown":
                 previous = self._clone_config(config)

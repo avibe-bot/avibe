@@ -2049,6 +2049,7 @@
         "title": "Test {{source}}",
         "hint": "Send one short request using this provider and the selected model. This can incur a small charge. The result applies only to this model.",
         "cooldownHint": "A successful test makes this provider available again right away.",
+        "stillUnavailable": "The provider is still marked unavailable.",
         "model": "Test model",
         "empty": "No models available. Close this dialog to fetch the list or add a model ID manually.",
         "run": "Run test",
