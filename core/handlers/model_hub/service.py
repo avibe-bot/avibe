@@ -1076,6 +1076,35 @@ class ModelHubService:
             None,
         )
 
+    async def _settle_pending_native_creates(self, vendor: str) -> None:
+        """Keep the native slot claimed until a finished create is committed.
+
+        The CLI login releases its credential lease as soon as it finishes, but
+        its Source is committed only by a later status read. In between, the
+        slot looks empty to both the singleton check and CLI custody, so another
+        start would be admitted and overwrite the credential that login just
+        wrote. Commit a finished create first, so the singleton check sees it,
+        and refuse while one is still in progress.
+        """
+
+        for flow_id, binding in self.oauth_flows.pending_creates(vendor, "native_cli"):
+            try:
+                flow = await self._oauth_status(flow_id, "native_cli")
+                self._raise_if_flow_expired(flow_id, flow)
+            except ModelHubError as error:
+                # Both reads forget a flow that can no longer finish.
+                if error.code in {"flow_not_found", "flow_expired"}:
+                    continue
+                raise
+            if flow.state == "success":
+                await self._materialize_completed_oauth(flow_id, binding, flow)
+            elif flow.state not in {"failed", "cancelled"}:
+                raise ModelHubError(
+                    "native_login_in_progress",
+                    status=409,
+                    detail="modelHub.errors.native_login_in_progress",
+                )
+
     async def _engine_call(self, awaitable):
         try:
             return await awaitable
@@ -1114,7 +1143,19 @@ class ModelHubService:
             raise ModelHubError("submission_rejected", status=422) from None
         except ModelHubError:
             raise
-        except Exception:
+        except Exception as error:
+            from core.backend_restart import NativeMigrationBlockedError
+
+            # A native writer refusal is an answered state, not an engine
+            # outage: reporting it as engine_down sends the user retrying a
+            # start that the same refusal will block again.
+            if isinstance(error, NativeMigrationBlockedError):
+                code = (
+                    error.reason
+                    if error.reason in {"config_recovery", "migration_recovery_pending"}
+                    else "migration_native_busy"
+                )
+                raise ModelHubError(code, status=409) from None
             raise ModelHubError("engine_down", status=503) from None
 
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:
@@ -6547,6 +6588,7 @@ class ModelHubService:
             flow_cleanup_attempted = False
             try:
                 if oauth_channel == "native_cli":
+                    await self._settle_pending_native_creates(vendor)
                     async with self._mutation_lock:
                         # The sanctioned CLI keeps one credential per vendor, so
                         # a second native Source would describe a credential the

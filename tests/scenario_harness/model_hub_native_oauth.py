@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
+from unittest.mock import AsyncMock
 
-from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
+from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig, V2Config
+from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     ObservationDiscovery,
@@ -28,6 +31,7 @@ from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     ModelHubService,
     UnavailableEngineAdapter,
+    V2ModelHubConfigStore,
     _NATIVE_VENDOR_BACKENDS,
 )
 from vibe.model_hub_runtime.adapter import _OAUTH_ENDPOINTS, hub_subscription_serving_protocol
@@ -109,6 +113,7 @@ class FakeAgentAuthService:
         *,
         force_reset: bool = True,
         owner_ref: str | None = None,
+        new_source: bool = False,
         on_irreversible_start=None,
     ):
         if force_reset and on_irreversible_start is not None:
@@ -225,6 +230,63 @@ class NativeOAuthScenarioHarness:
             now=lambda: datetime(2026, 7, 25, 0, 0, tzinfo=timezone.utc),
             requested_model_override=self.store.requested_model,
         )
+
+
+class CustodiedNativeOAuthScenarioHarness:
+    """Native Model Hub OAuth through the real AgentAuthService and CLI custody.
+
+    Only the Claude CLI transport and its login probe are faked. The saved Hub
+    ownership, the native credential lease, the shared flow lifecycle and the
+    Model Hub config all run as shipped against the isolated test home.
+    """
+
+    auth_url = "https://claude.ai/oauth/authorize?fixture=1"
+    account = {"active_auth_mode": "oauth", "email": "owner@example.com"}
+
+    def __init__(self, state_dir: Path):
+        config = V2Config.default()
+        config.model_hub.enabled = True
+        for supply in config.model_hub.agents.values():
+            supply.mode = "hub"
+        config.save()
+        self.agent_auth = AgentAuthService(SimpleNamespace(config=config))
+        self.callbacks: list[tuple[str, str]] = []
+        consent = asyncio.Event()
+
+        async def wait_for_consent(_client, request, timeout=900.0):
+            if request["subtype"] != "claude_oauth_wait_for_completion":
+                raise AssertionError(f"unexpected control request: {request}")
+            await consent.wait()
+            return {}
+
+        async def send_callback(_client, authorization_code, state):
+            self.callbacks.append((authorization_code, state))
+            consent.set()
+
+        self.agent_auth._start_claude_control_flow = AsyncMock(
+            return_value=(SimpleNamespace(), self.auth_url, None)
+        )
+        self.agent_auth._send_claude_control_request = wait_for_consent
+        self.agent_auth._send_claude_callback = send_callback
+        self.agent_auth._verify_login = AsyncMock(return_value=(True, '{"loggedIn": true}'))
+        self.agent_auth._refresh_backend_runtime = AsyncMock()
+        self.agent_auth._disconnect_claude_client = AsyncMock()
+        self.service = ModelHubService(
+            store=V2ModelHubConfigStore(),
+            adapter=UnavailableEngineAdapter(),
+            events=BoundedEventLog(state_dir / "events.json"),
+            native_oauth_adapter=AgentAuthNativeOAuthAdapter(
+                self.agent_auth,
+                auth_status_reader=lambda _backend: self.account,
+            ),
+            oauth_flows=OAuthFlowRegistry(state_dir / "oauth_flows.json"),
+            revocations=CredentialRevocationJournal(state_dir / "revocations.json"),
+        )
+
+    async def login_settled(self, flow_id: str) -> None:
+        """Wait until the CLI login has finished and released its lease."""
+
+        await self.agent_auth._web_flows[flow_id].waiter_task
 
 
 @dataclass(frozen=True)

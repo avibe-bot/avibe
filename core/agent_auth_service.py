@@ -505,7 +505,9 @@ class AgentAuthService:
             clients.append(flow.claude_client)
         return clients
 
-    def _acquire_native_lease(self, backend: str, *, source_id: str | None = None) -> NativeCredentialLease:
+    def _acquire_native_lease(
+        self, backend: str, *, source_id: str | None = None, new_source: bool = False
+    ) -> NativeCredentialLease:
         try:
             lease = NativeCredentialLease((backend,)).acquire()
         except NativeMigrationBlockedError as error:
@@ -521,7 +523,7 @@ class AgentAuthService:
                 flow_id=getattr(owner, "flow_id", None),
             ) from None
         try:
-            lease.assert_auth_custody(backend, source_id=source_id)
+            lease.assert_auth_custody(backend, source_id=source_id, new_source=new_source)
             return lease
         except BaseException:
             lease.release()
@@ -1318,6 +1320,7 @@ class AgentAuthService:
         provider_id: str | None = None,
         force_reset: bool = True,
         owner_ref: str | None = None,
+        new_source: bool = False,
         claude_login_method: str | None = None,
         on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
     ) -> AgentAuthFlow | WebAuthFlow:
@@ -1331,7 +1334,7 @@ class AgentAuthService:
                 if existing is not None:
                     await self._terminate_flow(existing)
 
-            lease = self._acquire_native_lease(backend, source_id=owner_ref)
+            lease = self._acquire_native_lease(backend, source_id=owner_ref, new_source=new_source)
             try:
                 provider = provider_id
                 if backend == "opencode" and context is not None:
@@ -2502,6 +2505,7 @@ class AgentAuthService:
         force_reset: bool = True,
         provider_id: Optional[str] = None,
         owner_ref: str | None = None,
+        new_source: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -2517,6 +2521,9 @@ class AgentAuthService:
         must pass ``provider_id``; the URL (and optional device code) are
         surfaced via ``WebAuthFlow.url`` / ``WebAuthFlow.device_code`` and
         completion follows its declared automatic or manual-code method.
+        ``owner_ref`` binds the flow to a Model Hub Source; ``new_source``
+        declares that Source is being created, which a Hub-routed backend
+        admits only while its vendor has no native subscription yet.
         """
         if backend not in self.WEB_BACKENDS:
             raise ValueError(f"unsupported_backend:{backend}")
@@ -2535,6 +2542,7 @@ class AgentAuthService:
                 provider_id=provider_id,
                 force_reset=force_reset,
                 owner_ref=owner_ref,
+                new_source=new_source,
                 on_irreversible_start=on_irreversible_start,
             )
         except asyncio.CancelledError:

@@ -235,7 +235,6 @@ describe('programmatic PWA navigation', () => {
       .sort((left, right) => left.path.localeCompare(right.path));
 
     expect(directCalls).toEqual([
-      { path: 'components/settings/models/providerTab.ts', count: 1 },
       { path: 'components/workbench/ShowPageLaunchControl.tsx', count: 1 },
       { path: 'lib/pwaNavigation.ts', count: 1 },
     ]);

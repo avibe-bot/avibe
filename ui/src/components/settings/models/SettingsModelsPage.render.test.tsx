@@ -936,8 +936,7 @@ describe('SettingsModelsPage surface branches', () => {
 
   it('opens a hub-only subscription straight into its flow, posted as a hub source', async () => {
     // A vendor no sanctioned CLI holds custody of has no channel choice, so §1.4
-    // skips its chooser phase and starts the flow on open. The gesture that
-    // allocated the provider tab was the menu item, not a 去登录 inside the dialog.
+    // skips its chooser phase and starts the flow on open.
     const started = {
       flow_id: 'flow_hub_only',
       client_nonce: 'ofn_hub_only',
@@ -1077,11 +1076,9 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(reauth).toHaveBeenCalledWith(blockedSubscription.id));
   });
 
-  // The confirm IS this journey's gesture — the dialog it opens POSTs as it mounts,
-  // so nothing after it can be granted a tab. Asserted where the user feels it: the
-  // provider page lands in the tab, instead of behind a blocked popup and a link
-  // the user has to notice.
-  it('lands the provider page in the tab the re-auth confirmation opened', async () => {
+  // The provider page is the user's to open: the confirmation starts the flow and
+  // the dialog shows the link, instead of the page opening a window by itself.
+  it('shows the re-auth provider link without opening a window from the confirmation', async () => {
     const authUrl = 'https://provider.example/authorize?code=1';
     const started = {
       flow_id: 'flow_reauth',
@@ -1093,17 +1090,15 @@ describe('SettingsModelsPage surface branches', () => {
     };
     vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
     vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: started, created: null, repaired: null });
-    const tab = { closed: false, opener: {} as unknown, location: { href: '' } };
-    const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const open = vi.spyOn(window, 'open');
     renderPage([blockedSubscription]);
 
     await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
 
-    expect(open).toHaveBeenCalledWith('about:blank', '_blank');
-    expect(tab.opener).toBeNull();
-    await waitFor(() => expect(tab.location.href).toBe(authUrl));
+    expect((await screen.findByRole('link', { name: authUrl })).getAttribute('href')).toBe(authUrl);
+    expect(open).not.toHaveBeenCalled();
   });
 
   // A failed re-auth has already spent the irreversible half — the sibling sources

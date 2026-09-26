@@ -38,12 +38,6 @@ import {
   type FlowView,
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
-import {
-  commitProviderTabRetry,
-  disposeProviderTab,
-  preopenProviderTab,
-  takeProviderTabForNavigation,
-} from './providerTab';
 import { REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import {
   NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
@@ -198,9 +192,7 @@ export const OAuthConnectDialog: React.FC<{
     setChannel(initialSubscriptionChannel(vendor, sources));
     // A vendor with no chooser copy has no channel choice to put in front of the
     // user, so it opens straight into its flow — the same entry the re-auth
-    // journey takes above. The gesture that allocated its provider tab was the
-    // menu item that opened this dialog (PD-1), since there is no 去登录 here to
-    // allocate one.
+    // journey takes above.
     setPhase(chooser === null ? 'flow' : 'choose');
   }, [chooser, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
@@ -358,11 +350,6 @@ export const OAuthConnectDialog: React.FC<{
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
       if (isDone(step.action)) stop();
-      if (terminalArrivalMovedRows(step.action)) {
-        disposeProviderTab(
-          step.view.failureClass ?? (step.action === 'succeed' ? 'success' : undefined),
-        );
-      }
       return isDone(step.action);
     };
     settleRef.current = settle;
@@ -390,13 +377,10 @@ export const OAuthConnectDialog: React.FC<{
             } catch (err) {
               // The success and rejection paths belong to the same read. Once
               // this authority is retired, neither outcome may update the view
-              // or dispose a provider tab owned by its replacement.
+              // owned by its replacement.
               if (cancelled || flowAuthorityRef.current !== authority) return true;
               const failure = apiFailure(err);
               const failureClass = classifyOAuthFailure(failure);
-              // This reread did not start a provider journey, so the tab opened
-              // by the Retry gesture has no URL to receive.
-              disposeProviderTab(failureClass);
               // An unread flow is still held. Retry may ask again, but it may not
               // turn missing evidence into permission to mint a replacement.
               if (failureClass === 'inconclusive') return true;
@@ -451,7 +435,6 @@ export const OAuthConnectDialog: React.FC<{
           pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
           return;
         }
-        disposeProviderTab(failureClass);
         // The authority goes first because its answer is what decides whether these
         // pairs are the ones on screen — see `failureLanded`. The refetch below is
         // owed whatever it answers.
@@ -555,7 +538,6 @@ export const OAuthConnectDialog: React.FC<{
           failureClass,
         });
         if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
-        disposeProviderTab(failureClass);
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -589,7 +571,6 @@ export const OAuthConnectDialog: React.FC<{
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
       const opened = openedFlowId;
-      disposeProviderTab('cleanup');
       if (heldFlowId.current === opened) heldFlowId.current = null;
       rereadHeldFlow.current = null;
       void releaseFlow(authority, owner, {
@@ -664,7 +645,6 @@ export const OAuthConnectDialog: React.FC<{
         errorKey: oauthFailureKey(failure?.code, journey),
         failureClass,
       });
-      if (failureLanded(step.action)) disposeProviderTab(failureClass);
       rowsBehindAreStale(failure, failureLanded(step.action));
     } finally {
       if (isCurrent()) setSubmitting(false);
@@ -678,7 +658,6 @@ export const OAuthConnectDialog: React.FC<{
       setNativeSlotTaken(true);
       setChannel('hub');
       setStartFailureCode(null);
-      disposeProviderTab(view.failureClass ?? 'retryable-provider');
       setPhase('choose');
       return;
     }
@@ -689,7 +668,6 @@ export const OAuthConnectDialog: React.FC<{
     const freshAcquisition = startFailureCode === null;
     setStartFailureCode(null);
     if (freshAcquisition) clientNonce.current = null;
-    commitProviderTabRetry();
     setStartAttempt((attempt) => attempt + 1);
     setPhase('flow');
   };
@@ -720,28 +698,6 @@ export const OAuthConnectDialog: React.FC<{
       ? 'settings.models.oauth.callback.hint'
       : 'settings.models.oauth.pasteCode.hint';
   const step2Label = serverText(t, presentation?.instructions_key, step2Fallback) ?? '';
-
-  const flowActive = Boolean(
-    flow
-      && !view.settled
-      && (flow.state === 'starting' || flow.state === 'awaiting_action' || flow.state === 'verifying'),
-  );
-  React.useEffect(() => {
-    if (!flowActive || !presentation?.auth_url) return;
-    // Claimed at the point of use, not when the dialog opens: the re-auth journey's
-    // tab is allocated by the confirm gesture before this component exists, and a
-    // claim taken at mount is stranded by anything that remounts (StrictMode
-    // replays effects in development) with the tab still open and unreachable.
-    // Claiming here also means a run with nothing to navigate keeps the handoff.
-    const target = takeProviderTabForNavigation();
-    if (!target || target.closed) return;
-    try {
-      target.location.href = presentation.auth_url;
-    } catch {
-      // A popup may become inaccessible after opening; the visible link remains
-      // the fallback in that case.
-    }
-  }, [flowActive, presentation?.auth_url]);
 
   // The chooser is only for a vendor whose copy exists. A hub-held subscription
   // has no channel choice to make, so it opens straight into its flow (the open
@@ -889,10 +845,7 @@ export const OAuthConnectDialog: React.FC<{
               variant="brand"
               size="sm"
               className="model-hub-dialog-action"
-              onClick={() => {
-                preopenProviderTab();
-                setPhase('flow');
-              }}
+              onClick={() => setPhase('flow')}
             >
               {t('settings.models.addSub.signIn')}
               <ArrowRight className="size-3.5" />
@@ -1036,10 +989,7 @@ export const OAuthConnectDialog: React.FC<{
                   variant="brand"
                   size="sm"
                   className="h-10 sm:h-9"
-                  onClick={() => {
-                    preopenProviderTab('retry');
-                    void retryStart();
-                  }}
+                  onClick={() => void retryStart()}
                 >
                   {t('settings.models.addSub.retry')}
                 </Button>
