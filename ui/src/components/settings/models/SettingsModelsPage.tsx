@@ -449,6 +449,9 @@ export const SettingsModelsPage: React.FC = () => {
   const [quotaReauthSource, setQuotaReauthSource] = React.useState<Source | null>(null);
   // A re-login started from a quota card has no detail heading to return to.
   const quotaReauthOpenerRef = React.useRef<HTMLElement | null>(null);
+  // The card button focus went back to when that re-login closed, until the
+  // quota re-read its success started has landed.
+  const quotaFocusHoldRef = React.useRef<HTMLElement | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
@@ -765,6 +768,13 @@ export const SettingsModelsPage: React.FC = () => {
     degraded: () => null,
   });
   const rereadQuota = React.useCallback(() => { void readQuota(false); }, [readQuota]);
+  // A clean re-login closes before the quota re-read it started lands, and a
+  // healthy answer removes the card button focus just went back to.
+  React.useLayoutEffect(() => {
+    const held = quotaFocusHoldRef.current;
+    quotaFocusHoldRef.current = null;
+    if (held && !held.isConnected && document.activeElement === document.body) focusQuotaOpener(held);
+  }, [quotaSettled]);
   const resetQuotaRereads = usePendingRereads(tab === 'quota', quotaPendingKey, quotaSettled, rereadQuota);
 
   React.useEffect(() => {
@@ -1470,6 +1480,7 @@ export const SettingsModelsPage: React.FC = () => {
     // quota card, back to its button, or to the quota tab once it is gone.
     const opener = quotaReauthOpenerRef.current;
     quotaReauthOpenerRef.current = null;
+    quotaFocusHoldRef.current = opener;
     window.setTimeout(() => (opener ? focusQuotaOpener(opener) : sourceDetailHeadingRef.current?.focus()), 0);
   }, []);
   const closeSubscriptionPicker = React.useCallback(() => {

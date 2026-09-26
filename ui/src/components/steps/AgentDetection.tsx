@@ -1032,6 +1032,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           onCommitted={() => {
             committedRouteRefresh.current = true;
             if (routeSelection) void refreshRouteOwnership(routeSelection.agent.backend);
+            // The dialog closes on commit, so the shared toast is the save's only report.
+            showToast(t('common.saved'), 'success');
           }}
           readAgents={async () => {
             const value = await agentReads.readValue();

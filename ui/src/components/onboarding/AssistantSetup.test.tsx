@@ -16,13 +16,13 @@ import { INITIAL_SETUP_FLOW_STATE } from './setupFlow';
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
   listVibeAgents: vi.fn(), getVibeAgent: vi.fn(),
-}, models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
+}, showToast: vi.fn(), models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
 vi.mock('../settings/models/modelsApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
   return { ...actual, modelsApi: { ...actual.modelsApi, ...mock.models } };
 });
-vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mock.showToast }) }));
 vi.mock('../settings/models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
 vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermission: () => ({ permissionAllowed: true, statusLoaded: true }) }));
 vi.mock('../settings/providers/BackendProviderConfig', () => ({ BackendProviderConfig: ({ backend }: { backend: string }) => <div>Existing provider: {backend}</div> }));
@@ -302,7 +302,7 @@ describe('assistant installation presentation', () => {
     expect(await row('Claude Code').findByRole('button', { name: 'API Key connected' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
   });
-  it('opens the setup route editor when the backend is already Hub-owned', async () => {
+  it('opens the setup route editor when the backend is already Hub-owned, and reports its save', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } }; saved.agents.claude.status = 'ok';
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true,
@@ -325,9 +325,12 @@ describe('assistant installation presentation', () => {
     mock.models.listSources.mockResolvedValue([]);
     const chain = {
       contract_version: 10, backend: 'claude', model_id: 'opus-5',
-      manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }] },
+      manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }, { source_id: 'src_b', model_id: 'opus-5' }] },
       route_origin: 'manual', current: { source_id: 'src_a', model_id: 'opus-5' },
-      chain: [{ source_id: 'src_a', model_id: 'opus-5', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
+      chain: [
+        { source_id: 'src_a', model_id: 'opus-5', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
+        { source_id: 'src_b', model_id: 'opus-5', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
+      ],
       supply_state: 'ok',
     };
     mock.models.getAgentChains.mockResolvedValue([chain]);
@@ -350,6 +353,15 @@ describe('assistant installation presentation', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.getByTestId('location').textContent).toBe('/');
     expect(enter.hasAttribute('disabled')).toBe(true);
+
+    // The dialog closes on commit, so the shared toast is the save's only report.
+    const savedChain = { ...chain, manual_override: { hops: [chain.manual_override.hops[1]] }, chain: [chain.chain[1]] };
+    mock.models.putAgentChain.mockResolvedValue({ chain: savedChain, removed_hops: [], interrupted: [] });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Remove hop' }))[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(mock.models.putAgentChain).toHaveBeenCalledOnce();
+    expect(mock.showToast).toHaveBeenCalledWith(en.common.saved, 'success');
   });
   it('an available update keeps Continue and configuration usable', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';

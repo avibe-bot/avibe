@@ -2613,6 +2613,45 @@ describe('SettingsModelsPage quota region', () => {
     // The finished sign-in closes its dialog; focus returns to the quota card's button, not the document.
     await waitFor(() => expect(document.activeElement).toBe(trigger), { timeout: 4000 });
   }, 12000);
+  it('returns focus to the quota tab when the re-read a clean re-login started removes its button', async () => {
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: { ...started, state: 'success' as const }, created: null, repaired: null });
+    renderPage([nativeSubscription]);
+    const expired = {
+      source_id: nativeSubscription.id, vendor: 'anthropic', display_name: nativeSubscription.display_name,
+      account_label: null, plan: null, fetched_at: null, state: 'auth_expired' as const,
+      error_key: 'models.quota.error.auth_expired', windows: [],
+    };
+    const read = vi.mocked(modelsApi.getQuota);
+    read.mockResolvedValue({ refresh_interval_seconds: 300, sources: [expired] });
+    await screen.findByText('Claude native login');
+    await openQuota();
+    const trigger = await screen.findByRole('button', { name: /^Sign in again$|^重新登录$/ });
+    await userEvent.click(trigger);
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+    // The new grant reads healthy, so the re-read lands without the button, and
+    // only after the dialog has already handed focus back to it.
+    const healthy = deferred<QuotaSummary>();
+    read.mockReturnValue(healthy.promise);
+    await waitFor(() => expect(document.activeElement).toBe(trigger), { timeout: 4000 });
+    await act(async () => healthy.resolve({
+      refresh_interval_seconds: 300,
+      sources: [{
+        ...expired, state: 'ok', error_key: undefined, fetched_at: new Date().toISOString(),
+        windows: [{ id: 'five_hour', kind: 'session', label: 'five_hour', used_pct: 40, window_seconds: 18_000, resets_at: new Date(Date.now() + 3_600_000).toISOString() }],
+      }],
+    }));
+    expect(screen.queryByRole('button', { name: /^Sign in again$|^重新登录$/ })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ }));
+  }, 12000);
   it('returns focus to the quota tab when a refresh removed the re-login button behind its confirmation', async () => {
     renderPage([nativeSubscription]);
     vi.mocked(modelsApi.getQuota).mockResolvedValue({
