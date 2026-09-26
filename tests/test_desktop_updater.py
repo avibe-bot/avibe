@@ -76,6 +76,22 @@ def test_real_workflow_channel_resolution(tmp_path, tag, test, stable, enabled, 
     }
 
 
+def test_resolver_appends_to_the_step_output_it_shares(tmp_path, monkeypatch):
+    # rc21 shipped without desktop packages: the resolver replaced the step's
+    # enabled/updater_enabled outputs, so the package job read enabled=''.
+    source = 'a' * 40
+    monkeypatch.setattr(desktop_release, 'git_output', lambda *_: source)
+    output = tmp_path / 'output'
+    output.write_text('enabled=true\nupdater_enabled=false\n', encoding='utf-8')
+    monkeypatch.setattr('sys.argv', ['desktop_release.py', 'resolve', '--tag', 'gh-v3.1.2rc15',
+                                     '--output', str(output)])
+    desktop_release.main()
+    assert dict(line.split('=', 1) for line in output.read_text().splitlines()) == {
+        'enabled': 'true', 'updater_enabled': 'false', 'tag': 'gh-v3.1.2rc15',
+        'source_sha': source, 'version': '3.1.2-rc.15', 'package_version': '3.1.2rc15',
+    }
+
+
 def test_release_cannot_publish_before_all_targets_and_signed_verification():
     jobs = workflow('release_ai.yml')
     assert 'desktop-packages' in jobs['release']['needs']
