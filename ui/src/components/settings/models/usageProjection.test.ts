@@ -3,22 +3,27 @@ import { describe, expect, it } from 'vitest';
 import type { UsageBucket, UsageBucketRow, UsageCounters, UsageReport } from './types';
 import {
   aggregateCounters,
+  filteredRows,
   formatBucketAxisLabel,
   formatBucketHeading,
   formatBucketRange,
-  identityLabel,
   pairKey,
+  REMOVED_SOURCES_KEY,
   reportHasPartialHistory,
   reportIsPriced,
+  resolveUsageFilter,
   seriesFor,
-  sourceIdentityLabel,
-  usageLabelContext,
+  usageIdentities,
   usageIsEmpty,
   usageIsPriced,
   usageMetricValue,
   usageNonCachedInput,
   usageTotalTokens,
 } from './usageProjection';
+
+const TEXT = { unknownModel: 'Unknown model', removedSources: 'Removed providers' };
+const TEXT_ZH = { unknownModel: '未知模型', removedSources: '已移除的供应商' };
+const NO_FILTER = { sourceIds: [], modelKeys: [] };
 
 const counters = (over: Partial<UsageCounters> = {}): UsageCounters => ({
   requests: 2,
@@ -71,7 +76,7 @@ describe('usageProjection', () => {
     expect(usageNonCachedInput(value)).toBe(52_220);
   });
 
-  it('keeps source/model identity separate even when labels match', () => {
+  it('keeps source/model identity separate even when labels match, without printing an ID', () => {
     const value = reportWith([
       bucket('00', [row()]),
       bucket('01', [row({ source_id: 'source-b' })]),
@@ -83,107 +88,92 @@ describe('usageProjection', () => {
       ...counters(),
       models: [{ model_id: 'model-a', label: 'Model', ...counters() }],
     });
-    const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', 'Unknown model');
+    const series = seriesFor(value, NO_FILTER, 'model', 'tokens', TEXT);
     expect(series.map((item) => item.key)).toEqual([pairKey('source-a', 'model-a'), pairKey('source-b', 'model-a')]);
-    expect(series.map((item) => item.label)).toEqual([
-      'Supplier · Model · source-a',
-      'Supplier · Model · source-b',
+    expect(series.map((item) => item.label)).toEqual(['Supplier · Model', 'Supplier (2) · Model']);
+    expect(seriesFor(value, NO_FILTER, 'source', 'tokens', TEXT).map((item) => item.label)).toEqual(['Supplier', 'Supplier (2)']);
+  });
+
+  it('names a model its live Source no longer lists by the model ID it was metered under', () => {
+    const value = reportWith([bucket('00', [row({ model_id: 'glm-5.3' })])]);
+    expect(usageIdentities(value, 'model', TEXT_ZH).get(pairKey('source-a', 'glm-5.3')))
+      .toMatchObject({ label: 'Supplier · glm-5.3', sourceLabel: 'Supplier', unlisted: true, removed: false });
+  });
+
+  it('keeps the unknown-model name only for a ledger key that no longer spells a model ID', () => {
+    const foldedKey = `${'m'.repeat(200)}~${'0'.repeat(64)}`;
+    const value = reportWith([bucket('00', [row({ model_id: foldedKey })])]);
+    expect(seriesFor(value, NO_FILTER, 'model', 'tokens', TEXT_ZH).map((item) => item.label)).toEqual(['Supplier · 未知模型']);
+  });
+
+  it('keeps a configured model name over an unlisted one that reads the same', () => {
+    const value = reportWith([bucket('00', [row({ model_id: 'Model' }), row()])]);
+    const labels = seriesFor(value, NO_FILTER, 'model', 'tokens', TEXT);
+    expect(labels.map((item) => [item.key, item.label])).toEqual([
+      [pairKey('source-a', 'Model'), 'Supplier · Model (2)'],
+      [pairKey('source-a', 'model-a'), 'Supplier · Model'],
     ]);
   });
 
-  it('localizes an unknown model in model-grouped series', () => {
-    const value = reportWith([bucket('00', [row({ model_id: 'removed-model' })])]);
-    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', '未知模型')[0]?.label).toBe('Supplier · 未知模型');
-    expect(identityLabel({
-      key: pairKey('source-a', 'removed-model'),
-      sourceId: 'source-a',
-      modelId: 'removed-model',
-      sourceLabel: 'Supplier',
-      modelLabel: null,
-    }, '未知模型')).toBe('Supplier · 未知模型');
-  });
+  // The report leaves a Source's label null exactly when config let it go.
+  describe('MH-USAGE-033: Sources config let go', () => {
+    const withRemoved = () => {
+      const value = reportWith([
+        bucket('00', [
+          row({ source_id: 'src_d1f4adc47c3f', model_id: 'glm-5.3', requests: 3 }),
+          row(),
+        ]),
+        bucket('01', [
+          row({ source_id: 'src_d1f4adc47c3f', model_id: 'kimi-k2' }),
+          row({ source_id: 'src_b52ba34d0659', model_id: 'deepseek-v3' }),
+        ]),
+      ]);
+      value.sources.push(
+        { source_id: 'src_d1f4adc47c3f', label: null, last_metered_at: null, ...counters(), models: [] },
+        { source_id: 'src_b52ba34d0659', label: null, last_metered_at: null, ...counters(), models: [] },
+      );
+      return value;
+    };
 
-  it('disambiguates localized unknown-model collisions', () => {
-    const value = reportWith([bucket('00', [
-      row({ model_id: 'removed-model' }),
-      row({ model_id: 'model-a' }),
-    ])]);
-    value.sources[0]!.models = [
-      { model_id: 'model-a', label: '未知模型', ...counters() },
-    ];
+    it.each(['model', 'source'] as const)('fold into one last, muted series when grouped by %s, keeping every count', (group) => {
+      const value = withRemoved();
+      const series = seriesFor(value, NO_FILTER, group, 'requests', TEXT);
+      expect(series.map((item) => item.label)).toEqual([group === 'model' ? 'Supplier · Model' : 'Supplier', 'Removed providers']);
+      expect(series.at(-1)).toMatchObject({ key: REMOVED_SOURCES_KEY, removed: true, values: [3, 4] });
+      expect(series.flatMap((item) => item.label)).not.toContainEqual(expect.stringContaining('src_'));
+      const total = seriesFor(value, NO_FILTER, 'total', 'requests', TEXT)[0]!.values;
+      expect(series.reduce((sum, item) => sum + (item.values[0] ?? 0) + (item.values[1] ?? 0), 0))
+        .toBe((total[0] ?? 0) + (total[1] ?? 0));
+    });
 
-    expect(seriesFor(value, { sourceIds: [], modelKeys: [] }, 'model', 'tokens', '未知模型').map((item) => item.label)).toEqual([
-      'Supplier · 未知模型 · source-a · removed-model',
-      'Supplier · 未知模型 · source-a · model-a',
-    ]);
-  });
+    it('select every folded row when the aggregate is picked in either filter', () => {
+      const value = withRemoved();
+      for (const selection of [
+        { sourceIds: [REMOVED_SOURCES_KEY], modelKeys: [] },
+        { sourceIds: [], modelKeys: [REMOVED_SOURCES_KEY] },
+      ]) {
+        const rows = filteredRows(value, resolveUsageFilter(value, selection));
+        expect(rows.map((item) => item.model_id).sort()).toEqual(['deepseek-v3', 'glm-5.3', 'kimi-k2']);
+      }
+      const live = filteredRows(value, resolveUsageFilter(value, { sourceIds: ['source-a'], modelKeys: [REMOVED_SOURCES_KEY] }));
+      expect(live).toEqual([]);
+    });
 
-  it('keeps final source labels unique when a suffix collides with a literal label', () => {
-    const value = reportWith([
-      bucket('00', [
-        row({ source_id: 'source-a' }),
-        row({ source_id: 'source-b' }),
-        row({ source_id: 'source-c' }),
-      ]),
-    ]);
-    value.sources = [
-      { source_id: 'source-a', label: 'Provider', last_metered_at: null, ...counters(), models: [] },
-      { source_id: 'source-b', label: 'Provider', last_metered_at: null, ...counters(), models: [] },
-      { source_id: 'source-c', label: 'Provider · source-a', last_metered_at: null, ...counters(), models: [] },
-    ];
-    const context = usageLabelContext(value, value.buckets.flatMap((bucket) => bucket.rows), 'Unknown model');
-    const labels = ['source-a', 'source-b', 'source-c'].map((sourceId) => (
-      sourceIdentityLabel(value, sourceId, context)
-    ));
-
-    expect(new Set(labels).size).toBe(labels.length);
-    expect(labels.every((label) => label.length > 0)).toBe(true);
-  });
-
-  it('keeps final identity labels unique after collision suffixes are added', () => {
-    const value = reportWith([
-      bucket('00', [
-        row({ model_id: 'old-a' }),
-        row({ model_id: 'old-b' }),
-        row({ source_id: 'source-b', model_id: 'literal-model' }),
-      ]),
-    ]);
-    value.sources = [
-      {
-        source_id: 'source-a',
-        label: 'Supplier',
-        last_metered_at: null,
-        ...counters(),
-        models: [],
-      },
-      {
-        source_id: 'source-b',
-        label: 'Supplier',
-        last_metered_at: null,
-        ...counters(),
-        models: [{
-          model_id: 'literal-model',
-          label: 'Unknown model · source-a · old-a',
-          ...counters(),
-        }],
-      },
-    ];
-
-    const labels = seriesFor(
-      value,
-      { sourceIds: [], modelKeys: [] },
-      'model',
-      'tokens',
-      'Unknown model',
-    ).map((series) => series.label);
-
-    expect(new Set(labels).size).toBe(labels.length);
-    expect(labels).toContain('Supplier · Unknown model · source-a · old-a');
+    it('never fold a live Source, even one that metered nothing in the window', () => {
+      const value = reportWith([bucket('00', [row({ source_id: 'src_d1f4adc47c3f', model_id: 'glm-5.3' })])]);
+      value.sources = [
+        { source_id: 'source-a', label: 'Supplier', last_metered_at: null, ...counters(), models: [] },
+        { source_id: 'src_d1f4adc47c3f', label: null, last_metered_at: null, ...counters(), models: [] },
+      ];
+      const identities = usageIdentities(value, 'source', TEXT);
+      expect(identities.of([row({ source_id: 'source-a' }), row({ source_id: 'src_d1f4adc47c3f' })]).map((item) => item.label))
+        .toEqual(['Supplier', 'Removed providers']);
+    });
   });
 
   it('renders incomplete empty buckets as unavailable gaps, not zero', () => {
     const value = reportWith([bucket('00', [], false), bucket('01', [], false)]);
-    const series = seriesFor(value, { sourceIds: [], modelKeys: [] }, 'total', 'tokens', 'Unknown model');
+    const series = seriesFor(value, NO_FILTER, 'total', 'tokens', TEXT);
     expect(series[0]?.values).toEqual([null, null]);
     expect(usageIsEmpty(value)).toBe(false);
     expect(reportHasPartialHistory(value, { sourceIds: [], modelKeys: [] })).toBe(true);

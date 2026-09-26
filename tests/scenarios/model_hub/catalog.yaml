@@ -620,7 +620,7 @@ scenarios:
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-016
   - id: MH-USAGE-017
-    name: A vanished model's ledger key never reaches the screen, while a vanished Source stays identifiable
+    name: A vanished Source reads as Removed providers in the table, legend and filter, and no ID reaches the screen
     status: covered
     kind: observation
     layer: unit
@@ -730,6 +730,16 @@ scenarios:
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-033
     related_tests:
       - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
+  - id: MH-USAGE-034
+    name: Usage from Sources config let go folds into one muted, last identity with exact totals, and an unlisted model on a live Source reads by the model ID it was metered under
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/usageProjection.test.ts::MH-USAGE-034
+    related_tests:
+      - tests/test_model_hub_l3.py::test_a_deleted_source_keeps_its_usage_and_reads_as_removed
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
+      - ui/e2e/model-catalog/usage.spec.ts
   - id: MH-USAGE-BACKEND-001
     name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
     status: covered

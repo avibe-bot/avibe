@@ -824,18 +824,20 @@ export type UsageByModel = UsageCounters & {
   /** False when no price is known for the model: its tokens are in
    *  `excluded_tokens`. Present exactly when the report is priced. */
   priced?: boolean;
-  /** Ledger key, which for a long identifier is a head plus a digest rather
-   *  than the identifier itself — a string nobody typed. Display `label`,
-   *  never this. `usageProjection.modelIdentity` is the only reader. */
+  /** Ledger key: the metered model identifier verbatim up to 200 characters,
+   *  otherwise a head plus a digest — a string nobody typed. Display `label`;
+   *  without one, `usageProjection.usageModelName` shows this key only while
+   *  it is verbatim. */
   model_id: string;
   /** The model identity this row was metered under, joined from current Source
-   *  config; null once the model is gone. */
+   *  config; null once the Source no longer lists the model. */
   label: string | null;
 };
 
 export type UsageBySource = UsageCounters & {
   source_id: string;
-  /** Joined from current Source config; null once the Source is gone. */
+  /** Joined from current Source config; null exactly when config no longer
+   *  holds the Source. The UI folds all such Sources into one identity. */
   label: string | null;
   /** When this Source last had a call metered, served or billed-and-failed. */
   last_metered_at: string | null;

@@ -35,11 +35,24 @@ const localAt = (ms: number): string => {
 
 const dayKey = (ms: number): string => localAt(ms).slice(0, 10);
 
+// `?removed=1` adds what the ledger keeps after config lets go: a deleted
+// Source that metered two models, a second deleted Source, and a model its
+// live Source no longer lists.
+const REMOVED = params.get('removed') === '1';
+const REMOVED_SOURCES = ['src_d1f4adc47c3f', 'src_b52ba34d0659'];
+
 const rowsFor = (index: number, count: number): UsageBucketRow[] => {
-  if (index === 1) return [row({ source_id: 'source-alpha' })];
-  if (index === Math.floor(count / 2)) return [row({ source_id: 'source-beta' })];
-  if (index === count - 2) return [row({ source_id: 'source-alpha', model_id: 'model-second' })];
-  return [];
+  const rows: UsageBucketRow[] = [];
+  if (index === 1) rows.push(row({ source_id: 'source-alpha' }));
+  if (index === Math.floor(count / 2)) rows.push(row({ source_id: 'source-beta' }));
+  if (index === count - 2) rows.push(row({ source_id: 'source-alpha', model_id: 'model-second' }));
+  if (REMOVED) {
+    if (index === 2) rows.push(row({ source_id: REMOVED_SOURCES[0], model_id: 'glm-5.3' }));
+    if (index === count - 3) rows.push(row({ source_id: REMOVED_SOURCES[0], model_id: 'kimi-k2' }));
+    if (index === count - 3) rows.push(row({ source_id: REMOVED_SOURCES[1], model_id: 'deepseek-v3' }));
+    if (index === Math.floor(count / 2)) rows.push(row({ source_id: 'source-alpha', model_id: 'glm-4.6-air' }));
+  }
+  return rows;
 };
 
 // `?priced=1` serves the report as a server with API-price valuation does.
@@ -85,6 +98,7 @@ const makeReport = (windowKey: UsageWindowKey): UsageReport => {
         models: [
           { model_id: 'model-shared', label: 'Same model', ...counters(cost(1.5)) },
           { model_id: 'model-second', label: 'Second model', ...counters(cost(1.5)) },
+          ...(REMOVED ? [{ model_id: 'glm-4.6-air', label: null, ...counters(cost(1.5)) }] : []),
         ],
       },
       {
@@ -94,6 +108,14 @@ const makeReport = (windowKey: UsageWindowKey): UsageReport => {
         ...counters(cost(1.5)),
         models: [{ model_id: 'model-shared', label: 'Same model', ...counters(cost(1.5)) }],
       },
+      ...(REMOVED ? REMOVED_SOURCES.map((source_id) => ({
+        source_id,
+        label: null,
+        last_metered_at: null,
+        ...counters(cost(1.5)),
+        models: (source_id === REMOVED_SOURCES[0] ? ['glm-5.3', 'kimi-k2'] : ['deepseek-v3'])
+          .map((model_id) => ({ model_id, label: null, ...counters(cost(1.5)) })),
+      })) : []),
     ],
     days: [],
     window_key: windowKey,

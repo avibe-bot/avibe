@@ -1567,6 +1567,9 @@
         "partialHistory": "部分时间桶的历史记录不完整",
         "historicalHourly": "含无具体小时记录的历史用量",
         "unknownModel": "未知模型",
+        "removedSources": "已移除的供应商",
+        "removedSourcesHint": "这些供应商删除前留下的用量",
+        "removedModel": "已移除",
         "granularity": {
           "hour": "按小时",
           "day": "按天"

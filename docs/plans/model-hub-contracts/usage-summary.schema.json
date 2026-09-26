@@ -306,7 +306,7 @@
           "minLength": 1
         },
         "label": {
-          "description": "Joined from current Source config; null once the Source is gone.",
+          "description": "Joined from current Source config; null exactly when config no longer holds the Source (a live Source always has a display name). The UI folds every null-label Source into one Removed providers identity and never displays source_id.",
           "type": [
             "string",
             "null"
@@ -376,12 +376,12 @@
       "additionalProperties": false,
       "properties": {
         "model_id": {
-          "description": "Ledger key, which for a long identifier is a head plus a digest rather than the identifier itself. Display label, never model_id.",
+          "description": "Ledger key: the metered model identifier verbatim up to 200 characters, otherwise a head plus a digest. Display label when present; an unlisted model under a live Source displays this key only while it is verbatim.",
           "type": "string",
           "minLength": 1
         },
         "label": {
-          "description": "The model identity this row was metered under, joined from current Source config; null once the model is gone.",
+          "description": "The model identity this row was metered under, joined from current Source config; null once the Source no longer lists the model.",
           "type": [
             "string",
             "null"

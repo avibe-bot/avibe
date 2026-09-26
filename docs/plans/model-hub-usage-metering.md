@@ -1062,8 +1062,12 @@ be a lie rather than a glitch, and each is a catalog row (MH-USAGE-016..020):
   control asked for;
 - a `token_reports` shortfall reads as reports that never arrived, never as unused
   capacity, which the schema forbids in as many words;
-- a model whose label is gone shows no identity at all, because its ledger key is a
-  digest; a gone Source keeps its `src_*` id, which is a string the user has seen.
+- no row ever displays an ID. A Source config no longer holds (report `label: null`)
+  folds with every other such Source into one muted, last-sorted "Removed providers"
+  identity, so totals stay exact without a `src_*` string on screen; a model its live
+  Source no longer lists shows the model identifier it was metered under, marked
+  removed, and only a digest-folded ledger key reads as "Unknown model"
+  (MH-USAGE-017, MH-USAGE-033). The CSV keeps the raw IDs for machines.
 
 **The read is the tab's own.** It is deliberately not a member of
 `FIRST_PAINT_REGION_WHITELIST`: the landing decides routing, and a report nobody
@@ -1144,7 +1148,7 @@ aria-label each state a token figure they really do own.
 **F2: deleting the last Source took the ledger with it.** `directEmpty` was a top-level
 routing fork, so the Frame 09 landing replaced the whole tab shell — including the Usage
 tab. But the ledger outlives the Sources it meters: retention is 62 days and MH-USAGE-017
-exists precisely because a vanished Source keeps its `src_*` id in the report. A user who
+exists precisely because a vanished Source keeps its usage in the report. A user who
 deletes their last source loses the only route to what it cost, and a user reading the
 report when a deletion lands is thrown off the tab mid-read.
 

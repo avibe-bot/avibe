@@ -234,6 +234,48 @@ test.describe('hermetic UsageTab', () => {
     expect(await scrollOwner.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
   });
 
+  // The fixture's deleted Sources are real `src_…` IDs, as the ledger keeps them.
+  for (const width of [1280, 390]) {
+    test(`MH-USAGE-033: removed providers fold into one muted, last identity at ${width}px, never an ID`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await openUsage(page, 'dark', '&removed=1');
+      const body = page.locator('body');
+      const legend = page.locator('.model-hub-usage-legend');
+      const legendItems = legend.locator('.model-hub-usage-legend-item');
+      const groups = page.getByRole('group', { name: 'Group' });
+      const rowNames = page.locator('.model-hub-usage-details tbody .model-hub-usage-row-name');
+
+      for (const group of ['Model', 'Source']) {
+        await groups.getByRole('button', { name: group, exact: true }).click();
+        await expect(legendItems.last()).toContainText('Removed providers');
+        await expect(legendItems.filter({ hasText: 'Removed providers' })).toHaveCount(1);
+        expect(await legendItems.last().locator('.model-hub-usage-legend-swatch')
+          .evaluate((node) => (node as HTMLElement).style.background)).toBe('var(--muted)');
+        await expect(legend).not.toContainText('src_');
+        const hitAreas = page.locator('.model-hub-usage-hit-area');
+        await hitAreas.nth((await hitAreas.count()) - 3).hover();
+        const dialog = page.getByRole('dialog', { name: 'Usage bucket details' });
+        await expect(dialog).toContainText('Removed providers');
+        await expect(dialog).not.toContainText('src_');
+        await page.mouse.click(4, 4);
+      }
+      await groups.getByRole('button', { name: 'Model', exact: true }).click();
+      await expect(legend).toContainText('Same supplier · glm-4.6-air');
+
+      await expect(rowNames.last()).toHaveText('Removed providers');
+      await expect(page.locator('.model-hub-usage-details')).toContainText('Same supplier · glm-4.6-air');
+      await page.getByRole('button', { name: 'By source' }).click();
+      await expect(rowNames.last()).toHaveText('Removed providers');
+      await expect(rowNames.filter({ hasText: 'Removed providers' })).toHaveCount(1);
+
+      await page.getByRole('button', { name: 'All Source' }).click();
+      await expect(page.getByRole('option', { name: /Removed providers/ })).toBeVisible();
+      await expect(body).not.toContainText('src_');
+      await expect(body).not.toContainText('Unknown model');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    });
+  }
+
   test('MH-USAGE-029: the API-price value holds the narrow layout and plots as dollars', async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 844 });
     await openUsage(page, 'dark', '&priced=1');

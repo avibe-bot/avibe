@@ -2877,6 +2877,11 @@
   background: var(--model-hub-wash-03);
 }
 
+/* Usage that outlived its providers: kept in every total, set back from the live rows. */
+.model-hub-usage-table-scroll tbody tr.is-removed th {
+  color: var(--muted);
+}
+
 .model-hub-usage-row-name,
 .model-hub-usage-row-detail {
   display: block;

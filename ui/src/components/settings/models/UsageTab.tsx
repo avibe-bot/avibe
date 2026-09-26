@@ -33,17 +33,14 @@ import {
   formatBucketLabel,
   formatBucketHeading,
   formatBucketRange,
-  identityDisplayLabel,
-  modelLabel,
-  pairKey,
+  emptyCounters,
   reportHasPartialHistory,
   reportIsPriced,
   reportHasUnknownTokens,
+  resolveUsageFilter,
   seriesFor,
-  sourceIdentityLabel,
-  sourceLabel,
-  usageLabelContext,
   usageCachedInputShare,
+  usageIdentities,
   usageIsEmpty,
   usageIsPriced,
   usageHasNoPrice,
@@ -53,9 +50,9 @@ import {
   usageTokensAreKnown,
   type UsageFilter,
   type UsageGroup,
-  type UsageIdentity,
   type UsageMetric,
   type UsageSeries,
+  type UsageText,
 } from './usageProjection';
 import { USAGE_WINDOW_OPTIONS } from './usageProjection';
 import { buildUsageCsv } from './usageCsv';
@@ -69,6 +66,11 @@ const SERIES_COLORS = [
   'var(--destructive)',
   'var(--primary)',
 ] as const;
+
+/** The removed-Sources aggregate reads as history, not as one more supplier. */
+const seriesColor = (item: UsageSeries): string => (item.removed
+  ? 'var(--muted)'
+  : SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]);
 
 type FilterOption = { key: string; label: string; detail?: string };
 type UsageTranslate = (key: string, options?: Record<string, unknown>) => string;
@@ -87,6 +89,11 @@ const useUsageTranslation = () => {
     t: translation.t as unknown as UsageTranslate,
   };
 };
+
+const usageText = (t: UsageTranslate): UsageText => ({
+  unknownModel: t('settings.models.usage.unknownModel'),
+  removedSources: t('settings.models.usage.removedSources'),
+});
 
 const useCount = () => {
   const { i18n } = useTranslation();
@@ -270,7 +277,7 @@ const ChartLegend: React.FC<{
           className={cn('model-hub-usage-legend-item', isHidden && 'is-hidden')}
           onClick={() => onToggle(item.key)}
         >
-          <span className="model-hub-usage-legend-swatch" style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />
+          <span className="model-hub-usage-legend-swatch" style={{ background: seriesColor(item) }} />
           <span>{labels.get(item.key) ?? item.label}</span>
           <strong>{values.length === 0 ? blank : unpriced ? noPrice : atLeast(count(total), floor)}</strong>
         </button>
@@ -351,8 +358,11 @@ function UsageChart({
     ? requestedIndex
     : null;
   const bars = report.window_key === '30d' || report.window_key === '60d';
-  const unknownModelLabel = t('settings.models.usage.unknownModel');
-  const series = React.useMemo(() => seriesFor(report, filter, group, metric, unknownModelLabel), [filter, group, metric, unknownModelLabel, report]);
+  const { unknownModel, removedSources } = usageText(t);
+  const series = React.useMemo(
+    () => seriesFor(report, filter, group, metric, { unknownModel, removedSources }),
+    [filter, group, metric, removedSources, report, unknownModel],
+  );
   const labels = React.useMemo(() => new Map(series.map((item) => [
     item.key,
     item.key === 'total'
@@ -413,7 +423,7 @@ function UsageChart({
       ? (index + 0.5) / bucketCount
       : index / Math.max(1, bucketCount - 1)) * plotWidth;
     const yAt = (value: number) => top + plotHeight * (1 - value / max);
-    const colorOf = (item: UsageSeries) => SERIES_COLORS[item.colorIndex % SERIES_COLORS.length];
+    const colorOf = seriesColor;
     const columnWidth = plotWidth / Math.max(1, bucketCount);
     if (bars) {
       return report.buckets.map((currentBucket, index) => {
@@ -512,7 +522,7 @@ function UsageChart({
                 y={y(offset)}
                 width={columnWidth * 0.64}
                 height={value === null ? 4 : Math.max(0, y(start) - y(offset))}
-                fill={value === null ? 'url(#usage-unknown-pattern)' : SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]}
+                fill={value === null ? 'url(#usage-unknown-pattern)' : seriesColor(item)}
                 opacity={0.88}
                 rx="2"
               />
@@ -767,7 +777,7 @@ function UsageChart({
                 cx={x(activeIndex)}
                 cy={y(value)}
                 r="4"
-                fill={SERIES_COLORS[item.colorIndex % SERIES_COLORS.length]}
+                fill={seriesColor(item)}
                 stroke="var(--background)"
                 strokeWidth="2"
               />
@@ -868,7 +878,7 @@ function UsageChart({
             <div className="model-hub-usage-tooltip-lines">
               {visibleSeries.map((item) => (
                 <div key={item.key}>
-                  <span><i style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />{labels.get(item.key) ?? item.label}</span>
+                  <span><i style={{ background: seriesColor(item) }} />{labels.get(item.key) ?? item.label}</span>
                   <b>{item.values[activeIndex as number] === null
                     ? t('settings.models.usage.blank')
                     : item.unpriced[activeIndex as number]
@@ -902,6 +912,7 @@ type TableRow = {
   key: string;
   label: string;
   detail: string;
+  removed: boolean;
   counters: UsageCounters;
 };
 
@@ -910,34 +921,22 @@ function tableRows(
   filter: UsageFilter,
   group: 'model' | 'source',
   pinnedKey: string | null,
-  unknownModelLabel: string,
+  t: UsageTranslate,
 ): TableRow[] {
   const buckets = pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey);
   const rows = buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
-  const grouped = new Map<string, TableRow>();
-  const labelContext = usageLabelContext(report, filteredRows(report, filter), unknownModelLabel);
-  for (const row of rows) {
-    const key = group === 'source' ? row.source_id : pairKey(row.source_id, row.model_id);
-    const identity = group === 'source'
-      ? null
-      : {
-        key,
-        sourceId: row.source_id,
-        modelId: row.model_id,
-        sourceLabel: sourceLabel(report, row.source_id),
-        modelLabel: modelLabel(report, row.source_id, row.model_id),
-      } satisfies UsageIdentity;
-    const previous = grouped.get(key);
-    grouped.set(key, {
-      key,
-      label: group === 'source'
-        ? sourceIdentityLabel(report, row.source_id, labelContext)
-        : identityDisplayLabel(identity!, unknownModelLabel, labelContext),
-      detail: group === 'source' ? '' : sourceIdentityLabel(report, row.source_id, labelContext),
-      counters: aggregateCounters([...(previous ? [previous.counters] : []), row]),
-    });
-  }
-  return [...grouped.values()];
+  const identities = usageIdentities(report, group, usageText(t));
+  return identities.of(rows).map((identity) => ({
+    key: identity.key,
+    label: identity.label,
+    detail: identity.removed
+      ? t('settings.models.usage.removedSourcesHint')
+      : identity.unlisted
+        ? `${identity.sourceLabel} · ${t('settings.models.usage.removedModel')}`
+        : identity.sourceLabel,
+    removed: identity.removed,
+    counters: aggregateCounters(rows.filter((row) => identities.keyOf(row) === identity.key)),
+  }));
 }
 
 const StatCard: React.FC<{ label: string; value: React.ReactNode; note: React.ReactNode }> = ({ label, value, note }) => (
@@ -1009,30 +1008,16 @@ export const UsageTab: React.FC<{
   }
 
   const allRows = filteredRows(report, { sourceIds: [], modelKeys: [] });
-  const unknownModelLabel = t('settings.models.usage.unknownModel');
-  const labelContext = usageLabelContext(report, allRows, unknownModelLabel);
-  const sourceOptions: FilterOption[] = report.sources.map((source) => ({
-    key: source.source_id,
-    label: sourceIdentityLabel(report, source.source_id, labelContext),
+  // A Source that metered nothing in this window still offers itself.
+  const sourceOptions: FilterOption[] = usageIdentities(report, 'source', usageText(t))
+    .of([...allRows, ...report.sources.map((source) => ({ ...emptyCounters(), source_id: source.source_id, model_id: '' }))])
+    .map((identity) => ({ key: identity.key, label: identity.label }));
+  const modelOptions: FilterOption[] = usageIdentities(report, 'model', usageText(t)).of(allRows).map((identity) => ({
+    key: identity.key,
+    label: identity.label,
+    detail: identity.unlisted ? t('settings.models.usage.removedModel') : undefined,
   }));
-  const modelOptions = [...new Map(
-    allRows.map((row) => {
-      const key = pairKey(row.source_id, row.model_id);
-      const identity = {
-        key,
-        sourceId: row.source_id,
-        modelId: row.model_id,
-        sourceLabel: sourceLabel(report, row.source_id),
-        modelLabel: modelLabel(report, row.source_id, row.model_id),
-      } satisfies UsageIdentity;
-      return [key, {
-        key,
-        label: identityDisplayLabel(identity, unknownModelLabel, labelContext),
-        detail: identity.modelLabel ? undefined : unknownModelLabel,
-      }];
-    }),
-  ).values()];
-  const filter: UsageFilter = { sourceIds, modelKeys };
+  const filter = resolveUsageFilter(report, { sourceIds, modelKeys });
   const scopedRows = filteredRows(report, filter);
   const totals = aggregateCounters(scopedRows);
   const partialHistory = reportHasPartialHistory(report, filter);
@@ -1043,9 +1028,11 @@ export const UsageTab: React.FC<{
     ? null
     : report.buckets.find((bucket) => bucket.key === pinnedKey) ?? null;
   const activePinnedKey = pinnedBucket?.key ?? null;
-  const rows = tableRows(report, filter, tableGroup, activePinnedKey, unknownModelLabel);
+  const rows = tableRows(report, filter, tableGroup, activePinnedKey, t);
   const sortValue = (row: TableRow): number => usageMetricValue(row.counters, metric) ?? -1;
-  const sortedRows = [...rows].sort((left, right) => (sortValue(right) - sortValue(left)) * (sortAscending ? -1 : 1));
+  // The removed aggregate closes the list whichever way it is sorted.
+  const sortedRows = [...rows].sort((left, right) => (Number(left.removed) - Number(right.removed))
+    || (sortValue(right) - sortValue(left)) * (sortAscending ? -1 : 1));
   const tableTotal = aggregateCounters(
     (activePinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === activePinnedKey))
       .flatMap((bucket) => filterBucketRows(bucket, filter)),
@@ -1285,7 +1272,7 @@ export const UsageTab: React.FC<{
                       || tableTotal.api_cost_lower_bound === true || usageHasNoPrice(row.counters));
                     const share = shareUnknown || value === null || totalValue === null || totalValue === 0 ? null : value / totalValue;
                     return (
-                      <tr key={row.key}>
+                      <tr key={row.key} className={cn(row.removed && 'is-removed')}>
                         <th scope="row">
                           <span className="model-hub-usage-row-name">{row.label}</span>
                           {row.detail && <span className="model-hub-usage-row-detail">{row.detail}</span>}
