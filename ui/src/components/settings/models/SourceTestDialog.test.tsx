@@ -231,8 +231,8 @@ describe('SourceTestDialog', () => {
   });
 
   it.each([
-    [true, 'text-mint-ink', 'text-destructive-ink'],
-    [false, 'text-destructive-ink', 'text-mint-ink'],
+    [true, 'model-hub-ink-mint', 'text-destructive-ink'],
+    [false, 'text-destructive-ink', 'model-hub-ink-mint'],
   ] as const)('colours the result by outcome: reachable=%s', async (reachable, shown, absent) => {
     vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
     render(view());

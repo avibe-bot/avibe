@@ -103,7 +103,7 @@ export const SourceTestDialog: React.FC<{
             onValueChange={(value) => { setSelection(value); setStatus(null); }} />}
         </Field>
         {options.length === 0 && <p className="text-sm text-muted">{t('settings.models.sourceTest.empty')}</p>}
-        {result && <p role="status" className={cn('min-w-0 break-words text-sm', result.reachable ? 'text-mint-ink' : 'text-destructive-ink')}>
+        {result && <p role="status" className={cn('min-w-0 break-words text-sm', result.reachable ? 'model-hub-ink-mint' : 'text-destructive-ink')}>
           {result.reachable ? <CheckCircle2 aria-hidden className="mr-1.5 inline size-4 align-[-3px]" /> : <CircleX aria-hidden className="mr-1.5 inline size-4 align-[-3px]" />}
           {result.reachable
             ? t('settings.models.sourceTest.success', { model: result.model_id, ms: result.latency_ms })
