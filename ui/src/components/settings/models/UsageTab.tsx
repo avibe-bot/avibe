@@ -1018,7 +1018,7 @@ export const UsageTab: React.FC<{
     label: identity.label,
     detail: identity.unlisted ? t('settings.models.usage.removedModel') : undefined,
   }));
-  // What the filters show selected; a Source deleted since it was picked reads as the aggregate.
+  // What the filters show selected: this report's own options, never a key it no longer offers.
   const selection = foldUsageSelection(report, { sourceIds, modelKeys });
   const filter = resolveUsageFilter(report, selection);
   const scopedRows = filteredRows(report, filter);
@@ -1112,7 +1112,7 @@ export const UsageTab: React.FC<{
           </select>
           <ChevronDown aria-hidden className="size-3" />
         </div>
-        {(sourceIds.length > 0 || modelKeys.length > 0 || metric !== 'tokens') && (
+        {(selection.sourceIds.length > 0 || selection.modelKeys.length > 0 || metric !== 'tokens') && (
           <Button
             type="button"
             variant="ghost"

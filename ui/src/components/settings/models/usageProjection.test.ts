@@ -4,6 +4,7 @@ import type { UsageBucket, UsageBucketRow, UsageCounters, UsageReport } from './
 import {
   aggregateCounters,
   filteredRows,
+  foldUsageSelection,
   formatBucketAxisLabel,
   formatBucketHeading,
   formatBucketRange,
@@ -162,6 +163,33 @@ describe('usageProjection', () => {
       }
       const live = filteredRows(value, resolveUsageFilter(value, { sourceIds: ['source-a'], modelKeys: [REMOVED_SOURCES_KEY] }));
       expect(live).toEqual([]);
+    });
+
+    // A selection outlives the report it was made in; the next one may no
+    // longer offer what it names.
+    it('MH-USAGE-035: reconcile a kept selection with what this report offers', () => {
+      const live = reportWith([bucket('00', [row()])]);
+      const removed = withRemoved();
+      const livePair = pairKey('source-a', 'model-a');
+      const removedPair = pairKey('src_d1f4adc47c3f', 'glm-5.3');
+      // Config let the picked Source go: it, and any pair of it, reads as the aggregate.
+      expect(foldUsageSelection(removed, { sourceIds: ['src_d1f4adc47c3f', 'src_b52ba34d0659'], modelKeys: [removedPair] }))
+        .toEqual({ sourceIds: [REMOVED_SOURCES_KEY], modelKeys: [REMOVED_SOURCES_KEY] });
+      // The aggregate was picked, and nothing folds into it any more.
+      expect(foldUsageSelection(live, { sourceIds: [REMOVED_SOURCES_KEY], modelKeys: [REMOVED_SOURCES_KEY] }))
+        .toEqual(NO_FILTER);
+      // A removed Source with no metered row still offers the aggregate as a Source, never as a model.
+      const unmetered = reportWith([bucket('00', [row()])]);
+      unmetered.sources.push({ source_id: 'src_d1f4adc47c3f', label: null, last_metered_at: null, ...counters(), models: [] });
+      expect(foldUsageSelection(unmetered, { sourceIds: [REMOVED_SOURCES_KEY], modelKeys: [REMOVED_SOURCES_KEY] }))
+        .toEqual({ sourceIds: [REMOVED_SOURCES_KEY], modelKeys: [] });
+      // A picked model, or Source, this report never metered is dropped; what it still offers stays.
+      const later = reportWith([bucket('00', [row({ model_id: 'model-b' })])]);
+      expect(foldUsageSelection(later, { sourceIds: ['source-a', 'source-z'], modelKeys: [livePair, pairKey('source-a', 'model-b')] }))
+        .toEqual({ sourceIds: ['source-a'], modelKeys: [pairKey('source-a', 'model-b')] });
+      // Nothing left picked means no filter, not a filter that matches nothing.
+      expect(filteredRows(later, resolveUsageFilter(later, { sourceIds: [], modelKeys: [livePair] })))
+        .toEqual(filteredRows(later, NO_FILTER));
     });
 
     it('never fold a live Source, even one that metered nothing in the window', () => {

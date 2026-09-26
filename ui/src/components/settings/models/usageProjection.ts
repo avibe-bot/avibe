@@ -377,20 +377,32 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
 }
 
 /**
- * A selection made while a Source was live still names its ID, or its pairs,
- * after config lets it go. From then on it names the removed aggregate, the
- * only identity the filters and the table still offer for that Source.
+ * A selection is kept across reports, so it can name identities the current
+ * one no longer offers. A Source config let go since it was picked, or any
+ * pair of it, now reads as the removed aggregate. Any other key this report has
+ * no option for is dropped, the aggregate itself once nothing folds into it, so
+ * the filters never hold a choice they cannot show.
  */
 export function foldUsageSelection(report: UsageReport, selection: UsageFilter): UsageFilter {
   const live = liveSources(report);
-  const known = new Set([...report.sources.map((source) => source.source_id), ...allRows(report).map((row) => row.source_id)]);
-  const removed = (sourceId: string) => known.has(sourceId) && !live.has(sourceId);
-  const fold = (keys: readonly string[], sourceOf: (key: string) => string) => [...new Set(keys.map((key) => (
-    removed(sourceOf(key)) ? REMOVED_SOURCES_KEY : key
-  )))];
+  const rows = allRows(report);
+  const known = new Set([...report.sources.map((source) => source.source_id), ...rows.map((row) => row.source_id)]);
+  const fold = (sourceId: string, key: string) => (live.has(sourceId) ? key : REMOVED_SOURCES_KEY);
+  // What each filter lists: every Source the report names, and every pair it metered.
+  const offered = {
+    sourceIds: new Set([...known].map((sourceId) => fold(sourceId, sourceId))),
+    modelKeys: new Set(rows.map((row) => fold(row.source_id, pairKey(row.source_id, row.model_id)))),
+  };
+  const reconcile = (keys: readonly string[], options: ReadonlySet<string>, sourceOf: (key: string) => string) => [
+    ...new Set(keys.map((key) => (known.has(sourceOf(key)) ? fold(sourceOf(key), key) : key))),
+  ].filter((key) => options.has(key));
   return {
-    sourceIds: fold(selection.sourceIds, (key) => key),
-    modelKeys: fold(selection.modelKeys, (key) => key.slice(0, Math.max(0, key.indexOf(PAIR_SEPARATOR)))),
+    sourceIds: reconcile(selection.sourceIds, offered.sourceIds, (key) => key),
+    modelKeys: reconcile(
+      selection.modelKeys,
+      offered.modelKeys,
+      (key) => key.slice(0, Math.max(0, key.indexOf(PAIR_SEPARATOR))),
+    ),
   };
 }
 
@@ -398,7 +410,7 @@ export function foldUsageSelection(report: UsageReport, selection: UsageFilter):
  * A selection names identities; the rows it keeps are named by the IDs they
  * were metered under. The removed aggregate therefore stands for every Source
  * ID, and every pair, it folded. It stays in the list too, matching no row, so
- * a selection whose rows are gone never widens to everything.
+ * picking it never widens to everything while it is still offered.
  */
 export function resolveUsageFilter(report: UsageReport, picked: UsageFilter): UsageFilter {
   const selection = foldUsageSelection(report, picked);
