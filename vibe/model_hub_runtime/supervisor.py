@@ -112,16 +112,15 @@ class EngineSupervisor:
             self._require_stopped_locked()
             self._start_attempted = False
 
-    def restart_if_running(self) -> bool:
+    def restart_if_running(self) -> None:
         with self._lock:
             if not self._is_running_locked():
                 # Not running here, but a previous service may have left an engine
                 # serving the old config: a refresh must not succeed beside it.
                 self._require_no_untracked_engine_locked()
-                return False
+                return
             self._stop_locked()
             self._start_locked()
-            return True
 
     def with_engine_excluded(self, operation: Callable[[EngineClient | None], _T]) -> _T:
         """Run ``operation`` while no engine can start, and return its result.

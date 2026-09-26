@@ -1372,7 +1372,6 @@ class CLIProxyEngineAdapter:
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
-        self._oauth_startup_reconciled = False
 
     async def install(self) -> EngineStatus:
         await self.recover_installation()
@@ -1494,7 +1493,7 @@ class CLIProxyEngineAdapter:
                 EngineHealth.NOT_INSTALLED,
             }:
                 return
-            await self._start_and_reconcile_oauth_inventory()
+            await asyncio.to_thread(self.supervisor.ensure_running)
 
     async def _run_installation(
         self,
@@ -1696,10 +1695,7 @@ class CLIProxyEngineAdapter:
                 raise self._install_failure(reason)
             if install.get("changed"):
                 await self._transports_idle.wait()
-                self._oauth_startup_reconciled = False
-                restarted = await run_owned_in_thread(self.supervisor.restart_if_running)
-                if restarted:
-                    await self._start_and_reconcile_oauth_inventory()
+                await run_owned_in_thread(self.supervisor.restart_if_running)
             return EngineEnsureResult(
                 status=await self.status(),
                 changed=bool(install.get("changed")),
@@ -1720,46 +1716,8 @@ class CLIProxyEngineAdapter:
                         self._start_after_install_task = start_task
                         start_task.add_done_callback(self._start_after_install_done)
                 return status
-            await self._start_and_reconcile_oauth_inventory()
+            await asyncio.to_thread(self.supervisor.ensure_running)
             return await self.status()
-
-    async def _start_and_reconcile_oauth_inventory(self) -> None:
-        await asyncio.to_thread(self.supervisor.ensure_running)
-        if self._oauth_startup_reconciled:
-            return
-
-        # Compatibility repair is not engine readiness. Keep its complete
-        # failure boundary here, including metadata and inventory acquisition;
-        # a deferred pass stays retryable on the next start. Engine startup
-        # above, cancellation, and targeted credential mutations remain strict.
-        try:
-            oauth_credentials = await asyncio.to_thread(
-                self.state_store._oauth_credentials,
-                isolate_errors=True,
-            )
-            if any(
-                str(metadata.get("vendor") or "").strip().lower() == "anthropic"
-                for _credential_ref, metadata in oauth_credentials
-            ):
-                client_getter = getattr(self.supervisor, "client_if_running", None)
-                if not callable(client_getter):
-                    raise EngineStateError("OAuth startup reconciliation is unavailable")
-                client = await asyncio.to_thread(client_getter)
-                if client is None:
-                    raise EngineStateError("OAuth startup reconciliation is unavailable")
-                inventory = await run_owned_in_thread(_auth_inventory, client)
-                if not await self._reconcile_oauth_inventory(inventory, isolate_errors=True):
-                    return
-
-            # Isolation lets healthy bindings migrate, but a skipped metadata
-            # document must not turn that partial pass into cached completion.
-            # Reuse strict enumeration as the final completeness check, also
-            # when every Claude record was unreadable in the initial scan.
-            await asyncio.to_thread(self.state_store._oauth_credentials)
-        except (EngineClientError, EngineStateError, OSError) as exc:
-            logger.warning("Model Hub OAuth startup reconciliation deferred: %s", type(exc).__name__)
-            return
-        self._oauth_startup_reconciled = True
 
     async def stop_runtime(self) -> EngineStatus:
         async with self._installation_lock:
@@ -1770,7 +1728,6 @@ class CLIProxyEngineAdapter:
             if start_after_install_task is not None and not start_after_install_task.done():
                 start_after_install_task.cancel()
             await asyncio.to_thread(self.supervisor.disable)
-            self._oauth_startup_reconciled = False
             return await self.status()
 
     async def stop(self) -> None:
@@ -1795,7 +1752,6 @@ class CLIProxyEngineAdapter:
             except Exception:  # noqa: BLE001
                 pass
         await asyncio.to_thread(self.supervisor.stop)
-        self._oauth_startup_reconciled = False
 
     async def status(self) -> EngineStatus:
         raw = await asyncio.to_thread(self.supervisor.status)
@@ -2032,15 +1988,6 @@ class CLIProxyEngineAdapter:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
                 raise EngineStateError("OAuth credential validation could not inspect the engine") from exc
-            await asyncio.to_thread(
-                self.state_store.reconcile_oauth_credential,
-                credential_ref,
-                auth_provider=expected_provider,
-            )
-            metadata = await asyncio.to_thread(
-                self.state_store.credential_metadata,
-                credential_ref,
-            )
             auth_name = str(metadata.get("auth_name") or "")
             matches = [
                 auth
@@ -2197,21 +2144,17 @@ class CLIProxyEngineAdapter:
             if metadata.get("activation_state") != "staged":
 
                 def remove_grant(client: EngineClient | None) -> None:
-                    current_auth_name = self._reconcile_oauth_credential_for_mutation(
-                        credential_ref,
-                        client,
-                    )
                     if client is not None:
                         try:
                             client.management_request(
                                 "DELETE",
                                 "/auth-files",
-                                query={"name": current_auth_name},
+                                query={"name": str(auth_name)},
                                 timeout=1.0,
                             )
                         except EngineClientError as exc:
                             raise EngineStateError("unable to remove OAuth auth file") from exc
-                    self.state_store.delete_oauth_auth_file(current_auth_name)
+                    self.state_store.delete_oauth_auth_file(str(auth_name))
 
                 # One supervisor operation: an engine left running by a previous
                 # service is reaped first, and none can start and load the grant
@@ -2262,7 +2205,7 @@ class CLIProxyEngineAdapter:
         auth_name = metadata.get("auth_name")
         if not isinstance(auth_name, str) or not auth_name:
             return False
-        return await self._cleanup_oauth_material(credential_ref)
+        return await self._cleanup_oauth_material(auth_name, credential_ref)
 
     async def discover_models(
         self,
@@ -2280,16 +2223,6 @@ class CLIProxyEngineAdapter:
             if metadata.get("vendor") != normalized_vendor or base_url is not None:
                 raise EngineStateError("credential does not match discovery target")
             client = await asyncio.to_thread(self.supervisor.client)
-            inventory = await asyncio.to_thread(_auth_inventory, client)
-            await asyncio.to_thread(
-                self.state_store.reconcile_oauth_credential,
-                credential_ref,
-                auth_provider=_OAUTH_ENDPOINTS[normalized_vendor][2],
-            )
-            metadata = await asyncio.to_thread(
-                self.state_store.credential_metadata,
-                credential_ref,
-            )
             payload = await asyncio.to_thread(
                 client.management_request,
                 "GET",
@@ -2380,15 +2313,6 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("credential does not match observation target")
             client = await asyncio.to_thread(self.supervisor.client)
             inventory = await asyncio.to_thread(_auth_inventory, client)
-            await asyncio.to_thread(
-                self.state_store.reconcile_oauth_credential,
-                credential_ref,
-                auth_provider=_OAUTH_ENDPOINTS[normalized_vendor][2],
-            )
-            metadata = await asyncio.to_thread(
-                self.state_store.credential_metadata,
-                credential_ref,
-            )
             auth_name = str(metadata.get("auth_name") or "")
             matches = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matches) != 1 or not matches[0].auth_index:
@@ -2656,13 +2580,6 @@ class CLIProxyEngineAdapter:
         try:
             client = await asyncio.to_thread(self.supervisor.client)
             before = await asyncio.to_thread(_auth_inventory, client)
-            try:
-                await self._reconcile_oauth_inventory(before)
-            except EngineStateError:
-                # A later completion pass will fail closed if persisted
-                # ownership is ambiguous; starting the OAuth flow must still
-                # retain its normal cleanup/retention contract.
-                pass
             payload = await asyncio.to_thread(
                 client.management_request,
                 "GET",
@@ -2702,74 +2619,6 @@ class CLIProxyEngineAdapter:
         with self._oauth_lock:
             self._oauth_flows[flow.flow_id] = flow
         return flow.snapshot()
-
-    async def _reconcile_oauth_inventory(
-        self,
-        inventory: Mapping[str, _AuthRecord],
-        *,
-        isolate_errors: bool = False,
-    ) -> bool:
-        return await asyncio.to_thread(
-            self._reconcile_oauth_inventory_sync,
-            inventory,
-            isolate_errors=isolate_errors,
-        )
-
-    def _reconcile_oauth_inventory_sync(
-        self,
-        inventory: Mapping[str, _AuthRecord],
-        *,
-        isolate_errors: bool = False,
-    ) -> bool:
-        complete = True
-        for auth in inventory.values():
-            if auth.provider != "claude":
-                continue
-            try:
-                self.state_store.reconcile_oauth_auth_file(
-                    auth.name,
-                    auth_provider=auth.provider,
-                    isolate_errors=isolate_errors,
-                )
-            except EngineStateError as exc:
-                if not isolate_errors:
-                    raise
-                complete = False
-                logger.warning(
-                    "Model Hub OAuth startup reconciliation skipped %s: %s",
-                    auth.name,
-                    exc,
-                )
-        return complete
-
-    def _reconcile_oauth_credential_for_mutation(
-        self,
-        credential_ref: str,
-        client: EngineClient | None,
-    ) -> str:
-        metadata = self.state_store.credential_metadata(credential_ref)
-        if metadata.get("kind") != "oauth":
-            raise EngineStateError("OAuth credential is unavailable")
-        vendor = str(metadata.get("vendor") or "").strip().lower()
-        endpoint = _OAUTH_ENDPOINTS.get(vendor)
-        auth_provider = endpoint[2] if endpoint is not None else ""
-        if auth_provider != "claude":
-            return str(metadata.get("auth_name") or "")
-        if client is not None:
-            try:
-                _auth_inventory(client)
-            except EngineClientError as exc:
-                raise EngineStateError("unable to inspect OAuth auth files") from exc
-            self.state_store.reconcile_oauth_credential(
-                credential_ref,
-                auth_provider=auth_provider,
-            )
-            refreshed = self.state_store.credential_metadata(credential_ref)
-            return str(refreshed.get("auth_name") or "")
-        return self.state_store.reconcile_oauth_credential(
-            credential_ref,
-            auth_provider=auth_provider,
-        )
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         endpoint = _OAUTH_ENDPOINTS.get(vendor)
@@ -2989,12 +2838,6 @@ class CLIProxyEngineAdapter:
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True
         inventory = await asyncio.to_thread(_auth_inventory, client)
-        try:
-            await self._reconcile_oauth_inventory(inventory)
-        except EngineStateError:
-            self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
-            self._fail_flow(flow, "models.oauth.binding_failed")
-            return
         provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
         try:
             foreign = await asyncio.to_thread(self._foreign_bound_identities, provider_records, flow.source_id)
@@ -3030,14 +2873,18 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
-        try:
-            auth_identity = await asyncio.to_thread(
-                self.state_store.oauth_auth_identity,
-                auth.name,
-                auth_provider=auth.provider,
-            )
-        except EngineStateError:
-            auth_identity = {}
+        if flow.auth_provider == "claude":
+            try:
+                # CPA only migrates Claude names while saving a new login.
+                # Restore the existing ref before ownership or cleanup decisions.
+                await asyncio.to_thread(self.state_store.reconcile_claude_login, auth.name)
+                foreign = await asyncio.to_thread(
+                    self._foreign_bound_identities, provider_records, flow.source_id,
+                )
+            except (EngineStateError, OSError):
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+                self._fail_flow(flow, "models.oauth.binding_failed")
+                return
         foreign_accounts = {
             record.account_id for record in provider_records if record.identity in foreign and record.account_id
         }
@@ -3058,12 +2905,6 @@ class CLIProxyEngineAdapter:
                 self.state_store.oauth_credential_ref,
                 auth.name,
             )
-            if existing_credential_ref is None and auth_identity:
-                existing_credential_ref = await asyncio.to_thread(
-                    self.state_store.oauth_credential_ref_for_identity,
-                    flow.vendor,
-                    auth_identity,
-                )
         except EngineStateError:
             # The grant changed but duplicate persisted metadata means no single
             # ref can be named safely.
@@ -3091,7 +2932,6 @@ class CLIProxyEngineAdapter:
                 flow.source_id,
                 flow.vendor,
                 auth.name,
-                identity=auth_identity,
             )
         except EngineStateError:
             if existing_credential_ref is None or existing_source_id is None:
@@ -3145,8 +2985,8 @@ class CLIProxyEngineAdapter:
                 # may remain behind it. Both auth-file deletions must be
                 # confirmed before revocation can discard the minted ref.
                 if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
+                    auth.name,
                     credential_ref,
-                    auth_name_override=auth.name,
                 ):
                     self._set_retained_material(
                         flow,
@@ -3197,23 +3037,8 @@ class CLIProxyEngineAdapter:
         except EngineUnavailableError:
             return False
 
-    async def _cleanup_oauth_material(
-        self,
-        credential_ref: str,
-        *,
-        auth_name_override: str | None = None,
-    ) -> bool:
+    async def _cleanup_oauth_material(self, auth_name: str, credential_ref: str) -> bool:
         def remove_grant(client: EngineClient | None) -> bool:
-            if auth_name_override is None:
-                try:
-                    auth_name = self._reconcile_oauth_credential_for_mutation(
-                        credential_ref,
-                        client,
-                    )
-                except EngineStateError:
-                    return False
-            else:
-                auth_name = auth_name_override
             engine_delete_succeeded = True
             if client is not None:
                 try:

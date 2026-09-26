@@ -759,16 +759,6 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
         fail_delete = True
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if (method, path) == ("GET", "/auth-files"):
-                return {
-                    "files": [
-                        {
-                            "id": "claude-account.json",
-                            "name": "claude-account.json",
-                            "provider": "claude",
-                        }
-                    ]
-                }
             assert (method, path) == ("DELETE", "/auth-files")
             if self.fail_delete:
                 raise EngineClientError("delete failed")
@@ -789,21 +779,12 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
         auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
             auth_file.name,
-        )
-        store.write_oauth_auth_file(
-            auth_file.name,
-            {
-                "type": "claude",
-                "prefix": store.credential_metadata(credential_ref)["prefix"],
-                "email": "user@example.com",
-                "account_uuid": "account-a",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-fixture",
-            },
         )
         client = Client()
         adapter = CLIProxyEngineAdapter(
@@ -829,16 +810,6 @@ def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
         delete_calls = 0
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if (method, path) == ("GET", "/auth-files"):
-                return {
-                    "files": [
-                        {
-                            "id": "claude-account.json",
-                            "name": "claude-account.json",
-                            "provider": "claude",
-                        }
-                    ]
-                }
             assert (method, path) == ("DELETE", "/auth-files")
             self.delete_calls += 1
             return {"status": "ok"}
@@ -858,21 +829,12 @@ def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
         auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
             auth_file.name,
-        )
-        store.write_oauth_auth_file(
-            auth_file.name,
-            {
-                "type": "claude",
-                "prefix": store.credential_metadata(credential_ref)["prefix"],
-                "email": "user@example.com",
-                "account_uuid": "account-a",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-fixture",
-            },
         )
         client = Client()
         adapter = CLIProxyEngineAdapter(
@@ -908,85 +870,6 @@ def test_orphaned_oauth_cleanup_never_existed_ref_is_converged(
         )
 
         assert await adapter.cleanup_orphaned_oauth_material("cred_00000000000000000000000000000000") is True
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("operation", ["revoke", "cleanup"])
-@pytest.mark.parametrize("engine_running", [False, True])
-def test_oauth_mutation_reconciles_renamed_claude_grant(
-    tmp_path: Path,
-    operation: str,
-    engine_running: bool,
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.deleted: list[str] = []
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if path == "/auth-files" and method == "GET":
-                return {
-                    "files": [
-                        {
-                            "id": "claude-00f765af-account.json",
-                            "name": "claude-00f765af-account.json",
-                            "provider": "claude",
-                        }
-                    ]
-                }
-            if path == "/auth-files" and method == "DELETE":
-                self.deleted.append(str((query or {}).get("name")))
-                return {"status": "ok"}
-            raise AssertionError((method, path, query, payload, timeout))
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self._client = client
-
-        def with_engine_excluded(self, operation):
-            return operation(self._client if engine_running else None)
-
-        def invalidate_configs(self) -> None:
-            return None
-
-    async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        store.prepare_instance("install-1")
-        old_name = "claude-account.json"
-        new_name = "claude-00f765af-account.json"
-        credential_ref = store.bind_oauth_credential(
-            "src_fixture123",
-            "anthropic",
-            old_name,
-        )
-        prefix = store.credential_metadata(credential_ref)["prefix"]
-        store.write_oauth_auth_file(
-            old_name,
-            {
-                "type": "claude",
-                "prefix": prefix,
-                "email": "user@example.com",
-                "account_uuid": "account-a",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-fixture",
-            },
-        )
-        (store.auth_dir / old_name).rename(store.auth_dir / new_name)
-        client = Client()
-        adapter = CLIProxyEngineAdapter(
-            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
-            state_store=store,
-        )
-
-        if operation == "revoke":
-            await adapter.revoke_credential(credential_ref)
-        else:
-            assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
-
-        assert client.deleted == ([new_name] if engine_running else [])
-        assert not (store.auth_dir / new_name).exists()
-        assert store.credential_metadata_if_present(credential_ref) is None
 
     asyncio.run(run())
 
@@ -1513,429 +1396,6 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
         assert (status.health is EngineHealth.INSTALLING) is (
             live_owner or resumable_claim
         )
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize(
-    "initial_failure",
-    ["none", "inventory_error", "inventory_shape", "missing_client", "metadata", "engine"],
-)
-def test_adapter_start_reconciles_renamed_claude_grant_once(
-    tmp_path: Path, monkeypatch, caplog, initial_failure: str,
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.inventory_calls = 0
-            self.damaged_name = "claude-damaged.json"
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            assert (method, path) == ("GET", "/auth-files")
-            self.inventory_calls += 1
-            if initial_failure == "inventory_error":
-                raise EngineClientError("fixture inventory unavailable")
-            if initial_failure == "inventory_shape":
-                return {"files": None}
-            return {
-                "files": [
-                    {
-                        "id": "claude-00f765af-user@example.com.json",
-                        "name": "claude-00f765af-user@example.com.json",
-                        "provider": "claude",
-                    },
-                    {
-                        "id": self.damaged_name,
-                        "name": self.damaged_name,
-                        "provider": "claude",
-                    },
-                ]
-            }
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self.client = client
-            self.start_calls = 0
-
-        def status(self):
-            return {
-                "host_platform": "fixture",
-                "status": {
-                    "health": "ok",
-                    "installed_version": "v7.3.16",
-                    "verified": True,
-                    "listening": {"host": "127.0.0.1", "port": 15220},
-                    "last_check": None,
-                    "error_key": None,
-                },
-            }
-
-        def ensure_running(self) -> None:
-            self.start_calls += 1
-            if initial_failure == "engine":
-                raise EngineStateError("fixture engine startup failed")
-
-        def client_if_running(self) -> Client | None:
-            return None if initial_failure == "missing_client" else self.client
-
-    async def run() -> None:
-        nonlocal initial_failure
-        store = EngineStateStore(tmp_path / "state")
-        store.prepare_instance("install-1")
-        old_name = "claude-user@example.com.json"
-        new_name = "claude-00f765af-user@example.com.json"
-        ref = store.bind_oauth_credential("src_fixture123", "anthropic", old_name)
-        prefix = store.credential_metadata(ref)["prefix"]
-        damaged_ref = store.bind_oauth_credential(
-            "src_damaged123",
-            "anthropic",
-            "claude-damaged.json",
-        )
-        store.write_oauth_auth_file(
-            old_name,
-            {
-                "type": "claude",
-                "prefix": prefix,
-                "email": "user@example.com",
-                "account_uuid": "account-a",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-fixture",
-            },
-        )
-        store.write_oauth_auth_file(
-            "claude-damaged.json",
-            {
-                "type": "claude",
-                "prefix": "foreign-prefix",
-                "email": "damaged@example.com",
-                "account_uuid": "damaged-account",
-                "organization_uuid": "organization-b",
-                "access_token": "private-access-damaged",
-            },
-        )
-        store.reconcile_oauth_auth_file(old_name, auth_provider="claude")
-        malformed_path = store.root / "credentials" / "cred_malformed123.json"
-        malformed_path.write_text("{", encoding="utf-8")
-        malformed_path.chmod(0o600)
-        (store.auth_dir / old_name).rename(store.auth_dir / new_name)
-
-        client = Client()
-        supervisor = Supervisor(store, client)
-        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
-
-        if initial_failure != "none":
-            before = store.credential_metadata(ref)
-            if initial_failure == "engine":
-                with pytest.raises(EngineStateError, match="fixture engine startup failed"):
-                    await adapter.start()
-                assert not client.inventory_calls
-            else:
-                with monkeypatch.context() as failures:
-                    if initial_failure == "metadata":
-                        def unavailable_metadata(**kwargs):
-                            raise OSError("fixture credential directory unavailable")
-
-                        failures.setattr(store, "_oauth_credentials", unavailable_metadata)
-                    assert (await adapter.start()).health is EngineHealth.OK
-                assert "OAuth startup reconciliation deferred" in caplog.text
-            assert store.credential_metadata(ref) == before
-            assert (store.auth_dir / new_name).is_file()
-            initial_failure = "none"
-
-        previous_inventory_calls = client.inventory_calls
-        started = await adapter.start()
-        assert started.health is EngineHealth.OK
-        assert client.inventory_calls == previous_inventory_calls + 1
-        assert store.credential_metadata(ref)["auth_name"] == new_name
-        assert store.credential_metadata(damaged_ref)["auth_name"] == "claude-damaged.json"
-
-        # A partially successful pass is not complete: repair the rejected
-        # auth file and observe its migration on the same adapter, without stop.
-        store.write_oauth_auth_file(
-            "claude-damaged.json",
-            {
-                "type": "claude",
-                "prefix": store.credential_metadata(damaged_ref)["prefix"],
-                "email": "damaged@example.com",
-                "account_uuid": "damaged-account",
-                "organization_uuid": "organization-b",
-                "access_token": "private-access-damaged",
-            },
-        )
-        client.damaged_name = "claude-repaired.json"
-        (store.auth_dir / "claude-damaged.json").rename(store.auth_dir / client.damaged_name)
-        assert (await adapter.start()).health is EngineHealth.OK
-        assert client.inventory_calls == previous_inventory_calls + 2
-        assert store.credential_metadata(damaged_ref)["auth_name"] == client.damaged_name
-
-        # The separately skipped credential document must also keep the pass
-        # retryable, even after every auth-file reconciliation succeeds.
-        malformed_path.unlink()
-        assert (await adapter.start()).health is EngineHealth.OK
-        assert client.inventory_calls == previous_inventory_calls + 3
-        await adapter.start()
-        assert client.inventory_calls == previous_inventory_calls + 3
-
-    asyncio.run(run())
-
-
-def test_ensure_installed_reconciles_after_restarting_running_engine(
-    tmp_path: Path,
-) -> None:
-    class Installer:
-        def ensure(self, **kwargs):
-            return {"ok": True, "changed": True}
-
-    class Client:
-        def __init__(self) -> None:
-            self.auth_name = "claude-legacy.json"
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            assert (method, path) == ("GET", "/auth-files")
-            return {
-                "files": [
-                    {
-                        "id": self.auth_name,
-                        "name": self.auth_name,
-                        "provider": "claude",
-                    }
-                ]
-            }
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self.installer = Installer()
-            self.client = client
-            self.restart_calls = 0
-
-        def status(self):
-            return {
-                "host_platform": "fixture",
-                "status": {
-                    "health": "ok",
-                    "installed_version": "v7.3.16",
-                    "verified": True,
-                    "listening": {"host": "127.0.0.1", "port": 15220},
-                    "last_check": None,
-                    "error_key": None,
-                },
-            }
-
-        def ensure_running(self) -> None:
-            return None
-
-        def restart_if_running(self) -> bool:
-            self.restart_calls += 1
-            old_name = "claude-legacy.json"
-            new_name = "claude-hash.json"
-            (self.state_store.auth_dir / old_name).rename(self.state_store.auth_dir / new_name)
-            self.client.auth_name = new_name
-            return True
-
-        def client_if_running(self) -> Client:
-            return self.client
-
-    async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        store.prepare_instance("install-1")
-        auth_name = "claude-legacy.json"
-        ref = store.bind_oauth_credential("src_fixture123", "anthropic", auth_name)
-        prefix = store.credential_metadata(ref)["prefix"]
-        store.write_oauth_auth_file(
-            auth_name,
-            {
-                "type": "claude",
-                "prefix": prefix,
-                "email": "user@example.com",
-                "account_uuid": "account-a",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-fixture",
-            },
-        )
-        client = Client()
-        supervisor = Supervisor(store, client)
-        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
-
-        await adapter.start()
-        assert store.credential_metadata(ref)["auth_name"] == auth_name
-
-        await adapter.ensure_installed()
-
-        assert supervisor.restart_calls == 1
-        assert store.credential_metadata(ref)["auth_name"] == "claude-hash.json"
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("operation", ["revoke", "cleanup"])
-def test_online_oauth_mutation_fails_closed_on_duplicate_claude_files(
-    tmp_path: Path,
-    operation: str,
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.deleted: list[str] = []
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if (method, path) == ("GET", "/auth-files"):
-                return {
-                    "files": [
-                        {
-                            "id": "claude-legacy.json",
-                            "name": "claude-legacy.json",
-                            "provider": "claude",
-                        },
-                        {
-                            "id": "claude-hash.json",
-                            "name": "claude-hash.json",
-                            "provider": "claude",
-                        },
-                    ]
-                }
-            if (method, path) == ("DELETE", "/auth-files"):
-                self.deleted.append(str((query or {})["name"]))
-                return {"status": "ok"}
-            raise AssertionError((method, path, query, payload, timeout))
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self.client = client
-
-        def with_engine_excluded(self, operation):
-            return operation(self.client)
-
-        def invalidate_configs(self) -> None:
-            return None
-
-    async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        store.prepare_instance("install-1")
-        old_name = "claude-legacy.json"
-        duplicate_name = "claude-hash.json"
-        ref = store.bind_oauth_credential("src_fixture123", "anthropic", old_name)
-        prefix = store.credential_metadata(ref)["prefix"]
-        payload = {
-            "type": "claude",
-            "prefix": prefix,
-            "email": "user@example.com",
-            "account_uuid": "account-a",
-            "organization_uuid": "organization-a",
-            "access_token": "private-access-fixture",
-        }
-        store.write_oauth_auth_file(old_name, payload)
-        store.write_oauth_auth_file(duplicate_name, payload)
-        client = Client()
-        adapter = CLIProxyEngineAdapter(
-            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
-            state_store=store,
-        )
-
-        if operation == "revoke":
-            with pytest.raises(EngineStateError, match="binding is ambiguous"):
-                await adapter.revoke_credential(ref)
-        else:
-            assert await adapter.cleanup_orphaned_oauth_material(ref) is False
-
-        assert store.credential_metadata_if_present(ref) is not None
-        assert (store.auth_dir / old_name).is_file()
-        assert (store.auth_dir / duplicate_name).is_file()
-        assert client.deleted == []
-
-    asyncio.run(run())
-
-
-def test_online_oauth_mutation_ignores_unrelated_damaged_claude_binding(
-    tmp_path: Path,
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.deleted: list[str] = []
-
-        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if (method, path) == ("GET", "/auth-files"):
-                return {
-                    "files": [
-                        {
-                            "id": "claude-primary.json",
-                            "name": "claude-primary.json",
-                            "provider": "claude",
-                        },
-                        {
-                            "id": "claude-damaged.json",
-                            "name": "claude-damaged.json",
-                            "provider": "claude",
-                        },
-                    ]
-                }
-            if (method, path) == ("DELETE", "/auth-files"):
-                self.deleted.append(str((query or {})["name"]))
-                return {"status": "ok"}
-            raise AssertionError((method, path, query, payload, timeout))
-
-    class Supervisor:
-        def __init__(self, store: EngineStateStore, client: Client) -> None:
-            self.state_store = store
-            self.client = client
-
-        def with_engine_excluded(self, operation):
-            return operation(self.client)
-
-        def invalidate_configs(self) -> None:
-            return None
-
-    async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        store.prepare_instance("install-1")
-        primary_name = "claude-primary.json"
-        damaged_name = "claude-damaged.json"
-        primary_ref = store.bind_oauth_credential(
-            "src_primary123",
-            "anthropic",
-            primary_name,
-        )
-        damaged_ref = store.bind_oauth_credential(
-            "src_damaged123",
-            "anthropic",
-            damaged_name,
-        )
-        primary_prefix = store.credential_metadata(primary_ref)["prefix"]
-        damaged_prefix = store.credential_metadata(damaged_ref)["prefix"]
-        store.write_oauth_auth_file(
-            primary_name,
-            {
-                "type": "claude",
-                "prefix": primary_prefix,
-                "email": "primary@example.com",
-                "account_uuid": "primary-account",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-primary",
-            },
-        )
-        store.write_oauth_auth_file(
-            damaged_name,
-            {
-                "type": "claude",
-                "prefix": "foreign-prefix",
-                "email": "damaged@example.com",
-                "account_uuid": "damaged-account",
-                "organization_uuid": "organization-b",
-                "access_token": "private-access-damaged",
-            },
-        )
-        client = Client()
-        adapter = CLIProxyEngineAdapter(
-            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
-            state_store=store,
-        )
-
-        await adapter.revoke_credential(primary_ref)
-
-        assert client.deleted == [primary_name]
-        assert store.credential_metadata_if_present(primary_ref) is None
-        assert store.credential_metadata_if_present(damaged_ref) is not None
-        assert (store.auth_dir / damaged_name).is_file()
 
     asyncio.run(run())
 
@@ -8384,16 +7844,6 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:
     class Client:
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
-            if path == "/auth-files":
-                return {
-                    "files": [
-                        {
-                            "id": "claude-account.json",
-                            "name": "claude-account.json",
-                            "provider": "claude",
-                        }
-                    ]
-                }
             assert (method, path) == ("GET", "/auth-files/models")
             assert query == {"name": "claude-account.json"}
             return {
@@ -8430,20 +7880,11 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
         credential_ref = store.bind_oauth_credential(
             "src_fixture123",
             "anthropic",
             "claude-account.json",
-        )
-        store.write_oauth_auth_file(
-            "claude-account.json",
-            {
-                "type": "claude",
-                "prefix": store.credential_metadata(credential_ref)["prefix"],
-                "email": "user@example.com",
-                "organization_uuid": "organization-a",
-                "account_uuid": "account-a",
-            },
         )
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store),  # type: ignore[arg-type]
@@ -8475,7 +7916,6 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
         "new",
         "refresh",
         "conflict",
-        "renamed_conflict",
         "duplicate_binding",
         "metadata_failure",
         "patch_failure",
@@ -8494,7 +7934,6 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             self.auth_calls = 0
             self.patches: list[dict[str, object]] = []
             self.deletes: list[str] = []
-            self.rename_auth_file = None
 
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             if path == "/auth-files":
@@ -8524,19 +7963,6 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                             }
                         ]
                     }
-                if oauth_record_case == "renamed_conflict":
-                    assert self.rename_auth_file is not None
-                    self.rename_auth_file()
-                    return {
-                        "files": [
-                            {
-                                "id": "claude-00f765af-account.json",
-                                "name": "claude-00f765af-account.json",
-                                "provider": "claude",
-                                "modtime": "2026-07-23T04:01:00Z",
-                            }
-                        ]
-                    }
                 return {
                     "files": [
                         {
@@ -8561,10 +7987,6 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                 }:
                     raise EngineClientError("patch failed")
                 self.patches.append(dict(payload or {}))
-                auth_path = self.store.auth_dir / str((payload or {})["name"])
-                auth_payload = json.loads(auth_path.read_text(encoding="utf-8"))
-                auth_payload["prefix"] = (payload or {})["prefix"]
-                self.store.write_oauth_auth_file(auth_path.name, auth_payload)
                 return {"status": "ok"}
             raise AssertionError((method, path, query, payload, timeout))
 
@@ -8589,17 +8011,8 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
-        store.write_oauth_auth_file(
-            "claude-account.json",
-            {
-                "type": "claude",
-                "prefix": "engine-prefix",
-                "email": "user@example.com",
-                "account_uuid": "account-a",
-                "organization_uuid": "organization-a",
-                "access_token": "private-access-fixture",
-            },
-        )
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        (store.auth_dir / "claude-account.json").chmod(0o600)
         existing_ref = None
         existing_prefix = None
         if oauth_record_case not in {
@@ -8611,26 +8024,11 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             "new_patch_revoke_failure",
         }:
             existing_ref = store.bind_oauth_credential(
-                (
-                    "src_other1234"
-                    if oauth_record_case in {"conflict", "renamed_conflict"}
-                    else "src_fixture123"
-                ),
+                "src_other1234" if oauth_record_case == "conflict" else "src_fixture123",
                 "anthropic",
                 "claude-account.json",
             )
             existing_prefix = store.credential_metadata(existing_ref)["prefix"]
-            store.write_oauth_auth_file(
-                "claude-account.json",
-                {
-                    "type": "claude",
-                    "prefix": existing_prefix,
-                    "email": "user@example.com",
-                    "account_uuid": "account-a",
-                    "organization_uuid": "organization-a",
-                    "access_token": "private-access-fixture",
-                },
-            )
             if oauth_record_case == "duplicate_binding":
                 duplicate_path = store._credential_path(f"cred_{'f' * 32}")
                 duplicate_path.write_bytes(store._credential_path(existing_ref).read_bytes())
@@ -8674,15 +8072,6 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         store.delete_oauth_auth_file = delete_oauth_auth_file  # type: ignore[method-assign]
         store.revoke_credential = revoke_credential  # type: ignore[method-assign]
         client = Client()
-        client.store = store
-        if oauth_record_case == "renamed_conflict":
-            def rename_auth_file() -> None:
-                old_path = store.auth_dir / "claude-account.json"
-                new_path = store.auth_dir / "claude-00f765af-account.json"
-                if old_path.exists():
-                    old_path.rename(new_path)
-
-            client.rename_auth_file = rename_auth_file
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store, client),  # type: ignore[arg-type]
             state_store=store,
@@ -8696,20 +8085,13 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             adapter.oauth_status(flow.flow_id),
         )
 
-        if oauth_record_case in {"conflict", "renamed_conflict"}:
+        if oauth_record_case == "conflict":
             # Signing in again to an account another Source already holds is a
             # duplicate add, reported as such, and that Source's file is kept.
             assert completed.state == "failed"
             assert completed.error_key == "models.oauth.account_already_added"
-            retained_name = (
-                "claude-00f765af-account.json"
-                if oauth_record_case == "renamed_conflict"
-                else "claude-account.json"
-            )
-            assert (store.auth_dir / retained_name).exists()
+            assert (store.auth_dir / "claude-account.json").exists()
             assert not client.deletes
-            if oauth_record_case == "renamed_conflict":
-                assert store.credential_metadata(existing_ref)["auth_name"] == retained_name
             assert completed.channel == "hub"
             assert completed.retained_material_disposition is RetainedMaterialDisposition.FOREIGN_SOURCE_REF
             assert completed.retained_credential_ref is None

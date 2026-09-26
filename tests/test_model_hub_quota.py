@@ -614,38 +614,6 @@ class _StateStore:
         return self.metadata[credential_ref]
 
 
-async def test_adapter_quota_read_does_not_reconcile_or_write_credential_state(tmp_path):
-    """MH-QUOTA-021: quota polling is observational even when auth inventory is readable."""
-
-    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-    from vibe.model_hub_runtime.state import EngineStateStore
-
-    store = EngineStateStore(tmp_path / "state")
-    credential_ref = store.bind_oauth_credential("src_codex001", "openai", "codex-b.json")
-    metadata = store.credential_metadata(credential_ref)
-    store.write_oauth_auth_file(
-        "codex-b.json",
-        {
-            "type": "codex",
-            "prefix": metadata["prefix"],
-            "access_token": "private-access-fixture",
-        },
-    )
-    before_bytes = store._credential_path(credential_ref).read_bytes()
-    before_mtime = store._credential_path(credential_ref).stat().st_mtime_ns
-
-    adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
-    client = _EngineClient({"status_code": 200, "header": {}, "body": json.dumps(CODEX_REPORT)})
-    adapter.supervisor = _Supervisor(client)
-    adapter.state_store = store
-
-    parsed = await adapter.subscription_quota("src_codex001", "openai", credential_ref)
-
-    assert parsed["windows"]
-    assert store._credential_path(credential_ref).read_bytes() == before_bytes
-    assert store._credential_path(credential_ref).stat().st_mtime_ns == before_mtime
-
-
 def _adapter(response, metadata, by_url=None):
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 

@@ -12,7 +12,7 @@ import stat
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
@@ -40,9 +40,6 @@ class EngineStateError(RuntimeError):
 class RuntimeSecrets:
     management_key: str
     gateway_token: str
-
-
-_OAUTH_IDENTITY_FIELDS = ("email", "organization_uuid", "account_uuid")
 
 
 def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
@@ -282,37 +279,17 @@ class EngineStateStore:
                 raise
             return credential_ref
 
-    def bind_oauth_credential(
-        self,
-        source_id: str,
-        vendor: str,
-        auth_name: str,
-        *,
-        identity: Mapping[str, Any] | None = None,
-    ) -> str:
+    def bind_oauth_credential(self, source_id: str, vendor: str, auth_name: str) -> str:
         _validated_source_id(source_id)
         if not vendor.strip() or not auth_name.strip():
             raise EngineStateError("OAuth credential binding is incomplete")
         normalized_vendor = vendor.strip().lower()
         normalized_auth_name = auth_name.strip()
-        normalized_identity = _oauth_owning_identity(identity)
         with self._lock:
-            exact_matches = [
+            matches = [
                 (credential_ref, payload)
                 for credential_ref, payload in self._oauth_credentials()
                 if payload.get("auth_name") == normalized_auth_name
-            ]
-            identity_matches = [
-                (credential_ref, payload)
-                for credential_ref, payload in self._oauth_credentials()
-                if payload.get("vendor") == normalized_vendor
-                and _oauth_identity_matches(
-                    _oauth_identity_from_metadata(payload),
-                    normalized_identity,
-                )
-            ] if normalized_identity else []
-            matches = exact_matches + [
-                match for match in identity_matches if match not in exact_matches
             ]
             if matches:
                 if len(matches) != 1:
@@ -320,26 +297,6 @@ class EngineStateStore:
                 credential_ref, payload = matches[0]
                 if payload.get("source_id") != source_id or payload.get("vendor") != normalized_vendor:
                     raise EngineStateError("OAuth auth record is already bound to another source")
-                stored_identity = _oauth_identity_from_metadata(payload)
-                if (
-                    normalized_identity
-                    and stored_identity
-                    and not _oauth_identity_matches(stored_identity, normalized_identity)
-                ):
-                    raise EngineStateError("OAuth auth record identity conflicts")
-                if payload.get("auth_name") != normalized_auth_name or normalized_identity:
-                    self._secure_write_json(
-                        self._credential_path(credential_ref),
-                        {
-                            **payload,
-                            "auth_name": normalized_auth_name,
-                            **(
-                                {"oauth_identity": normalized_identity}
-                                if normalized_identity
-                                else {}
-                            ),
-                        },
-                    )
                 return credential_ref
             credential_ref = f"cred_{secrets.token_hex(16)}"
             prefix = f"avibe-{secrets.token_hex(12)}"
@@ -351,11 +308,6 @@ class EngineStateStore:
                     "vendor": normalized_vendor,
                     "auth_name": normalized_auth_name,
                     "prefix": prefix,
-                    **(
-                        {"oauth_identity": normalized_identity}
-                        if normalized_identity
-                        else {}
-                    ),
                 },
             )
             return credential_ref
@@ -1007,230 +959,53 @@ class EngineStateStore:
         value = payload.get("auth_name") if payload.get("kind") == "oauth" else None
         return str(value) if value else None
 
-    def oauth_auth_identity(
-        self,
-        auth_name: str,
-        *,
-        auth_provider: str,
-    ) -> dict[str, str]:
-        """Read only stable identity fields from one engine-owned auth file."""
+    def reconcile_claude_login(self, auth_name: str) -> None:
+        """Follow a login's preserved prefix, never infer ownership from account fields.
 
-        normalized_name = _validated_oauth_auth_name(auth_name.strip())
-        with self._lock:
-            payload = self._decode_oauth_payload(self.auth_dir / normalized_name)
-            provider = str(payload.get("type") or "").strip().lower()
-            if provider != auth_provider.strip().lower():
-                raise EngineStateError("OAuth auth record provider conflicts")
-            return _oauth_identity_from_payload(payload, provider)
-
-    def reconcile_oauth_auth_file(
-        self,
-        auth_name: str,
-        *,
-        auth_provider: str,
-        isolate_errors: bool = False,
-    ) -> str | None:
-        """Heal CPA filename migrations without changing credential ownership.
-
-        A filename-only match may refresh the stable identity metadata. A
-        filename migration is accepted only when the migrated file still carries
-        the old Avibe prefix, which is CPA's metadata-preservation contract.
+        CPA c404af96 saveTokenRecord saves the new canonical name with the
+        previous file's metadata, then deletes that previous file. Only the
+        OAuth-completion path calls this; ordinary loads/refreshes keep names.
         """
-
-        normalized_name = _validated_oauth_auth_name(auth_name.strip())
-        normalized_provider = auth_provider.strip().lower()
+        auth_name = _validated_oauth_auth_name(auth_name)
         with self._lock:
-            try:
-                self.auth_dir.joinpath(normalized_name).lstat()
-            except FileNotFoundError:
-                return None
-            payload = self._decode_oauth_payload(self.auth_dir / normalized_name)
-            provider = str(payload.get("type") or "").strip().lower()
-            if provider != normalized_provider:
-                raise EngineStateError("OAuth auth record provider conflicts")
-            identity = _oauth_identity_from_payload(payload, provider)
-            credentials = [
-                (credential_ref, metadata)
-                for credential_ref, metadata in self._oauth_credentials(
-                    isolate_errors=isolate_errors,
-                )
-                if metadata.get("vendor") == _oauth_vendor_for_provider(provider)
-            ]
-            exact = [
-                (credential_ref, metadata)
-                for credential_ref, metadata in credentials
-                if metadata.get("auth_name") == normalized_name
-            ]
-            if len(exact) > 1:
-                raise EngineStateError("OAuth auth record binding is ambiguous")
-            if exact:
-                credential_ref, metadata = exact[0]
-                stored_prefix = str(metadata.get("prefix") or "").strip().strip("/")
-                payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
-                if not stored_prefix or payload_prefix != stored_prefix:
-                    raise EngineStateError("OAuth auth record prefix conflicts")
-                if len(self._oauth_auth_names_for_prefix(stored_prefix, normalized_provider)) > 1:
-                    raise EngineStateError("OAuth auth record binding is ambiguous")
-                stored_identity = _oauth_identity_from_metadata(metadata)
-                if (
-                    stored_identity
-                    and (
-                        not identity
-                        or not _oauth_identity_matches(stored_identity, identity)
-                    )
-                ):
-                    raise EngineStateError("OAuth auth record identity conflicts")
-                updated = {
-                    **metadata,
-                    **({"oauth_identity": identity} if identity else {}),
-                }
-                if updated != metadata:
-                    self._secure_write_json(
-                        self._credential_path(credential_ref),
-                        updated,
-                    )
-                return credential_ref
-
-            # v7.2 metadata has only the opaque auth filename and the Avibe
-            # prefix. CPA preserves that prefix when it renames a Claude file,
-            # so it is the only released identity anchor available before this
-            # version can seed oauth_identity. Require one vendor-scoped owner:
-            # a duplicate prefix is ambiguity, never a reason to guess.
-            payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
-            if payload_prefix:
-                prefix_matches = [
-                    (credential_ref, metadata)
-                    for credential_ref, metadata in credentials
-                    if str(metadata.get("prefix") or "").strip().strip("/") == payload_prefix
-                ]
-                if len(prefix_matches) > 1:
-                    raise EngineStateError("OAuth auth record prefix is ambiguous")
-                if prefix_matches:
-                    credential_ref, metadata = prefix_matches[0]
-                    if len(self._oauth_auth_names_for_prefix(payload_prefix, normalized_provider)) > 1:
-                        raise EngineStateError("OAuth auth record binding is ambiguous")
-                    stored_identity = _oauth_identity_from_metadata(metadata)
-                    if (
-                        stored_identity
-                        and (
-                            not identity
-                            or not _oauth_identity_matches(stored_identity, identity)
-                        )
-                    ):
-                        raise EngineStateError("OAuth auth record identity conflicts")
-                    updated = {
-                        **metadata,
-                        "auth_name": normalized_name,
-                        **({"oauth_identity": identity} if identity else {}),
-                    }
-                    if updated != metadata:
-                        self._secure_write_json(
-                            self._credential_path(credential_ref),
-                            updated,
-                        )
-                    return credential_ref
-
-            if not identity:
-                return None
-            identity_matches = [
-                (credential_ref, metadata)
-                for credential_ref, metadata in credentials
-                if _oauth_identity_matches(
-                    _oauth_identity_from_metadata(metadata),
-                    identity,
-                )
-            ]
-            if len(identity_matches) > 1:
-                raise EngineStateError("OAuth auth record identity is ambiguous")
-            if not identity_matches:
-                return None
-            credential_ref, metadata = identity_matches[0]
-            prefix = str(metadata.get("prefix") or "").strip()
-            if not prefix or str(payload.get("prefix") or "").strip().strip("/") != prefix:
-                raise EngineStateError("OAuth auth record prefix conflicts")
-            updated = {
-                **metadata,
-                "auth_name": normalized_name,
-                "oauth_identity": identity,
-            }
-            if updated != metadata:
-                self._secure_write_json(
-                    self._credential_path(credential_ref),
-                    updated,
-                )
-            return credential_ref
-
-    def _oauth_auth_names_for_prefix(self, prefix: str, provider: str) -> list[str]:
-        matches: list[str] = []
-        for path in self.auth_dir.glob("*.json"):
-            payload = self._decode_oauth_payload(path)
-            if (
-                str(payload.get("type") or "").strip().lower() == provider
-                and str(payload.get("prefix") or "").strip().strip("/") == prefix
-            ):
-                matches.append(path.name)
-        return matches
-
-    def reconcile_oauth_credential(
-        self,
-        credential_ref: str,
-        *,
-        auth_provider: str,
-    ) -> str:
-        """Refresh one OAuth binding before a credential mutation.
-
-        A running CPA exposes the complete inventory to the adapter. When it is
-        stopped, the managed auth directory is the remaining source of truth;
-        scan it so a CPA filename migration cannot leave revocation pointed at
-        a stale metadata name.
-        """
-
-        normalized_provider = auth_provider.strip().lower()
-        with self._lock:
-            metadata = self.credential_metadata(credential_ref)
-            if metadata.get("kind") != "oauth":
+            payload = self._read_json(self.auth_dir / auth_name)
+            if payload is None:
                 raise EngineStateError("OAuth credential is unavailable")
-            auth_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
-            if normalized_provider != "claude":
-                return auth_name
-
-            self.audit_auth_permissions(enforce=True)
-            stored_prefix = str(metadata.get("prefix") or "").strip().strip("/")
-            stored_identity = _oauth_identity_from_metadata(metadata)
-            candidate_names = sorted(
-                path.name
-                for path in self.auth_dir.iterdir()
-                if path.name.lower().endswith(".json")
-            )
-            matching_names: list[str] = []
-            for candidate_name in candidate_names:
-                payload = self._decode_oauth_payload(self.auth_dir / candidate_name)
-                provider = str(payload.get("type") or "").strip().lower()
-                payload_prefix = str(payload.get("prefix") or "").strip().strip("/")
-                if candidate_name == auth_name or (
-                    provider == normalized_provider
-                    and stored_prefix
-                    and payload_prefix == stored_prefix
-                ) or (
-                    provider == normalized_provider
-                    and stored_identity
-                    and _oauth_identity_matches(
-                        stored_identity,
-                        _oauth_identity_from_payload(payload, provider),
-                    )
-                ):
-                    matching_names.append(candidate_name)
-
-            if len(matching_names) > 1:
+            prefix = payload.get("prefix")
+            if not isinstance(prefix, str) or not prefix:
+                return
+            if payload.get("type") != "claude":
+                raise EngineStateError("OAuth auth record provider conflicts")
+            credentials = self._oauth_credentials()
+            owners = [
+                (ref, metadata) for ref, metadata in credentials
+                if metadata.get("vendor") == "anthropic" and metadata.get("prefix") == prefix
+            ]
+            if not owners:
+                return
+            if len(owners) != 1:
                 raise EngineStateError("OAuth auth record binding is ambiguous")
-            if matching_names:
-                self.reconcile_oauth_auth_file(
-                    matching_names[0],
-                    auth_provider=normalized_provider,
-                )
-
-            refreshed = self.credential_metadata(credential_ref)
-            return _validated_oauth_auth_name(str(refreshed.get("auth_name") or ""))
+            credential_ref, metadata = owners[0]
+            if any(
+                ref != credential_ref and record.get("auth_name") == auth_name
+                for ref, record in credentials
+            ):
+                raise EngineStateError("OAuth auth record binding is ambiguous")
+            previous_name = _validated_oauth_auth_name(str(metadata.get("auth_name") or ""))
+            if previous_name == auth_name:
+                return
+            # A failed legacy-file deletion leaves two grants. Keep both and
+            # the original binding; do not choose or clean up either one.
+            try:
+                (self.auth_dir / previous_name).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise EngineStateError("OAuth auth record binding is ambiguous")
+            self._secure_write_json(
+                self._credential_path(credential_ref),
+                {**metadata, "auth_name": auth_name},
+            )
 
     def oauth_account_label(
         self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
@@ -1275,29 +1050,6 @@ class EngineStateStore:
             ]
         if len(matches) > 1:
             raise EngineStateError("OAuth auth record binding is ambiguous")
-        return matches[0] if matches else None
-
-    def oauth_credential_ref_for_identity(
-        self,
-        vendor: str,
-        identity: Mapping[str, Any],
-    ) -> str | None:
-        normalized_vendor = vendor.strip().lower()
-        normalized_identity = _oauth_owning_identity(identity)
-        if not normalized_identity:
-            return None
-        with self._lock:
-            matches = [
-                credential_ref
-                for credential_ref, payload in self._oauth_credentials()
-                if payload.get("vendor") == normalized_vendor
-                and _oauth_identity_matches(
-                    _oauth_identity_from_metadata(payload),
-                    normalized_identity,
-                )
-            ]
-        if len(matches) > 1:
-            raise EngineStateError("OAuth auth record identity is ambiguous")
         return matches[0] if matches else None
 
     def delete_oauth_auth_file(self, auth_name: str) -> None:
@@ -1382,32 +1134,23 @@ class EngineStateStore:
         self._ensure_private_dir(self.oauth_staging_dir)
         return self.oauth_staging_dir / f"{credential_ref}.json"
 
-    def _oauth_credentials(
-        self,
-        *,
-        isolate_errors: bool = False,
-    ) -> list[tuple[str, dict[str, Any]]]:
+    def _oauth_credentials(self) -> list[tuple[str, dict[str, Any]]]:
         self._ensure_private_dir(self.root)
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
         result: list[tuple[str, dict[str, Any]]] = []
         for path in credentials_dir.glob("cred_*.json"):
-            try:
-                mode = path.lstat().st_mode
-                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
-                    raise EngineStateError("credential permissions are unsafe")
-                credential_ref = path.stem
-                if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-                    raise EngineStateError("credential state contains an unsafe entry")
-                _credential_ref_auth_scheme(credential_ref)
-                payload = self._read_json(path)
-                if payload and payload.get("kind") == "oauth":
-                    _validate_credential_auth_scheme(credential_ref, payload)
-                    result.append((credential_ref, payload))
-            except (EngineStateError, OSError, TypeError, ValueError) as exc:
-                if not isolate_errors:
-                    raise
-                logger.warning("Skipping invalid credential metadata %s: %s", path.name, exc)
+            mode = path.lstat().st_mode
+            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                raise EngineStateError("credential permissions are unsafe")
+            credential_ref = path.stem
+            if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+                raise EngineStateError("credential state contains an unsafe entry")
+            _credential_ref_auth_scheme(credential_ref)
+            payload = self._read_json(path)
+            if payload and payload.get("kind") == "oauth":
+                _validate_credential_auth_scheme(credential_ref, payload)
+                result.append((credential_ref, payload))
         return result
 
     def _write_sources(self, sources: Sequence[SourceRecord]) -> None:
@@ -1708,82 +1451,6 @@ def _oauth_account_label(payload: dict[str, Any]) -> str | None:
             continue
         return candidate
     return None
-
-
-def _normalized_oauth_identity(identity: Mapping[str, Any] | None) -> dict[str, str]:
-    if not isinstance(identity, Mapping):
-        return {}
-    normalized: dict[str, str] = {}
-    for key in _OAUTH_IDENTITY_FIELDS:
-        value = identity.get(key)
-        if not isinstance(value, str):
-            continue
-        value = value.strip()
-        if (
-            not value
-            or len(value) > 320
-            or any(
-                ord(character) < 32
-                or ord(character) == 127
-                or 0xD800 <= ord(character) <= 0xDFFF
-                for character in value
-            )
-        ):
-            continue
-        normalized[key] = value.casefold()
-    return normalized
-
-
-def _oauth_identity_from_payload(
-    payload: Mapping[str, Any],
-    provider: str,
-) -> dict[str, str]:
-    if provider != "claude":
-        return {}
-    return _oauth_owning_identity(payload)
-
-
-def _oauth_identity_from_metadata(payload: Mapping[str, Any]) -> dict[str, str]:
-    value = payload.get("oauth_identity")
-    return _oauth_owning_identity(value if isinstance(value, Mapping) else None)
-
-
-def _oauth_owning_identity(
-    identity: Mapping[str, Any] | None,
-) -> dict[str, str]:
-    normalized = _normalized_oauth_identity(identity)
-    if not normalized.keys() & {"email", "account_uuid"}:
-        return {}
-    return normalized
-
-
-def _oauth_identity_matches(
-    stored: Mapping[str, str],
-    target: Mapping[str, str],
-) -> bool:
-    """Match the same Claude account without merging organizations."""
-
-    stored_identity = _oauth_owning_identity(stored)
-    target_identity = _oauth_owning_identity(target)
-    if not stored_identity or not target_identity:
-        return False
-    if not stored_identity.keys() <= target_identity.keys():
-        return False
-    shared_account_fields = (
-        stored_identity.keys()
-        & target_identity.keys()
-        & {"email", "account_uuid"}
-    )
-    if not shared_account_fields:
-        return False
-    if any(stored_identity[field] != target_identity[field] for field in shared_account_fields):
-        return False
-    shared_org = stored_identity.keys() & target_identity.keys() & {"organization_uuid"}
-    return not shared_org or stored_identity["organization_uuid"] == target_identity["organization_uuid"]
-
-
-def _oauth_vendor_for_provider(provider: str) -> str:
-    return {"claude": "anthropic", "codex": "openai"}.get(provider, provider)
 
 
 def _credential_ref_auth_scheme(credential_ref: str) -> str | None:

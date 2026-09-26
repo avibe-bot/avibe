@@ -1,8 +1,8 @@
 # Model Hub CPA v7.3.16 Upgrade
 
-Status: implementation ready for review, 2026-09-25. The packaged target is
-now an Avibe-owned v7.3.16 build. The installed runtime was not upgraded or
-restarted in this change.
+Status: release assets published and verified; login-only compatibility in review,
+2026-09-26. The packaged target is an Avibe-owned v7.3.16 build. The installed
+runtime was not upgraded or restarted in this change.
 
 ## Change contract
 
@@ -25,42 +25,60 @@ The upgrade must preserve:
 
 ### Claude credential filenames
 
-CPA v7.3.16 may migrate a Claude credential from a legacy name such as
-`claude-account.json` to a stable identity-hash name such as
-`claude-00f765af-account.json`. Avibe reconciles the file identity from the
-stable `email`, `organization_uuid`, and `account_uuid` fields before binding
-or cleaning up OAuth material. The original credential ref, Source, and
-prefix remain the owner, and ambiguous reconciliation fails closed.
+CPA v7.3.16 changes a Claude filename only when saving a new OAuth login.
+The email-only name `claude-owner@example.com.json` can become
+`claude-00f765af-owner@example.com.json`; an account-hashed name can likewise
+precede an organization-hashed name. Existing files remain usable without
+relogin. Startup, restart, token refresh, upload and watcher loading do not
+generate a new Claude filename.
 
-Coverage includes same-Source reauthentication, cross-Source duplicate login,
-renamed credentials, and binding or cleanup failures.
+The pinned upstream call graph at `c404af96ebacedf8168b3c2bdbf4449a21cd1c1e`
+is the evidence for this boundary:
 
-#### Startup failure boundary
+- `internal/api/handlers/management/auth_files_provider_oauth.go:169-180`
+  computes the canonical name after login and calls `saveTokenRecord`.
+- `internal/api/handlers/management/auth_files_fields.go:945-980` finds the
+  legacy credential, merges its metadata, saves the new file, then deletes the
+  predecessor. `sdk/auth/manager.go:90-110` does the same for CLI login.
+  These are the only callers of `FindMatchingLegacyCredential`.
+- `sdk/cliproxy/auth/metadata_merge.go:24-53` preserves non-token metadata,
+  including Avibe's prefix; `internal/auth/claude/token.go:73-100` writes it.
+- `sdk/auth/filestore.go:417-446` resolves persistence to the existing path or
+  filename. `internal/watcher/synthesizer/file.go:97,199` loads the existing
+  basename; `internal/api/handlers/management/auth_files_crud.go:261-275`
+  uploads under the supplied name. None invokes Claude filename generation.
 
-Review through `2ea480163` repeatedly found the same class: optional
-compatibility reconciliation could escape into the runtime-start result.
-Per-file exception handling alone cannot cover enumeration, client acquisition,
-or inventory transport failures. The scope decision is to keep one boundary
-after successful engine startup around the entire compatibility pass:
+Avibe therefore applies one rule, only in `_complete_oauth`, after identifying
+the login's resulting auth file and before binding or cleanup:
 
-- Engine startup failures and cancellation still propagate.
-- Pass-level state, filesystem, and management-client failures are logged,
-  preserve credential material, and do not mark reconciliation complete.
-  A subsequent start retries the pass without a background retry loop.
-- Individual damaged metadata and ownership conflicts remain isolated so
-  healthy bindings can migrate; targeted operations still report those conflicts.
-- Completion means the whole optional pass succeeded, not merely that errors
-  were isolated. Auth-file reconciliation returns completeness, and a final
-  strict metadata scan prevents skipped documents (including an entirely
-  unreadable Claude inventory) from being cached as success. Repaired records
-  are retried by the same adapter on the next start, without stopping CPA.
-- Targeted credential validation and revocation retain strict ownership checks;
-  this startup policy does not authorize guessing or deleting ambiguous grants.
+- A file carrying an existing Claude credential's exact Avibe prefix belongs
+  to that credential. Update only its `auth_name`; preserve ref, Source and
+  prefix. Account email/organization/account UUID fields are not ownership keys.
+- The normal same-Source reauthentication and foreign-Source rejection then
+  apply. A migrated file owned by another Source is retained as
+  `FOREIGN_SOURCE_REF`, never deleted merely because its filename is new.
+- Multiple credential owners or a still-present predecessor are ambiguous:
+  completion fails with `binding_failed`, retains `UNKNOWN`, and changes or
+  deletes neither grant. If CPA itself reports the failed deletion as an OAuth
+  error, the existing `upstream_failed`/unknown-retention path applies.
 
-The consuming startup test covers unavailable inventory, invalid inventory
-shape, missing management client, unavailable metadata, recovery, and actual
-engine startup failure. Build tests use an independently declared archive
-fixture and platform set, not expectations learned from a prior build.
+#### Circuit-breaker diagnosis and scope decision
+
+The earlier review loop assumed migration could happen during any lifecycle
+operation. That premise created global reconciliation passes, startup retry
+flags and account-identity matching, each with additional failure boundaries.
+Direct inspection of the pinned upstream disproved the premise. The unpushed
+activation/observation follow-up was withdrawn, not extended.
+
+Remove the global pass, completeness/isolation state, `oauth_identity`
+seeding/comparison, and reconciliation from startup, native activation,
+revocation, validation, discovery, quota and labels. Those paths return to the
+base behavior. Keep only the login-completion rule and its consuming tests.
+The manifest, CPA patch, builder, workflow and release guard are frozen.
+
+New findings must establish their trigger against the pinned upstream before
+changing code. A proposal to reintroduce general reconciliation or identity
+matching, or change the release pipeline, requires a new scope decision.
 
 ### Release publication and provenance boundary
 
@@ -116,6 +134,12 @@ CPA's canonical `max_completion_tokens` conversion.
   of the upstream v7.3.16 archives.
 - No new provider entry points or changes to the supported platform matrix.
 - No automatic tracking of upstream `latest`.
+- Avibe's random prefix is an ownership tag inside its managed auth directory,
+  not a tamper-proof signature. Arbitrary external replacement of an account
+  while copying another credential's prefix is outside this upgrade's scope;
+  no account-identity registry or observational-read hardening is introduced.
+- Ambiguous or interrupted logins are retained, not automatically repaired at
+  startup. Ordinary legacy files do not need a migration pass to remain usable.
 - The capability-driven reasoning intent gap remains a separate existing issue;
   this upgrade does not claim to repair it.
 - Synthetic wire tests do not establish live vendor OAuth login/refresh or
@@ -123,16 +147,25 @@ CPA's canonical `max_completion_tokens` conversion.
 
 ## Evidence and limits
 
-- The follow-up completion/provenance/draft-repair changes passed 525 focused
-  tests across runtime, source identity, builder, release guard and inference
-  waiting, plus Ruff and diff checks. An independent read-only review found no
-  remaining defects after exercising unreadable-draft recovery. Exact-head
-  hosted review and CI remain delivery gates.
+- The narrowed regressions exercise same-Source login, foreign-Source login,
+  predecessor retention, PATCH failure after migration, and unchanged legacy
+  use without relogin. The four login cases failed on the base implementation
+  for new-prefix rebinding or deletion of the only surviving grant.
+- Earlier global-reconciliation test counts are not evidence for this narrowed
+  implementation. Run its focused suites and obtain fresh exact-head hosted
+  review/CI before close-out.
+- The narrowed implementation passed 1,368 tests across runtime, OAuth, native
+  takeover, Source identity, quota, API, build, release guard and login migration,
+  plus changed-file Ruff and diff checks. All state is test-owned and synthetic.
 - Workflow run `36213312402` built and published `model-hub-engine-v7.3.16-3`
   from `df6fef95c078536c4406d1357ea676daaba7160b`. The first guard hit a
   transient public-download 404; failed-job rerun attempt 2 completed
   successfully, including the verified backup. An independent public download
   subsequently verified all nine assets against the unchanged packaged manifest.
+- The repeated release workflow `36214619870` succeeded on `fbba8aa10` with
+  all three jobs successful; that head's lint run `36214572839` also completed
+  with all 18 checks successful. Neither result substitutes for review/CI on
+  the next ownership-fix head.
 - The four patched archive sizes, archive SHA-256 values, and extracted binary
   SHA-256 values are recorded in the packaged manifest.
 - The patch is limited to the helper shared by CPA's buffered and streaming
