@@ -13,7 +13,7 @@ import { serverText } from './serverCopy';
 import { selectTestModel } from './testModelPreference';
 import type { Source, SourceProbeResult } from './types';
 
-type TestStatus = { kind: 'result'; result: SourceProbeResult } | { kind: 'unconfirmed' } | null;
+type TestStatus = { kind: 'result'; result: SourceProbeResult; stillCooling: boolean } | { kind: 'unconfirmed' } | null;
 
 export const SourceTestDialog: React.FC<{
   source: Source;
@@ -73,8 +73,11 @@ export const SourceTestDialog: React.FC<{
           && current.base_url === latest.base_url && current.protocol === latest.protocol
           && (!current.verification_pending || current.verification_pending === latest.verification_pending)
           && current.models.some((model) => model.id === selected && !model.retired);
+        // Only a verified reply lifts a cooldown, so the reconciled state, not
+        // `reachable`, says whether this test restored the provider.
         continuation.settle(ticket, () => setStatus(matches
-          ? { kind: 'result', result: answer } : { kind: 'unconfirmed' }));
+          ? { kind: 'result', result: answer, stillCooling: current.state.status === 'cooldown' }
+          : { kind: 'unconfirmed' }));
       });
     } catch {
       continuation.settle(ticket, () => setStatus({ kind: 'unconfirmed' }));
@@ -84,11 +87,15 @@ export const SourceTestDialog: React.FC<{
     }
   };
   const result = status?.kind === 'result' ? status.result : null;
+  const stillCooling = status?.kind === 'result' && status.stillCooling;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent closeLabel={t('common.close')}>
         <DialogTitle className="min-w-0 break-words pr-6">{t('settings.models.sourceTest.title', { source: source.display_name })}</DialogTitle>
-        <DialogDescription>{t('settings.models.sourceTest.hint')}</DialogDescription>
+        <DialogDescription>
+          {t('settings.models.sourceTest.hint')}
+          {source.state.status === 'cooldown' && ` ${t('settings.models.sourceTest.cooldownHint')}`}
+        </DialogDescription>
         <Field label={t('settings.models.sourceTest.model')}>
           {(id) => <Combobox id={id} ariaLabel={t('settings.models.sourceTest.model')} options={options}
             value={selected} disabled={busy || options.length === 0} allowCustomValue={false}
@@ -102,6 +109,7 @@ export const SourceTestDialog: React.FC<{
               model: result.model_id,
               reason: serverText(t, result.error, 'settings.models.sourceTest.unknown'),
             })}
+          {result.reachable && stillCooling && ` ${t('settings.models.sourceTest.stillUnavailable')}`}
         </p>}
         {status?.kind === 'unconfirmed' && <p role="alert" className="text-sm text-destructive-ink">{t('settings.models.sourceTest.requestFailed')}</p>}
         <DialogFooter>
