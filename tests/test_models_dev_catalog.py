@@ -373,3 +373,35 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
     # no substrings.
     assert set(matches) == {"gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini"}
     assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}
+
+
+def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):
+    """MH-PRICE-014: With no cached copy, readers start one fetch and say one is coming; after a failure they do not."""
+
+    import threading
+
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: tmp_path / "models_dev_catalog.json")
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_flight", False, raising=False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_failed", False, raising=False)
+    release = threading.Event()
+    fetches = []
+
+    def fetch(_previous):
+        fetches.append(threading.current_thread().name)
+        release.wait(timeout=5)
+        raise OSError("offline")
+
+    monkeypatch.setattr(models_dev_catalog, "_fetch_catalog", fetch)
+    readers = [threading.Thread(target=models_dev_catalog.load_models_dev_catalog_with_date) for _ in range(8)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(timeout=5)
+    assert models_dev_catalog.load_models_dev_catalog_with_date() == ({}, None, True)
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "models-dev-refresh":
+            thread.join(timeout=5)
+    assert fetches == ["models-dev-refresh"]
+    # The fetch failed: the next read retries it, but no longer promises prices.
+    assert models_dev_catalog.load_models_dev_catalog_with_date() == ({}, None, False)

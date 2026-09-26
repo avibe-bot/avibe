@@ -204,36 +204,64 @@ def load_models_dev_catalog() -> dict[str, Any]:
             raise RuntimeError("models.dev catalog is unavailable") from None
 
 
-_REFRESH_IN_FLIGHT = threading.Event()
+# One background fetch at a time. The claim and the answer to "will one land"
+# are read under one lock, so two readers cannot both start a fetch and no
+# reader can miss one that finished in between.
+_REFRESH_LOCK = threading.Lock()
+_refresh_in_flight = False
+_last_refresh_failed = False
 
 
-def _refresh_in_background() -> None:
+def _refresh_in_background() -> bool:
+    """Start a background fetch unless one is running; whether a fetch is expected to land.
+
+    A fetch retried after a failed one is not expected to: the reader says "no
+    price" rather than "fetching" for as long as the network keeps failing.
+    """
+
+    global _refresh_in_flight
+
     def refresh() -> None:
+        global _refresh_in_flight, _last_refresh_failed
+        failed = True
         try:
             # Only the read is locked: request-path readers must not wait on the
             # network, and the write is atomic on its own.
             with _CACHE_LOCK:
                 cached = _read_cache()
             _fetch_catalog(cached)
+            failed = False
         except Exception:  # noqa: BLE001 - a background refresh has no one to report to
             logger.debug("models.dev background refresh failed", exc_info=True)
         finally:
-            _REFRESH_IN_FLIGHT.clear()
+            with _REFRESH_LOCK:
+                _refresh_in_flight = False
+                _last_refresh_failed = failed
 
-    if _REFRESH_IN_FLIGHT.is_set():
-        return
-    _REFRESH_IN_FLIGHT.set()
-    threading.Thread(target=refresh, name="models-dev-refresh", daemon=True).start()
+    with _REFRESH_LOCK:
+        expected = not _last_refresh_failed
+        if _refresh_in_flight:
+            return expected
+        _refresh_in_flight = True
+    try:
+        threading.Thread(target=refresh, name="models-dev-refresh", daemon=True).start()
+    except RuntimeError:  # no thread to be had: release the claim, or no fetch ever runs again
+        with _REFRESH_LOCK:
+            _refresh_in_flight = False
+        return False
+    return expected
 
 
-def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None]:
-    """The catalog and when it was fetched, without waiting on the network when a copy exists.
+def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None, bool]:
+    """The catalog, when it was fetched, and whether a first copy is on its way.
 
-    For readers on a request path, such as usage valuation: a stale cached copy is
-    returned at once and refreshed in the background, since a day-old price table
-    is still the best one there is and the reader shows its date. With no cached
-    copy at all it starts that fetch and returns an empty catalog, so the first
-    read reports nothing as priced rather than holding a page on the network.
+    For readers on a request path, such as usage valuation, which never wait on
+    the network when a copy exists: a stale cached copy is returned at once and
+    refreshed in the background, since a day-old price table is still the best
+    one there is and the reader shows its date. With no cached copy at all it
+    starts that fetch and returns an empty catalog, so the first read reports
+    nothing as priced rather than holding a page on the network; the third value
+    says a fetch is running that should land, so the reader can read again soon.
     """
 
     with _CACHE_LOCK:
@@ -245,9 +273,8 @@ def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None]:
         age = time.time() - fetched if fetched is not None else None
         if age is None or not 0 <= age < MODELS_DEV_CACHE_TTL_SECONDS:
             _refresh_in_background()
-        return catalog, fetched
-    _refresh_in_background()
-    return {}, None
+        return catalog, fetched, False
+    return {}, None, _refresh_in_background()
 
 
 def _search_tokens(query: str) -> tuple[str, ...]:

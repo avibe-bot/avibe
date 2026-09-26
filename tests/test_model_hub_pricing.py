@@ -153,7 +153,7 @@ def test_price_table_reads_the_override_file_and_survives_a_bad_one(tmp_path):
     def load():
         return load_price_table(
             tmp_path,
-            catalog_loader=lambda: (CATALOG, FETCHED_AT),
+            catalog_loader=lambda: (CATALOG, FETCHED_AT, False),
             vendor_map_loader=lambda: VENDOR_MAP,
         )
 
@@ -284,6 +284,10 @@ def test_rows_written_before_cache_writes_read_as_uncaptured(tmp_path):
         ("openai", "prolite", "chatgpt_pro_5x"),
         ("codex", "ProLite", "chatgpt_pro_5x"),
         ("openai", "team", None),
+        # A Claude product the profile names without a built-in fee (MH-QUOTA-030).
+        ("anthropic", "team", None),
+        ("anthropic", "enterprise", None),
+        ("anthropic", "max", None),
         ("codex", "pro", "chatgpt_pro"),
         ("gemini", "pro", None),
         ("xai", "plus", None),
@@ -337,7 +341,7 @@ def test_an_invalid_override_entry_is_ignored_and_the_rest_still_apply(tmp_path)
         }),
         encoding="utf-8",
     )
-    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT, False), vendor_map_loader=lambda: VENDOR_MAP)
 
     # Rejected entries fall through to models.dev, as an absent override would.
     assert table.price("claude-opus-5").input == 5
@@ -362,7 +366,7 @@ def test_an_integer_past_the_json_digit_limit_is_ignored_alone(tmp_path):
         ' "plans": {"claude_max_20x": {"fee_usd": %s}, "team_seat": {"fee_usd": 30}}}' % (digits, digits),
         encoding="utf-8",
     )
-    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+    table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT, False), vendor_map_loader=lambda: VENDOR_MAP)
     assert table.price("claude-opus-5").input == 5
     assert table.price("claude-fable-5-1").input == 7
     assert table.fee("claude_max_20x") == 200
@@ -386,7 +390,7 @@ def test_an_integer_past_a_lowered_interpreter_digit_limit_is_ignored_alone(tmp_
             % ("9" * 700),
             encoding="utf-8",
         )
-        table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT), vendor_map_loader=lambda: VENDOR_MAP)
+        table = load_price_table(tmp_path, catalog_loader=lambda: (CATALOG, FETCHED_AT, False), vendor_map_loader=lambda: VENDOR_MAP)
     finally:
         sys.set_int_max_str_digits(previous)
     assert table.price("claude-opus-5").input == 5

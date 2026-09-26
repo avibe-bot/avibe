@@ -1420,6 +1420,7 @@
         "footnoteValue": "“按 API 价格”指同样的用量按官方 API 标价要花多少钱，用来看订阅值不值，不是实际扣费。",
         "priceTableDate": "价格表日期 {{date}}。",
         "priceTableUnknown": "暂无价格表日期。",
+        "priceTableFetching": "正在获取价格表…",
         "value": {
           "week": "近 7 天按 API 价格",
           "period": {
@@ -1427,6 +1428,7 @@
             "rolling_30d": "近 30 天按 API 价格"
           },
           "noPrice": "暂无价格",
+          "fetching": "正在获取价格…",
           "paid": "回本 {{multiple}} 倍",
           "even": "刚好回本",
           "short": "还差 {{amount}} 回本",
@@ -1647,10 +1649,12 @@
         "cost": {
           "notBilled": "按官方 API 标价折算，不是实际扣费",
           "noPrice": "暂无价格",
+          "fetching": "正在获取价格…",
           "excluded_one": "{{tokens}} tokens 暂无价格，未计入",
           "excluded_other": "{{tokens}} tokens 暂无价格，未计入",
           "tableDate": "价格表日期 {{date}}",
-          "tableDateUnknown": "暂无价格表日期"
+          "tableDateUnknown": "暂无价格表日期",
+          "tableFetching": "正在获取价格表…"
         }
       },
       "supplyTooltip": {

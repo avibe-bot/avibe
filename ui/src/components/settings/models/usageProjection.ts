@@ -40,6 +40,8 @@ export type UsageSeries = {
   values: Array<number | null>;
   /** Per bucket, whether the value is only a floor (`api_cost_lower_bound`); cost only. */
   floors: boolean[];
+  /** Per bucket, whether nothing in the value is priced, so it reads as no price, never $0; cost only. */
+  unpriced: boolean[];
 };
 
 export const PAIR_SEPARATOR = '\u0000';
@@ -74,6 +76,10 @@ export function aggregateCounters(rows: readonly UsageCounters[]): UsageCounters
 
 /** Whether the server priced these counters at API prices. */
 export const usageIsPriced = (counters: UsageCounters): boolean => typeof counters.api_cost_usd === 'number';
+
+/** Every priced token of these counters belongs to a model with no known price. */
+export const usageHasNoPrice = (counters: UsageCounters): boolean =>
+  usageIsPriced(counters) && (counters.excluded_tokens ?? 0) > 0 && (counters.api_cost_usd ?? 0) === 0;
 
 /** Whether the report carries API-price value at all: a server that predates it never does. */
 export const reportIsPriced = (report: UsageSummary): boolean => report.pricing !== undefined;
@@ -427,6 +433,11 @@ export const costIsFloor = (rows: readonly UsageCounters[], metric: UsageMetric)
   metric === 'cost' && aggregateCounters(rows).api_cost_lower_bound === true
 );
 
+/** Whether these rows' cost has nothing priced in it, as opposed to a floor of some priced part. */
+export const costIsUnpriced = (rows: readonly UsageCounters[], metric: UsageMetric): boolean => (
+  metric === 'cost' && usageHasNoPrice(aggregateCounters(rows))
+);
+
 const bucketMetricValue = (
   bucket: UsageBucket,
   rows: UsageBucketRow[],
@@ -459,12 +470,14 @@ export function seriesFor(
       cost: 'API price',
     };
     const floors = report.buckets.map((bucket) => costIsFloor(filterBucketRows(bucket, filter), metric));
+    const unpriced = report.buckets.map((bucket) => costIsUnpriced(filterBucketRows(bucket, filter), metric));
     return [...valuesByKey.entries()].map(([key, values], index) => ({
       key,
       label: labels[key],
       colorIndex: index,
       values,
       floors,
+      unpriced,
     }));
   }
 
@@ -479,6 +492,7 @@ export function seriesFor(
         metric,
       )),
       floors: report.buckets.map((bucket) => costIsFloor(filterBucketRows(bucket, filter), metric)),
+      unpriced: report.buckets.map((bucket) => costIsUnpriced(filterBucketRows(bucket, filter), metric)),
     }];
   }
 
@@ -494,6 +508,10 @@ export function seriesFor(
         return bucketMetricValue(bucket, rowsForSource, metric);
       }),
       floors: report.buckets.map((bucket) => costIsFloor(
+        filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId),
+        metric,
+      )),
+      unpriced: report.buckets.map((bucket) => costIsUnpriced(
         filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId),
         metric,
       )),
@@ -513,6 +531,12 @@ export function seriesFor(
       return bucketMetricValue(bucket, rowsForIdentity, metric);
     }),
     floors: report.buckets.map((bucket) => costIsFloor(
+      filterBucketRows(bucket, filter).filter((row) => (
+        row.source_id === identity.sourceId && row.model_id === identity.modelId
+      )),
+      metric,
+    )),
+    unpriced: report.buckets.map((bucket) => costIsUnpriced(
       filterBucketRows(bucket, filter).filter((row) => (
         row.source_id === identity.sourceId && row.model_id === identity.modelId
       )),

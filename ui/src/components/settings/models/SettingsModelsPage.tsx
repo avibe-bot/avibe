@@ -299,6 +299,32 @@ const QUOTA_POLL_MS = 5 * 60_000;
 export const QUOTA_PENDING_REREAD_MS = 5_000;
 export const QUOTA_PENDING_REREADS = 3;
 
+/**
+ * Re-read a report whose reading the service says is still landing — a quota
+ * read past its deadline, or prices whose first fetch is running — soon, a
+ * bounded number of times in a row. `pendingKey` is null while no settled
+ * reading is on screen and '' when nothing is pending; `settled` counts settled
+ * reads, so one that lands still pending re-arms the timer. Returns the reset a
+ * fresh open or a manual refresh calls.
+ */
+function usePendingRereads(active: boolean, pendingKey: string | null, settled: number, reread: () => void) {
+  const rereads = React.useRef(0);
+  React.useEffect(() => {
+    if (!active || pendingKey === null) return undefined;
+    if (pendingKey === '') {
+      rereads.current = 0;
+      return undefined;
+    }
+    if (rereads.current >= QUOTA_PENDING_REREADS) return undefined;
+    const timer = window.setTimeout(() => {
+      rereads.current += 1;
+      reread();
+    }, QUOTA_PENDING_REREAD_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, pendingKey, settled, reread]);
+  return React.useCallback(() => { rereads.current = 0; }, []);
+}
+
 /** Back to the re-login button of a quota card, or to the selected tab once a refresh has removed it. */
 const focusQuotaOpener = (opener: HTMLElement) =>
   (opener.isConnected ? opener : document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))?.focus();
@@ -662,9 +688,11 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }));
 
+  const [usageSettled, setUsageSettled] = React.useState(0);
   const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageReport>>((incoming) => {
     if (!aliveRef.current) return;
     setUsageRead((previous) => settleRegionRead(previous, incoming));
+    setUsageSettled((count) => count + 1);
   }));
 
   const refreshUsage = React.useCallback(async (window: UsageWindowKey) => {
@@ -684,16 +712,27 @@ export const SettingsModelsPage: React.FC = () => {
    * change is the same read with a different span, which is why one effect owns
    * both.
    */
+  /** A first install has no price table yet: while its fetch runs, re-read so the prices land on screen. */
+  const usagePendingKey = foldRegionRead<UsageReport, string | null>(usageRead, {
+    loading: () => null,
+    ready: (data) => (data.pricing?.pending ? 'pricing' : ''),
+    unread: () => null,
+    degraded: () => null,
+  });
+  const rereadUsage = React.useCallback(() => { void refreshUsage(usageWindow); }, [refreshUsage, usageWindow]);
+  const resetUsageRereads = usePendingRereads(tab === 'usage', usagePendingKey, usageSettled, rereadUsage);
+
   React.useEffect(() => {
     if (tab !== 'usage') return;
+    resetUsageRereads();
     void refreshUsage(usageWindow);
-  }, [tab, usageWindow, refreshUsage]);
+  }, [tab, usageWindow, refreshUsage, resetUsageRereads]);
 
   const retryUsage = React.useCallback(async () => {
+    resetUsageRereads();
     await refreshUsage(usageWindow);
-  }, [refreshUsage, usageWindow]);
+  }, [refreshUsage, resetUsageRereads, usageWindow]);
 
-  const quotaPendingRereads = React.useRef(0);
   // Counts settled reads, so a re-read that lands with the same pending set
   // still re-arms the timer below.
   const [quotaSettled, setQuotaSettled] = React.useState(0);
@@ -715,48 +754,37 @@ export const SettingsModelsPage: React.FC = () => {
    * service caches per Source, so an interval tick costs a vendor call only
    * when that Source's reading is actually due.
    */
-  React.useEffect(() => {
-    if (tab !== 'quota') return undefined;
-    quotaPendingRereads.current = 0;
-    void readQuota(false);
-    const timer = window.setInterval(() => { void readQuota(false); }, QUOTA_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [tab, readQuota]);
-
   /**
-   * The Sources the service named as still reading: null while no settled
-   * reading is on screen, '' when none is pending. Each settled reading that
-   * still names one re-arms the timer once.
+   * What the service named as still landing: the Sources still reading, and
+   * prices whose first fetch is running. Null while no settled reading is on
+   * screen, '' when nothing is pending.
    */
   const quotaPendingKey = foldRegionRead<QuotaSummary, string | null>(quotaRead, {
     loading: () => null,
-    ready: (data) => (data.pending ?? []).join('\u0000'),
+    ready: (data) => [...(data.pending ?? []), ...(data.value?.pending ? ['\u0001pricing'] : [])].join('\u0000'),
     unread: () => null,
     degraded: () => null,
   });
+  const rereadQuota = React.useCallback(() => { void readQuota(false); }, [readQuota]);
+  const resetQuotaRereads = usePendingRereads(tab === 'quota', quotaPendingKey, quotaSettled, rereadQuota);
+
   React.useEffect(() => {
-    if (tab !== 'quota' || quotaPendingKey === null) return undefined;
-    if (quotaPendingKey === '') {
-      quotaPendingRereads.current = 0;
-      return undefined;
-    }
-    if (quotaPendingRereads.current >= QUOTA_PENDING_REREADS) return undefined;
-    const timer = window.setTimeout(() => {
-      quotaPendingRereads.current += 1;
-      void readQuota(false);
-    }, QUOTA_PENDING_REREAD_MS);
-    return () => window.clearTimeout(timer);
-  }, [tab, quotaPendingKey, quotaSettled, readQuota]);
+    if (tab !== 'quota') return undefined;
+    resetQuotaRereads();
+    void readQuota(false);
+    const timer = window.setInterval(() => { void readQuota(false); }, QUOTA_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [tab, readQuota, resetQuotaRereads]);
 
   const refreshQuotaNow = React.useCallback(async () => {
-    quotaPendingRereads.current = 0;
+    resetQuotaRereads();
     setRefreshingQuota(true);
     try {
       await readQuota(true);
     } finally {
       if (aliveRef.current) setRefreshingQuota(false);
     }
-  }, [readQuota]);
+  }, [readQuota, resetQuotaRereads]);
 
   const retryQuota = React.useCallback(async () => {
     await readQuota(false);

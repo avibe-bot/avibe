@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { atLeast, formatCost, formatCount, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue } from './types';
+import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue, UsagePricing } from './types';
 import { TimeHint } from './TimeHint';
 import { VendorGlyph } from './vendorGlyph';
 import {
@@ -215,10 +215,16 @@ const calendarDaysBetween = (from: string, to: string) => Math.round((Date.parse
 /** Whether every priced token of a span belongs to a model with no price. */
 const unpriced = (value: PricedUsage) => value.api_cost_usd === 0 && value.excluded_tokens > 0;
 
+/** The copy for a span with nothing priced: prices on their way while a first fetch runs, else none. */
+const noPriceKey = (pricing: UsagePricing) => (pricing.pending
+  ? 'settings.models.quota.value.fetching' as const
+  : 'settings.models.quota.value.noPrice' as const);
+
 /** The account's API-price value: its week, its period against the fee, and the renewal. */
 const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ value, text }) => {
   const { t } = useTranslation();
-  const payback = value.fee_usd !== null ? quotaPayback(value.period.api_cost_usd, value.fee_usd) : null;
+  // A period with nothing priced has no verdict to give; its figure already says why.
+  const payback = value.fee_usd !== null && !unpriced(value.period) ? quotaPayback(value.period.api_cost_usd, value.fee_usd) : null;
   // A floor can prove a payback but never size a shortfall.
   const floor = value.period.api_cost_lower_bound;
   // Both days are host-calendar days, so count between them, not from the browser's clock.
@@ -231,12 +237,12 @@ const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ va
       <div className="model-hub-quota-value" data-quota-value>
         <div>
           <span>{t('settings.models.quota.value.week')}</span>
-          <b>{unpriced(value.week) ? t('settings.models.quota.value.noPrice') : text.usd(value.week)}</b>
+          <b>{unpriced(value.week) ? t(noPriceKey(value)) : text.usd(value.week)}</b>
         </div>
         <div>
           <span>{t(`settings.models.quota.value.period.${value.period.basis}`)}</span>
           <b>
-            {unpriced(value.period) ? t('settings.models.quota.value.noPrice') : text.usd(value.period)}
+            {unpriced(value.period) ? t(noPriceKey(value)) : text.usd(value.period)}
             {payback !== null && (
             <em className={cn(payback.kind !== 'short' && 'is-good')} data-quota-payback={payback.kind}>
               {/* 「刚好回本」 sizes the value against the fee; a floor there only proves it is at least paid back. */}
@@ -260,7 +266,7 @@ const ValueStrip: React.FC<{ value: SourceQuotaValue; text: QuotaText }> = ({ va
           </div>
         )}
       </div>
-      {excluded > 0 && (
+      {excluded > 0 && !value.pending && (
         <p className="model-hub-quota-value-note">{t('settings.models.quota.value.excluded', { tokens: text.tokens(excluded) })}</p>
       )}
     </>
@@ -481,11 +487,11 @@ export const QuotaTab: React.FC<{
                     label={t('settings.models.quota.stat.weekValue')}
                     icon={<CircleDollarSign className="size-[15px]" aria-hidden />}
                     value={unpriced(value.week)
-                      ? t('settings.models.quota.value.noPrice')
+                      ? t(noPriceKey(value))
                       : <>{text.usd(value.week)}<small className="model-hub-quota-stat-unit">USD</small></>}
                     note={[
                       t('settings.models.quota.stat.weekValueNote'),
-                      value.week.excluded_tokens > 0 && !unpriced(value.week)
+                      value.week.excluded_tokens > 0 && !unpriced(value.week) && !value.pending
                         ? t('settings.models.quota.value.excluded', { tokens: text.tokens(value.week.excluded_tokens) })
                         : null,
                     ].filter(Boolean).join(' · ')}
@@ -496,11 +502,13 @@ export const QuotaTab: React.FC<{
                     label={t('settings.models.quota.stat.payback')}
                     icon={<TrendingUp className="size-[15px]" aria-hidden />}
                     value={value.period && periodPayback
-                      ? <>{t('settings.models.quota.stat.paybackMultiple', { multiple: atLeast(text.multiple(periodPayback.multiple), value.period.api_cost_lower_bound) })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
+                      ? unpriced(value.period)
+                        ? t(noPriceKey(value))
+                        : <>{t('settings.models.quota.stat.paybackMultiple', { multiple: atLeast(text.multiple(periodPayback.multiple), value.period.api_cost_lower_bound) })}<small className="model-hub-quota-stat-unit">{t('settings.models.quota.stat.paybackUnit')}</small></>
                       : '—'}
                     note={value.period && periodPayback
                       ? [
-                          periodPayback.kind === 'short'
+                          unpriced(value.period) ? null : periodPayback.kind === 'short'
                             ? value.period.api_cost_lower_bound
                               ? t('settings.models.quota.stat.paybackShortUnknown')
                               : t('settings.models.quota.stat.paybackShort', { amount: text.dollars(periodPayback.shortfallUsd) })
@@ -544,7 +552,9 @@ export const QuotaTab: React.FC<{
                   {value && <>{' '}{t('settings.models.quota.footnoteValue')}</>}
                   {value && <>{' '}{value.price_table_date
                     ? t('settings.models.quota.priceTableDate', { date: value.price_table_date })
-                    : t('settings.models.quota.priceTableUnknown')}</>}
+                    : value.pending
+                      ? t('settings.models.quota.priceTableFetching')
+                      : t('settings.models.quota.priceTableUnknown')}</>}
                 </span>
               </p>
             </>}

@@ -229,8 +229,11 @@ class PriceTable:
         vendor_map: Mapping[str, Any],
         overrides: Mapping[str, Any],
         price_table_date: Optional[str],
+        pending: bool = False,
     ):
         self.price_table_date = price_table_date
+        # No models.dev table yet, and a first fetch is running that should land.
+        self.pending = pending
         self._catalog = catalog
         self._vendor_map = vendor_map
         self._model_overrides: dict[str, Mapping[str, Any]] = {}
@@ -304,6 +307,14 @@ class PriceTable:
         if not isinstance(entry, Mapping):
             return None
         return model_price(entry.get("cost"))
+
+    def fields(self) -> dict[str, Any]:
+        """The table's own part of every priced block: currency, date, and a first fetch still running."""
+
+        fields: dict[str, Any] = {"currency": CURRENCY, "price_table_date": self.price_table_date}
+        if self.pending:
+            fields["pending"] = True
+        return fields
 
     def source_plan(self, source_id: str) -> SourcePlan:
         return self._sources.get(source_id, SourcePlan())
@@ -424,10 +435,15 @@ def _read_overrides(path: Path) -> dict[str, Any]:
 def load_price_table(
     state_dir: Path,
     *,
-    catalog_loader: Optional[Callable[[], tuple[Mapping[str, Any], Optional[float]]]] = None,
+    catalog_loader: Optional[Callable[[], tuple[Mapping[str, Any], Optional[float], bool]]] = None,
     vendor_map_loader: Optional[Callable[[], Mapping[str, Any]]] = None,
 ) -> PriceTable:
-    """Build the current table. A missing catalog leaves only the overrides to price with."""
+    """Build the current table. A missing catalog leaves only the overrides to price with.
+
+    The loader answers the catalog, when it was fetched, and whether a first copy
+    is on its way; the last makes the table `pending`, so a reader can say the
+    prices are being fetched rather than that there are none.
+    """
 
     if catalog_loader is None or vendor_map_loader is None:
         from vibe import models_dev_catalog
@@ -435,10 +451,10 @@ def load_price_table(
         catalog_loader = catalog_loader or models_dev_catalog.load_models_dev_catalog_with_date
         vendor_map_loader = vendor_map_loader or models_dev_catalog.load_model_vendor_map
     try:
-        catalog, fetched_at = catalog_loader()
+        catalog, fetched_at, fetching = catalog_loader()
     except Exception as exc:  # noqa: BLE001 - an optional valuation never fails a read
         logger.info("Model Hub pricing has no models.dev catalog: %s", type(exc).__name__)
-        catalog, fetched_at = {}, None
+        catalog, fetched_at, fetching = {}, None, False
     try:
         vendor_map = vendor_map_loader()
     except Exception:  # noqa: BLE001
@@ -448,6 +464,7 @@ def load_price_table(
         vendor_map=vendor_map if isinstance(vendor_map, Mapping) else {},
         overrides=_read_overrides(state_dir / PRICE_OVERRIDE_FILENAME),
         price_table_date=_local_day(fetched_at) if catalog else None,
+        pending=fetching is True and not catalog,
     )
 
 
@@ -490,8 +507,7 @@ def quota_values(
         fee = prices.fee(key)
         multiple = round(period.api_cost_usd / fee, 4) if fee else None
         source["value"] = {
-            "currency": CURRENCY,
-            "price_table_date": prices.price_table_date,
+            **prices.fields(),
             "plan_key": key,
             "fee_usd": fee,
             "multiple": multiple,
@@ -510,8 +526,7 @@ def quota_values(
             period_fee += fee
             period_sources += 1
     return {
-        "currency": CURRENCY,
-        "price_table_date": prices.price_table_date,
+        **prices.fields(),
         "week": week_total.fields(),
         "period": (
             {

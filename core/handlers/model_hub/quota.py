@@ -288,11 +288,13 @@ _CLAUDE_MAX_TIER_PLANS: Final[Mapping[str, str]] = {
 
 
 def parse_claude_plan(body: object) -> Optional[str]:
-    """Read the plan from `GET https://api.anthropic.com/api/oauth/profile`, or None.
+    """Read the plan from `GET https://api.anthropic.com/api/oauth/profile`; None when unreadable.
 
-    Best effort by design: the plan only prices a fee comparison, so a body we
-    cannot read, or a product without a built-in fee (Team, Enterprise, an
-    unknown Max tier), yields no plan rather than a failure.
+    A readable profile always names the product, so a plan read from it replaces
+    the last one even when it carries no built-in fee: Team and Enterprise are
+    named as themselves, and a Max tier this table does not know is plain `max`.
+    None means the read told us nothing — a body we cannot read — and the caller
+    keeps the plan it last knew.
     """
 
     try:
@@ -302,14 +304,14 @@ def parse_claude_plan(body: object) -> Optional[str]:
     organization = payload.get("organization")
     if not isinstance(organization, dict):
         return None
-    kind = organization.get("organization_type")
-    kind = kind.strip().lower() if isinstance(kind, str) else ""
-    if kind == "claude_pro":
-        return "pro"
-    if kind != "claude_max":
+    kind = _label(organization.get("organization_type"))
+    if kind is None:
         return None
+    kind = kind.lower()
+    if kind != "claude_max":
+        return kind.removeprefix("claude_") or None
     tier = organization.get("rate_limit_tier")
-    return _CLAUDE_MAX_TIER_PLANS.get(tier.strip().lower()) if isinstance(tier, str) else None
+    return _CLAUDE_MAX_TIER_PLANS.get(tier.strip().lower(), "max") if isinstance(tier, str) else "max"
 
 
 def _codex_kind(seconds: Optional[int]) -> QuotaWindowKind:
@@ -582,7 +584,9 @@ class SubscriptionQuotaCache:
             return
         plan = parsed.get("plan")
         if plan is None and entry.snapshot is not None:
-            # The plan is a best-effort second read; one miss must not blank it.
+            # No plan means this read could not name one — Claude's is a best-effort
+            # second read — so it must not blank the last. A named plan, one without
+            # a built-in fee included, replaces it.
             plan = entry.snapshot["plan"]
         entry.snapshot = {"plan": plan, "windows": windows}
         entry.fetched_at = self._now()

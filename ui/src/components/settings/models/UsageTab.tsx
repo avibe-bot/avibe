@@ -26,6 +26,7 @@ import type { UsageCounters, UsageReport, UsageWindowKey } from './types';
 import {
   aggregateCounters,
   costIsFloor,
+  costIsUnpriced,
   filterBucketRows,
   filteredRows,
   formatBucketAxisLabel,
@@ -45,6 +46,7 @@ import {
   usageCachedInputShare,
   usageIsEmpty,
   usageIsPriced,
+  usageHasNoPrice,
   usageMetricValue,
   usageNonCachedInput,
   usageReportShortfall,
@@ -111,9 +113,10 @@ const tokenText = (
   return value === null ? blank : count(value);
 };
 
-/** Every priced token of these counters belongs to a model with no known price. */
-const usageHasNoPrice = (counters: UsageCounters): boolean =>
-  usageIsPriced(counters) && (counters.excluded_tokens ?? 0) > 0 && (counters.api_cost_usd ?? 0) === 0;
+/** What a cost with nothing priced in it reads as: prices on their way while a first fetch runs, else none. */
+const noPriceText = (report: UsageReport, t: UsageTranslate): string => (report.pricing?.pending
+  ? t('settings.models.usage.cost.fetching')
+  : t('settings.models.usage.cost.noPrice'));
 
 const metricLabel = (metric: UsageMetric, t: UsageTranslate): string =>
   t(`settings.models.usage.metric.${metric}`);
@@ -246,15 +249,18 @@ const ChartLegend: React.FC<{
   labels: Map<string, string>;
   count: (value: number) => string;
   blank: string;
+  noPrice: string;
   ariaLabel: string;
   /** The plot's left edge, which the first swatch lines up with. */
   inset: number;
-}> = ({ series, hidden, onToggle, labels, count, blank, ariaLabel, inset }) => (
+}> = ({ series, hidden, onToggle, labels, count, blank, noPrice, ariaLabel, inset }) => (
   <div className="model-hub-usage-legend" aria-label={ariaLabel} style={{ marginLeft: Math.max(0, inset - LEGEND_SWATCH_OFFSET) }}>
     {series.map((item) => {
       const values = item.values.filter((value): value is number => value !== null);
       const total = values.reduce((sum, value) => sum + value, 0);
       const floor = item.floors.some(Boolean);
+      // Costs are never negative, so a zero total with an unpriced bucket has nothing priced in it.
+      const unpriced = total === 0 && item.unpriced.some(Boolean);
       const isHidden = hidden.includes(item.key);
       return (
         <button
@@ -266,7 +272,7 @@ const ChartLegend: React.FC<{
         >
           <span className="model-hub-usage-legend-swatch" style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />
           <span>{labels.get(item.key) ?? item.label}</span>
-          <strong>{values.length === 0 ? blank : atLeast(count(total), floor)}</strong>
+          <strong>{values.length === 0 ? blank : unpriced ? noPrice : atLeast(count(total), floor)}</strong>
         </button>
       );
     })}
@@ -715,6 +721,7 @@ function UsageChart({
         labels={labels}
         count={format}
         blank={t('settings.models.usage.blank') as string}
+        noPrice={noPriceText(report, t)}
         ariaLabel={t('settings.models.usage.chart.legend') as string}
         inset={left}
       />
@@ -851,7 +858,11 @@ function UsageChart({
               </div>
             </div>
             <div className="model-hub-usage-tooltip-total">
-              <strong>{activeValue === null ? t('settings.models.usage.blank') : atLeast(format(activeValue), costIsFloor(bucketRows, metric))}</strong>
+              <strong>{activeValue === null
+                ? t('settings.models.usage.blank')
+                : costIsUnpriced(bucketRows, metric)
+                  ? noPriceText(report, t)
+                  : atLeast(format(activeValue), costIsFloor(bucketRows, metric))}</strong>
               <span>{metricLabel(metric, t)}</span>
             </div>
             <div className="model-hub-usage-tooltip-lines">
@@ -860,7 +871,9 @@ function UsageChart({
                   <span><i style={{ background: SERIES_COLORS[item.colorIndex % SERIES_COLORS.length] }} />{labels.get(item.key) ?? item.label}</span>
                   <b>{item.values[activeIndex as number] === null
                     ? t('settings.models.usage.blank')
-                    : atLeast(format(item.values[activeIndex as number] ?? 0), item.floors[activeIndex as number])}</b>
+                    : item.unpriced[activeIndex as number]
+                      ? noPriceText(report, t)
+                      : atLeast(format(item.values[activeIndex as number] ?? 0), item.floors[activeIndex as number])}</b>
                 </div>
               ))}
             </div>
@@ -1162,16 +1175,18 @@ export const UsageTab: React.FC<{
                 value={historyOnlyUnknown || !usageIsPriced(totals)
                   ? t('settings.models.usage.blank')
                   : usageHasNoPrice(totals)
-                    ? t('settings.models.usage.cost.noPrice')
+                    ? noPriceText(report, t)
                     : formatCost(totals.api_cost_usd ?? 0, totals.api_cost_lower_bound, i18n.language)}
                 note={[
                   t('settings.models.usage.cost.notBilled'),
-                  (totals.excluded_tokens ?? 0) > 0 && !usageHasNoPrice(totals)
+                  (totals.excluded_tokens ?? 0) > 0 && !usageHasNoPrice(totals) && !report.pricing?.pending
                     ? t('settings.models.usage.cost.excluded', { count: totals.excluded_tokens ?? 0, tokens: count(totals.excluded_tokens ?? 0) })
                     : null,
                   report.pricing?.price_table_date
                     ? t('settings.models.usage.cost.tableDate', { date: report.pricing.price_table_date })
-                    : t('settings.models.usage.cost.tableDateUnknown'),
+                    : report.pricing?.pending
+                      ? t('settings.models.usage.cost.tableFetching')
+                      : t('settings.models.usage.cost.tableDateUnknown'),
                 ].filter(Boolean).join(' · ')}
               />
             )}
@@ -1281,7 +1296,7 @@ export const UsageTab: React.FC<{
                         <td>{tokenText(row.counters, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                         <td>{tokenText(row.counters, 'output', count, t('settings.models.usage.blank') as string)}</td>
                         <td className="model-hub-usage-table-total">{metric === 'cost' && usageHasNoPrice(row.counters)
-                          ? t('settings.models.usage.cost.noPrice')
+                          ? noPriceText(report, t)
                           : metricText(row.counters)}</td>
                         <td>{share === null ? t('settings.models.usage.blank') : formatPercent(share, i18n.language, 1)}</td>
                       </tr>
@@ -1298,7 +1313,9 @@ export const UsageTab: React.FC<{
                       <td>{usageTokensAreKnown(tableTotal) ? count(usageNonCachedInput(tableTotal)) : t('settings.models.usage.blank')}</td>
                       <td>{tokenText(tableTotal, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                       <td>{tokenText(tableTotal, 'output', count, t('settings.models.usage.blank') as string)}</td>
-                      <td>{metricText(tableTotal)}</td>
+                      <td>{metric === 'cost' && usageHasNoPrice(tableTotal)
+                        ? noPriceText(report, t)
+                        : metricText(tableTotal)}</td>
                       <td>{(() => {
                         const totalValue = usageMetricValue(tableTotal, metric);
                         return totalValue === null || totalValue === 0

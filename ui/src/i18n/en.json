@@ -1420,6 +1420,7 @@
         "footnoteValue": "“At API price” is what the same use would cost at the vendor’s published API price — a way to judge the plan, not a charge.",
         "priceTableDate": "Price table from {{date}}.",
         "priceTableUnknown": "Price table date unknown.",
+        "priceTableFetching": "Fetching the price table…",
         "value": {
           "week": "Last 7 days at API price",
           "period": {
@@ -1427,6 +1428,7 @@
             "rolling_30d": "Last 30 days at API price"
           },
           "noPrice": "No price yet",
+          "fetching": "Fetching prices…",
           "paid": "Paid back {{multiple}}×",
           "even": "Just paid back",
           "short": "{{amount}} to pay back",
@@ -1647,10 +1649,12 @@
         "cost": {
           "notBilled": "At published API prices, not a charge",
           "noPrice": "No price yet",
+          "fetching": "Fetching prices…",
           "excluded_one": "{{tokens}} token has no price and is left out",
           "excluded_other": "{{tokens}} tokens have no price and are left out",
           "tableDate": "Price table from {{date}}",
-          "tableDateUnknown": "Price table date unknown"
+          "tableDateUnknown": "Price table date unknown",
+          "tableFetching": "Fetching the price table…"
         }
       },
       "supplyTooltip": {

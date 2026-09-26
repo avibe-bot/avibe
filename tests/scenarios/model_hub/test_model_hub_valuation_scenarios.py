@@ -17,7 +17,7 @@ import pytest
 from jsonschema import Draft7Validator, FormatChecker
 from referencing import Registry, Resource
 
-from core.handlers.model_hub.pricing import PriceTable
+from core.handlers.model_hub.pricing import PriceTable, load_price_table
 from core.handlers.model_hub.stream_wire import extract_protocol_usage
 from tests.scenario_harness.model_hub import (
     MemoryModelHubStore,
@@ -124,3 +124,37 @@ def test_mh_price_scenario_001_a_metered_stream_is_valued_through_usage_and_quot
     assert value["period"]["api_cost_lower_bound"] is True
     assert quota["value"]["period"]["api_cost_lower_bound"] is True
     assert "cred_" not in json.dumps(quota)
+
+
+def test_mh_price_014_a_first_read_before_any_price_table_says_prices_are_on_their_way(tmp_path):
+    """MH-PRICE-014: With no models.dev copy yet and a fetch running, usage and quota both say pricing is pending."""
+
+    service = _service(tmp_path)
+    report = extract_protocol_usage("anthropic", MESSAGE_START).merge(
+        extract_protocol_usage("anthropic", MESSAGE_DELTA)
+    )
+
+    async def meter() -> None:
+        service.usage_writer.record(source_id="src_max", model_id="claude-opus-5", usage=report, at=NOW)
+        assert await service.usage_writer.drain(timeout=5) == 0
+
+    asyncio.run(meter())
+    # The first two loads find no copy while the first fetch runs; the next two find it landed.
+    loads = iter([({}, None, True), ({}, None, True), (CATALOG, NOW.timestamp(), False), (CATALOG, NOW.timestamp(), False)])
+    service.price_table = lambda: load_price_table(
+        tmp_path, catalog_loader=lambda: next(loads), vendor_map_loader=lambda: VENDOR_MAP
+    )
+
+    usage = service.usage_summary(window="24h")
+    _assert_valid("usage-summary.schema.json", usage)
+    assert usage["pricing"] == {"currency": "USD", "price_table_date": None, "pending": True}
+    assert usage["totals"]["api_cost_usd"] == 0 and usage["totals"]["excluded_tokens"] > 0
+    quota = asyncio.run(service.quota_summary())
+    _assert_valid("quota-summary.schema.json", quota)
+    assert quota["value"]["pending"] is True and quota["sources"][0]["value"]["pending"] is True
+
+    # Once the table lands, the same reads price the usage and drop the flag.
+    usage = service.usage_summary(window="24h")
+    assert "pending" not in usage["pricing"] and usage["totals"]["api_cost_usd"] > 0
+    quota = asyncio.run(service.quota_summary())
+    assert "pending" not in quota["value"] and "pending" not in quota["sources"][0]["value"]

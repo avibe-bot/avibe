@@ -691,14 +691,16 @@ CLAUDE_PROFILE = {
         ({}, "max_20x"),
         ({"rate_limit_tier": "default_claude_max_5x"}, "max_5x"),
         ({"organization_type": "claude_pro", "rate_limit_tier": "default_claude_ai"}, "pro"),
-        ({"organization_type": "claude_team", "rate_limit_tier": "default_claude_max_5x"}, None),
-        ({"organization_type": "claude_enterprise", "rate_limit_tier": "default_claude_max_20x"}, None),
-        ({"rate_limit_tier": "something_new"}, None),
-        ({"rate_limit_tier": None}, None),
+        ({"organization_type": "claude_team", "rate_limit_tier": "default_claude_max_5x"}, "team"),
+        ({"organization_type": "Claude_Enterprise", "rate_limit_tier": "default_claude_max_20x"}, "enterprise"),
+        ({"rate_limit_tier": "something_new"}, "max"),
+        ({"rate_limit_tier": None}, "max"),
+        ({"organization_type": "  "}, None),
+        ({"organization_type": None}, None),
     ],
 )
 def test_claude_plan_is_read_from_the_oauth_profile_organization(organization, plan):
-    """MH-QUOTA-019: The product comes from organization_type, the Max tier from rate_limit_tier; anything else is no plan."""
+    """MH-QUOTA-019, MH-QUOTA-030: organization_type names the product and rate_limit_tier the Max tier; a profile naming no product is no plan."""
 
     from core.handlers.model_hub.quota import parse_claude_plan
 
@@ -736,19 +738,36 @@ async def test_adapter_adds_the_claude_plan_from_the_profile_and_never_fails_on_
         assert parsed["plan"] is None and parsed["windows"]
 
 
-async def test_a_missing_plan_on_one_read_keeps_the_last_known_plan():
-    """MH-QUOTA-019: A plan read that misses once does not blank the plan the page prices against."""
+async def test_a_readable_claude_profile_replaces_the_plan_and_an_unreadable_one_keeps_it():
+    """MH-QUOTA-019, MH-QUOTA-030: Only a failed plan read keeps the last plan; a readable one replaces it, fee or none."""
 
-    plans = iter(["max_20x", None])
+    usage = {"status_code": 200, "header": {}, "body": json.dumps(CLAUDE_LEGACY)}
+
+    def profile(**organization):
+        body = {**CLAUDE_PROFILE, "organization": {**CLAUDE_PROFILE["organization"], **organization}}
+        return {"status_code": 200, "body": json.dumps(body)}
+
+    profiles = {_PROFILE_URL: profile()}
+    adapter, _client = _adapter(usage, _METADATA, profiles)
     moment = [datetime(2026, 9, 1, tzinfo=timezone.utc)]
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=lambda: moment[0])
 
-    async def fetch(source_id, vendor, credential_ref):
-        return {"plan": next(plans), "windows": []}
+    async def plan_after(answer):
+        profiles[_PROFILE_URL] = answer
+        moment[0] += timedelta(minutes=6)
+        source = (await cache.summary([_CLAUDE]))["sources"][0]
+        assert source["state"] == "ok" and source["windows"]
+        return source["plan"]
 
-    cache = SubscriptionQuotaCache(fetch, now=lambda: moment[0])
     assert (await cache.summary([_CLAUDE]))["sources"][0]["plan"] == "max_20x"
-    moment[0] += timedelta(minutes=6)
-    assert (await cache.summary([_CLAUDE]))["sources"][0]["plan"] == "max_20x"
+    for failure in ({"status_code": 500, "body": "{}"}, {"status_code": 200, "body": "<html>"}):
+        assert await plan_after(failure) == "max_20x"
+    # Moving to a Team seat names Team, which has no built-in fee to compare with.
+    assert await plan_after(profile(organization_type="claude_team")) == "team"
+    assert await plan_after(profile(organization_type="claude_max", rate_limit_tier="default_claude_max_5x")) == "max_5x"
+    assert await plan_after(profile(organization_type="claude_pro", rate_limit_tier="default_claude_ai")) == "pro"
+    # A Max tier the fee table does not know is still Max, never the last known tier.
+    assert await plan_after(profile(organization_type="claude_max", rate_limit_tier="default_claude_max_40x")) == "max"
 
 
 @pytest.mark.parametrize(
