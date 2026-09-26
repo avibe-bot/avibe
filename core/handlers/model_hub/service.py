@@ -646,6 +646,18 @@ def _validated_base_url(value: object) -> Optional[str]:
         raise ModelHubError("discovery_failed") from None
 
 
+def _validated_source_name(value: object) -> str:
+    """A Source name as the Web UI reads it: trimmed, present, and never a pasted credential.
+
+    Admission owns the trim, not the config parser: a name an earlier release
+    stored with edge or only whitespace must keep loading.
+    """
+    name = value.strip() if isinstance(value, str) else ""
+    if not name or len(name) > 64 or contains_credential_material(name):
+        raise ModelHubError("discovery_failed")
+    return name
+
+
 def _builtin_model_ids(backend: str) -> tuple[str, ...]:
     """Real built-in model ids for a fixed-menu backend, from the bundled catalog.
 
@@ -3183,17 +3195,14 @@ class ModelHubService:
             vendor = normalize_model_hub_vendor_id(vendor)
         except ValueError:
             raise ModelHubError("discovery_failed") from None
-        display_name_defaulted = not payload.get("display_name")
-        display_name = payload.get("display_name") or seeded_source_name(vendor)
+        # A blank name is no name, so the Source starts with the vendor's seed.
+        requested_name = payload.get("display_name")
+        if isinstance(requested_name, str):
+            requested_name = requested_name.strip()
+        display_name_defaulted = not requested_name
         if kind not in {"subscription", "api_key"}:
             raise ModelHubError("discovery_failed")
-        if (
-            not isinstance(display_name, str)
-            or not display_name
-            or len(display_name) > 64
-            or contains_credential_material(display_name)
-        ):
-            raise ModelHubError("discovery_failed")
+        display_name = _validated_source_name(requested_name or seeded_source_name(vendor))
         channel = payload.get("supply_channel") or ("native_cli" if kind == "subscription" else "hub")
         if channel not in {"native_cli", "hub"} or (kind == "api_key" and channel != "hub"):
             raise ModelHubError("discovery_failed")
@@ -3593,15 +3602,7 @@ class ModelHubService:
             removed_hops: list[dict] = []
             interrupted: list[dict] = []
             if "display_name" in payload:
-                display_name = payload["display_name"]
-                if (
-                    not isinstance(display_name, str)
-                    or not display_name
-                    or len(display_name) > 64
-                    or contains_credential_material(display_name)
-                ):
-                    raise ModelHubError("discovery_failed")
-                source.display_name = display_name
+                source.display_name = _validated_source_name(payload["display_name"])
             base_url_changed = (
                 "base_url" in payload and source.base_url != base_url
             )

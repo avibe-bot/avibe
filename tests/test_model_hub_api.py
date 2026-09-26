@@ -62,6 +62,7 @@ from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
     create_default_service,
+    seeded_source_name,
 )
 from tests.ui_server_test_helpers import (
     _save_config,
@@ -9473,6 +9474,26 @@ def test_an_emptied_endpoint_is_judged_by_the_vendor_alone():
         by_vendor.setdefault(case["vendor"], set()).add(case["server_valid"])
     assert by_vendor
     assert {vendor: verdicts for vendor, verdicts in by_vendor.items() if len(verdicts) != 1} == {}
+
+
+def test_source_names_are_admitted_trimmed(tmp_path):
+    """MH-SRC-NAME-001: a Source name is stored as it reads, trimmed.
+
+    A blank name on create is no name and takes the vendor's seed, as an omitted
+    one does; editing a name to blank is refused (the shared fixture holds the
+    edit cases). Neither may store a name the Web UI renders empty.
+    """
+    service, store, _ = _service(tmp_path)
+    seeded = asyncio.run(
+        _create_source(service, {"kind": "api_key", "vendor": "anthropic", "display_name": "   ", "key": "sk-test-a"})
+    )
+    named = asyncio.run(
+        _create_source(service, {"kind": "api_key", "vendor": "anthropic", "display_name": " Relay ", "key": "sk-test-b"})
+    )
+
+    assert seeded["display_name"] == seeded_source_name("anthropic")
+    assert named["display_name"] == "Relay"
+    assert [source.display_name for source in store.config.sources] == [seeded_source_name("anthropic"), "Relay"]
 
 
 def test_source_display_names_reject_credential_material(tmp_path):

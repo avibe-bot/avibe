@@ -12,6 +12,18 @@
       "reason": "displayNameRequired"
     },
     {
+      "id": "whitespace_only",
+      "value": "   ",
+      "valid": false,
+      "reason": "displayNameRequired"
+    },
+    {
+      "id": "edge_whitespace",
+      "value": "  Relay key  ",
+      "valid": true,
+      "normalized": "Relay key"
+    },
+    {
       "id": "too_long",
       "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "valid": false,

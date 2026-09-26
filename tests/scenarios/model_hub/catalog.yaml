@@ -292,6 +292,15 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/supply.test.ts
       - ui/e2e/model-catalog/gateway-status.spec.ts
+  - id: MH-SRC-NAME-001
+    name: A Source name is admitted trimmed; a blank one on create takes the vendor seed and an edit to blank is refused, matching the Web UI's own check
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_api.py::test_source_names_are_admitted_trimmed
+    related_tests:
+      - tests/test_model_hub_api.py::test_source_edit_validation_contract_fixture
+      - ui/src/components/settings/models/manage.test.ts
   - id: MH-SRC-DELETE-001
     name: Source deletion removes every reference while preserving survivor order
     status: covered
@@ -741,6 +750,15 @@ scenarios:
       - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
       - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-034
       - ui/e2e/model-catalog/usage.spec.ts
+  - id: MH-USAGE-035
+    name: A Source or model filter kept across reports holds only what the current report offers, folding a Source config let go into the removed aggregate and dropping any other stale key, the aggregate included
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/usageProjection.test.ts::MH-USAGE-035
+    related_tests:
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-035
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-034
   - id: MH-USAGE-BACKEND-001
     name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
     status: covered

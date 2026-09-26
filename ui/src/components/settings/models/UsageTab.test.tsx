@@ -187,6 +187,36 @@ describe('UsageTab', () => {
     expect(container.textContent).not.toContain('src_');
   });
 
+  it('MH-USAGE-035: a picked aggregate the next report no longer offers is dropped, not kept for a later one', async () => {
+    const page = (value: UsageReport) => (
+      <I18nextProvider i18n={i18n}>
+        <UsageTab usage={readyRegion(value)} windowKey="24h" onWindowChange={vi.fn()} />
+      </I18nextProvider>
+    );
+    const live = report();
+    const withRemoved = {
+      ...live,
+      sources: [...live.sources, { source_id: 'src_gone01', label: null, last_metered_at: null, ...counters(), models: [] }],
+      buckets: [bucket('00', [row(), row({ source_id: 'src_gone01', model_id: 'model-g' })])],
+    };
+    const { container, rerender } = render(page(withRemoved));
+    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('option', { name: /Removed providers/ }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByRole('button', { name: 'Reset filters' })).toBeTruthy();
+
+    rerender(page(live));
+    expect(screen.getByRole('button', { name: 'All Source' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Reset filters' })).toBeNull();
+    expect(container.querySelector('.model-hub-usage-empty-state')).toBeNull();
+    expect(within(screen.getByRole('table')).getAllByText('Shared label · Shared model').length).toBeGreaterThan(0);
+
+    // Dropped means gone: a later report offering it again does not bring it back.
+    rerender(page(withRemoved));
+    expect(screen.getByRole('button', { name: 'All Source' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Reset filters' })).toBeNull();
+  });
+
   it('MH-USAGE-018: reads a shortfall as reports that never arrived', () => {
     const shortfall = counters({
       requests: 4,
