@@ -498,6 +498,10 @@
               "type": "null"
             }
           ]
+        },
+        "pending": {
+          "description": "Present (true) when no models.dev price table has been read yet and a first fetch is running that is expected to land; the cost fields then cover only what local overrides price. A client may re-read shortly and say prices are being fetched rather than that there are none. Absent means no fetch is awaited: a table is in hand, or the last fetch failed.",
+          "const": true
         }
       }
     }

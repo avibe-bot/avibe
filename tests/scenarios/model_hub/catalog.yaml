@@ -722,6 +722,14 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/format.test.ts::MH-USAGE-032
       - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
+  - id: MH-USAGE-033
+    name: A cost with nothing priced reads no price on every usage and quota surface, a partly priced one 「≥」, and a fully priced one exact
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-033
+    related_tests:
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
   - id: MH-USAGE-BACKEND-001
     name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
     status: covered
@@ -905,7 +913,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_quota.py::test_claude_plan_ignores_an_unreadable_profile
       - tests/test_model_hub_quota.py::test_adapter_adds_the_claude_plan_from_the_profile_and_never_fails_on_it
-      - tests/test_model_hub_quota.py::test_a_missing_plan_on_one_read_keeps_the_last_known_plan
+      - tests/test_model_hub_quota.py::test_a_readable_claude_profile_replaces_the_plan_and_an_unreadable_one_keeps_it
   - id: MH-QUOTA-020
     name: A quota read past the page deadline is named pending, and the page re-reads it soon a bounded number of times until it lands
     status: covered
@@ -970,6 +978,16 @@ scenarios:
     test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-029
     related_tests:
       - ui/e2e/model-catalog/quota-layout.spec.ts
+  - id: MH-QUOTA-030
+    name: A Claude account that moves to Team, Enterprise, a lower Max tier, or Pro shows its new plan and fee, while an unreadable profile keeps the old plan
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_a_readable_claude_profile_replaces_the_plan_and_an_unreadable_one_keeps_it
+    related_tests:
+      - tests/test_model_hub_quota.py::test_claude_plan_is_read_from_the_oauth_profile_organization
+      - tests/test_model_hub_pricing.py::test_reported_plans_resolve_to_fee_table_keys
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-027
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered
@@ -1065,6 +1083,17 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_pricing.py::test_an_invalid_override_entry_is_ignored_and_the_rest_still_apply
+  - id: MH-PRICE-014
+    name: Before the first price table lands, usage and quota say prices are being fetched, the page re-reads a bounded number of times, and one fetch runs at a time
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py::test_mh_price_014_a_first_read_before_any_price_table_says_prices_are_on_their_way
+    related_tests:
+      - tests/test_models_dev_catalog.py::test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-PRICE-014
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-PRICE-014
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-PRICE-014
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

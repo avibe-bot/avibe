@@ -572,7 +572,9 @@ class EngineAdapter(Protocol):
 
         The engine makes the model-free account call with the bound grant; only
         the parsed ``{plan, windows}`` crosses this boundary, never the grant or
-        the raw body. Raise ``SubscriptionQuotaError`` with a sanitized reason
+        the raw body. ``plan`` is the plan this read named, one without a built-in
+        fee included, or None when it could not name one; only None keeps the
+        last known plan. Raise ``SubscriptionQuotaError`` with a sanitized reason
         (``auth_expired``, ``rate_limited``, ``unsupported``, ``unavailable`` or
         ``malformed``) on every failure. A report only: never feeds resolution.
         """

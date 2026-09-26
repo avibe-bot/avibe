@@ -2393,6 +2393,51 @@ describe('SettingsModelsPage usage region', () => {
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 
+  // A fresh install has no price table until its first fetch lands: the report
+  // says pricing is pending, and the tab re-reads soon, on the quota's bounded
+  // cadence, so the prices appear without a manual refresh.
+  it('MH-PRICE-014: re-reads the usage report while its prices are pending and stops once they land', async () => {
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    const pending = { ...usageSummary, pricing: { currency: 'USD' as const, price_table_date: null, pending: true as const } };
+    read
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValue({ ...usageSummary, pricing: { currency: 'USD' as const, price_table_date: '2026-08-18' } });
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    const rereads = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS);
+    // A reading that lands still pending re-arms the timer.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await waitFor(() => expect(rereads()).toHaveLength(attempt));
+      await act(async () => { (rereads()[attempt - 1][0] as () => void)(); });
+      await waitFor(() => expect(read).toHaveBeenCalledTimes(attempt + 1));
+    }
+    expect(read.mock.calls.map(([window]) => window)).toEqual(['24h', '24h', '24h']);
+    // Priced: no further re-read is scheduled.
+    await act(async () => { await Promise.resolve(); });
+    expect(rereads()).toHaveLength(2);
+  });
+
+  it('MH-PRICE-014: gives up re-reading the usage report after a bounded number of tries while prices stay pending', async () => {
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    read.mockResolvedValue({ ...usageSummary, pricing: { currency: 'USD', price_table_date: null, pending: true } });
+    await openUsage();
+    const rereads = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS);
+    for (let attempt = 1; attempt <= QUOTA_PENDING_REREADS; attempt += 1) {
+      await waitFor(() => expect(rereads()).toHaveLength(attempt));
+      await act(async () => { (rereads()[attempt - 1][0] as () => void)(); });
+      await waitFor(() => expect(read).toHaveBeenCalledTimes(attempt + 1));
+    }
+    await act(async () => { await Promise.resolve(); });
+    expect(rereads()).toHaveLength(QUOTA_PENDING_REREADS);
+  });
+
   it('retries the read the tab failed on, at the same span', async () => {
     renderPage([retainedSource]);
     const read = vi.mocked(modelsApi.getUsageSummary);
@@ -2464,6 +2509,29 @@ describe('SettingsModelsPage quota region', () => {
     expect((await screen.findAllByText(/^60%$/)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/^Reading quota…$|^正在读取额度…$/)).toBeNull();
     // Nothing pending: no further re-read is scheduled.
+    await act(async () => { await Promise.resolve(); });
+    expect(rereads()).toHaveLength(1);
+  });
+
+  it('MH-PRICE-014: re-reads quota while its prices are pending, even with every Source read', async () => {
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    const priced = { api_cost_usd: 0, excluded_tokens: 0, api_cost_lower_bound: false };
+    const value = (pending: boolean) => ({
+      currency: 'USD' as const, price_table_date: pending ? null : '2026-08-18', ...(pending ? { pending: true as const } : {}),
+      week: priced, period: null,
+    });
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getQuota);
+    read
+      .mockResolvedValueOnce({ refresh_interval_seconds: 300, sources: [], value: value(true) })
+      .mockResolvedValue({ refresh_interval_seconds: 300, sources: [], value: value(false) });
+    await openQuota();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    const rereads = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS);
+    await waitFor(() => expect(rereads()).toHaveLength(1));
+    await act(async () => { (rereads()[0][0] as () => void)(); });
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
     await act(async () => { await Promise.resolve(); });
     expect(rereads()).toHaveLength(1);
   });

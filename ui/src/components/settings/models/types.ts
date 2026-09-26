@@ -815,6 +815,9 @@ export type UsagePricing = {
   currency: 'USD';
   /** Local date the price table was fetched; null when only overrides priced. */
   price_table_date: string | null;
+  /** No price table yet and a first fetch is running; re-read soon, and say
+   *  prices are being fetched rather than that there are none. */
+  pending?: true;
 };
 
 export type UsageByModel = UsageCounters & {
@@ -918,6 +921,8 @@ export type SourceQuota = {
   vendor: string;
   display_name: string;
   account_label: string | null;
+  /** Plan the vendor last named, with or without a built-in fee (Claude's
+   *  `team` and `enterprise` have none); null until a read names one. */
   plan: string | null;
   fetched_at: string | null;
   state: QuotaSourceState;

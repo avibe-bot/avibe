@@ -68,7 +68,7 @@
           ]
         },
         "plan": {
-          "description": "Plan name the vendor reported, when it reports one.",
+          "description": "Plan the vendor last reported, whether or not it has a built-in fee (Claude's `team` and `enterprise` have none, nor does a Max tier the fee table does not know, reported as `max`). A read that names a plan replaces this one; a read that names none keeps it. Null until any read names one.",
           "type": [
             "string",
             "null"
@@ -334,6 +334,10 @@
             }
           ]
         },
+        "pending": {
+          "description": "Present (true) when no models.dev price table has been read yet and a first fetch is running that is expected to land; the cost fields then cover only what local overrides price. A client may re-read shortly and say prices are being fetched rather than that there are none. Absent means no fetch is awaited: a table is in hand, or the last fetch failed.",
+          "const": true
+        },
         "plan_key": {
           "description": "Fee-table key the plan resolved to (built-in: claude_pro, claude_max_5x, claude_max_20x, chatgpt_plus, chatgpt_pro_5x, chatgpt_pro; or a key the local override file defines), or null when the plan is unknown.",
           "type": [
@@ -397,6 +401,10 @@
               "type": "null"
             }
           ]
+        },
+        "pending": {
+          "description": "Present (true) when no models.dev price table has been read yet and a first fetch is running that is expected to land; the cost fields then cover only what local overrides price. A client may re-read shortly and say prices are being fetched rather than that there are none. Absent means no fetch is awaited: a table is in hand, or the last fetch failed.",
+          "const": true
         },
         "week": {
           "$ref": "#/definitions/PricedUsage",

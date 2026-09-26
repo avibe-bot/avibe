@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
-from .pricing import CURRENCY, Cost, ModelPrice, PriceTable, row_cost
+from .pricing import Cost, ModelPrice, PriceTable, row_cost
 from .state_file import write_state_document
 from .stream_wire import ProtocolUsageReport
 
@@ -1641,7 +1641,7 @@ class BoundedUsageLedger:
             "days": [with_cost(by_day[day]) for day in sorted(by_day)],
         }
         if prices is not None:
-            summary["pricing"] = {"currency": CURRENCY, "price_table_date": prices.price_table_date}
+            summary["pricing"] = prices.fields()
         return summary
 
     def report(

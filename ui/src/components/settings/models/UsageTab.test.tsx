@@ -430,6 +430,64 @@ describe('UsageTab', () => {
     expect(detail().textContent).not.toContain('≥');
   });
 
+  it('MH-USAGE-033: a cost with nothing priced reads no price on every surface, a partial one 「≥」, a full one exact', async () => {
+    const cost = (usd: number, excluded: number, floor: boolean) => ({ api_cost_usd: usd, excluded_tokens: excluded, api_cost_lower_bound: floor });
+    // Bucket 00 has only an unpriced model; bucket 01 a priced one beside it; bucket 02 is fully priced.
+    const relay = (over: Partial<UsageBucketRow>) => row({ source_id: 'source-b', model_id: 'relay-model', ...cost(0, 140, true), ...over });
+    const value = pricedReport();
+    value.buckets = [
+      bucket('00', [relay({})]),
+      bucket('01', [row(cost(0.5, 0, false)), relay({})]),
+      bucket('02', [row(cost(0.25, 0, false))]),
+    ];
+    const { container } = draw(value);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    await userEvent.click(screen.getByRole('button', { name: 'Model' }));
+    const legend = () => container.querySelector('.model-hub-usage-legend')!;
+    // The unpriced model's legend total is no price, never 「≥ $0.00」; the priced one's is exact.
+    expect(legend().textContent).toContain('No price yet');
+    expect(legend().textContent).toContain('$0.75');
+    expect(legend().textContent).not.toContain('$0.00');
+
+    const buckets = screen.getAllByRole('button', { name: /Usage bucket/ });
+    const detail = () => screen.getByRole('dialog', { name: 'Usage bucket details' });
+    fireEvent.pointerEnter(buckets[0]);
+    const relayLine = () => within(detail().querySelector('.model-hub-usage-tooltip-lines') as HTMLElement)
+      .getByText('Relay · Relay model').closest('div')!.textContent;
+    expect(detail().querySelector('.model-hub-usage-tooltip-total')!.textContent).toBe('No price yetAt API price');
+    expect(relayLine()).toContain('No price yet');
+    fireEvent.pointerEnter(buckets[1]);
+    await screen.findByText('≥ $0.50', { selector: '.model-hub-usage-tooltip-total strong' });
+    // Within a partly priced bucket, the line with nothing priced still says so.
+    expect(relayLine()).toContain('No price yet');
+    fireEvent.pointerEnter(buckets[2]);
+    await screen.findByText('$0.25', { selector: '.model-hub-usage-tooltip-total strong' });
+
+    // Pinned to the unpriced bucket, the table total has nothing priced either.
+    fireEvent.pointerEnter(buckets[0]);
+    await userEvent.click(screen.getByRole('button', { name: 'Pin this bucket' }));
+    const table = container.querySelector('.model-hub-usage-table-scroll')!;
+    expect(table.querySelector('tbody')!.textContent).toContain('No price yet');
+    expect(table.querySelector('tfoot .model-hub-usage-table-total, tfoot td:nth-last-child(2)')!.textContent).toBe('No price yet');
+    expect(table.textContent).not.toContain('$0.00');
+  });
+
+  it('MH-PRICE-014: while the first price table is still being fetched, says so rather than no price', async () => {
+    const value = pricedReport();
+    value.pricing = { currency: 'USD', price_table_date: null, pending: true };
+    value.totals = { ...value.totals, api_cost_usd: 0, excluded_tokens: 280, api_cost_lower_bound: true };
+    value.buckets = value.buckets.map((item) => ({ ...item, rows: item.rows.map((entry) => ({ ...entry, api_cost_usd: 0, excluded_tokens: 140, api_cost_lower_bound: true })) }));
+    const { container } = draw(value);
+    const stats = container.querySelector('.model-hub-usage-stat-grid--priced')!;
+    expect(stats.textContent).toContain('Fetching prices…');
+    expect(stats.textContent).toContain('Fetching the price table…');
+    expect(stats.textContent).not.toContain('No price yet');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Metric' }), 'cost');
+    expect(container.querySelector('.model-hub-usage-legend')!.textContent).toContain('Fetching prices…');
+    expect(container.querySelector('.model-hub-usage-table-scroll')!.textContent).toContain('Fetching prices…');
+    expect(container.textContent).not.toContain('No price yet');
+  });
+
   it('MH-USAGE-031: reads the API-price value in Chinese as a conversion, not a charge', async () => {
     await i18n.addResourceBundle('zh', 'translation', zh, true, true);
     await i18n.changeLanguage('zh');

@@ -314,6 +314,10 @@ describe('QuotaTab', () => {
     expect(badge('openai', 'business')).toBe('Business');
     expect(badge('anthropic', 'claude_max_20x')).toBe('Max 20x');
     expect(badge('anthropic', 'max-5x')).toBe('Max 5x');
+    // A Claude product the profile names without a built-in fee still reads as itself (MH-QUOTA-030).
+    expect(badge('anthropic', 'team')).toBe('Team');
+    expect(badge('anthropic', 'enterprise')).toBe('Enterprise');
+    expect(badge('anthropic', 'max')).toBe('Max');
     // An id another vendor's table names is not borrowed; an unknown id reads as words.
     expect(badge('anthropic', 'prolite')).toBe('Prolite');
     expect(badge('anthropic', 'chatgpt_pro')).toBe('Chatgpt Pro');
@@ -516,6 +520,17 @@ describe('QuotaTab', () => {
       expect(card.textContent).toContain('12,000 tokens 暂无价格，未计入');
       expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('暂无价格');
       cleanup();
+      // Nothing priced in the period: the payback card says no price, never 「≥ 0.0 倍」 (MH-USAGE-033).
+      const none = priced(0, { excluded_tokens: 12_000, api_cost_lower_bound: true });
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(0, 200, { week: none, period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...none } }) })],
+        totals(0, { cost: 0, fee: 200 }, { week: none, period: { sources: 1, fee_usd: 200, multiple: 0, ...none } }),
+      )));
+      const stats = document.querySelector('.model-hub-quota-stats')!.textContent;
+      expect(stats).not.toContain('0.0 倍');
+      expect(stats).not.toContain('$0.00');
+      expect(stats!.match(/暂无价格/g)?.length).toBeGreaterThanOrEqual(2);
+      cleanup();
       // Partly priced: the figure stands and the leftover is named; a lower bound says ≥.
       draw(readyRegion(valued(
         [claude({ value: sourceValue(40, 200, { week: priced(40, { excluded_tokens: 500, api_cost_lower_bound: true }) }) })],
@@ -558,6 +573,19 @@ describe('QuotaTab', () => {
       expect(document.body.textContent).toContain('≥ $0.00');
       expect(document.body.textContent).not.toMatch(/(?<!≥ )\$0\.00/);
       expect(document.body.textContent).not.toContain('还差');
+    });
+
+    it('MH-PRICE-014: while the first price table is being fetched, the value surfaces say so rather than no price', () => {
+      const none = priced(0, { excluded_tokens: 12_000, api_cost_lower_bound: true });
+      const fetching = { price_table_date: null, pending: true as const };
+      draw(readyRegion(valued(
+        [claude({ value: sourceValue(0, 200, { ...fetching, week: none, period: { basis: 'billing_cycle', from_day: '2026-09-05', to_day: '2026-09-25', renews_on: '2026-10-05', ...none } }) })],
+        totals(0, { cost: 0, fee: 200 }, { ...fetching, week: none, period: { sources: 1, fee_usd: 200, multiple: 0, ...none } }),
+      )));
+      expect(within(screen.getByRole('article')).getAllByText('正在获取价格…').length).toBe(2);
+      expect(document.querySelector('.model-hub-quota-stats')!.textContent).toContain('正在获取价格…');
+      expect(document.querySelector('.model-hub-quota-foot')!.textContent).toContain('正在获取价格表…');
+      expect(document.body.textContent).not.toContain('暂无价格');
     });
 
     it('MH-QUOTA-025: a Source still being read shows a loading line instead of 「暂时读不到」', () => {
