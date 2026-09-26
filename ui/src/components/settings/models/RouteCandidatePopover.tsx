@@ -36,6 +36,9 @@ export const RouteCandidatePopover: React.FC<{
   onReturnFocus?: () => void;
   trigger: React.ReactElement;
   width: "route" | "trigger";
+  /** Which trigger edge a route-width panel lines up with: a row action sits at
+   *  the right of its row, the Add trigger at the left of the tools. */
+  align?: "start" | "end";
   /** Opened by another control (a phone's row menu) instead of `trigger`,
    *  which is then only the anchor the panel hangs from. */
   open?: boolean;
@@ -50,6 +53,7 @@ export const RouteCandidatePopover: React.FC<{
   onReturnFocus,
   trigger,
   width,
+  align = "end",
   open: controlledOpen,
   onOpenChange,
 }) => {
@@ -170,7 +174,7 @@ export const RouteCandidatePopover: React.FC<{
       <PopoverContent
         side="bottom"
         avoidCollisions={false}
-        align={width === "route" ? "end" : "start"}
+        align={width === "route" ? align : "start"}
         sideOffset={6}
         collisionPadding={16}
         className={cn(
