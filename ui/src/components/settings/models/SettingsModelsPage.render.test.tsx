@@ -503,7 +503,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect((callback.match(/void refresh\(\)/g) ?? []).length).toBe(2);
   });
 
-  it('issues exactly one surface refresh for a successful subscription create', async () => {
+  it('reads the surface once for a successful subscription create, plus the close\'s own reread', async () => {
     const created = {
       ...nativeSubscription,
       id: 'src_created_subscription',
@@ -537,12 +537,15 @@ describe('SettingsModelsPage surface branches', () => {
     await user.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
 
     await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
+    // The sign-in hands straight over to the provider it created: its toast is the
+    // report, so there is no success panel to wait out first.
+    const detail = await screen.findByRole('dialog', { name: 'Created subscription' });
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    expect(screen.queryByRole('dialog', { name: 'Created subscription' })).toBeNull();
-    await waitFor(() => expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1));
-    await act(async () => Promise.resolve());
-    expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
-    const detail = await screen.findByRole('dialog', { name: 'Created subscription' }, { timeout: 2500 });
+    // One read for the landing, with the flow's trailing stale-row notice folded
+    // into it, and the one every closed flow owes its rows after the cancel settles.
+    await waitFor(() => expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 2));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 2);
     await user.click(within(detail).getByRole('button', { name: /Close provider details|关闭供应商详情/i }));
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });

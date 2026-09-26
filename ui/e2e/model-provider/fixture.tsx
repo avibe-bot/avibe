@@ -7,6 +7,7 @@ import zh from '../../src/i18n/zh.json';
 import '../../src/index.css';
 import '../../src/components/settings/models/modelHubSurface.css';
 import { Button } from '../../src/components/ui/button';
+import { ToastProvider } from '../../src/context/ToastProvider';
 import { AddApiKeyDialog } from '../../src/components/settings/models/AddApiKeyDialog';
 import { SourceDetailPanel } from '../../src/components/settings/models/SourceDetailPanel';
 import { SourcesCard } from '../../src/components/settings/models/SourcesCard';
@@ -128,4 +129,4 @@ function IdentityFixture() {
   </I18nextProvider>;
 }
 
-createRoot(document.getElementById('root')!).render(params.has('identity') ? <IdentityFixture /> : <Fixture />);
+createRoot(document.getElementById('root')!).render(<ToastProvider>{params.has('identity') ? <IdentityFixture /> : <Fixture />}</ToastProvider>);

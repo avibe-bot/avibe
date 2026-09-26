@@ -212,8 +212,8 @@ export const AddSourceDialog: React.FC<{
   const [phase, setPhase] = React.useState<WritePhase>({ kind: 'idle' });
   const [continuation] = React.useState(createContinuationSettlement);
   const clientNonce = React.useRef(sourceClientNonce());
-  // Set when an authorization really produced a source. It is what tells that
-  // flow's own close apart from a cancellation: both arrive the same way.
+  // Set when an authorization really produced a source, so the argument-less
+  // report that follows it is not read as a second, separate change.
   const authorizedLanded = React.useRef(false);
   // Permission as of now, not as of the press. A submit that first reads the inventory
   // back can be inside that await when the engine stops, and the value the press saw is
@@ -309,14 +309,14 @@ export const AddSourceDialog: React.FC<{
       void onAdded(null).catch(() => undefined);
       return;
     }
-    // A source did arrive — and the flow's own success panel is still on screen,
-    // holding the report of where it landed for the 1400ms it owns. Tearing that
-    // down here to show this dialog's spinner would take the one thing the person
-    // was waiting to read. So read back behind it, and let its close be what
-    // closes this frame. The shipped host does exactly this.
+    // A source did arrive, and the flow has already said so in its toast. That
+    // is the end of this frame, as it is for a key that saved: the screen reads
+    // the inventory back behind it and shows where the source landed.
     authorizedLanded.current = true;
     void onAdded({ source, ...(placement ?? { added_to: [], adopted_by: source.adopted_by ?? [] }) })
       .catch(() => undefined);
+    continuation.invalidate();
+    onClose();
   };
 
   const writing = phase.kind === 'saving' || phase.kind === 'checking';
@@ -543,17 +543,10 @@ export const AddSourceDialog: React.FC<{
           open
           vendor={subscriptionVendor}
           sources={sources}
-          onClose={() => {
-            if (!authorizedLanded.current) {
-              // Cancelled, failed, or abandoned: back to the frame it was launched
-              // from, with the method and the draft it was launched with.
-              setPhase({ kind: 'idle' });
-              return;
-            }
-            authorizedLanded.current = false;
-            continuation.invalidate();
-            onClose();
-          }}
+          // Cancelled, failed, or abandoned: back to the frame it was launched
+          // from, with the method and the draft it was launched with. A flow that
+          // produced a source never gets here; its arrival already closed the frame.
+          onClose={() => setPhase({ kind: 'idle' })}
           onConnected={authorized}
         />
       )}

@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as React from 'react';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render as renderRaw, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -88,11 +88,10 @@ const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean
     return;
   }
 
+  // A deletion is confirmed before its first attempt, so a guard refusal is
+  // forced through with no second click.
   await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
   await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
-  if (forced) {
-    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除供应商$/i }));
-  }
 };
 
 const noReauth = () => {
@@ -136,6 +135,9 @@ const settlement = (overrides: Partial<SourceMutationSettlement> = {}): SourceMu
   readInventory: async () => ({ snapshot: beginSourceSnapshot(), sources: await modelsApi.listSources() }),
   ...overrides,
 });
+// The panel always mounts its key-replacement dialog, and that dialog reports
+// a saved key through the page's toast, so every panel render needs one.
+const render = (ui: React.ReactElement) => renderRaw(ui, { wrapper: ToastProvider });
 const immediateTrack: TrackSourceMutation = async (work) => work(source, settlement());
 // The surface owner announces a committed mutation and reconciles it behind that
 // announcement — no second decision stands between the write and its settlement.
@@ -154,19 +156,15 @@ const CommittedPanel: React.FC<CommittedPanelProps> = (props) => (
 type MutationScheduler = <T>(work: () => Promise<T>) => Promise<T>;
 
 const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
-  <ToastProvider>
-    <I18nextProvider i18n={i18n}>
-      <CommittedPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} onReauth={noReauth} />
-    </I18nextProvider>
-  </ToastProvider>,
+  <I18nextProvider i18n={i18n}>
+    <CommittedPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} onReauth={noReauth} />
+  </I18nextProvider>,
 );
 
 const renderProtocol = (protocol: SourceProtocol, models: Source['models'] = source.models) => render(
-  <ToastProvider>
-    <I18nextProvider i18n={i18n}>
-      <CommittedPanel source={{ ...source, protocol, models }} trackMutation={immediateTrack} onReauth={noReauth} />
-    </I18nextProvider>
-  </ToastProvider>,
+  <I18nextProvider i18n={i18n}>
+    <CommittedPanel source={{ ...source, protocol, models }} trackMutation={immediateTrack} onReauth={noReauth} />
+  </I18nextProvider>,
 );
 
 const EchoPanel: React.FC<{
@@ -197,11 +195,9 @@ const renderEchoPanel = (
   reconcile: React.ComponentProps<typeof EchoPanel>['reconcile'] = vi.fn(),
   scheduler?: MutationScheduler,
 ) => render(
-  <ToastProvider>
-    <I18nextProvider i18n={i18n}>
-      <EchoPanel reconcile={reconcile} scheduler={scheduler} />
-    </I18nextProvider>
-  </ToastProvider>,
+  <I18nextProvider i18n={i18n}>
+    <EchoPanel reconcile={reconcile} scheduler={scheduler} />
+  </I18nextProvider>,
 );
 
 afterEach(() => {
@@ -436,7 +432,7 @@ describe('SourceDetailPanel', () => {
     expect(commits[0].impact).toEqual({ hops, gaps });
   });
 
-  it('echoes a non-empty server plan exactly when deleting a source', async () => {
+  it('forces a guarded source deletion with the server plan, byte for byte, without asking twice', async () => {
     const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 2, source_id: source.id, model_id: 'model-a' }];
     const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
     const requests: { url: string; init?: RequestInit }[] = [];
@@ -456,8 +452,6 @@ describe('SourceDetailPanel', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
-    expect(await screen.findAllByText(/claude-opus-4-6/)).toHaveLength(2);
     await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(2));
@@ -603,7 +597,6 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
-    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除供应商$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(3));
@@ -947,9 +940,9 @@ describe('SourceDetailPanel', () => {
 
   it('routes every full-Source mutation family through the shared per-Source queue', () => {
     const detail = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceDetailPanel.tsx'), 'utf8');
-    expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const refetch = \(plan: ManageGuardPlan \| null = null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const addManualModel = \(\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
-    expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const remove = \(model: SuppliedModel, plan: ManageGuardPlan \| null = null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const submitEdit = \(draft: SourceEditDraft, patch: SourcePatch, plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const submitDelete = \(plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
   });
@@ -1032,9 +1025,9 @@ describe('SourceDetailPanel', () => {
     { lng, kind: 'api_key', supply_channel: 'native_cli', hasTest: false },
   ] as const))('explains saved $kind/$supply_channel status without promising a test entry in $lng', async ({ lng, kind, supply_channel, hasTest }) => {
     const locale = i18n.cloneInstance({ lng });
-    render(<ToastProvider><I18nextProvider i18n={locale}>
+    render(<I18nextProvider i18n={locale}>
       <CommittedPanel source={{ ...source, kind, supply_channel, verification_pending: 'vp_fixture' }} trackMutation={immediateTrack} onReauth={noReauth} />
-    </I18nextProvider></ToastProvider>);
+    </I18nextProvider>);
     expect(screen.getByText(locale.t('settings.models.sourceDetail.status.saved'))).toBeTruthy();
     expect(Boolean(screen.queryByRole('button', { name: locale.t('settings.models.sourceTest.open') }))).toBe(hasTest);
     const hint = screen.getByRole('button', { name: locale.t('settings.models.sourceDetail.status.savedHintLabel') });
@@ -1098,7 +1091,7 @@ describe('SourceDetailPanel', () => {
     expect(bodies[1]).toEqual({ force: true, would_remove_hops: hops, would_interrupt: gaps });
   });
 
-  it('requires confirmation again when a forced removal receives a new guard plan', async () => {
+  it('forces a confirmed removal through a guard plan that moved, without asking again', async () => {
     const firstHops = [{ backend: 'claude' as const, menu_model: 'menu-a', position: 1, source_id: source.id, model_id: 'model-a' }];
     const nextHops = [{ backend: 'codex' as const, menu_model: 'menu-b', position: 3, source_id: source.id, model_id: 'model-a' }];
     const bodies: unknown[] = [];
@@ -1118,11 +1111,13 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Remove anyway$|^仍要移除$/i }));
 
-    expect(await screen.findByText(/menu-b/)).toBeTruthy();
-    expect(bodies[1]).toEqual({ force: true, would_remove_hops: firstHops, would_interrupt: [] });
-    await userEvent.click(screen.getByRole('button', { name: /^Remove anyway$|^仍要移除$/i }));
+    // The user answered once, against the first plan. The moved plan is resent
+    // under that answer, echoed as the server named it, and nothing asks again.
     await waitFor(() => expect(bodies).toHaveLength(3));
+    expect(bodies[1]).toEqual({ force: true, would_remove_hops: firstHops, would_interrupt: [] });
     expect(bodies[2]).toEqual({ force: true, would_remove_hops: nextHops, would_interrupt: [] });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.queryByText(/menu-b/)).toBeNull();
   });
 
   it('names every model and Agent that a guarded change would interrupt', () => {

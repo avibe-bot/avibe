@@ -24,7 +24,7 @@ test.describe('G · supply guards and failure copy', () => {
     await requireMockUpstream(mock);
   });
 
-  test('B7 · removing the only source of a route is refused, explained, then reported', async ({ hub, api, gateway }) => {
+  test('B7 · removing the only source of a route asks once, then reports', async ({ hub, api, gateway }) => {
     const source = gateway.sources[0];
     const supplied = source.models[0]?.id;
     expect(
@@ -56,35 +56,22 @@ test.describe('G · supply guards and failure copy', () => {
       await hub.manageMenuTrigger(source.display_name).click();
       await hub.manageItem('delete_source').click();
 
-      // 1 · the plain confirm. The menu item opens it with no evidence in it,
+      // 1 · the one confirm. The menu item opens it with no evidence in it,
       // because the client has not asked the server anything yet — it only knows
-      // that deleting a source is destructive.
+      // that deleting a source is destructive, and its subtitle says the source
+      // leaves every Agent and route that uses it.
       const guard = hub.dialogTitled(copy('guard.title.deleteSource', { source: source.display_name }));
-      const confirm = guard.getByRole('button', {
-        name: copy('guard.confirm.deleteSource'),
-        exact: true,
-      });
       await expect(guard).toBeVisible({ timeout: 30_000 });
       await expect(guard).toContainText(copy('guard.subtitle.deleteSource'));
       await expectVisibleWithout(guard, copy('guard.label'));
 
-      // 2 · confirming ATTEMPTS the delete, and the SERVER refuses it. The same
-      // dialog comes back carrying the refusal's own plan — which hops go, and
-      // which models are left with nothing. That two-step shape is the scenario:
-      // a source nothing routes through is deleted on the first confirm, and the
-      // evidence below appears only because something is actually at stake.
-      await confirm.click();
-      await expect(guard).toContainText(copy('guard.label'), { timeout: 30_000 });
-      await expect(guard).toContainText(copy('guard.gap.label'));
-      await expect(guard).toContainText(copy('guard.hint.interrupt'));
-      await expect(guard).toContainText(gateway.model);
+      // 2 · confirming is the whole decision. The server refuses the first
+      // attempt with its plan, and the client resends it forced with that plan
+      // echoed — the user already agreed to what the subtitle named, so the
+      // dialog never comes back to ask a second time.
+      await guard.getByRole('button', { name: copy('guard.confirm.deleteSource'), exact: true }).click();
 
-      // 3 · confirm again, which re-sends the delete echoing that plan back.
-      await confirm.click();
-
-      // 4 · the removal announces itself once, in the toast layer. Step 2 is
-      // where the facts were put to the user and step 3 is where they accepted
-      // them, so restating the same plan in a modal would only ask again.
+      // 3 · the removal announces itself once, in the toast layer.
       await expect(hub.toasts.filter({ hasText: copy('sourceDetail.remove.settlement.title') }))
         .toBeVisible({ timeout: 30_000 });
       await expect(hub.guardDialog).toHaveCount(0);

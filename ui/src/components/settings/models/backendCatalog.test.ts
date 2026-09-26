@@ -15,16 +15,13 @@ import {
   backendModelId,
   draftRowFor,
   draftWithId,
-  echoableRefusal,
   heldRowFor,
   offeredCandidates,
-  orderWithRestored,
   MODELS_DEV_FIELDS,
   pickerGroups,
   readBackendCatalogBaseline,
   retireModelsDevMatch,
   sameBackendModel,
-  samePlanContents,
 } from './backendCatalog';
 import type {
   AgentSupply,
@@ -525,45 +522,6 @@ describe('backendCatalogIntent', () => {
   });
 });
 
-describe('orderWithRestored', () => {
-  const BASELINE = ['a', 'b', 'c', 'd'];
-
-  const without = (...ids: string[]) => BASELINE.filter((id) => !ids.includes(id));
-
-  it('puts a cancelled removal back where the baseline had it, wherever that was', () => {
-    // The property, stated for every position rather than for the one that
-    // happens to be interesting: undoing a removal restores the baseline
-    // exactly. A row that came back at the end would answer 「are you sure?」
-    // with a reordered catalog the user never asked for — and one that reports
-    // itself as edited afterwards can never be saved back to what it was.
-    for (const id of BASELINE) {
-      expect(orderWithRestored(without(id), BASELINE, new Set([id])), id).toEqual(BASELINE);
-    }
-    // Including all of them at once, in any combination: the restored rows keep
-    // their baseline sequence among themselves, so neighbours cannot swap.
-    expect(orderWithRestored(without('b', 'c'), BASELINE, new Set(['b', 'c']))).toEqual(BASELINE);
-    expect(orderWithRestored([], BASELINE, new Set(BASELINE))).toEqual(BASELINE);
-  });
-
-  it('leaves every other edit alone', () => {
-    // A refusal answers one removal; it says nothing about a reorder or an
-    // addition the user also made, and those are still theirs afterwards. So
-    // the baseline decides positions and is never replayed as the order.
-    expect(orderWithRestored(['d', 'a', 'c'], BASELINE, new Set(['b'])))
-      .toEqual(['d', 'a', 'b', 'c']);
-    expect(orderWithRestored(['a', 'c', 'd', 'new'], BASELINE, new Set(['b'])))
-      .toEqual(['a', 'b', 'c', 'd', 'new']);
-    expect(orderWithRestored(['a', 'b', 'c', 'd'], BASELINE, new Set())).toEqual(BASELINE);
-  });
-
-  it('restores an id whose baseline neighbours are all gone', () => {
-    // Nothing to anchor to is still an answer: the front, because a row with no
-    // surviving predecessor had none in the baseline either.
-    expect(orderWithRestored(['d'], BASELINE, new Set(['b']))).toEqual(['b', 'd']);
-    expect(orderWithRestored(['new'], BASELINE, new Set(['c']))).toEqual(['c', 'new']);
-  });
-});
-
 describe('applyBackendCatalogIntent', () => {
   it('replays edits onto a newer catalog and keeps a concurrent addition visible', () => {
     const intent = backendCatalogIntent([model('a'), model('b')], [model('b'), model('a', { display_name: 'A' })]);
@@ -824,105 +782,3 @@ describe('offeredCandidates', () => {
   });
 });
 
-describe('samePlanContents', () => {
-  const hop = (position: number) => ({
-    source_id: 'src', model_id: 'kimi-k3', backend: 'claude', menu_model: 'kimi-k3', position,
-  });
-  const gap = (agents: string[]) => ({ backend: 'claude', model_id: 'kimi-k3', agents });
-
-  /** Every ordering of a list. */
-  const orderings = <T>(list: readonly T[]): T[][] => (
-    list.length <= 1
-      ? [[...list]]
-      : list.flatMap((head, index) => orderings([...list.slice(0, index), ...list.slice(index + 1)])
-        .map((rest) => [head, ...rest]))
-  );
-
-  it('reads any two orderings of the same consequences as one plan', () => {
-    // The decision it serves: 「is the server's refusal the one the user already
-    // confirmed?」. The preview follows the order the user clicked and the
-    // refusal follows the server's own walk of the baseline, so an order that
-    // differs between them is not a disagreement about what would happen — and
-    // asking the same question twice for it is the bug.
-    const plan = [hop(1), hop(2), gap(['reviewer'])];
-    const every = orderings(plan);
-    expect(every).toHaveLength(6);
-    expect(every.filter((ordering) => !samePlanContents(plan, ordering))).toEqual([]);
-  });
-
-  it('reads consequences that are not the same as a different plan', () => {
-    // What makes the automatic retry safe: a server whose answer moved between
-    // the question and the retry has to ask it again.
-    const plan = [hop(1), hop(2)];
-    const moved = [
-      [],                       // nothing left
-      [hop(1)],                 // one fewer
-      [hop(1), hop(2), hop(3)], // one more
-      [hop(1), hop(1)],         // one replaced by a copy of the other
-      [hop(1), hop(9)],         // one altered
-    ];
-    expect(moved.filter((other) => samePlanContents(plan, other))).toEqual([]);
-    // Including inside an element, where no story explains a reordering: one
-    // side produced that list, so a different order there is a real change.
-    expect(samePlanContents([gap(['a', 'b'])], [gap(['b', 'a'])])).toBe(false);
-  });
-
-  it('reads no difference into how the same element happens to be written', () => {
-    // Both halves are JSON off a wire, and neither side controls the other's
-    // key order or how it spells a field it has nothing to say about.
-    expect(samePlanContents(
-      [{ source_id: 'src', model_id: 'kimi-k3', position: 1 }],
-      [{ position: 1, model_id: 'kimi-k3', source_id: 'src', menu_model: undefined }],
-    )).toBe(true);
-  });
-});
-
-describe('echoableRefusal', () => {
-  const BASELINE = [model('alpha'), model('beta'), model('gamma')];
-  const REQUESTED = [model('alpha')];
-  const stored = (owed: readonly string[]) => ({
-    baseline: BASELINE,
-    models: REQUESTED,
-    owed: new Set(owed),
-  });
-
-  it('permits an echo only where the refusal was accepted AND still describes this write', () => {
-    // Two independent facts decide it, so what is stated here is their product
-    // rather than a list of cases: whether every held-back removal has been
-    // answered against the server's own plan, and whether the write is still
-    // the one the server refused. `force` asserts both at once — 「the user saw
-    // this consequence, and it is the consequence of what I am sending」 — so
-    // the answer is their conjunction, and each dimension is free to grow
-    // without the expectations being rewritten.
-    const ACCEPTANCE = [
-      { what: 'every question answered', owed: [], accepted: true },
-      { what: 'one still owed', owed: ['beta'], accepted: false },
-      { what: 'every one still owed', owed: ['beta', 'gamma'], accepted: false },
-    ];
-    const SUBJECT = [
-      { what: 'the write it refused', baseline: BASELINE, requested: REQUESTED, same: true },
-      { what: 'a draft that removed more since', baseline: BASELINE, requested: [], same: false },
-      { what: 'a draft that put a row back', baseline: BASELINE, requested: BASELINE, same: false },
-      { what: 'a draft that added a row', baseline: BASELINE, requested: [...REQUESTED, model('delta')], same: false },
-      { what: 'the same ids, one row edited', baseline: BASELINE, requested: [model('alpha', { display_name: 'Alpha' })], same: false },
-      { what: 'a newer server catalog', baseline: [...BASELINE, model('delta')], requested: REQUESTED, same: false },
-    ];
-    const cells = ACCEPTANCE.flatMap((acceptance) => SUBJECT.map((subject) => ({
-      what: `${acceptance.what} · ${subject.what}`,
-      echoable: echoableRefusal(stored(acceptance.owed), subject.baseline, subject.requested),
-      accepted: acceptance.accepted,
-      same: subject.same,
-    })));
-    expect(cells.filter((cell) => cell.echoable !== (cell.accepted && cell.same))).toEqual([]);
-    // And the product is the whole point: neither fact on its own permits an
-    // echo, so exactly one cell of the matrix does.
-    expect(cells.filter((cell) => cell.echoable).map((cell) => cell.what))
-      .toEqual(['every question answered · the write it refused']);
-  });
-
-  it('permits nothing when there is no refusal to echo', () => {
-    // The state a fresh dialog saves from, and the one it returns to after a
-    // reopen: there is no server plan, so there is nothing to force.
-    expect(echoableRefusal(null, BASELINE, REQUESTED)).toBe(false);
-  });
-});

@@ -104,10 +104,13 @@ test('MH-ROUTING-007 follow-defaults switch, undo, cancel, and save preserve exp
     };
     expect(await refused.json()).toMatchObject({ ok: false, contract_version: 10, error: 'source_in_route_chain', ...plan });
     expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual(manual);
-    await expect(dialog.locator('.model-hub-guard-hop')).toHaveCount(1);
-    await expect(dialog.locator('.model-hub-guard-hop strong')).toHaveText(`${copy(`backends.${gateway.backend}`)} · ${gateway.model}`);
-    await expect(dialog.locator('.model-hub-guard-hop > span > span')).toHaveText(`${manual.hops[0].model_id} · ${copy('guard.hop.position', { n: 1 })}`);
-    const confirm = labelledButton(dialog, copy('guard.confirm.saveRoute'));
+    // The one question is its own modal over the chain the user was editing.
+    const guard = hub.dialogTitled(copy('guard.title.saveRoute', { menuModel: gateway.model }));
+    await expect(guard).toBeVisible();
+    await expect(guard.locator('.model-hub-guard-hop')).toHaveCount(1);
+    await expect(guard.locator('.model-hub-guard-hop strong')).toHaveText(`${copy(`backends.${gateway.backend}`)} · ${gateway.model}`);
+    await expect(guard.locator('.model-hub-guard-hop > span > span')).toHaveText(`${copy('gateway.row.current', { source: gateway.sources[0].display_name, model: manual.hops[0].model_id })} · ${copy('guard.hop.position', { n: 1 })}`);
+    const confirm = labelledButton(guard, copy('guard.confirm.saveRoute'));
     await expect(confirm).toBeVisible();
     const committedPromise = page.waitForResponse((response) => response.url() === chainUrl && response.request().method() === 'DELETE');
     await confirm.click();
@@ -117,6 +120,7 @@ test('MH-ROUTING-007 follow-defaults switch, undo, cancel, and save preserve exp
     await expect.poll(async () => (await api.agentChain(gateway.backend, gateway.model)).manual_override).toBeNull();
     expect(identities(await api.agentChain(gateway.backend, gateway.model))).toEqual(identities(inherited));
     expect(mutations).toEqual(['DELETE', 'DELETE']);
+    await expect(guard).toHaveCount(0);
     await expect(dialog).toHaveCount(0);
     await page.reload();
     const reloaded = await api.agentChain(gateway.backend, gateway.model);

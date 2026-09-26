@@ -138,7 +138,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
   const [routeSelection, setRouteSelection] = useState<RouteChainSelection | null>(null);
-  const [routeReconciliation, setRouteReconciliation] = useState({ pending: false, failed: false });
   const committedRouteRefresh = useRef(false);
   const canEditSetupRoute = Boolean(onNavigate && agentReads);
   const [routeRead, setRouteRead] = useState<{
@@ -1032,15 +1031,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           }}
           onCommitted={() => {
             committedRouteRefresh.current = true;
-            setRouteReconciliation({ pending: true, failed: false });
-            if (routeSelection) void refreshRouteOwnership(routeSelection.agent.backend)
-              .then((ok) => setRouteReconciliation({ pending: false, failed: !ok }));
+            if (routeSelection) void refreshRouteOwnership(routeSelection.agent.backend);
           }}
-          commitReconciliation={{ ...routeReconciliation, retry: () => {
-            setRouteReconciliation({ pending: true, failed: false });
-            if (routeSelection) void refreshRouteOwnership(routeSelection.agent.backend)
-              .then((ok) => setRouteReconciliation({ pending: false, failed: !ok }));
-          } }}
           readAgents={async () => {
             const value = await agentReads.readValue();
             return { value, install: () => setRouteRead((current) => ({ ...current, supplies: value })) };

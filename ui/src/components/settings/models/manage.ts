@@ -60,7 +60,7 @@ export type ManageStage =
   | { kind: 'submitting_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; surface: 'edit' | 'guard' }
   | { kind: 'confirming_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan }
   | { kind: 'edit_failed'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
-  | { kind: 'confirming_delete'; plan: ManageGuardPlan | null }
+  | { kind: 'confirming_delete' }
   | { kind: 'submitting_delete'; plan: ManageGuardPlan | null; forced: boolean }
   | { kind: 'delete_failed'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
   | { kind: 'committed_edit' }
@@ -118,11 +118,7 @@ export const MANAGE_STAGE_RETRY = {
     forced: stage.forced,
     surface: 'edit',
   }),
-  confirming_delete: (stage) => ({
-    kind: 'submitting_delete',
-    plan: stage.plan,
-    forced: stage.plan !== null,
-  }),
+  confirming_delete: () => ({ kind: 'submitting_delete', plan: null, forced: false }),
   submitting_delete: keepManageStage,
   delete_failed: (stage) => ({
     kind: 'submitting_delete',
@@ -179,7 +175,6 @@ export type ManageStageEvent =
   | { type: 'submit_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; surface: 'edit' | 'guard' }
   | { type: 'submit_delete'; plan: ManageGuardPlan | null }
   | { type: 'guard_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan }
-  | { type: 'guard_delete'; plan: ManageGuardPlan }
   | { type: 'fail_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
   | { type: 'fail_delete'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
   | { type: 'commit'; action: ManageCommitAction }
@@ -201,7 +196,7 @@ const applyManageStageTransition = <Event,>(
 export const transitionManageStage = (stage: ManageStage, event: ManageStageEvent): ManageStage => {
   switch (event.type) {
     case 'begin_edit': return { kind: 'editing', draft: event.draft };
-    case 'begin_delete': return { kind: 'confirming_delete', plan: null };
+    case 'begin_delete': return { kind: 'confirming_delete' };
     case 'submit_edit': return {
       kind: 'submitting_edit',
       draft: event.draft,
@@ -221,7 +216,6 @@ export const transitionManageStage = (stage: ManageStage, event: ManageStageEven
       patch: event.patch,
       plan: event.plan,
     };
-    case 'guard_delete': return { kind: 'confirming_delete', plan: event.plan };
     case 'fail_edit': return {
       kind: 'edit_failed',
       draft: event.draft,

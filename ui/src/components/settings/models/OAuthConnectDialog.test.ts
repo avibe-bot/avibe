@@ -206,6 +206,46 @@ describe('add-subscription start recovery', () => {
   });
 });
 
+describe('reauth terminal', () => {
+  const finishedReauth = (repaired: OAuthResult['repaired']) => {
+    const flow = {
+      flow_id: 'oaf_reauth_done',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'success' as const,
+      presentation: { expects: 'none' as const },
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(flow);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow, created: null, repaired });
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+  };
+
+  // The toast is the whole report of a clean repair; a success panel held open on
+  // a timer after it only makes the person wait to be let go.
+  it('closes a clean repair as soon as it lands', async () => {
+    finishedReauth({ source: subscription(), recovered: true, interrupted_pairs: [] });
+    const onClose = vi.fn();
+    renderDialog({ reauth: subscription(), onClose });
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1), { timeout: 500 });
+  });
+
+  it('keeps a repair that stranded models on screen to be read', async () => {
+    finishedReauth({
+      source: subscription(),
+      recovered: true,
+      interrupted_pairs: [{ backend: 'claude', model_id: 'claude-opus-5', agents: [] }],
+    });
+    const onClose = vi.fn();
+    renderDialog({ reauth: subscription(), onClose });
+
+    expect(await screen.findByText(/claude-opus-5/)).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
 describe('OAuth failure class behavior', () => {
   it('keeps a held flow when its timeout reread is inconclusive', async () => {
     vi.useFakeTimers();
