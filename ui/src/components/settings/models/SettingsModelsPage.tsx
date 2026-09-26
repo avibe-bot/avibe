@@ -19,7 +19,7 @@ import { GatewayModule } from './GatewayModule';
 import { MigrationDialog } from './MigrationDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
-import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport, type SuspendedRouteAttempt } from './RouteChainDialog';
+import { RouteChainDialog, type RouteCollectionObservation, type RouteReport, type SuspendedRouteAttempt } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
@@ -440,7 +440,7 @@ export const SettingsModelsPage: React.FC = () => {
   // the dialog's own subject. Separate from `subscriptionVendor` because the two
   // journeys start from different surfaces — this one from the source detail,
   // which replaces the overview that holds 添加订阅 — and only the create path
-  // owns the success-landing timer and reconcile flag below.
+  // owns the success landing and reconcile flag below.
   const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
   // A quota read can be the first to see a refused grant while the Source row
   // is still healthy, so its re-login cannot route through the detail panel's
@@ -449,12 +449,14 @@ export const SettingsModelsPage: React.FC = () => {
   const [quotaReauthSource, setQuotaReauthSource] = React.useState<Source | null>(null);
   // A re-login started from a quota card has no detail heading to return to.
   const quotaReauthOpenerRef = React.useRef<HTMLElement | null>(null);
+  // The card button focus went back to when that re-login closed, until the
+  // quota re-read its success started has landed.
+  const quotaFocusHoldRef = React.useRef<HTMLElement | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
   const subscriptionPickerRefs = React.useRef<Partial<Record<SubscriptionPickerVendor, HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
-  const subscriptionCloseTimer = React.useRef<number | null>(null);
   // A successful OAuth terminal reports the same moved rows twice: first with
   // the created source, then as the generic stale-row notification. The source
   // callback owns the one full reconciliation; consume the trailing notification
@@ -766,6 +768,13 @@ export const SettingsModelsPage: React.FC = () => {
     degraded: () => null,
   });
   const rereadQuota = React.useCallback(() => { void readQuota(false); }, [readQuota]);
+  // A clean re-login closes before the quota re-read it started lands, and a
+  // healthy answer removes the card button focus just went back to.
+  React.useLayoutEffect(() => {
+    const held = quotaFocusHoldRef.current;
+    quotaFocusHoldRef.current = null;
+    if (held && !held.isConnected && document.activeElement === document.body) focusQuotaOpener(held);
+  }, [quotaSettled]);
   const resetQuotaRereads = usePendingRereads(tab === 'quota', quotaPendingKey, quotaSettled, rereadQuota);
 
   React.useEffect(() => {
@@ -1321,11 +1330,6 @@ export const SettingsModelsPage: React.FC = () => {
     if (status?.pending || !status?.failed.size) return;
     routeProjectionReconciler.retry();
   }, [routeProjectionReconciler]);
-  const routeCommitReconciliation = React.useMemo<RouteCommitReconciliation | null>(() => routeCommitStatus ? ({
-    pending: routeCommitStatus.pending,
-    failed: routeCommitStatus.failed.size > 0,
-    retry: retryRouteCommit,
-  }) : null, [retryRouteCommit, routeCommitStatus]);
   React.useEffect(() => {
     const heldBackends = new Set(suspendedRouteAttempts.keys());
     for (const backend of suspendedHubFrontiersRef.current.keys()) {
@@ -1437,8 +1441,8 @@ export const SettingsModelsPage: React.FC = () => {
       void refresh();
       return;
     }
-    // Keep the success panel as the only active dialog until its handoff timer
-    // closes it. The provider dialog then opens and owns its normal autofocus.
+    // The toast already said it connected, so the sign-in dialog hands straight
+    // over to the provider it created, which then owns its normal autofocus.
     sourceEntityAuthority.landLatest(source);
     selectSource({
       sourceId: source.id,
@@ -1446,17 +1450,9 @@ export const SettingsModelsPage: React.FC = () => {
     });
     subscriptionSuccessReconcileRef.current = true;
     void refresh();
-    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
-    subscriptionCloseTimer.current = window.setTimeout(() => {
-      subscriptionCloseTimer.current = null;
-      setSubscriptionVendor(null);
-    }, 1400);
+    setSubscriptionVendor(null);
   }, [refresh, selectSource, sourceEntityAuthority]);
   const closeSubscription = React.useCallback(() => {
-    if (subscriptionCloseTimer.current !== null) {
-      window.clearTimeout(subscriptionCloseTimer.current);
-      subscriptionCloseTimer.current = null;
-    }
     setSubscriptionVendor(null);
     window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
   }, []);
@@ -1484,6 +1480,7 @@ export const SettingsModelsPage: React.FC = () => {
     // quota card, back to its button, or to the quota tab once it is gone.
     const opener = quotaReauthOpenerRef.current;
     quotaReauthOpenerRef.current = null;
+    quotaFocusHoldRef.current = opener;
     window.setTimeout(() => (opener ? focusQuotaOpener(opener) : sourceDetailHeadingRef.current?.focus()), 0);
   }, []);
   const closeSubscriptionPicker = React.useCallback(() => {
@@ -1505,9 +1502,6 @@ export const SettingsModelsPage: React.FC = () => {
     if (subscriptionPickerOpen) closeSubscriptionPicker();
     else openSubscriptionPicker();
   }, [closeSubscriptionPicker, openSubscriptionPicker, subscriptionPickerOpen]);
-  React.useEffect(() => () => {
-    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
-  }, []);
 
   return (
     <ModelHubShell
@@ -1807,18 +1801,17 @@ export const SettingsModelsPage: React.FC = () => {
           setRouteTarget(null);
           if (target) focusRouteDestination(target);
         }}
-        onManageModel={(action, route) => {
+        onManageModel={(action) => {
           // The catalog dialog is the one writer of the model list; the route
           // dialog steps aside while it edits or removes the model it was
           // showing, then reopens on that model.
           if (!routeTarget) return;
           catalogOriginRef.current = routeTarget;
           setRouteTarget(null);
-          setCatalogFocus({ modelId: routeTarget.modelId, action, route });
+          setCatalogFocus({ modelId: routeTarget.modelId, action });
           setMenuBackend(routeTarget.agent.backend);
         }}
         onCommitted={(result) => routeCommitted(result, routeTarget?.opener ?? null)}
-        commitReconciliation={routeCommitReconciliation}
         onObserved={routeObserved}
         readAgents={readRouteAgents}
         readSources={readRouteSources}

@@ -266,8 +266,7 @@ describe("RouteChainDialog", () => {
     await user.click(screen.getByRole('menuitem', { name: 'Edit model' }));
     await user.click(head.getByRole('button', { name: 'Model actions' }));
     await user.click(screen.getByRole('menuitem', { name: 'Remove model' }));
-    const shown = [{ source_id: 'src_a', model_id: 'claude-opus-5' }, { source_id: 'src_b', model_id: 'opus-5' }];
-    expect(manage.mock.calls).toEqual([['edit', shown], ['remove', shown]]);
+    expect(manage.mock.calls).toEqual([['edit'], ['remove']]);
     // An unsaved draft would be dropped by leaving, so the handoff steps aside.
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
     expect(head.queryByRole('button', { name: 'Model actions' })).toBeNull();
@@ -500,7 +499,7 @@ describe("RouteChainDialog", () => {
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
     });
 
-    it('clears to no-key Unconfigured, confirms the exact DELETE guard and closes after saving', async () => {
+    it('clears to no-key Unconfigured, confirms the exact DELETE guard once and closes after saving', async () => {
       const user = userEvent.setup();
       const gap = { backend: 'claude' as const, model_id: 'opus-5', agents: ['writer'] };
       const hop = { backend: 'claude' as const, menu_model: 'opus-5', ...chain.manual_override!.hops[0], position: 1 };
@@ -520,14 +519,16 @@ describe("RouteChainDialog", () => {
       await screen.findByText('After restore: unconfigured');
       expect(restore).not.toHaveBeenCalled();
       await user.click(screen.getByRole('button', { name: 'Save' }));
-      await user.click(await screen.findByRole('button', { name: 'Save anyway' }));
+      const guard = within(await screen.findByRole('dialog', { name: 'Save the route chain for opus-5' }));
+      expect(guard.getByText('Agents pinned to it: writer')).toBeTruthy();
+      await user.click(guard.getByRole('button', { name: 'Save anyway' }));
       await waitFor(() => expect(close).toHaveBeenCalledOnce());
       expect(restore.mock.calls).toEqual([
         ['claude', 'opus-5', undefined],
         ['claude', 'opus-5', { force: true, would_remove_hops: [hop], would_interrupt: [gap] }],
       ]);
       expect(committed).toHaveBeenCalledWith(mutation(unconfigured, { removed_hops: [hop], interrupted: [gap] }));
-      expect(screen.getByText('Agents pinned to it: writer')).toBeTruthy();
+      expect(screen.queryByRole('dialog', { name: 'Save the route chain for opus-5' })).toBeNull();
       expect(put).not.toHaveBeenCalled();
     });
 
@@ -639,8 +640,7 @@ describe("RouteChainDialog", () => {
       await waitFor(() => expect((screen.getByRole('button', { name: 'Retry' }) as HTMLButtonElement).disabled).toBe(false));
       expect(committed).not.toHaveBeenCalled();
       await user.click(screen.getByRole('button', { name: 'Retry' }));
-      await within(document.querySelector<HTMLElement>('.model-hub-route-foot')!).findByRole('button', { name: 'Done' });
-      expect(committed).toHaveBeenCalledWith({ chain: unconfigured, removed_hops: null, interrupted: null });
+      await waitFor(() => expect(committed).toHaveBeenCalledWith({ chain: unconfigured, removed_hops: null, interrupted: null }));
       expect(restore).toHaveBeenCalledOnce();
       expect(put).not.toHaveBeenCalled();
     });
@@ -883,7 +883,7 @@ describe("RouteChainDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
-  it("echoes the exact refusal plan on a forced confirmation", async () => {
+  it("asks once in its own modal over the draft, then echoes the exact refusal plan", async () => {
     const user = userEvent.setup();
     const gap = {
       backend: "claude" as const,
@@ -897,52 +897,82 @@ describe("RouteChainDialog", () => {
       model_id: "claude-opus-5",
       position: 1,
     };
+    const refusal = () =>
+      new ApiCallError("source_last_supplier", undefined, true, [gap], [], [hop]);
     const put = vi
       .spyOn(modelsApi, "putAgentChain")
-      .mockRejectedValueOnce(
-        new ApiCallError(
-          "source_last_supplier",
-          undefined,
-          true,
-          [gap],
-          [],
-          [hop],
-        ),
-      )
+      .mockRejectedValueOnce(refusal())
+      .mockRejectedValueOnce(refusal())
       .mockResolvedValueOnce(mutation());
-    renderDialog();
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
     await screen.findAllByRole("button", { name: "Remove hop" });
 
     await user.click(screen.getAllByRole("button", { name: "Remove hop" })[1]);
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(
-      await screen.findByRole("button", { name: "Save anyway" }),
-    ).toBeTruthy();
-    expect(screen.getByText("Save the route chain for opus-5")).toBeTruthy();
-    expect(screen.getByText("Hops that will be removed")).toBeTruthy();
-    expect(screen.getByText("1 hop")).toBeTruthy();
-    expect(
-      screen.getByText((_, element) =>
-        element?.classList.contains("model-hub-guard-hop") === true &&
-        element.textContent?.includes("Order #1") === true,
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText("Some models will be left with no usable source."),
-    ).toBeTruthy();
-    expect(
-      screen.queryByText("Models that will be left with no source"),
-    ).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Save anyway" }));
+    const dialog = await screen.findByRole("dialog", { name: "Save the route chain for opus-5" });
+    const guard = within(dialog);
+    expect(guard.getByText("Hops that will be removed")).toBeTruthy();
+    expect(guard.getByText("1 hop")).toBeTruthy();
+    // The hop names the supplier it went through, in the page's own mapping copy.
+    expect(guard.getByText("API key → claude-opus-5 · Order #1")).toBeTruthy();
+    expect(guard.getByText("Models that will be left with no source")).toBeTruthy();
+    expect(guard.getByText("Agents pinned to it: writer")).toBeTruthy();
+    expect(guard.getByText("Some models will be left with no usable source.")).toBeTruthy();
 
-    await waitFor(() =>
-      expect(put).toHaveBeenLastCalledWith("claude", "opus-5", {
-        hops: [{ source_id: "src_a", model_id: "claude-opus-5" }],
-        force: true,
-        would_remove_hops: [hop],
-        would_interrupt: [gap],
-      }),
+    // Cancel returns to the chain exactly as it was left, still saveable.
+    await user.click(guard.getAllByRole("button", { name: "Cancel" }).at(-1)!);
+    expect(screen.queryByRole("dialog", { name: "Save the route chain for opus-5" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Remove hop" })).toHaveLength(1);
+    expect(put).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(
+      within(await screen.findByRole("dialog", { name: "Save the route chain for opus-5" }))
+        .getByRole("button", { name: "Save anyway" }),
     );
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(put).toHaveBeenLastCalledWith("claude", "opus-5", {
+      hops: [{ source_id: "src_a", model_id: "claude-opus-5" }],
+      force: true,
+      would_remove_hops: [hop],
+      would_interrupt: [gap],
+    });
+  });
+
+  it("resends a confirmed save with the recomputed plan instead of asking again", async () => {
+    const user = userEvent.setup();
+    const gap = { backend: "claude" as const, model_id: "opus-5", agents: ["writer"] };
+    const firstHop = {
+      backend: "claude" as const,
+      menu_model: "opus-5",
+      source_id: "src_a",
+      model_id: "claude-opus-5",
+      position: 1,
+    };
+    const nextHop = { ...firstHop, position: 2 };
+    const put = vi
+      .spyOn(modelsApi, "putAgentChain")
+      .mockRejectedValueOnce(new ApiCallError("source_last_supplier", undefined, true, [gap], [], [firstHop]))
+      .mockRejectedValueOnce(new ApiCallError("source_last_supplier", undefined, true, [gap], [], [nextHop]))
+      .mockResolvedValueOnce(mutation());
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
+    await screen.findAllByRole("button", { name: "Remove hop" });
+
+    await user.click(screen.getAllByRole("button", { name: "Remove hop" })[1]);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(
+      within(await screen.findByRole("dialog", { name: "Save the route chain for opus-5" }))
+        .getByRole("button", { name: "Save anyway" }),
+    );
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(put).toHaveBeenCalledTimes(3);
+    expect(put.mock.calls[1][2]).toMatchObject({ force: true, would_remove_hops: [firstHop] });
+    expect(put.mock.calls[2][2]).toMatchObject({ force: true, would_remove_hops: [nextHop] });
+    expect(screen.queryByRole("dialog", { name: "Save the route chain for opus-5" })).toBeNull();
   });
 
   it("re-reads the exact chain after an unconfirmed write and never retries the PUT", async () => {

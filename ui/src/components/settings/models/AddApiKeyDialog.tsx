@@ -2,7 +2,6 @@ import type { TranslationKey } from '@/i18n/types';
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
-  CheckCircle2,
   CircleX,
   LoaderCircle,
   Save,
@@ -12,6 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/context/ToastContext';
 import { ApiKeyField, ApiKeySourceForm } from './ApiKeySourceForm';
 import {
   apiKeySourceCreate,
@@ -23,7 +23,9 @@ import {
 } from './apiKeySourceDraft';
 import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
-import { GuardImpact } from './GuardImpact';
+import { GuardDialog } from './GuardDialog';
+import { GuardImpact, type GuardPlan } from './GuardImpact';
+import { confirmGuardPlan, guardedFailure, sendAgreed } from './guardedWrite';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import {
   createContinuationSettlement,
@@ -34,10 +36,9 @@ import {
   type TrackSourceMutation,
 } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
-import { mayHaveWritten, REPAIR_LINE_KEY, wasBlocked } from './repair';
+import { mayHaveWritten, REPAIR_TOAST, wasBlocked } from './repair';
 import { serverText } from './serverCopy';
 import {
-  type RouteHopRef,
   type Source,
   type SupplyGap,
 } from './types';
@@ -50,23 +51,18 @@ type Phase =
 
 const INITIAL_PHASE: Phase = { kind: 'form' };
 
-type ReplaceOutcome =
-  | { kind: 'repaired' }
-  | { kind: 'impact'; hops: RouteHopRef[]; gaps: SupplyGap[] };
-
-const replacementOutcomeFromEvidence = (
-  hops: RouteHopRef[] = [],
-  gaps: SupplyGap[] = [],
-): ReplaceOutcome => {
-  if (hops.length > 0 || gaps.length > 0) return { kind: 'impact', hops, gaps };
-  return { kind: 'repaired' };
-};
+/**
+ * A landed replacement is announced in one toast, in the repair verdict's own
+ * words and order. Which hops it cost was the guard's question, answered before
+ * the write, so the toast says only what is still wrong: an Agent the write
+ * stranded, or a source that is still stopped.
+ */
+const replacementToast = (source: Source, gaps: SupplyGap[] = []) =>
+  REPAIR_TOAST[gaps.length > 0 ? 'gaps' : wasBlocked(source.state) ? 'unresolved' : 'repaired'];
 
 type ReplacePhase =
   | { kind: 'edit' }
   | { kind: 'submitting' }
-  | { kind: 'guard'; hops: RouteHopRef[]; gaps: SupplyGap[] }
-  | { kind: 'done'; outcome: ReplaceOutcome }
   | { kind: 'failure'; failureClass: ModelHubFailureClass };
 
 type AddApiKeyDialogProps = {
@@ -101,64 +97,58 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const addOnAdded = replaceMode ? null : props.onAdded;
   const replaceSourceId = replaceMode ? props.source.id : null;
   const { t } = useTranslation();
+  const { showToast } = useToast();
   const [draft, setDraft] = React.useState<ApiKeySourceDraft>(EMPTY_API_KEY_DRAFT);
   const apiKey = draft.apiKey;
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
   const [replacePhase, setReplacePhase] = React.useState<ReplacePhase>({ kind: 'edit' });
+  const [guard, setGuard] = React.useState<GuardPlan | null>(null);
   const [continuation] = React.useState(createContinuationSettlement);
   const [createdDelivery] = React.useState(createSourceCreatedDelivery);
   const clientNonce = React.useRef(sourceClientNonce());
-  const replaceCloseTimer = React.useRef<number | null>(null);
   React.useEffect(() => {
     if (addOnAdded) createdDelivery.update(addOnAdded, onClose);
   }, [addOnAdded, createdDelivery, onClose]);
 
   React.useEffect(() => {
     continuation.invalidate();
-    if (replaceCloseTimer.current !== null) {
-      window.clearTimeout(replaceCloseTimer.current);
-      replaceCloseTimer.current = null;
-    }
     if (open) {
       clientNonce.current = sourceClientNonce();
       setDraft(EMPTY_API_KEY_DRAFT);
       setRevealed(false);
       setPhase(INITIAL_PHASE);
       setReplacePhase({ kind: 'edit' });
+      setGuard(null);
     }
-    return () => {
-      continuation.invalidate();
-      if (replaceCloseTimer.current !== null) {
-        window.clearTimeout(replaceCloseTimer.current);
-        replaceCloseTimer.current = null;
-      }
-    };
+    return () => continuation.invalidate();
   }, [continuation, open, replaceSourceId]);
 
   const publishReplacementEvidence = React.useCallback((
     seq: ContinuationTicket,
     settlement: SourceMutationSettlement,
     source: Source,
-    hops?: RouteHopRef[],
     gaps?: SupplyGap[],
   ) => {
-    const outcome = replacementOutcomeFromEvidence(hops, gaps);
-    const landed = continuation.settle(seq, () => setReplacePhase({ kind: 'done', outcome }));
-    if (landed === 'landed' && outcome.kind === 'repaired') {
-      replaceCloseTimer.current = window.setTimeout(onClose, 1400);
-    }
+    continuation.settle(seq, () => {
+      const toast = replacementToast(source, gaps);
+      showToast(t(toast.key) as string, toast.tone);
+      onClose();
+    });
     // Entity settlement applies synchronously; collection reconciliation is
     // trailing work and cannot gate an outcome already established by evidence.
     void settlement.source(source).catch(() => undefined);
-  }, [continuation, onClose]);
+  }, [continuation, onClose, showToast, t]);
 
   const publishReplacementFailure = React.useCallback((
     seq: ContinuationTicket,
     failureClass: ModelHubFailureClass,
     settle?: () => Promise<SourceMutationLanding>,
   ) => {
-    continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
+    continuation.settle(seq, () => {
+      setGuard(null);
+      setReplacePhase({ kind: 'failure', failureClass });
+    });
     if (settle) void settle().catch(() => undefined);
   }, [continuation]);
 
@@ -174,41 +164,37 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     }
   }, [continuation, createdDelivery, draft]);
 
-  const submitReplacement = React.useCallback(async (force: boolean) => {
+  // `plan` is the guard's question already answered: the write echoes it, and a
+  // plan that moved before the forced write lands is resent, not asked again.
+  const submitReplacement = React.useCallback(async (plan: GuardPlan | null) => {
     if (props.mode !== 'replace' || !apiKey.trim() || replacePhase.kind === 'submitting') return;
-    const confirmation = force && replacePhase.kind === 'guard'
-      ? {
-          force: true as const,
-          would_remove_hops: replacePhase.hops,
-          would_interrupt: replacePhase.gaps,
-        }
-      : null;
-    if (force && !confirmation) return;
     const key = apiKey.trim();
     const seq = continuation.begin();
     setReplacePhase({ kind: 'submitting' });
     await props.trackMutation(async (latest, settlement) => {
+      let sent = plan;
       try {
-        const answer = await modelsApi.replaceCredential(
-          latest.id,
-          confirmation ? { key, ...confirmation } : { key },
-        );
+        const answer = await sendAgreed(plan !== null, plan, (next) => {
+          sent = next;
+          return modelsApi.replaceCredential(latest.id, next ? { key, ...confirmGuardPlan(next) } : { key });
+        });
         publishReplacementEvidence(
           seq,
           settlement,
           answer.source,
-          answer.removed_hops,
           answer.interrupted,
         );
       } catch (error) {
         const failure = apiFailure(error);
-        if (failure && (failure.wouldRemoveHops.length > 0 || failure.wouldInterrupt.length > 0)) {
+        // Only an unconfirmed attempt asks: a confirmed one already resent the
+        // moving plan within its bound, and ends as the failure below.
+        const refusal = plan === null ? guardedFailure(error) : null;
+        if (refusal) {
           settlement.release();
-          continuation.settle(seq, () => setReplacePhase({
-            kind: 'guard',
-            hops: failure.wouldRemoveHops,
-            gaps: failure.wouldInterrupt,
-          }));
+          continuation.settle(seq, () => {
+            setGuard(refusal);
+            setReplacePhase({ kind: 'edit' });
+          });
           return;
         }
         let failureClass = classifyModelHubFailure(failure);
@@ -236,8 +222,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 seq,
                 settlement,
                 current,
-                confirmation?.would_remove_hops,
-                confirmation?.would_interrupt,
+                sent?.gaps,
               );
               return;
             }
@@ -249,15 +234,11 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         publishReplacementFailure(seq, failureClass);
       }
     });
-  }, [apiKey, continuation, props, publishReplacementEvidence, publishReplacementFailure, replacePhase]);
+  }, [apiKey, continuation, props, publishReplacementEvidence, publishReplacementFailure, replacePhase.kind]);
 
   const cancel = React.useCallback(() => {
     if (replaceMode) {
       if (replacePhase.kind === 'submitting') return;
-      if (replacePhase.kind === 'guard') {
-        setReplacePhase({ kind: 'edit' });
-        return;
-      }
       continuation.invalidate();
       onClose();
       return;
@@ -315,9 +296,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const canSubmit = draftComplete(draft) && !formLocked;
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
-  const replaceFieldLocked = replacePhase.kind === 'submitting'
-    || replacePhase.kind === 'done'
-    || replaceTerminalFailure;
+  const replaceFieldLocked = replacePhase.kind === 'submitting' || replaceTerminalFailure;
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && canCancel && cancel()}>
       <DialogPrimitive.Portal>
@@ -331,9 +310,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           <div className="flex items-center justify-between gap-3">
             <DialogPrimitive.Title className="model-hub-add-key-title font-bold text-foreground">
               {replaceMode
-                ? replacePhase.kind === 'guard'
-                  ? t('settings.models.guard.title.replaceKey', { source: props.source.display_name })
-                  : t('settings.models.repair.replaceTitle', { name: props.source.display_name })
+                ? t('settings.models.repair.replaceTitle', { name: props.source.display_name })
                 : t('settings.models.addKey.title')}
             </DialogPrimitive.Title>
             <Button
@@ -341,7 +318,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               variant="ghost"
               size="icon"
               className="model-hub-ink-59 size-[27px]"
-              aria-label={t(replacePhase.kind === 'guard' ? 'settings.models.guard.cancel' : 'settings.models.addKey.cancel')}
+              aria-label={t('settings.models.addKey.cancel')}
               disabled={!canCancel}
               onClick={cancel}
             >
@@ -350,20 +327,12 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           </div>
           <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3 font-mono">
             {replaceMode
-              ? replacePhase.kind === 'guard'
-                ? t('settings.models.guard.subtitle.replaceKey')
-                : t('settings.models.repair.replaceBody')
+              ? t('settings.models.repair.replaceBody')
               : t('settings.models.addKey.saveFirstHint')}
           </DialogPrimitive.Description>
         </header>
 
-        {replaceMode && replacePhase.kind === 'guard' && (
-          <div className="model-hub-guard-body">
-            <GuardImpact hops={replacePhase.hops} gaps={replacePhase.gaps} />
-          </div>
-        )}
-
-        {replaceMode && replacePhase.kind !== 'guard' && (
+        {replaceMode && (
           <div className="model-hub-add-key-body flex flex-col">
             <ApiKeyField
               value={apiKey}
@@ -373,7 +342,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               label={t('settings.models.repair.replaceLabel')}
               onChange={editKey}
               onToggleReveal={() => setRevealed((value) => !value)}
-              onEnter={replaceTerminalFailure ? undefined : () => void submitReplacement(false)}
+              onEnter={replaceTerminalFailure ? undefined : () => void submitReplacement(null)}
             />
             {replacePhase.kind === 'submitting' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
@@ -390,24 +359,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">
                   {t(REPLACE_FAILURE_KEY[replacePhase.failureClass])}
                 </span>
-              </div>
-            )}
-            {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'impact' && (
-              <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
-                <span className="model-hub-ink-gold text-[12.5px] font-semibold leading-relaxed">
-                  {t('settings.models.repair.refreshed')}
-                </span>
-                <GuardImpact
-                  hops={replacePhase.outcome.hops}
-                  gaps={replacePhase.outcome.gaps}
-                  committed
-                />
-              </div>
-            )}
-            {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'repaired' && (
-              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
-                <CheckCircle2 className="size-4 shrink-0" />
-                {t(REPAIR_LINE_KEY.repaired)}
               </div>
             )}
           </div>
@@ -454,28 +405,22 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 disabled={!canCancel}
                 onClick={cancel}
               >
-                {t(replacePhase.kind === 'done'
-                  ? 'common.close'
-                  : replacePhase.kind === 'guard'
-                    ? 'settings.models.guard.cancel'
-                    : 'settings.models.addKey.cancel')}
+                {t('settings.models.addKey.cancel')}
               </Button>
-              {replacePhase.kind !== 'done' && !replaceTerminalFailure && (
+              {!replaceTerminalFailure && (
                 <Button
                   type="button"
-                  variant={replacePhase.kind === 'guard' ? 'destructive' : 'brand'}
+                  variant="brand"
                   className="model-hub-add-key-action"
                   disabled={replacePhase.kind === 'submitting' || !apiKey.trim()}
-                  onClick={() => void submitReplacement(replacePhase.kind === 'guard')}
+                  onClick={() => void submitReplacement(null)}
                 >
                   {replacePhase.kind === 'submitting' && <LoaderCircle className="size-3 animate-spin" />}
                   {t(replacePhase.kind === 'submitting'
                     ? 'settings.models.repair.replacing'
-                    : replacePhase.kind === 'guard'
-                      ? 'settings.models.guard.confirm.replaceKey'
-                      : replacePhase.kind === 'failure'
-                        ? 'settings.models.addKey.retry'
-                        : 'settings.models.repair.replaceSubmit')}
+                    : replacePhase.kind === 'failure'
+                      ? 'settings.models.addKey.retry'
+                      : 'settings.models.repair.replaceSubmit')}
                 </Button>
               )}
             </>
@@ -501,6 +446,19 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
             </>
           )}
         </footer>
+        {replaceMode && (
+          <GuardDialog
+            open={guard !== null}
+            title={t('settings.models.guard.title.replaceKey', { source: props.source.display_name })}
+            subtitle={t('settings.models.guard.subtitle.replaceKey')}
+            confirmLabel={t('settings.models.guard.confirm.replaceKey')}
+            busy={replacePhase.kind === 'submitting'}
+            onCancel={() => setGuard(null)}
+            onConfirm={() => { if (guard) void submitReplacement(guard); }}
+          >
+            {guard && <GuardImpact hops={guard.hops} gaps={guard.gaps} />}
+          </GuardDialog>
+        )}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

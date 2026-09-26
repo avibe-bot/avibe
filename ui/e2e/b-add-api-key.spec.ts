@@ -199,7 +199,7 @@ test.describe('B · add an API-key source', () => {
     });
   });
 
-  test('B6 · replacing the key reuses the same dialog, and reports what it did', async ({ hub, mock, api, gateway }) => {
+  test('B6 · replacing the key reuses the same dialog, then closes on a toast', async ({ hub, mock, api, gateway }) => {
     // The only spec in the suite that may have to sit out a 30-second cooldown
     // before its precondition even exists. See `settleKeyVerdict`.
     test.setTimeout(300_000);
@@ -350,8 +350,9 @@ test.describe('B · add an API-key source', () => {
       await dialog.getByRole('button', { name: copy('repair.replaceSubmit'), exact: true }).click();
 
       // The upstream still lists the same models, so the new key costs the route
-      // nothing — a plain repair, and the dialog says which of the two it was.
-      await expect(dialog).toContainText(copy('repair.repaired'), { timeout: 30_000 });
+      // nothing: a plain repair, which closes the dialog and says so in a toast.
+      await expect(hub.toasts.filter({ hasText: copy('repair.repaired') })).toHaveCount(1, { timeout: 30_000 });
+      await expect(dialog).toHaveCount(0);
       // And the row it was raised from is no longer stopped. A dialog that
       // reports a repair over a source still marked blocked has reported a
       // repair that did not happen.

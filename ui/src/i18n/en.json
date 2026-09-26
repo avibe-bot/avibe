@@ -1023,6 +1023,8 @@
           "reorder": "Reorder {{model}}",
           "removeConfirm": "Remove",
           "removeTitle": "Remove {{model}}?",
+          "guardTitle": "Save the model list?",
+          "guardSubtitle": "Removing these models also removes their routes.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
@@ -1760,7 +1762,6 @@
         "cancel": "Cancel",
         "save": "Save",
         "saving": "Saving route chain…",
-        "refreshing": "Route chain saved. Refreshing…",
         "fail": {
           "read": "The route chain could not be read",
           "save": "The route chain was not saved",
@@ -1770,10 +1771,7 @@
         "retry": "Retry",
         "empty": "This model follows default routing, but no eligible provider can route it.",
         "impact": {
-          "title": "The route chain was saved",
-          "detail": "These are the items this save actually removed or interrupted.",
-          "refreshFail": "The route chain was saved, but the display could not be refreshed.",
-          "done": "Done"
+          "refreshFail": "The route chain was saved, but the display could not be refreshed."
         },
         "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it.",
         "mode": {
@@ -1968,11 +1966,6 @@
         "interrupted": "On the gateway · supply interrupted, the next turn will fail",
         "noSources": "On the gateway · no source enabled yet, the next turn will fail",
         "nothingRunnable": "On the gateway · no enabled source can serve right now, the next turn will fail"
-      },
-      "adoption": {
-        "enabled": "Added to {{list}}",
-        "route": "{{backend}} · {{model}} · hop {{position}}",
-        "none": "Connected. Add it to a model's route when you want to use it."
       },
       "supplyMode": {
         "title": "Supply mode",
