@@ -55,6 +55,7 @@ from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, Scenario
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
+    CustodiedNativeOAuthScenarioHarness,
     HubOAuthScenarioHarness,
     HubOAuthStartForm,
     NativeOAuthScenarioHarness,
@@ -1829,6 +1830,63 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(started["flow"]["channel"], "native_cli")
         self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
+
+    async def test_hub_owned_native_subscription_create_closes_the_loop(self):
+        """Scenario: AUTH-SETUP-910.
+
+        On an install whose Claude backend is already Hub-routed, adding the
+        Claude subscription "managed by the Agent" must reach the CLI login and
+        end in one native Source. The login runs under the real CLI custody
+        check, so a refusal there is exactly what the user saw as "the model
+        gateway is not responding".
+
+        The CLI finishes and releases its credential lease before any status
+        read commits the Source. Until then the native slot still looks empty,
+        so a second start in that window must not open another login over the
+        credential this one just wrote.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = CustodiedNativeOAuthScenarioHarness(Path(state_dir.name))
+        start = {"vendor": "anthropic", "channel": "native_cli"}
+
+        started = await harness.service.oauth_start(dict(start))
+
+        flow = started["flow"]
+        flow_id = flow["flow_id"]
+        self.assertEqual(flow["channel"], "native_cli")
+        self.assertEqual(flow["presentation"]["auth_url"], harness.auth_url)
+        harness.agent_auth._start_claude_control_flow.assert_awaited_once()
+
+        with self.assertRaises(ModelHubError) as busy:
+            await harness.service.oauth_start(dict(start))
+        self.assertEqual(busy.exception.code, "native_login_in_progress")
+
+        await harness.service.oauth_submit(
+            {"flow_id": flow_id, "value": "auth-code#oauth-state"}
+        )
+        await harness.login_settled(flow_id)
+        self.assertEqual(harness.callbacks, [("auth-code", "oauth-state")])
+        self.assertEqual(V2Config.load().model_hub.sources, [])
+
+        with self.assertRaises(ModelHubError) as occupied:
+            await harness.service.oauth_start(dict(start))
+
+        self.assertEqual(occupied.exception.code, "native_source_already_exists")
+        harness.agent_auth._start_claude_control_flow.assert_awaited_once()
+        (source,) = V2Config.load().model_hub.sources
+        self.assertEqual(occupied.exception.data, {"existing_source_id": source.id})
+        self.assertEqual(source.id, flow["source_id"])
+        self.assertEqual(
+            (source.vendor, source.supply_channel, source.account_label),
+            ("anthropic", "native_cli", "owner@example.com"),
+        )
+        self.assertEqual(source.state.status, "standby")
+
+        completed = await harness.service.oauth_status(flow_id)
+
+        self.assertEqual(completed["flow"]["state"], "success")
+        self.assertEqual(completed["source"]["id"], source.id)
 
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.

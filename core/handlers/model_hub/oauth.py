@@ -499,6 +499,23 @@ class OAuthFlowRegistry:
                     return flow_id, binding
         return None
 
+    def pending_creates(
+        self,
+        vendor: str,
+        channel: OAuthChannel,
+    ) -> tuple[tuple[str, OAuthFlowBinding], ...]:
+        with self._lock:
+            flows = self._read()
+        return tuple(
+            (flow_id, binding)
+            for flow_id, binding in flows.items()
+            if binding.vendor == vendor
+            and binding.channel == channel
+            and binding.intent == "create"
+            and not binding.completed
+            and binding.terminal_state is None
+        )
+
     def forget(self, flow_id: str) -> None:
         with self._lock:
             flows = self._read()
