@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
@@ -17,6 +18,7 @@ from config.v2_config import ModelHubConfig, ModelHubRouteConfig, ModelHubRouteH
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub import turn_gateway
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
@@ -636,4 +638,101 @@ def test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal(tmp_
         assert len(service.adapter.invocations) == 4 and clock.delays == [1]
         assert admissions == [(source_id, "shared-model") for source_id in [first.id, second.id] * 2]
         assert service.agent_chain(backend, models[backend])["supply_state"] == "interrupted"
+    asyncio.run(run())
+
+
+KEEPALIVE = b": keepalive\n\n"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("ending", ["served", "recovered", "exhausted", "disconnect"])
+def test_slow_stream_resolution_keeps_claude_connected(monkeypatch, tmp_path, backend, ending):
+    """MH-RUNTIME-010: Claude sees headers and keepalives while the Hub resolves.
+
+    Claude Code aborts a stream whose headers or bytes stay silent past its
+    watchdogs, so its streams commit early and carry every ending inside the
+    stream. Codex and OpenCode key recovery on the HTTP status and keep it.
+    """
+    monkeypatch.setattr(turn_gateway, "_EARLY_STREAM_COMMIT_SECONDS", 0.05)
+    monkeypatch.setattr(turn_gateway, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    exhausted_event = b"event: error\ndata: " + json.dumps(
+        {"type": "error", "error": {"type": "api_error", "message": RECOVERY_EXHAUSTED_MESSAGE}},
+        separators=(",", ":"),
+    ).encode() + b"\n\n"
+
+    async def run() -> None:
+        endpoint, protocol = BACKENDS[backend]
+        source = _source(
+            "src_patient1", "Patient", vendor="anthropic" if backend == "claude" else "openai", protocol=protocol,
+        )
+        service, clock, models = configured_service(tmp_path, sources=[source])
+        metadata, output, terminal, _buffered = WIRE[protocol]
+        held, release, upstream_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def respond(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            if len(calls) == 1:
+                # An upstream that sends nothing until its first model output.
+                held.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    upstream_cancelled.set()
+                    raise
+            elif ending == "exhausted":
+                clock.advance(121)
+            if ending == "served" or (ending == "recovered" and len(calls) == 2):
+                return web.Response(body=metadata + output + terminal, content_type="text/event-stream")
+            return web.json_response({"error": {"type": "server_error"}}, status=503)
+
+        try:
+            async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+                async with gateway_client(service, backend, models[backend]) as (_gateway, client, url, headers):
+                    post = asyncio.create_task(
+                        client.post(url, headers=headers, json={"model": "shared-model", "stream": True}),
+                    )
+                    try:
+                        await asyncio.wait_for(held.wait(), timeout=2)
+                        if backend == "claude":
+                            response = await asyncio.wait_for(post, timeout=2)
+                            assert response.status == 200
+                            assert response.content_type == "text/event-stream"
+                            first = response.content.readexactly(len(KEEPALIVE))
+                            assert await asyncio.wait_for(first, timeout=2) == KEEPALIVE
+                        else:
+                            done, _pending = await asyncio.wait({post}, timeout=0.2)
+                            assert not done, "a status-keyed stream committed before resolution ended"
+                        if ending == "disconnect":
+                            if backend == "claude":
+                                response.close()
+                            else:
+                                post.cancel()
+                            await asyncio.wait_for(upstream_cancelled.wait(), timeout=2)
+                        else:
+                            release.set()
+                            if backend != "claude":
+                                response = await asyncio.wait_for(post, timeout=2)
+                            body = await asyncio.wait_for(response.read(), timeout=2)
+                            while body.startswith(KEEPALIVE):
+                                body = body[len(KEEPALIVE):]
+                            if ending != "exhausted":
+                                assert response.status == 200
+                                assert body == metadata + output + terminal
+                            elif backend == "claude":
+                                assert response.status == 200
+                                assert body == exhausted_event
+                            else:
+                                assert response.status == (400 if backend == "codex" else 424)
+                                assert RECOVERY_EXHAUSTED_CODE.encode() in body
+                    finally:
+                        if not post.done():
+                            post.cancel()
+                        await asyncio.gather(post, return_exceptions=True)
+                assert adapter._active_transports == 0
+        finally:
+            release.set()
+        assert len(calls) == (1 if ending in {"served", "disconnect"} else 2)
+        assert clock.delays == ([] if ending in {"served", "disconnect"} else [30])
+
     asyncio.run(run())

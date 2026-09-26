@@ -227,6 +227,9 @@ def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None
     # must not become launch-settings overrides of native project/local choices.
     connection_env.pop("CLAUDE_CODE_MAX_CONTEXT_TOKENS", None)
     connection_env.pop("CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
+    # Timeout defaults likewise yield to an explicit native choice.
+    for key in _CLAUDE_HUB_TIMEOUT_DEFAULTS:
+        connection_env.pop(key, None)
     settings["env"] = {**settings.get("env", {}), **connection_env}
     settings["apiKeyHelper"] = ""
     return json.dumps(settings)
@@ -314,6 +317,14 @@ def _localized_launch_error(
     )
 
 
+# The Hub resolves, waits out recovery, and fails over before a stream's first
+# model output, so Claude's pre-output windows are raised to the CLI's maximum.
+_CLAUDE_HUB_TIMEOUT_DEFAULTS = {
+    "API_TIMEOUT_MS": "1800000",
+    "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": "1800000",
+}
+
+
 def build_claude_hub_env(
     base_env: dict[str, str],
     launch: ModelHubLaunch,
@@ -346,6 +357,11 @@ def build_claude_hub_env(
         result["ANTHROPIC_AUTH_TOKEN"] = launch.gateway_token
         result["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
         result["CLAUDE_CODE_MAX_RETRIES"] = "0"
+        # The Hub owns retry and failover. A stream error must not make the CLI
+        # replay the whole turn as a second, non-streaming request.
+        result["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] = "1"
+        for key, value in _CLAUDE_HUB_TIMEOUT_DEFAULTS.items():
+            result.setdefault(key, value)
     else:
         # A native_cli hop keeps the user's official CLI authentication.
         result = dict(base_env)

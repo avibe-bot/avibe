@@ -1,6 +1,11 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-011
+    source: claude-cli-2.1.280-hub-request-timeouts-2026-09-26
+    summary: Claude hub turns failed with "Request timed out" while the Hub was still resolving. The CLI aborts a stream whose headers miss its first-byte window (300s by default for non-Anthropic base URLs) or whose body stays byte-silent, and the Hub withheld headers until the first model output. Claude streams now commit headers early and send SSE comments during resolution, and Claude hub launches raise the first-byte and API timeouts to the CLI maximum.
+    affects:
+      - MH-RUNTIME-010
   - id: MH-OBS-010
     source: local-regression-persisted-migration-2026-09-20
     summary: Already-Hub backends were all disabled because inherited process authentication was represented as migration blockers. Saved Claude AUTH_TOKEN was mislabeled as permission failure. Migration must inventory persisted files independently of runtime injection, and preserve Bearer transport for supported custom Anthropic endpoints rather than treating it as x-api-key or OAuth.

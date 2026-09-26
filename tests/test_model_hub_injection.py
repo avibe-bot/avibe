@@ -236,6 +236,27 @@ def test_claude_catalog_limits_fill_only_absent_environment_values(channel, expl
     assert explicit == original
 
 
+@pytest.mark.parametrize(
+    "explicit", [{}, {"API_TIMEOUT_MS": "900000"}, {"CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": ""}],
+)
+def test_claude_hub_waits_out_resolution_as_one_streaming_request(explicit):
+    """MH-RUNTIME-010: the Hub owns pre-output waits, so the CLI neither aborts nor replays them."""
+    timeouts = ("API_TIMEOUT_MS", "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS")
+    native = {**explicit, "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "0"}
+    launch = hub_launch()
+
+    env = build_claude_hub_env(native, launch)
+    assert {key: env[key] for key in timeouts} == {key: explicit.get(key, "1800000") for key in timeouts}
+    assert env["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] == "1"
+
+    settings = json.loads(claude_settings_for_launch(json.dumps({"env": native}), launch))
+    assert {key: settings["env"].get(key) for key in timeouts} == {key: explicit.get(key) for key in timeouts}
+    assert settings["env"]["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] == "1"
+
+    official = hub_launch(channel="native_cli", gateway_base_url=None, gateway_token=None)
+    assert build_claude_hub_env(native, official) == native
+
+
 def test_hub_connection_settings_preserve_explicit_limits_without_promoting_catalog_defaults():
     launch = hub_launch(context_window=128_000, max_output_tokens=32_000)
     settings = json.loads(claude_settings_for_launch(
