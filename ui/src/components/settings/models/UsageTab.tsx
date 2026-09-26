@@ -1295,7 +1295,7 @@ export const UsageTab: React.FC<{
                         <td>{usageTokensAreKnown(row.counters) ? count(usageNonCachedInput(row.counters)) : t('settings.models.usage.blank')}</td>
                         <td>{tokenText(row.counters, 'cache', count, t('settings.models.usage.blank') as string)}</td>
                         <td>{tokenText(row.counters, 'output', count, t('settings.models.usage.blank') as string)}</td>
-                        <td className="model-hub-usage-table-total">{metric === 'cost' && usageHasNoPrice(row.counters)
+                        <td className={cn('model-hub-usage-table-total', metric === 'cost' && usageHasNoPrice(row.counters) && 'is-unpriced')}>{metric === 'cost' && usageHasNoPrice(row.counters)
                           ? noPriceText(report, t)
                           : metricText(row.counters)}</td>
                         <td>{share === null ? t('settings.models.usage.blank') : formatPercent(share, i18n.language, 1)}</td>

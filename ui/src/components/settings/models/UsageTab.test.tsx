@@ -367,6 +367,9 @@ describe('UsageTab', () => {
       pricing: { currency: 'USD', price_table_date: '2026-09-23' },
     });
   };
+  // No price is not an amount: its table cell reads muted, never in the money colour.
+  const mutedCostCells = (root: Element) => [...root.querySelectorAll('tbody .model-hub-usage-table-total.is-unpriced')]
+    .map((cell) => cell.textContent);
 
   it('MH-USAGE-030: offers the API-price metric only for a priced report', () => {
     draw(report());
@@ -393,6 +396,7 @@ describe('UsageTab', () => {
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).toContain('$0.50');
     expect(container.querySelector('.model-hub-usage-table-scroll')?.textContent).not.toContain('≥');
     expect(container.querySelector('.model-hub-usage-table-scroll tbody')?.textContent).toMatch(/\d%/);
+    expect(mutedCostCells(container)).toEqual(['No price yet']);
     cleanup();
 
     // A floor keeps its 「≥」 in the itemized rows and the table total, not only the card.
@@ -406,6 +410,8 @@ describe('UsageTab', () => {
     const table = drawn.container.querySelector('.model-hub-usage-table-scroll')!;
     expect(table.querySelector('tbody')!.textContent).toContain('≥ $0.50');
     expect(table.querySelector('tfoot')!.textContent).toContain('≥ $0.50');
+    // A floor is still money; only the row with nothing priced reads muted.
+    expect(mutedCostCells(table)).toEqual(['No price yet']);
     // A share of a floor total is not a known fraction.
     expect(table.querySelector('tbody')!.textContent).not.toMatch(/\d%/);
   });
@@ -486,6 +492,7 @@ describe('UsageTab', () => {
     expect(container.querySelector('.model-hub-usage-legend')!.textContent).toContain('Fetching prices…');
     expect(container.querySelector('.model-hub-usage-table-scroll')!.textContent).toContain('Fetching prices…');
     expect(container.textContent).not.toContain('No price yet');
+    expect(mutedCostCells(container)).toEqual(['Fetching prices…', 'Fetching prices…']);
   });
 
   it('MH-USAGE-031: reads the API-price value in Chinese as a conversion, not a charge', async () => {

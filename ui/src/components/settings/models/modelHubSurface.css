@@ -2896,6 +2896,11 @@
   font-weight: 650;
 }
 
+/* No price (or one still being fetched) is not an amount; only money takes the money colour. */
+.model-hub-usage-table-total.is-unpriced {
+  color: var(--muted);
+}
+
 .model-hub-usage-table-empty {
   padding: 22px 12px !important;
   color: var(--model-hub-muted-b3);
