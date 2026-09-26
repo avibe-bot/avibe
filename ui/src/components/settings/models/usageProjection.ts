@@ -215,7 +215,10 @@ export function formatBucketHeading(bucket: UsageBucket, locale: string): { rang
  */
 export const REMOVED_SOURCES_KEY = `${PAIR_SEPARATOR}removed`;
 
-/** The longest ledger key that is still the identifier itself; a longer one is a head plus a digest. */
+/**
+ * The longest ledger key, in code points as the ledger counts them, that is
+ * still the identifier itself; a longer one is a head plus a digest.
+ */
 const LEDGER_VERBATIM_MAX_LENGTH = 200;
 
 export type UsageText = {
@@ -266,7 +269,7 @@ export function modelLabel(report: UsageReport, sourceId: string, modelId: strin
 export function usageModelName(report: UsageReport, sourceId: string, modelId: string, unknownModel: string): string {
   const label = modelLabel(report, sourceId, modelId);
   if (label) return label;
-  return !modelId.trim() || modelId.length > LEDGER_VERBATIM_MAX_LENGTH ? unknownModel : modelId;
+  return !modelId.trim() || [...modelId].length > LEDGER_VERBATIM_MAX_LENGTH ? unknownModel : modelId;
 }
 
 const byKey = <T extends readonly [string, ...unknown[]]>([left]: T, [right]: T) => (left < right ? -1 : left > right ? 1 : 0);

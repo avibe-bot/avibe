@@ -102,8 +102,11 @@ describe('usageProjection', () => {
 
   it('keeps the unknown-model name only for a ledger key that no longer spells a model ID', () => {
     const foldedKey = `${'m'.repeat(200)}~${'0'.repeat(64)}`;
-    const value = reportWith([bucket('00', [row({ model_id: foldedKey })])]);
-    expect(seriesFor(value, NO_FILTER, 'model', 'tokens', TEXT_ZH).map((item) => item.label)).toEqual(['Supplier · 未知模型']);
+    // The ledger counts code points: 200 astral characters are still verbatim.
+    const astralId = '🧠'.repeat(200);
+    const value = reportWith([bucket('00', [row({ model_id: foldedKey }), row({ model_id: astralId })])]);
+    expect(seriesFor(value, NO_FILTER, 'model', 'tokens', TEXT_ZH).map((item) => item.label))
+      .toEqual(['Supplier · 未知模型', `Supplier · ${astralId}`]);
   });
 
   it('keeps a configured model name over an unlisted one that reads the same', () => {
