@@ -314,15 +314,19 @@ for (const lang of ['en', 'zh'] as const) {
 // engine reports is on screen; this is that reading on the other axis, so the
 // assertion is the one the screenshot would have failed: both edges inside the
 // viewport, at every width a phone actually is.
-for (const [label, width] of [['small', 390], ['large', 430]] as const) {
-  test(`MH-ROUTING-007: the edit picker stays on screen on a ${label} phone`, async ({ page }) => {
+// The Add trigger sits at the left of the tools instead, so its panel hangs
+// right from there; aligned to the trigger's end it had only the trigger's own
+// width to the padding line and shrank to a sliver.
+for (const [label, width] of [['small', 390], ['large', 430]] as const) for (const picker of ['edit', 'add'] as const) {
+  test(`MH-ROUTING-007: the ${picker} picker stays on screen on a ${label} phone`, async ({ page }) => {
     const copy = (key: string) => hub(key, {}, 'zh');
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
     await page.getByRole('button', { name: 'Open route', exact: true }).click();
     const dialog = page.locator('.model-hub-route-dialog');
     await enterCustom(dialog, copy);
-    await hopAction(dialog, copy, 'editHop');
+    if (picker === 'edit') await hopAction(dialog, copy, 'editHop');
+    else await dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true }).click();
     const selector = page.locator('.model-hub-route-selector');
     await expect(selector).toBeVisible();
     await settled(selector);
@@ -332,7 +336,7 @@ for (const [label, width] of [['small', 390], ['large', 430]] as const) {
     expect(panel.x + panel.width).toBeLessThanOrEqual(width);
     // Contained by shrinking, not by collapsing: a panel bounded to nothing
     // would satisfy the edges above and still be unusable.
-    expect(panel.width).toBeGreaterThanOrEqual(240);
+    expect(panel.width).toBeGreaterThanOrEqual(Math.min(420, width - 64));
     // And the column that was being cut is the one that has to survive: its
     // left edge is what leaves the viewport first.
     const head = (await selector.locator('.model-hub-route-selector-list').boundingBox())!;

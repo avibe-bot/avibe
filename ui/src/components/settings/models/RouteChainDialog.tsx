@@ -1281,6 +1281,7 @@ export const RouteChainDialog: React.FC<{
             confirmLabel={t("settings.models.routeDialog.add.confirm") as string}
             label={t("settings.models.routeDialog.addHop") as string}
             width="route"
+            align="start"
             onApply={addCandidate}
             onReturnFocus={() => addButtonRef.current?.focus()}
             trigger={

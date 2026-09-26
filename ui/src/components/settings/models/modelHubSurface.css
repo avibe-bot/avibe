@@ -1212,8 +1212,9 @@
    `size` is not gated (`@radix-ui/react-popper` applies it unconditionally), so
    the available-width report survives, and for a `bottom`/`end` placement
    floating-ui computes it as `width - overflow.left`: exactly the width whose
-   left edge lands on the padding line. Bounding by it contains the panel
-   without restoring the flip. Where the room is ampler than the design width —
+   left edge lands on the padding line; the Add trigger's `start` placement
+   reads `width - overflow.right` the same way. Bounding by it contains the
+   panel without restoring the flip. Where the room is ampler than the design width —
    every desktop placement — the min is the design width and nothing moves. */
 .model-hub-route-selector--width-route {
   --model-hub-route-selector-inline-max: 420px;
