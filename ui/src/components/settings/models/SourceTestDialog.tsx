@@ -1,10 +1,11 @@
 import * as React from 'react';
-import { FlaskConical, LoaderCircle } from 'lucide-react';
+import { CheckCircle2, CircleX, FlaskConical, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 import { Field } from './dialogFields';
 import { apiFailure, modelsApi } from './modelsApi';
 import { createContinuationSettlement, type TrackSourceMutation } from './mutationSettlement';
@@ -102,7 +103,8 @@ export const SourceTestDialog: React.FC<{
             onValueChange={(value) => { setSelection(value); setStatus(null); }} />}
         </Field>
         {options.length === 0 && <p className="text-sm text-muted">{t('settings.models.sourceTest.empty')}</p>}
-        {result && <p role="status" className="min-w-0 break-words text-sm">
+        {result && <p role="status" className={cn('min-w-0 break-words text-sm', result.reachable ? 'text-mint-ink' : 'text-destructive-ink')}>
+          {result.reachable ? <CheckCircle2 aria-hidden className="mr-1.5 inline size-4 align-[-3px]" /> : <CircleX aria-hidden className="mr-1.5 inline size-4 align-[-3px]" />}
           {result.reachable
             ? t('settings.models.sourceTest.success', { model: result.model_id, ms: result.latency_ms })
             : t('settings.models.sourceTest.failure', {

@@ -230,6 +230,20 @@ describe('SourceTestDialog', () => {
     expect(screen.getByText(/responded successfully/)).toBeTruthy();
   });
 
+  it.each([
+    [true, 'text-mint-ink', 'text-destructive-ink'],
+    [false, 'text-destructive-ink', 'text-mint-ink'],
+  ] as const)('colours the result by outcome: reachable=%s', async (reachable, shown, absent) => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    const reported = await screen.findByRole('status');
+    expect(reported.classList.contains(shown)).toBe(true);
+    expect(reported.classList.contains(absent)).toBe(false);
+    expect(reported.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(reported.textContent).toMatch(reachable ? /responded successfully/ : /did not pass this test/);
+  });
+
   it('lets an empty inventory exit to the existing manual model editor', () => {
     render(view({ ...source, models: [] }));
     expect(screen.getByText(/add a model ID manually/)).toBeTruthy();
