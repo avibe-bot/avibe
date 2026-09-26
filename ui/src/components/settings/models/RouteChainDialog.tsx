@@ -2,15 +2,14 @@ import type { TranslationKey } from '@/i18n/types';
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
+  ChevronRight,
   GripVertical,
-  Info,
   ListOrdered,
   LoaderCircle,
+  MoreHorizontal,
   Pencil,
-  Pin,
   Plus,
   RefreshCw,
-  RotateCcw,
   Trash2,
   Undo2,
   X,
@@ -18,14 +17,19 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { ResponsiveMenu } from "@/components/ui/responsive-menu";
+import { SegmentedRadio } from "@/components/ui/segmented";
 import { cn } from "@/lib/utils";
-import { GuardGapList } from "./GuardGapList";
+import { useIsMobile } from "@/lib/useIsMobile";
+import { GuardDialog } from "./GuardDialog";
+import { GuardImpact, type GuardPlan } from "./GuardImpact";
+import { confirmGuardPlan, guardedFailure, sendAgreed } from "./guardedWrite";
 import { RouteCandidatePopover } from "./RouteCandidatePopover";
-import { RouteOriginBadge } from "./RouteOriginBadge";
-import { RouteRecordedTurn } from './RouteRecordedTurn';
+import { RecordedTurnBadge, RecordedTurnDetails, RouteRecordedTurn } from './RouteRecordedTurn';
+import { recordedOn, useRecordedTurn } from './recordedTurn';
 import { eligibleSources } from "./eligibility";
 import { equalHopIdentity, hopBelongsToSource } from "./hopIdentity";
-import { apiFailure, modelsApi, type GuardConfirmation } from "./modelsApi";
+import { apiFailure, modelsApi } from "./modelsApi";
 import type { ModelChainRead } from "./modelRows";
 import {
   routeCandidates,
@@ -51,11 +55,9 @@ import type {
 
 const sourceName = (sources: Source[], sourceId: string): string =>
   sources.find((source) => source.id === sourceId)?.display_name ?? sourceId;
+const MENU_ITEM = "model-hub-route-menu-item flex w-full items-center rounded-md text-left font-semibold hover:bg-surface-2";
+type RouteMode = "follow" | "custom";
 
-type GuardState = {
-  hops: RouteHopRef[];
-  gaps: NonNullable<GuardConfirmation["would_interrupt"]>;
-};
 export type RouteReport = {
   chain: AgentChainMutation["chain"];
   removed_hops: RouteHopRef[] | null;
@@ -66,11 +68,8 @@ type Phase =
   | "ready"
   | "unread"
   | "saving"
-  | "guard"
   | "rejected"
   | "unknown"
-  | "impact"
-  | "refreshing"
   | "reconciling"
   | "direct";
 type ReconcileMember = "agents" | "sources" | "chain";
@@ -86,11 +85,6 @@ export type RouteCollectionObservation<T> = {
   value: T;
   install: () => void;
 };
-export type RouteCommitReconciliation = {
-  pending: boolean;
-  failed: boolean;
-  retry: () => void;
-};
 export type SuspendedRouteAttempt = {
   backend: AgentSupply["backend"];
   modelId: string;
@@ -104,7 +98,6 @@ export const RouteChainDialog: React.FC<{
   sources: Source[];
   onClose: () => void;
   onCommitted?: (result: RouteReport) => void;
-  commitReconciliation?: RouteCommitReconciliation | null;
   onObserved?: (chain: AgentChainMutation["chain"]) => void;
   onOpenDefaults?: () => void;
   covered?: boolean;
@@ -117,13 +110,12 @@ export const RouteChainDialog: React.FC<{
   /** Hand this model over to the catalog dialog, which is the one writer of the
    *  model list — the Route dialog only names the model and the intent, so the
    *  edit and removal protocols (guard, refusal, save) stay in one place. */
-  onManageModel?: (action: "edit" | "remove", route: RouteHop[]) => void;
+  onManageModel?: (action: "edit" | "remove") => void;
 }> = ({
   selection,
   sources,
   onClose,
   onCommitted,
-  commitReconciliation,
   onObserved,
   onOpenDefaults,
   covered = false,
@@ -154,11 +146,10 @@ export const RouteChainDialog: React.FC<{
   const [chain, setChain] = React.useState<AgentChainMutation["chain"] | null>(
     null,
   );
-  const [guard, setGuard] = React.useState<GuardState | null>(null);
+  const [guard, setGuard] = React.useState<GuardPlan | null>(null);
   const [submitted, setSubmitted] = React.useState<RouteHop[] | null>(null);
   const [submittedStage, setSubmittedStage] =
     React.useState<SuspendedRouteAttempt["stage"]>("initial");
-  const [report, setReport] = React.useState<RouteReport | null>(null);
   const [reconcileFailed, setReconcileFailed] = React.useState(false);
   const [failedMembers, setFailedMembers] = React.useState<
     ReadonlySet<ReconcileMember>
@@ -175,14 +166,18 @@ export const RouteChainDialog: React.FC<{
   const editRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const removeRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const addButtonRef = React.useRef<HTMLButtonElement | null>(null);
-  const reseedButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const modeRef = React.useRef<HTMLDivElement | null>(null);
+  const pendingUndoRef = React.useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = React.useRef<HTMLButtonElement | null>(null);
-  const [originHelp, setOriginHelp] = React.useState(false);
+  const isMobile = useIsMobile();
+  const [headMenu, setHeadMenu] = React.useState(false);
+  const [hopMenu, setHopMenu] = React.useState<number | null>(null);
+  const [replacing, setReplacing] = React.useState<number | null>(null);
+  const [recordDetails, setRecordDetails] = React.useState(false);
   const saveButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const savingStatusRef = React.useRef<HTMLSpanElement | null>(null);
   const retryButtonRef = React.useRef<HTMLButtonElement | null>(null);
-  const doneButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const openedIdentity = React.useRef<string | null>(null);
   const invalidSignature = React.useRef("");
   const generation = React.useRef(0);
@@ -191,6 +186,7 @@ export const RouteChainDialog: React.FC<{
   const agent = selection?.agent ?? null;
   const modelId = selection?.modelId ?? "";
   const selectionBackend = selection?.agent.backend;
+  const recordedTurn = useRecordedTurn(selectionBackend, modelId);
   // Only an editable catalog row can be handed over: a locked row (Claude Code's
   // `Default`) offers no actions in the catalog either, and a server that
   // predates backend catalogs sends no list to answer from.
@@ -247,17 +243,37 @@ export const RouteChainDialog: React.FC<{
   const manageableModel = Boolean(
     onManageModel && catalogRow && !catalogRow.locked && phase === "ready" && !dirty && !restoring,
   );
-  const draftOrigin = manualDraft ? (draft.length ? 'manual' : null) : (preview ?? chain)?.route_origin ?? null;
+  // A switch that saving would apply: back to defaults over a saved route, or
+  // onto a route of this model's own over inherited routing.
+  const pendingSwitch: "restore" | "pin" | null = !manualDraft && savedOverride !== null
+    ? "restore"
+    : manualDraft && savedOverride === null
+      ? "pin"
+      : null;
   const announce = (key: TranslationKey, params?: Record<string, unknown>) =>
     setAnnouncement({ key, params });
   const focusAfterRender = (ref: React.RefObject<HTMLElement | null>) => {
     requestAnimationFrame(() => ref.current?.focus());
   };
-  // The footer carries a dismiss control only while there is a draft to
+  // The footer's dismiss control is live only while there is a draft to
   // discard; otherwise the header close is the dialog's single way out, so
   // every "return focus to the way out" path resolves through here.
-  const focusDismiss = () =>
-    (cancelButtonRef.current ?? closeButtonRef.current)?.focus();
+  const focusDismiss = () => {
+    const cancel = cancelButtonRef.current;
+    (cancel && !cancel.disabled ? cancel : closeButtonRef.current)?.focus();
+  };
+  const focusMode = () =>
+    requestAnimationFrame(() =>
+      modeRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus(),
+    );
+  // A restore preview disables the mode switch while it reads, so focus waits
+  // on its Undo instead; a local revert leaves the switch live.
+  const focusAfterFollow = () =>
+    requestAnimationFrame(() => {
+      const undo = pendingUndoRef.current;
+      if (undo && !undo.disabled) undo.focus();
+      else modeRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
+    });
 
   const readChain = React.useCallback(async () => {
     if (!selectionBackend) return;
@@ -312,28 +328,24 @@ export const RouteChainDialog: React.FC<{
     setGuard(null);
     setSubmitted(null);
     setSubmittedStage("initial");
-    setReport(null);
     setReconcileFailed(false);
     setFailedMembers(new Set());
     setUnknownObservation("none");
     setUnknownSourceCurrent(false);
+    setHeadMenu(false);
+    setHopMenu(null);
+    setReplacing(null);
+    setRecordDetails(false);
     advanceInteraction({ type: "reset", draft: [], focusIndex: 0 });
     if (selection) void readChain();
   }, [advanceInteraction, readChain, selection]);
 
   React.useEffect(() => {
-    if (
-      !selection ||
-      selection.available !== false ||
-      phase === "impact" ||
-      phase === "refreshing"
-    ) {
-      return;
-    }
+    if (!selection || selection.available !== false) return;
     generation.current += 1;
     previewGeneration.current += 1;
     onClose();
-  }, [onClose, phase, selection]);
+  }, [onClose, selection]);
 
   React.useEffect(() => {
     const signature = valid.invalidIndexes.join(",");
@@ -348,29 +360,15 @@ export const RouteChainDialog: React.FC<{
     setSelectorEpoch((current) => current + 1);
     advanceInteraction({ type: "drop-grab" });
     focusAfterRender({
-      current: removeRefs.current[valid.invalidIndexes[0]] ?? null,
+      current: removeRefs.current[valid.invalidIndexes[0]]
+        ?? editRefs.current[valid.invalidIndexes[0]] ?? null,
     });
   }, [advanceInteraction, phase, valid.invalidIndexes]);
 
-  React.useEffect(() => {
-    if (!report || !commitReconciliation) return;
-    setReconcileFailed(commitReconciliation.failed);
-    setPhase(commitReconciliation.pending ? "refreshing" : "impact");
-    if (commitReconciliation.failed) focusAfterRender(retryButtonRef);
-  }, [commitReconciliation, report]);
-
   const close = () => {
-    if (phase === "guard") {
-      setGuard(null);
-      setPhase("ready");
-      focusAfterRender(saveButtonRef);
-      return;
-    }
     if (phase !== "saving") {
       previewGeneration.current += 1;
-      if (phase !== "impact" && phase !== "refreshing") {
-        generation.current += 1;
-      }
+      generation.current += 1;
       onClose();
     }
   };
@@ -387,11 +385,10 @@ export const RouteChainDialog: React.FC<{
     focusAfterRender(cancelButtonRef);
   };
   const remove = (index: number) => {
-    if (phase === "saving" || phase === "impact" || phase === "refreshing")
-      return;
+    if (phase === "saving") return;
     if (draft.length === 1) {
-      void restoreAutomatic();
-      focusAfterRender(reseedButtonRef);
+      followDefaults();
+      focusAfterFollow();
       return;
     }
     const next = advanceInteraction({ type: "remove", index });
@@ -402,8 +399,6 @@ export const RouteChainDialog: React.FC<{
         gripRefs.current[focusedIndex]?.focus();
       } else if (addCandidates.length > 0) {
         addButtonRef.current?.focus();
-      } else if (reseedButtonRef.current && !reseedButtonRef.current.disabled) {
-        reseedButtonRef.current.focus();
       } else {
         focusDismiss();
       }
@@ -505,21 +500,17 @@ export const RouteChainDialog: React.FC<{
     setPreviewPending(false);
     setPreviewFailed(false);
     restoreUndo.current = null;
-    setReport(nextReport);
+    setGuard(null);
     setOrigin(committedHops);
     advanceInteraction({ type: "reset", draft: committedHops });
     setUnknownObservation("none");
     setUnknownSourceCurrent(false);
     onCommitted?.(nextReport);
-    setPhase(
-      nextReport.removed_hops?.length || nextReport.interrupted?.length
-        ? "impact"
-        : "refreshing",
-    );
+    setPhase("ready");
     onClose();
   };
 
-  const submit = async (confirmation?: GuardState) => {
+  const submit = async (confirmation?: GuardPlan) => {
     if (!selection || !agent || phase === "saving" || covered || previewPending || unresolvedPreview || (!manualDraft && previewFailed) || (manualDraft && !valid.valid) || !dirty)
       return;
     const hops = (confirmation ? (submitted ?? draft) : draft).map((hop) => ({
@@ -529,19 +520,16 @@ export const RouteChainDialog: React.FC<{
     if (!confirmation) submittedOverride.current = manualDraft ? { hops } : null;
     setSubmittedStage(confirmation ? "confirmed" : "initial");
     setPhase("saving");
-    setGuard(null);
-    requestAnimationFrame(() => savingStatusRef.current?.focus());
+    // A confirmed save keeps its question mounted, busy, until the answer lands;
+    // an initial one shows the progress status in the dialog itself.
+    if (!confirmation) requestAnimationFrame(() => savingStatusRef.current?.focus());
     try {
-      const guardFields = confirmation
-          ? {
-              force: true as const,
-              would_remove_hops: confirmation.hops,
-              would_interrupt: confirmation.gaps,
-            }
-          : {};
-      const result = submittedOverride.current === null
-        ? await modelsApi.restoreAgentChain(agent.backend, modelId, confirmation ? guardFields as GuardConfirmation : undefined)
-        : await modelsApi.putAgentChain(agent.backend, modelId, { hops, ...guardFields });
+      const result = await sendAgreed(confirmation !== undefined, confirmation ?? null, (plan) => {
+        const guardFields = plan ? confirmGuardPlan(plan) : undefined;
+        return submittedOverride.current === null
+          ? modelsApi.restoreAgentChain(agent.backend, modelId, guardFields)
+          : modelsApi.putAgentChain(agent.backend, modelId, { hops, ...guardFields });
+      });
       beginCommitted(
         {
           chain: result.chain,
@@ -553,6 +541,7 @@ export const RouteChainDialog: React.FC<{
     } catch (error) {
       const failure = apiFailure(error);
       if (failure?.code === "direct_mode") {
+        setGuard(null);
         setPhase("direct");
         onDirectMode?.(
           {
@@ -566,18 +555,17 @@ export const RouteChainDialog: React.FC<{
         );
         return;
       }
-      if (
-        (failure?.code === "source_last_supplier" || failure?.code === 'source_in_route_chain') &&
-        (failure.wouldInterrupt.length > 0 || failure.wouldRemoveHops.length > 0)
-      ) {
-        setGuard({
-          hops: failure.wouldRemoveHops,
-          gaps: failure.wouldInterrupt,
-        });
-        setPhase("guard");
-        focusAfterRender(cancelButtonRef);
+      const refusal = failure?.code === "source_last_supplier" || failure?.code === "source_in_route_chain"
+        ? guardedFailure(error)
+        : null;
+      // Only an initial save reaches here with a plan: a confirmed one resends
+      // the recomputed plan itself, so the question is asked once per save.
+      if (refusal && !confirmation) {
+        setGuard(refusal);
+        setPhase("ready");
         return;
       }
+      setGuard(null);
       const nextPhase = failure?.serverNamed ? "rejected" : "unknown";
       setPhase(nextPhase);
       focusAfterRender(retryButtonRef);
@@ -731,11 +719,6 @@ export const RouteChainDialog: React.FC<{
     }
   };
 
-  const retryCommittedRead = () => {
-    if (!report || phase !== "impact" || !commitReconciliation?.failed) return;
-    doneButtonRef.current?.focus();
-    commitReconciliation.retry();
-  };
   const addCandidate = (candidate: RouteCandidate) => {
     const next = advanceInteraction({ type: "append", hop: candidate.hop });
     requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
@@ -791,6 +774,46 @@ export const RouteChainDialog: React.FC<{
     restoreUndo.current = null;
     announce('settings.models.routing.undoDone');
   };
+  // Undoing an unsaved pin is local: saved routing already follows defaults,
+  // and the inherited route this dialog last read is what stays in force.
+  const revertToInherited = () => {
+    previewGeneration.current += 1;
+    restoreUndo.current = null;
+    setPreview(null);
+    setPreviewPending(false);
+    setPreviewFailed(false);
+    setManualDraft(false);
+    advanceInteraction({ type: 'reset', draft: origin });
+    setSelectorEpoch((current) => current + 1);
+  };
+  const followDefaults = () => {
+    if (savedOverride === null) revertToInherited();
+    else void restoreAutomatic();
+  };
+  const switchMode = (next: RouteMode) => {
+    if (phase !== 'ready' || previewPending) return;
+    if (next === 'custom') {
+      if (manualDraft) return;
+      // Returning from a pending restore brings back the route that was left.
+      if (restoreUndo.current) undoRestore();
+      else setManualDraft(true);
+    } else if (manualDraft) {
+      followDefaults();
+      focusAfterFollow();
+    }
+  };
+  const undoSwitch = () => {
+    if (restoreUndo.current) undoRestore();
+    else revertToInherited();
+    focusMode();
+  };
+  // Follow-default rows are the inherited route, read only; editing starts from
+  // the Custom switch, so no row gesture can pin a route by accident.
+  const editable = manualDraft;
+  const actionsDisabled = phase === "saving";
+  const recordedHopIndex = recordedTurn.record
+    ? draft.findIndex((hop) => recordedOn(recordedTurn.record, hop))
+    : -1;
   const renderHop = (hop: RouteHop, index: number) => {
     const visibleChain = preview ?? chain;
     const chainLink = visibleChain?.chain.find((entry) =>
@@ -812,11 +835,77 @@ export const RouteChainDialog: React.FC<{
           draft.filter((_, draftIndex) => draftIndex !== index),
         )
       : [];
+    const roving = grabbed === null && rovingIndex === index ? 0 : -1;
+    const editLabel = t("settings.models.routeDialog.editHop") as string;
+    const removeLabel = t("settings.models.routeDialog.removeHop") as string;
+    const replaceHop = (nextCandidate: RouteCandidate) => {
+      const next = advanceInteraction({
+        type: "replace",
+        index,
+        hop: nextCandidate.hop,
+      });
+      announce("settings.models.routeDialog.edit.replaced", {
+        position: index + 1,
+      });
+      requestAnimationFrame(() =>
+        gripRefs.current[next.focusIndex]?.focus(),
+      );
+    };
+    const actionClass = "model-hub-route-action grid shrink-0 place-items-center text-muted";
+    // Phones fold both row actions into one menu; the picker then hangs from
+    // that menu's button instead of a pencil of its own.
+    const mobileActions = (
+      <ResponsiveMenu
+        open={hopMenu === index}
+        onOpenChange={(open) => setHopMenu(open ? index : null)}
+        sheetTitle={displayedSource}
+        sheetDescription={hop.model_id}
+        trigger={
+          <button
+            ref={(node) => {
+              editRefs.current[index] = node;
+            }}
+            type="button"
+            aria-label={t("settings.models.routeDialog.hopActions") as string}
+            tabIndex={roving}
+            disabled={actionsDisabled}
+            className={cn(actionClass, "model-hub-route-more")}
+          >
+            <MoreHorizontal aria-hidden="true" />
+          </button>
+        }
+      >
+        <button
+          type="button"
+          role="menuitem"
+          className={MENU_ITEM}
+          onClick={() => {
+            setHopMenu(null);
+            requestAnimationFrame(() => setReplacing(index));
+          }}
+        >
+          <Pencil aria-hidden="true" />
+          {editLabel}
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className={cn(MENU_ITEM, "text-destructive-ink hover:bg-destructive/[0.08]")}
+          onClick={() => {
+            setHopMenu(null);
+            remove(index);
+          }}
+        >
+          <X aria-hidden="true" />
+          {removeLabel}
+        </button>
+      </ResponsiveMenu>
+    );
     return (
       <div
         key={`${hop.source_id}:${hop.model_id}:${index}`}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => {
+        onDragOver={editable ? (event) => event.preventDefault() : undefined}
+        onDrop={editable ? (event) => {
           event.preventDefault();
           if (grabbed !== null) {
             advanceInteraction({
@@ -825,11 +914,12 @@ export const RouteChainDialog: React.FC<{
             });
             advanceInteraction({ type: "drop-grab" });
           }
-        }}
+        } : undefined}
         data-current={current || undefined}
-        className="model-hub-route-hop model-hub-fill-08 flex items-center border border-border"
+        data-editable={editable || undefined}
+        className="model-hub-route-hop flex items-center"
       >
-        <button
+        {editable && <button
           ref={(node) => {
             gripRefs.current[index] = node;
           }}
@@ -855,7 +945,7 @@ export const RouteChainDialog: React.FC<{
           className="model-hub-route-grip grid shrink-0 place-items-center"
         >
           <GripVertical aria-hidden="true" />
-        </button>
+        </button>}
         <span
           className={cn(
             "model-hub-route-ordinal grid shrink-0 place-items-center font-mono font-medium",
@@ -897,70 +987,64 @@ export const RouteChainDialog: React.FC<{
             </span>
           )}
         </span>
-        <span className="model-hub-route-actions flex shrink-0 items-center">
+        {index === recordedHopIndex && recordedTurn.record && (
+          <RecordedTurnBadge record={recordedTurn.record} onOpen={() => setRecordDetails(true)} />
+        )}
+        {editable && <span className="model-hub-route-actions flex shrink-0 items-center">
           <RouteCandidatePopover
             key={`edit:${selectorEpoch}:${index}`}
             candidates={replacementCandidates}
             sources={targetSources}
             confirmLabel={t("settings.models.routeDialog.edit.confirm") as string}
             initialHop={hop}
-            label={t("settings.models.routeDialog.editHop") as string}
+            label={editLabel}
             width="route"
             onReturnFocus={() => editRefs.current[index]?.focus()}
-            onApply={(nextCandidate) => {
-              const next = advanceInteraction({
-                type: "replace",
-                index,
-                hop: nextCandidate.hop,
-              });
-              announce("settings.models.routeDialog.edit.replaced", {
-                position: index + 1,
-              });
-              requestAnimationFrame(() =>
-                gripRefs.current[next.focusIndex]?.focus(),
-              );
-            }}
-            trigger={
+            onApply={replaceHop}
+            {...(isMobile ? {
+              open: replacing === index,
+              onOpenChange: (open: boolean) => setReplacing(open ? index : null),
+            } : {})}
+            trigger={isMobile ? <span className="model-hub-route-menu-anchor">{mobileActions}</span> : (
               <button
                 ref={(node) => {
                   editRefs.current[index] = node;
                 }}
                 type="button"
-                aria-label={t("settings.models.routeDialog.editHop") as string}
-                title={t("settings.models.routeDialog.editHop") as string}
-                tabIndex={grabbed === null && rovingIndex === index ? 0 : -1}
-                disabled={
-                  phase === "saving" ||
-                  phase === "impact" ||
-                  phase === "refreshing"
-                }
-                className="model-hub-route-action model-hub-route-edit model-hub-fill-0a grid shrink-0 place-items-center border border-border text-muted"
+                aria-label={editLabel}
+                title={editLabel}
+                tabIndex={roving}
+                disabled={actionsDisabled}
+                className={cn(actionClass, "model-hub-route-edit")}
               >
                 <Pencil aria-hidden="true" />
               </button>
-            }
+            )}
           />
-          <button
+          {!isMobile && <button
             ref={(node) => {
               removeRefs.current[index] = node;
             }}
             type="button"
-            aria-label={t("settings.models.routeDialog.removeHop") as string}
-            tabIndex={grabbed === null && rovingIndex === index ? 0 : -1}
-            disabled={
-              phase === "saving" || phase === "impact" || phase === "refreshing"
-            }
+            aria-label={removeLabel}
+            title={removeLabel}
+            tabIndex={roving}
+            disabled={actionsDisabled}
             onClick={() => remove(index)}
-            className="model-hub-route-action model-hub-route-remove model-hub-fill-0a grid shrink-0 place-items-center border border-border text-muted"
+            className={cn(actionClass, "model-hub-route-remove")}
           >
             <X aria-hidden="true" />
-          </button>
-        </span>
+          </button>}
+        </span>}
       </div>
     );
   };
 
   if (!selection) return null;
+  // A confirmed save answers inside its own question, so the chain it is about
+  // stays on screen behind it rather than turning into a progress line.
+  const savingInline = phase === "saving" && guard === null;
+  const sourceNames = Object.fromEntries(sources.map((source) => [source.id, source.display_name]));
   const body =
     phase === "loading" ? (
       <div className="model-hub-route-body flex flex-1 items-center justify-center gap-2 text-muted">
@@ -985,44 +1069,12 @@ export const RouteChainDialog: React.FC<{
       <div className="model-hub-route-body flex flex-1 items-center justify-center text-muted">
         {t("settings.models.routeDialog.fail.read")}
       </div>
-    ) : phase === "saving" ? (
+    ) : savingInline ? (
       <div className="model-hub-route-body flex flex-1 items-center justify-center gap-2 text-muted">
         <LoaderCircle className="size-4 animate-spin" />
         <span ref={savingStatusRef} role="status" tabIndex={-1}>
           {t("settings.models.routeDialog.saving")}
         </span>
-      </div>
-    ) : phase === "guard" && guard ? (
-      <div className="model-hub-route-body flex flex-1 flex-col gap-4">
-        <div className="model-hub-guard-label">
-          <p>{t("settings.models.guard.label")}</p>
-          <span>{t("settings.models.guard.count", { count: guard.hops.length })}</span>
-        </div>
-        <ul className="model-hub-guard-list">
-          {guard.hops.map((hop) => (
-            <li
-              key={`${hop.backend}:${hop.menu_model}:${hop.position}`}
-              className="model-hub-guard-hop"
-            >
-              <span className="min-w-0 flex-1">
-                <strong>
-                  {t(`settings.models.backends.${hop.backend}`, {
-                    defaultValue: hop.backend,
-                  })} · {hop.menu_model}
-                </strong>
-                <span>
-                  {hop.model_id} · {t("settings.models.guard.hop.position", {
-                    n: hop.position,
-                  })}
-                </span>
-              </span>
-            </li>
-          ))}
-        </ul>
-        <p className="model-hub-guard-hint text-destructive-ink">
-          <Info aria-hidden="true" />
-          {t("settings.models.guard.hint.interrupt")}
-        </p>
       </div>
     ) : phase === "rejected" ? (
       <div className="model-hub-route-body flex flex-1 flex-col items-center justify-center gap-3 text-muted">
@@ -1057,82 +1109,27 @@ export const RouteChainDialog: React.FC<{
           {t("settings.models.routeDialog.retry")}
         </Button>
       </div>
-    ) : phase === "impact" || phase === "refreshing" ? (
-      <div className="model-hub-route-body flex flex-1 flex-col gap-4">
-        <h3 className="model-hub-route-label font-bold">
-          {t("settings.models.routeDialog.impact.title")}
-        </h3>
-        {report?.removed_hops?.length ? (
-          <ul className="model-hub-guard-list">
-            {report.removed_hops.map((hop) => (
-              <li
-                key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`}
-                className="model-hub-guard-hop"
-              >
-                <span className="min-w-0 flex-1">
-                  <strong>
-                    {t(`settings.models.backends.${hop.backend}`, {
-                      defaultValue: hop.backend,
-                    })} · {hop.menu_model}
-                  </strong>
-                  <span>
-                    {hop.model_id} · {t("settings.models.guard.hop.position", {
-                      n: hop.position,
-                    })}
-                  </span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        <GuardGapList gaps={report?.interrupted ?? []} />
-        {Boolean(report?.removed_hops?.length || report?.interrupted?.length) && (
-          <p className="text-xs text-muted">
-            {t("settings.models.routeDialog.impact.detail")}
-          </p>
-        )}
-        {phase === "refreshing" && (
-          <p className="text-xs text-muted">
-            {t("settings.models.routeDialog.refreshing")}
-          </p>
-        )}
-        {reconcileFailed && (
-          <p className="text-xs text-muted">
-            {t("settings.models.routeDialog.impact.refreshFail")}
-          </p>
-        )}
-        {reconcileFailed && commitReconciliation?.failed && (
-          <Button
-            ref={retryButtonRef}
-            type="button"
-            disabled={phase === "refreshing"}
-            onClick={() => void retryCommittedRead()}
-          >
-            {t("settings.models.routeDialog.retry")}
-          </Button>
-        )}
-      </div>
     ) : (
       <div className="model-hub-route-body flex flex-col">
-        {!unresolvedPreview && !(manualDraft && draft.length === 0) && <div className="model-hub-route-origin-line">
-          {/* The line reads as the route in force unless an unsaved pin is
-              about to replace it, which `manualPending` already says itself. */}
-          {!(manualDraft && dirty) && <span className="model-hub-route-origin-now">{t('settings.models.routing.originNow')}</span>}
-          <RouteOriginBadge origin={draftOrigin} backend={agent!.backend} open={originHelp} onOpenChange={setOriginHelp} />
-          <span>{t(manualDraft ? (dirty ? 'settings.models.routing.manualPending' : 'settings.models.routing.frozen') : 'settings.models.routing.follows', { backend })}</span>
-        </div>}
-        {unresolvedPreview && <div className="model-hub-route-preview" role="status">
-          {previewPending && <strong>{t('settings.models.routing.previewLoading')}</strong>}
-          <span>{t('settings.models.routing.restorePending')}</span>
-        </div>}
-        {preview && <div className="model-hub-route-preview" data-origin={preview.route_origin ?? 'unconfigured'} role="status">
-          <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`, { defaultValue: `settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}` })}</strong>
-          <span>{t('settings.models.routing.restorePending')}</span>
-        </div>}
-        {!unresolvedPreview && <><h3 className="model-hub-route-label font-bold">
-          {t(preview ? 'settings.models.routing.afterSave' : "settings.models.routeDialog.section")}
-        </h3>
-        <div inert={previewPending} className="model-hub-route-list flex flex-col border border-border bg-background">
+        <div className="model-hub-route-mode flex flex-col">
+          <div ref={modeRef}>
+            <SegmentedRadio<RouteMode>
+              ariaLabel={t("settings.models.routeDialog.mode.label") as string}
+              value={manualDraft ? "custom" : "follow"}
+              onChange={switchMode}
+              disabled={phase !== "ready" || previewPending}
+              className="model-hub-route-mode-switch"
+              options={[
+                { id: "follow", label: t("settings.models.routeDialog.mode.follow") as string },
+                { id: "custom", label: t("settings.models.routeDialog.mode.custom") as string },
+              ]}
+            />
+          </div>
+          <p className="model-hub-route-mode-copy text-muted">
+            {t(manualDraft ? "settings.models.routing.manualHint" : "settings.models.routing.follows", { backend })}
+          </p>
+        </div>
+        {!unresolvedPreview && <div inert={previewPending} className="model-hub-route-list flex flex-col">
           {draft.length ? (
             draft.map(renderHop)
           ) : (
@@ -1141,49 +1138,47 @@ export const RouteChainDialog: React.FC<{
               {!manualDraft && onOpenDefaults && <Button variant="outline" onClick={onOpenDefaults}><ListOrdered aria-hidden />{t('settings.models.routing.configureDefaults')}</Button>}
             </div>
           )}
-          {canEditRoute && <RouteCandidatePopover
+        </div>}
+        <div className="model-hub-route-tools flex flex-wrap items-center justify-between">
+          {!unresolvedPreview && manualDraft && canEditRoute ? <RouteCandidatePopover
             key={`add:${selectorEpoch}`}
             candidates={addCandidates}
             sources={targetSources}
             confirmLabel={t("settings.models.routeDialog.add.confirm") as string}
             label={t("settings.models.routeDialog.addHop") as string}
-            width="trigger"
+            width="route"
+            align="start"
             onApply={addCandidate}
             onReturnFocus={() => addButtonRef.current?.focus()}
             trigger={
-              <button
+              <Button
                 ref={addButtonRef}
                 type="button"
+                variant="outline"
+                size="sm"
                 disabled={targetSources.length === 0 || previewPending}
                 aria-describedby={
                   addCandidates.length === 0
                     ? "model-hub-route-add-none"
                     : undefined
                 }
-                className="model-hub-route-add model-hub-fill-05 flex w-full items-center justify-center gap-1.5 border border-border font-semibold text-muted disabled:opacity-60"
+                className="model-hub-route-add"
               >
                 <Plus aria-hidden="true" />
                 {t("settings.models.routeDialog.addHop")}
-              </button>
+              </Button>
             }
-          />}
-        </div></>}
-        {onOpenDefaults && <button type="button" onClick={onOpenDefaults} className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan-ink">
-          <ListOrdered aria-hidden="true" />
-          {t('settings.models.routing.defaultRouting')}
-          <span className="text-muted">{(agent?.sources?.order ?? []).map((id) => sourceName(sources, id)).join(' → ')}</span>
-        </button>}
+          /> : <span />}
+          {onOpenDefaults && <button type="button" onClick={onOpenDefaults} className="model-hub-route-defaults flex items-center text-muted">
+            {t(manualDraft ? 'settings.models.routeDialog.mode.viewDefaults' : 'settings.models.routeDialog.mode.adjustDefaults')}
+            <ChevronRight aria-hidden="true" />
+          </button>}
+        </div>
         {addCandidates.length === 0 && (
           <span className="sr-only" id="model-hub-route-add-none">
             {t("settings.models.routeDialog.add.none")}
           </span>
         )}
-        <p className="model-hub-route-hint flex items-start">
-          <Info aria-hidden="true" className="shrink-0" />
-          <span className="model-hub-route-hint-copy">
-            {t(manualDraft ? 'settings.models.routing.manualHint' : 'settings.models.routing.editHint')}
-          </span>
-        </p>
         {previewFailed && <div role="alert" className="text-destructive-ink text-xs"><p>{t('settings.models.routing.previewFailed')}</p><Button variant="ghost" size="sm" disabled={previewPending} onClick={() => void restoreAutomatic()}><RefreshCw aria-hidden />{t('settings.models.routeDialog.retry')}</Button></div>}
         {manualDraft && valid.invalidIndexes.length > 0 && (
           <p
@@ -1193,6 +1188,20 @@ export const RouteChainDialog: React.FC<{
             {t("settings.models.routeDialog.invalidAfterRefresh")}
           </p>
         )}
+        {/* Next to Save, which is what it describes: above the rows it would push
+            the Add trigger down and take the room its picker opens into. */}
+        {(pendingSwitch || restoring) && <div className="model-hub-route-pending flex items-center justify-between" role="status" data-origin={preview?.route_origin ?? undefined}>
+          <span className="flex min-w-0 flex-col">
+            {previewPending && <strong>{t('settings.models.routing.previewLoading')}</strong>}
+            {preview && <strong>{t(`settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}`, { defaultValue: `settings.models.routing.preview.${preview.route_origin ?? 'unconfigured'}` })}</strong>}
+            <span>{t(pendingSwitch === 'pin' ? 'settings.models.routing.manualPending' : 'settings.models.routing.restorePending')}</span>
+          </span>
+          <button ref={pendingUndoRef} type="button" disabled={phase !== 'ready'} onClick={undoSwitch} className="model-hub-route-pending-undo flex shrink-0 items-center font-semibold">
+            <Undo2 aria-hidden="true" />
+            {t('settings.models.routeDialog.mode.undo')}
+          </button>
+        </div>}
+        <RouteRecordedTurn turn={recordedTurn} matched={recordedHopIndex >= 0} onOpenDetails={() => setRecordDetails(true)} />
         <span className="sr-only" aria-live="polite">
           {announcement ? t(announcement.key, announcement.params) : ""}
         </span>
@@ -1204,12 +1213,7 @@ export const RouteChainDialog: React.FC<{
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="model-hub-route-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
-          aria-busy={
-            phase === "saving" ||
-            previewPending ||
-            phase === "refreshing" ||
-            phase === "reconciling"
-          }
+          aria-busy={phase === "saving" || previewPending || phase === "reconciling"}
           className="model-hub-route-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
@@ -1225,50 +1229,55 @@ export const RouteChainDialog: React.FC<{
           <header className="model-hub-route-head flex flex-col border-b border-border">
             <span className="flex items-center justify-between gap-3">
               <DialogPrimitive.Title className="model-hub-route-title font-bold text-foreground">
-                {t(
-                  phase === "guard"
-                    ? "settings.models.guard.title.saveRoute"
-                    : "settings.models.routeDialog.title",
-                  { menuModel: modelId },
-                )}
+                {t("settings.models.routeDialog.title", { menuModel: modelId })}
               </DialogPrimitive.Title>
               <span className="model-hub-route-head-actions flex shrink-0 items-center gap-1.5">
                 {manageableModel && (
-                  <>
-                    <Button
+                  <ResponsiveMenu
+                    open={headMenu}
+                    onOpenChange={setHeadMenu}
+                    sheetTitle={modelId}
+                    trigger={
+                      <button
+                        type="button"
+                        aria-label={t("settings.models.routeDialog.modelActions") as string}
+                        title={t("settings.models.routeDialog.modelActions") as string}
+                        className="model-hub-route-close grid shrink-0 place-items-center"
+                      >
+                        <MoreHorizontal aria-hidden="true" />
+                      </button>
+                    }
+                  >
+                    <button
                       type="button"
-                      variant="outline"
-                      size="sm"
-                      className="model-hub-route-head-action"
-                      onClick={() => onManageModel?.("edit", draft)}
+                      role="menuitem"
+                      className={MENU_ITEM}
+                      onClick={() => {
+                        setHeadMenu(false);
+                        onManageModel?.("edit");
+                      }}
                     >
                       <Pencil aria-hidden="true" />
                       {t("settings.models.routeDialog.editModel")}
-                    </Button>
-                    <Button
+                    </button>
+                    <button
                       type="button"
-                      variant="destructive"
-                      size="sm"
-                      className="model-hub-route-head-action"
-                      onClick={() => onManageModel?.("remove", draft)}
+                      role="menuitem"
+                      className={cn(MENU_ITEM, "text-destructive-ink hover:bg-destructive/[0.08]")}
+                      onClick={() => {
+                        setHeadMenu(false);
+                        onManageModel?.("remove");
+                      }}
                     >
                       <Trash2 aria-hidden="true" />
                       {t("settings.models.routeDialog.removeModel")}
-                    </Button>
-                  </>
+                    </button>
+                  </ResponsiveMenu>
                 )}
                 <DialogPrimitive.Close
                   ref={closeButtonRef}
                   disabled={phase === "saving"}
-                  aria-label={
-                    t(
-                      phase === "guard"
-                        ? "settings.models.guard.cancel"
-                        : phase === "impact" || phase === "refreshing"
-                          ? "settings.models.routeDialog.impact.done"
-                          : "settings.models.routing.close",
-                    ) as string
-                  }
+                  aria-label={t("settings.models.routing.close") as string}
                   className="model-hub-route-close grid shrink-0 place-items-center"
                 >
                   <X aria-hidden="true" />
@@ -1276,72 +1285,42 @@ export const RouteChainDialog: React.FC<{
               </span>
             </span>
             <DialogPrimitive.Description className="model-hub-route-subtitle font-mono text-muted">
-              {phase === "guard"
-                ? t("settings.models.guard.subtitle.saveRoute")
-                : backend}
+              {backend}
             </DialogPrimitive.Description>
           </header>
           {body}
-          <RouteRecordedTurn key={`${selectionBackend}:${modelId}`} backend={selectionBackend!} modelId={modelId} />
+          <RecordedTurnDetails record={recordedTurn.record} open={recordDetails} onOpenChange={setRecordDetails} />
+          <GuardDialog
+            open={guard !== null}
+            title={t("settings.models.guard.title.saveRoute", { menuModel: modelId })}
+            subtitle={t("settings.models.guard.subtitle.saveRoute")}
+            confirmLabel={t("settings.models.guard.confirm.saveRoute")}
+            busy={phase === "saving"}
+            onCancel={() => {
+              setGuard(null);
+              focusAfterRender(saveButtonRef);
+            }}
+            onConfirm={() => { if (guard) void submit(guard); }}
+          >
+            {guard && <GuardImpact hops={guard.hops} gaps={guard.gaps} sourceNames={sourceNames} />}
+          </GuardDialog>
           <footer className="model-hub-route-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
-            {phase === "impact" || phase === "refreshing" ? (
-              <Button
-                ref={doneButtonRef}
-                type="button"
-                className="model-hub-dialog-action"
-                onClick={close}
-              >
-                {t("settings.models.routeDialog.impact.done")}
-              </Button>
-            ) : phase === "guard" && guard ? (
-              <>
-                <Button
-                  ref={cancelButtonRef}
-                  type="button"
-                  variant="outline"
-                  className="model-hub-dialog-action"
-                  onClick={() => {
-                    setGuard(null);
-                    setPhase("ready");
-                    requestAnimationFrame(() => saveButtonRef.current?.focus());
-                  }}
-                >
-                  {t("settings.models.guard.cancel")}
-                </Button>
-                <Button
-                  ref={saveButtonRef}
-                  type="button"
-                  className="model-hub-dialog-action"
-                  onClick={() => void submit(guard)}
-                >
-                  {t("settings.models.guard.confirm.saveRoute")}
-                </Button>
-              </>
-            ) : phase === "saving" ? (
+            {savingInline ? (
               <span role="status" className="text-xs text-muted">
                 {t("settings.models.routeDialog.saving")}
               </span>
             ) : (
               <>
-                {(manualDraft || restoring) && <Button ref={reseedButtonRef} variant="outline" className="model-hub-dialog-action mr-auto" disabled={phase !== 'ready'} onClick={() => restoring ? undoRestore() : void restoreAutomatic()}>
-                  {previewPending ? <LoaderCircle className="animate-spin" aria-hidden /> : restoreUndo.current ? <Undo2 aria-hidden /> : <RotateCcw aria-hidden />}
-                  {t(restoreUndo.current ? 'settings.models.routing.undoRestore' : 'settings.models.routing.restoreAutomatic')}
-                </Button>}
-                {!manualDraft && !restoring && draft.length > 0 && <Button
-                  variant="outline"
-                  className="model-hub-dialog-action mr-auto"
-                  disabled={phase !== 'ready' || !valid.valid}
-                  onClick={() => setManualDraft(true)}
-                ><Pin aria-hidden />{t('settings.models.routing.pinRoute')}</Button>}
-                {canDiscardDraft && <Button
+                <Button
                   ref={cancelButtonRef}
                   type="button"
                   variant="outline"
                   className="model-hub-dialog-action"
+                  disabled={!canDiscardDraft}
                   onClick={cancelChanges}
                 >
                   {t('settings.models.routing.cancelChanges')}
-                </Button>}
+                </Button>
                 <Button
                   ref={saveButtonRef}
                   type="button"

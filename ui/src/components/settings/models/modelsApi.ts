@@ -25,6 +25,7 @@ import type {
   MigrationApplyResult,
   MigrationScan,
   ModelCandidate,
+  ModelCandidateModelsDev,
   ModelCandidateSupplier,
   ModelsDevMatch,
   NativeProtocol,
@@ -41,9 +42,11 @@ import type {
   SourceRepaired,
   SupplyChannel,
   SupplyGap,
-  UsageSummary,
+  UsageReport,
+  UsageWindowKey,
+  QuotaSummary,
 } from './types';
-import { USAGE_DEFAULT_WINDOW_DAYS } from './types';
+import { BACKEND_MODEL_INPUT_MODALITIES, BACKEND_MODEL_OUTPUT_MODALITIES, USAGE_DEFAULT_WINDOW } from './types';
 
 /** Add-time Route placement returned by both source-creation paths. */
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
@@ -159,10 +162,12 @@ export type ModelsApi = {
   applyMigration(itemIds: string[], cleanApiKeys?: boolean): Promise<MigrationApplyResult>;
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
-  /** Metered token report over a trailing local-day window. `days` is a REQUEST:
-   *  the server clamps it to retention and echoes what it served in
-   *  `window_days`, which is the only number a view may display. */
-  getUsageSummary(days?: number): Promise<UsageSummary>;
+  /** Usage analytics over the explicit modern window selector. */
+  getUsageSummary(window?: UsageWindowKey): Promise<UsageReport>;
+  /** Subscription rate-limit windows, served from the service's 5-minute cache. */
+  getQuota(): Promise<QuotaSummary>;
+  /** The same report, re-read now (the service bounds how often). */
+  refreshQuota(): Promise<QuotaSummary>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
@@ -319,6 +324,27 @@ const reentryGroup = (raw: Record<string, unknown>): Pick<ModelCandidate, 'group
     : {};
 };
 
+const positiveInt = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+const flag = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
+const members = <T extends string>(value: unknown, allowed: readonly T[]): T[] =>
+  Array.isArray(value) ? value.filter((item): item is T => allowed.includes(item as T)) : [];
+
+/** A candidate's models.dev description, kept whole or not at all: the server
+ *  states the seven fields together, keyed by `models_dev_id`. */
+const candidateModelsDev = (row: Record<string, unknown>): ModelCandidateModelsDev | Record<string, never> =>
+  typeof row.models_dev_id === 'string' && row.models_dev_id
+    ? {
+        models_dev_id: row.models_dev_id,
+        context_window: positiveInt(row.context_window),
+        max_output_tokens: positiveInt(row.max_output_tokens),
+        input_modalities: members(row.input_modalities, BACKEND_MODEL_INPUT_MODALITIES),
+        output_modalities: members(row.output_modalities, BACKEND_MODEL_OUTPUT_MODALITIES),
+        supports_tools: flag(row.supports_tools),
+        supports_reasoning: flag(row.supports_reasoning),
+      }
+    : {};
+
 /**
  * One candidate group, read defensively.
  *
@@ -346,6 +372,7 @@ const modelCandidates = (raw: unknown, fallbackOrigin: CandidateOrigin): ModelCa
             ? { native_protocol: row.native_protocol as NativeProtocol }
             : {}),
           ...reentryGroup(row),
+          ...candidateModelsDev(row),
         }];
       })
     : [];
@@ -644,8 +671,10 @@ export const modelsApi: ModelsApi = {
     call<{ events: ResolutionEvent[] }>(
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
     ).then((r) => r.events),
-  getUsageSummary: (days = USAGE_DEFAULT_WINDOW_DAYS) =>
-    call<{ usage: UsageSummary }>(`/api/models/usage?days=${days}`).then((r) => r.usage),
+  getUsageSummary: (window = USAGE_DEFAULT_WINDOW) =>
+    call<{ usage: UsageReport }>(`/api/models/usage?window=${window}`).then((r) => r.usage),
+  getQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota').then((r) => r.quota),
+  refreshQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota/refresh', jsonInit('POST')).then((r) => r.quota),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),

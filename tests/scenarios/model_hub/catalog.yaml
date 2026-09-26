@@ -23,6 +23,12 @@ capability:
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
+    - tests/test_ui_server_fastapi.py
+    - tests/test_model_hub_quota.py
+    - tests/test_model_hub_pricing.py
+    - ui/src/components/settings/models/QuotaTab.test.tsx
+    - ui/src/components/settings/models/usageProjection.test.ts
+    - ui/src/components/settings/models/format.test.ts
     - tests/test_local_deps.py
     - tests/test_opencode_server.py
     - tests/test_runtime_activation.py
@@ -49,6 +55,7 @@ capability:
     - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
     - tests/test_model_hub_persisted_migration.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py
     - tests/e2e/test_model_hub_guards.py
     - tests/e2e/test_model_hub_migration.py
     - tests/e2e/test_model_hub_migration_persisted.py
@@ -613,7 +620,7 @@ scenarios:
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-016
   - id: MH-USAGE-017
-    name: A vanished model's ledger key never reaches the screen, while a vanished Source stays identifiable
+    name: A vanished Source reads as Removed providers in the table, legend and filter, and no ID reaches the screen
     status: covered
     kind: observation
     layer: unit
@@ -678,6 +685,426 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-027
+  - id: MH-USAGE-028
+    name: API price sums only across rows that all carry one and renders as dollars with a sub-cent floor
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/usageProjection.test.ts::MH-USAGE-028
+    related_tests:
+      - ui/src/components/settings/models/format.test.ts::MH-USAGE-028
+  - id: MH-USAGE-029
+    name: The usage report states API price as not a charge and names unpriced tokens and the price table
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-029
+    related_tests:
+      - ui/e2e/model-catalog/usage.spec.ts
+  - id: MH-USAGE-030
+    name: The usage report offers the API-price metric only when the server priced the report
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-030
+  - id: MH-USAGE-031
+    name: The Chinese usage report reads API price as a conversion, never a charge
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-031
+  - id: MH-USAGE-032
+    name: A floor API price reads 「≥」 in the chart legend and bucket detail, a floor of zero included
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-032
+    related_tests:
+      - ui/src/components/settings/models/format.test.ts::MH-USAGE-032
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
+  - id: MH-USAGE-033
+    name: A cost with nothing priced reads no price on every usage and quota surface, a partly priced one 「≥」, and a fully priced one exact
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-033
+    related_tests:
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
+  - id: MH-USAGE-034
+    name: Usage from Sources config let go folds into one muted, last identity with exact totals, and an unlisted model on a live Source reads by the model ID it was metered under
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/usageProjection.test.ts::MH-USAGE-034
+    related_tests:
+      - tests/test_model_hub_l3.py::test_a_deleted_source_keeps_its_usage_and_reads_as_removed
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-034
+      - ui/e2e/model-catalog/usage.spec.ts
+  - id: MH-USAGE-BACKEND-001
+    name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_modern_hourly_report_is_dense_and_keeps_source_model_identity
+  - id: MH-USAGE-BACKEND-002
+    name: UsageWriter preserves temporal identity when a flush spans different hours
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_usage_writer_never_coalesces_different_hours_before_persistence
+  - id: MH-USAGE-BACKEND-003
+    name: Released daily-only usage remains available while hourly history stays unavailable
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_legacy_daily_rows_are_preserved_but_never_allocated_to_an_hour
+  - id: MH-USAGE-BACKEND-004
+    name: Corrupt nested hourly slices cannot duplicate or exceed their daily owner
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_corrupt_nested_hours_are_deduplicated_bounded_and_marked_unavailable
+  - id: MH-USAGE-BACKEND-005
+    name: Modern usage selector reaches the controller RPC and rejects invalid query combinations
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_ui_server_fastapi.py::test_the_usage_route_forwards_a_modern_window_and_rejects_selector_conflicts
+  - id: MH-USAGE-BACKEND-006
+    name: Fractional-offset and DST hourly reports join every local-day owner across midnight
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_hourly_report_joins_every_local_day_owner_across_midnight
+    related_tests:
+      - tests/test_model_hub_usage.py::test_legacy_usage_after_local_midnight_marks_the_overlapping_hour_incomplete
+  - id: MH-USAGE-BACKEND-007
+    name: Queued same-hour calls preserve their distinct local-day owners through persistence
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_usage_writer_preserves_daily_owners_inside_one_utc_hour
+  - id: MH-USAGE-BACKEND-008
+    name: Read and write boundaries exclude future hourly evidence without claiming complete zero usage
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write
+  - id: MH-USAGE-E2E-001
+    name: Measured hourly and daily reports reconcile through HTTP and IPC after a controller restart
+    status: covered
+    kind: persistence
+    layer: e2e
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_usage_reports_reconcile_across_http_ipc_and_restart
+  - id: MH-USAGE-E2E-002
+    name: The real usage API preserves released daily history without inventing hourly counts
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_daily_only_history_is_not_invented_as_hourly_usage
+  - id: MH-QUOTA-001
+    name: Claude's fixed quota windows parse and null or app-only windows are skipped
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_claude_quota_parser_reads_legacy_windows_and_skips_nulls
+  - id: MH-QUOTA-002
+    name: Claude limit rows classify on kind and keep the server's model names, including non-ASCII ones
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_claude_quota_parser_prefers_server_limits_and_keeps_unknown_rows
+  - id: MH-QUOTA-003
+    name: Codex quota windows classify by length and name Spark from its metered feature
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_codex_quota_parser_reads_primary_secondary_and_additional_limits
+    related_tests:
+      - tests/test_model_hub_quota.py::test_codex_quota_parser_classifies_a_lone_weekly_primary_by_length
+  - id: MH-QUOTA-004
+    name: A malformed or hostile quota body is one Source's sanitized failure with bounded values
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_parsers_reject_a_malformed_body_as_one_source_failure
+  - id: MH-QUOTA-005
+    name: Each subscription's quota is re-read at most every five minutes and concurrent reads share one fetch
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_refreshes_each_source_at_most_every_five_minutes
+  - id: MH-QUOTA-006
+    name: A failed quota re-read keeps the last good windows and reports the Source stale
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_keeps_the_last_good_snapshot_as_stale
+  - id: MH-QUOTA-007
+    name: A refused grant reports auth_expired and one Source's failure never fails the page
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_reports_auth_expired_and_never_a_page_failure
+  - id: MH-QUOTA-008
+    name: A forced quota refresh is rate-limited and a vendor 429 cools the Source down
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_forced_refresh_is_rate_limited_and_429_cools_down
+  - id: MH-QUOTA-009
+    name: A re-authenticated subscription does not inherit the old grant's quota
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_forgets_a_reauthenticated_grant
+  - id: MH-QUOTA-010
+    name: A slow vendor quota call does not hold the page
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_cache_does_not_hold_the_page_on_a_slow_vendor
+  - id: MH-QUOTA-011
+    name: The engine reads quota with the bound grant and only parsed windows cross the adapter
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
+  - id: MH-QUOTA-012
+    name: Quota routes serve hub subscriptions only and a forced refresh inside its interval is served from cache
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_api.py::test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh
+  - id: MH-QUOTA-013
+    name: The quota tab shows each window's remaining share, pace, and reset, with scoped models grouped
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-013
+  - id: MH-QUOTA-014
+    name: A stale or expired subscription keeps its last windows under a re-login banner
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-014
+  - id: MH-QUOTA-015
+    name: The quota tab stays within a narrow viewport and names an unrecognised limit in words on one line
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-015
+    related_tests:
+      - ui/e2e/model-catalog/quota-layout.spec.ts
+  - id: MH-QUOTA-016
+    name: The quota report is read when its tab is opened and refreshed only while it stays open
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-016
+  - id: MH-QUOTA-017
+    name: An expired grant is signed in again from its quota card through the confirmed re-login journey, and quota re-reads after
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-017
+  - id: MH-QUOTA-018
+    name: A grant routing blocks as needs_action is re-read instead of showing its pre-block quota
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_routing_blocker_drops_the_blocked_grants_quota_reading
+  - id: MH-QUOTA-019
+    name: The Claude plan is read best-effort from the OAuth profile and a missed read keeps the last known plan
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_claude_plan_is_read_from_the_oauth_profile_organization
+    related_tests:
+      - tests/test_model_hub_quota.py::test_claude_plan_ignores_an_unreadable_profile
+      - tests/test_model_hub_quota.py::test_adapter_adds_the_claude_plan_from_the_profile_and_never_fails_on_it
+      - tests/test_model_hub_quota.py::test_a_readable_claude_profile_replaces_the_plan_and_an_unreadable_one_keeps_it
+  - id: MH-QUOTA-020
+    name: A quota read past the page deadline is named pending, and the page re-reads it soon a bounded number of times until it lands
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_quota_summary_names_the_sources_still_being_read
+    related_tests:
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-020
+  - id: MH-QUOTA-021
+    name: Payback reads as paid at 1.1x and over, just even from 1x, and short below the fee
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-021
+  - id: MH-QUOTA-022
+    name: The quota tab states week and period value at API price against the fee, with the price table date
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-022
+  - id: MH-QUOTA-023
+    name: A subscription short of its fee says by how much, and an unknown plan hides payback but keeps the value
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-023
+  - id: MH-QUOTA-024
+    name: A model with no price reads as no price and is counted, never priced as zero
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-024
+  - id: MH-QUOTA-025
+    name: A Source still being read shows a loading line instead of an unavailable reading
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-025
+  - id: MH-QUOTA-026
+    name: The quota value copy renders in English through the same keys
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-026
+  - id: MH-QUOTA-027
+    name: A reported plan id reads as its display name, and an unknown id as title-cased words
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-027
+  - id: MH-QUOTA-028
+    name: A countdown drops its zero second part
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-028
+  - id: MH-QUOTA-029
+    name: A countdown shows only the duration; its exact local moment opens on hover, focus, or tap and is in its accessible name
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-029
+    related_tests:
+      - ui/e2e/model-catalog/quota-layout.spec.ts
+  - id: MH-QUOTA-030
+    name: A Claude account that moves to Team, Enterprise, a lower Max tier, or Pro shows its new plan and fee, while an unreadable profile keeps the old plan
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_a_readable_claude_profile_replaces_the_plan_and_an_unreadable_one_keeps_it
+    related_tests:
+      - tests/test_model_hub_quota.py::test_claude_plan_is_read_from_the_oauth_profile_organization
+      - tests/test_model_hub_pricing.py::test_reported_plans_resolve_to_fee_table_keys
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-027
+  - id: MH-PRICE-001
+    name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_model_price_reads_models_dev_cost_and_fills_missing_cache_prices
+  - id: MH-PRICE-002
+    name: Context tags, snapshot dates, provider prefixes, and case do not change the list price a model ID resolves to
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_model_ids_normalize_to_the_price_table_spelling
+  - id: MH-PRICE-003
+    name: Real ledger model IDs price from their first-party provider, directly or through the alias map
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_real_ledger_model_ids_resolve_through_the_alias_map
+  - id: MH-PRICE-004
+    name: The local price override file wins over models.dev, and an unreadable one falls back to it
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_override_file_wins_over_models_dev_and_can_alias
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_price_table_reads_the_override_file_and_survives_a_bad_one
+  - id: MH-PRICE-005
+    name: Each token class takes its own price, a model with no price is excluded and counted, and any unknown part (excluded tokens, unreported requests, uncaptured cache writes) makes a lower bound
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_row_cost_prices_each_token_class_and_excludes_unknown_models
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_usage_metered_before_cache_writes_were_captured_is_a_lower_bound
+      - tests/test_model_hub_pricing.py::test_priced_usage_with_unknown_parts_is_a_floor
+  - id: MH-PRICE-006
+    name: Every priced usage total is the sum of its rows, with unpriced tokens counted apart
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_usage_report_prices_totals_as_the_sum_of_their_rows
+  - id: MH-PRICE-007
+    name: A ledger row written before cache-write capture reads as zero writes and uncaptured, without a rewrite
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_rows_written_before_cache_writes_read_as_uncaptured
+  - id: MH-PRICE-008
+    name: Reported and configured plans resolve to the built-in or overridden monthly fee
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_reported_plans_resolve_to_fee_table_keys
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_override_file_sets_a_sources_plan_fee_and_renewal_day
+      - tests/test_model_hub_pricing.py::test_pro_5x_is_priced_apart_from_pro
+  - id: MH-PRICE-009
+    name: The value period is the current billing cycle when a renewal day is known, else the trailing 30 days
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_billing_period_is_the_current_cycle_or_the_trailing_30_days
+  - id: MH-PRICE-010
+    name: Each subscription's week and period value is compared with its plan fee, and payback totals count only known fees
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_quota_values_compare_each_period_with_its_plan_fee
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_daily_costs_answer_only_for_the_given_sources
+      - tests/test_model_hub_api.py::test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh
+  - id: MH-PRICE-011
+    name: Priced daily and hourly usage reads stay inside the usage-summary contract
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_priced_usage_reads_match_the_usage_summary_contract
+  - id: MH-PRICE-SCENARIO-001
+    name: A metered stream's cache writes and an unreported call reach the served usage and quota value at API price, as a floor
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py::test_mh_price_scenario_001_a_metered_stream_is_valued_through_usage_and_quota
+  - id: MH-PRICE-012
+    name: Any unpriced, unreported, or uncaptured part reaches every usage aggregate and quota value above it as a floor
+    status: covered
+    kind: safety
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_no_aggregate_over_an_unknown_part_is_published_as_exact
+  - id: MH-PRICE-013
+    name: An invalid price override entry (huge, non-finite, or an over-long model key) is ignored alone, and a Source plan is whitespace-trimmed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_an_invalid_override_entry_is_ignored_and_the_rest_still_apply
+  - id: MH-PRICE-014
+    name: Before the first price table lands, usage and quota say prices are being fetched, the page re-reads a bounded number of times, and one fetch runs at a time
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py::test_mh_price_014_a_first_read_before_any_price_table_says_prices_are_on_their_way
+    related_tests:
+      - tests/test_models_dev_catalog.py::test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-PRICE-014
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-PRICE-014
+      - ui/src/components/settings/models/QuotaTab.test.tsx::MH-PRICE-014
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

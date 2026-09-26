@@ -805,16 +805,9 @@ describe('AddSourceDialog — what comes back from an authorization', () => {
       added_to: ['claude'],
       adopted_by: ['claude'],
     }));
-    // The read happens BEHIND the flow's own success panel, which owns the report
-    // of where the source landed and the handoff that dismisses it. Replacing that
-    // with this dialog's spinner would discard the one thing worth reading.
-    expect(screen.getByTestId('oauth-stub')).toBeTruthy();
-    expect(onClose).not.toHaveBeenCalled();
-
-    act(() => oauth.current?.onClose());
-
-    // And when the flow does hand back, there is nothing left to add here.
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    // The arrival is the end of the frame, as a saved key is: the flow's toast has
+    // already said so, and nobody should have to dismiss a report to leave.
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('asks for one read when a landing reports itself twice', async () => {
@@ -840,10 +833,8 @@ describe('AddSourceDialog — what comes back from an authorization', () => {
     });
     expect(onAdded).not.toHaveBeenCalledWith(null);
 
-    // And the extra call changed nothing about the handback: the flow's own panel
-    // still owns the close, and this frame still goes with it.
-    act(() => oauth.current?.onClose());
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    // And the extra call changed nothing about the handback: the frame closed once.
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('returns to the frame it was launched from when nothing arrived', async () => {

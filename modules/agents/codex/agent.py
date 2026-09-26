@@ -89,6 +89,10 @@ CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
 CODEX_PROMPT_STRATEGY_METADATA_KEY = "codex_prompt_strategy"
 _STEER_RECONCILIATION_TTL_SECONDS = 300.0
 _MAX_STEER_RECONCILIATION_TARGETS = 128
+# How long a runtime change waits for the shared per-cwd app-server to go idle.
+# Short waits cover a replacement prompt's own interrupted turn; a long job in
+# another Session must fail this turn visibly instead of holding it forever.
+_RUNTIME_CHANGE_WAIT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,12 @@ class _CodexConnectionProbeState:
 
 class CodexConnectionProbeRuntimeMismatchError(RuntimeError):
     """The cached transport does not represent direct Codex credentials."""
+
+
+class CodexRuntimeChangeBlockedError(RuntimeError):
+    """Another live turn owns the cwd transport that a runtime change must replace."""
+
+    reason = "transport_runtime_change_blocked"
 
 
 class CodexModelHubCatalogUnavailableError(RuntimeError):
@@ -527,14 +537,20 @@ class CodexAgent(BaseAgent):
                 return
             except Exception as e:
                 logger.error("Failed to start Codex transport: %s", e, exc_info=True)
-                await self._record_model_hub_native_failure(request.context, str(e))
-                if isinstance(e, CodexModelHubCatalogUnavailableError):
-                    language = str(
-                        getattr(getattr(self.controller, "config", None), "language", "en")
-                        or "en"
-                    )
+                language = str(
+                    getattr(getattr(self.controller, "config", None), "language", "en")
+                    or "en"
+                )
+                if isinstance(e, CodexRuntimeChangeBlockedError):
+                    # Not a source failure: no Hub cooldown. Hold the unwritten
+                    # input for an explicit retry once the blocking turn ends.
+                    mark_prewrite_recovery_required(request.context, e.reason)
+                    display_text = f"❌ {i18n_t('error.codexRuntimeChangeBlocked', language)}"
+                elif isinstance(e, CodexModelHubCatalogUnavailableError):
+                    await self._record_model_hub_native_failure(request.context, str(e))
                     display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
                 else:
+                    await self._record_model_hub_native_failure(request.context, str(e))
                     display_text = f"❌ Failed to start Codex CLI: {e}"
                 await emit_backend_failure(
                     self.controller,
@@ -657,9 +673,12 @@ class CodexAgent(BaseAgent):
                 # fallbacks).
                 if isinstance(e, (CodexResumeUnavailableError, CodexResponseTooLargeError)):
                     mark_prewrite_recovery_required(request.context, "codex_resume_unavailable")
+                elif isinstance(e, CodexRuntimeChangeBlockedError):
+                    mark_prewrite_recovery_required(request.context, e.reason)
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
-                await self._record_model_hub_native_failure(request.context, str(e))
+                if not isinstance(e, CodexRuntimeChangeBlockedError):
+                    await self._record_model_hub_native_failure(request.context, str(e))
                 # A successful replacement consumes no shared pressure evidence.
                 # Diagnose only the transport whose failure is actually reported.
                 resource_failure = self._resource_failure_for_transport(transport)
@@ -1487,6 +1506,12 @@ class CodexAgent(BaseAgent):
                 or "en"
             )
             message = i18n_t("error.codexForkBoundaryUnavailable", language)
+        elif isinstance(error, CodexRuntimeChangeBlockedError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            message = i18n_t("error.codexRuntimeChangeBlocked", language)
         else:
             message = f"Codex error: {error}"
 
@@ -2197,6 +2222,7 @@ class CodexAgent(BaseAgent):
         if cwd not in self._transport_locks:
             self._transport_locks[cwd] = asyncio.Lock()
 
+        wait_deadline: float | None = None
         while True:
             wait_for_active_turns = False
             async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
@@ -2232,7 +2258,25 @@ class CodexAgent(BaseAgent):
                         logger.info("Restarting Codex transport after Model Hub channel change for cwd=%s", cwd)
 
                 if wait_for_active_turns:
-                    pass
+                    now = time.monotonic()
+                    if wait_deadline is None:
+                        wait_deadline = now + _RUNTIME_CHANGE_WAIT_SECONDS
+                        logger.info(
+                            "Codex runtime change waiting for active turns: cwd=%s from=%s to=%s",
+                            cwd,
+                            existing_fingerprint.split(":", 1)[0],
+                            desired_fingerprint.split(":", 1)[0],
+                        )
+                    elif now >= wait_deadline:
+                        logger.warning(
+                            "Codex runtime change blocked by active turns after %.0fs: cwd=%s",
+                            _RUNTIME_CHANGE_WAIT_SECONDS,
+                            cwd,
+                        )
+                        raise CodexRuntimeChangeBlockedError(
+                            "Another active Codex turn in this working directory uses a "
+                            "different runtime; the requested model cannot start until it finishes"
+                        )
                 else:
                     runtime_args: list[str] = []
                     runtime_env = dict(self._codex_runtime_environment())

@@ -1,10 +1,11 @@
 import * as React from 'react';
-import { ArrowDownToLine, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
+import { ArrowDownToLine, Activity, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -18,7 +19,7 @@ import { GatewayModule } from './GatewayModule';
 import { MigrationDialog } from './MigrationDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
-import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport, type SuspendedRouteAttempt } from './RouteChainDialog';
+import { RouteChainDialog, type RouteCollectionObservation, type RouteReport, type SuspendedRouteAttempt } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
@@ -32,6 +33,7 @@ import {
   releaseSuspendedRouteAttempt,
 } from './suspendedRouteAttempts';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
+import { QuotaTab } from './QuotaTab';
 import { UsageTab } from './UsageTab';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKeySet, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
@@ -64,17 +66,26 @@ import {
 } from './regionRead';
 import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, runtimeCanAttemptInstall, runtimeIsRunning } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
-import { handOffProviderTab } from './providerTab';
+import { canReauth, reauthBodyKey, reauthCost } from './repair';
 import { resumeGatewayAdoption } from './gatewayAdoption';
 import { groupMigrationCandidates } from './migrationGrouping';
-import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
+import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
-import { USAGE_DEFAULT_WINDOW_DAYS, type AgentBackend, type AgentSupply, type ResolutionEvent, type RuntimeDependency, type Source, type UsageSummary } from './types';
-import type { UsageWindowOption } from './usageProjection';
+import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
+type ModelsTranslate = (key: string, options?: Record<string, unknown>) => string;
+
+const useModelsTranslation = () => {
+  const translation = useTranslation();
+  return {
+    ...translation,
+    t: translation.t as unknown as ModelsTranslate,
+  };
+};
+
 type RouteTarget = {
   agent: AgentSupply;
   modelId: string;
@@ -178,7 +189,7 @@ export const RuntimePill: React.FC<{
   stopping?: boolean;
   directCount?: number;
 }> = ({ read, starting, stopping = false, directCount }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
     loading: () => null,
     ready: (runtime) => ({ runtime, authoritative: true }),
@@ -229,7 +240,7 @@ const RuntimeClosedState: React.FC<{
   starting: boolean;
   stopping: boolean;
 }> = ({ read, runtime, starting, stopping }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   const health = runtime?.status.health ?? null;
   const key = stopping
     ? 'stopping'
@@ -261,7 +272,7 @@ const RuntimeClosedState: React.FC<{
 };
 
 const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, children, rootRef }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   return (
     <div ref={rootRef} className="model-hub-shell">
       <header className="model-hub-shell-head">
@@ -280,15 +291,52 @@ const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.React
   );
 };
 
-type HubTab = 'sources' | 'usage' | 'logs';
+/** The service refreshes each Source at most this often; polling faster buys nothing. */
+const QUOTA_POLL_MS = 5 * 60_000;
+/** A read the service is still running past its page deadline lands soon after;
+ *  re-read at this pace, a bounded number of times, rather than wait a whole poll. */
+export const QUOTA_PENDING_REREAD_MS = 5_000;
+export const QUOTA_PENDING_REREADS = 3;
+
+/**
+ * Re-read a report whose reading the service says is still landing — a quota
+ * read past its deadline, or prices whose first fetch is running — soon, a
+ * bounded number of times in a row. `pendingKey` is null while no settled
+ * reading is on screen and '' when nothing is pending; `settled` counts settled
+ * reads, so one that lands still pending re-arms the timer. Returns the reset a
+ * fresh open or a manual refresh calls.
+ */
+function usePendingRereads(active: boolean, pendingKey: string | null, settled: number, reread: () => void) {
+  const rereads = React.useRef(0);
+  React.useEffect(() => {
+    if (!active || pendingKey === null) return undefined;
+    if (pendingKey === '') {
+      rereads.current = 0;
+      return undefined;
+    }
+    if (rereads.current >= QUOTA_PENDING_REREADS) return undefined;
+    const timer = window.setTimeout(() => {
+      rereads.current += 1;
+      reread();
+    }, QUOTA_PENDING_REREAD_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, pendingKey, settled, reread]);
+  return React.useCallback(() => { rereads.current = 0; }, []);
+}
+
+/** Back to the re-login button of a quota card, or to the selected tab once a refresh has removed it. */
+const focusQuotaOpener = (opener: HTMLElement) =>
+  (opener.isConnected ? opener : document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))?.focus();
+
+type HubTab = 'sources' | 'quota' | 'usage' | 'logs';
 
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   return (
     <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
-      {(['sources', 'usage', 'logs'] as const).map((id) => (
+      {(['sources', 'quota', 'usage', 'logs'] as const).map((id) => (
         <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
-          {id === 'sources' ? <Route className="size-3.5" /> : id === 'usage' ? <Gauge className="size-3.5" /> : <ScrollText className="size-3.5" />}
+          {id === 'sources' ? <Route className="size-3.5" /> : id === 'quota' ? <Gauge className="size-3.5" /> : id === 'usage' ? <Activity className="size-3.5" /> : <ScrollText className="size-3.5" />}
           {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : id}`)}
         </button>
       ))}
@@ -297,7 +345,7 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
 };
 
 const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSupply) => void }> = ({ agents, onSwitch }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   if (agents.length === 0) {
     return <section className="model-hub-direct-empty"><h2>{t('settings.models.direct.empty.title')}</h2><p>{t('settings.models.direct.empty.body')}</p><span>{t('settings.models.direct.empty.install')}</span></section>;
   }
@@ -338,13 +386,13 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
 };
 
 const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   if (count === 0) return null;
   return <span className="model-hub-takeover-pill"><span className="model-hub-runtime-dot" />{t('settings.models.takeover.pill', { count })}</span>;
 };
 
 export const SettingsModelsPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t } = useModelsTranslation();
   const { showToast } = useToast();
   const navigate = useNavigate();
   // An Agent named in the warning list is a destination, not a label: the page
@@ -365,8 +413,10 @@ export const SettingsModelsPage: React.FC = () => {
   const [eventsRead, setEventsRead] = React.useState<RegionRead<EventFeed>>(loadingRegion);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [tab, setTab] = React.useState<HubTab>('sources');
-  const [usageRead, setUsageRead] = React.useState<RegionRead<UsageSummary>>(loadingRegion);
-  const [usageWindow, setUsageWindow] = React.useState<UsageWindowOption>(USAGE_DEFAULT_WINDOW_DAYS);
+  const [usageRead, setUsageRead] = React.useState<RegionRead<UsageReport>>(loadingRegion);
+  const [usageWindow, setUsageWindow] = React.useState<UsageWindowKey>(USAGE_DEFAULT_WINDOW);
+  const [quotaRead, setQuotaRead] = React.useState<RegionRead<QuotaSummary>>(loadingRegion);
+  const [refreshingQuota, setRefreshingQuota] = React.useState(false);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
@@ -389,14 +439,23 @@ export const SettingsModelsPage: React.FC = () => {
   // the dialog's own subject. Separate from `subscriptionVendor` because the two
   // journeys start from different surfaces — this one from the source detail,
   // which replaces the overview that holds 添加订阅 — and only the create path
-  // owns the success-landing timer and reconcile flag below.
+  // owns the success landing and reconcile flag below.
   const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
+  // A quota read can be the first to see a refused grant while the Source row
+  // is still healthy, so its re-login cannot route through the detail panel's
+  // repair button (which only a blocked row shows). It asks the same question
+  // here, then starts the same journey.
+  const [quotaReauthSource, setQuotaReauthSource] = React.useState<Source | null>(null);
+  // A re-login started from a quota card has no detail heading to return to.
+  const quotaReauthOpenerRef = React.useRef<HTMLElement | null>(null);
+  // The card button focus went back to when that re-login closed, until the
+  // quota re-read its success started has landed.
+  const quotaFocusHoldRef = React.useRef<HTMLElement | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
   const subscriptionPickerRefs = React.useRef<Partial<Record<SubscriptionPickerVendor, HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
-  const subscriptionCloseTimer = React.useRef<number | null>(null);
   // A successful OAuth terminal reports the same moved rows twice: first with
   // the created source, then as the generic stale-row notification. The source
   // callback owns the one full reconciliation; consume the trailing notification
@@ -630,14 +689,16 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }));
 
-  const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageSummary>>((incoming) => {
+  const [usageSettled, setUsageSettled] = React.useState(0);
+  const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageReport>>((incoming) => {
     if (!aliveRef.current) return;
     setUsageRead((previous) => settleRegionRead(previous, incoming));
+    setUsageSettled((count) => count + 1);
   }));
 
-  const refreshUsage = React.useCallback(async (days: UsageWindowOption) => {
+  const refreshUsage = React.useCallback(async (window: UsageWindowKey) => {
     setUsageRead(beginRegionRead);
-    await usageReadAuthority.run(() => readRegion(() => modelsApi.getUsageSummary(days)));
+    await usageReadAuthority.run(() => readRegion(() => modelsApi.getUsageSummary(window)));
   }, [usageReadAuthority]);
 
   /**
@@ -652,14 +713,90 @@ export const SettingsModelsPage: React.FC = () => {
    * change is the same read with a different span, which is why one effect owns
    * both.
    */
+  /** A first install has no price table yet: while its fetch runs, re-read so the prices land on screen. */
+  const usagePendingKey = foldRegionRead<UsageReport, string | null>(usageRead, {
+    loading: () => null,
+    ready: (data) => (data.pricing?.pending ? 'pricing' : ''),
+    unread: () => null,
+    degraded: () => null,
+  });
+  const rereadUsage = React.useCallback(() => { void refreshUsage(usageWindow); }, [refreshUsage, usageWindow]);
+  const resetUsageRereads = usePendingRereads(tab === 'usage', usagePendingKey, usageSettled, rereadUsage);
+
   React.useEffect(() => {
     if (tab !== 'usage') return;
+    resetUsageRereads();
     void refreshUsage(usageWindow);
-  }, [tab, usageWindow, refreshUsage]);
+  }, [tab, usageWindow, refreshUsage, resetUsageRereads]);
 
   const retryUsage = React.useCallback(async () => {
+    resetUsageRereads();
     await refreshUsage(usageWindow);
-  }, [refreshUsage, usageWindow]);
+  }, [refreshUsage, resetUsageRereads, usageWindow]);
+
+  // Counts settled reads, so a re-read that lands with the same pending set
+  // still re-arms the timer below.
+  const [quotaSettled, setQuotaSettled] = React.useState(0);
+  const [quotaReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<QuotaSummary>>((incoming) => {
+    if (!aliveRef.current) return;
+    setQuotaRead((previous) => settleRegionRead(previous, incoming));
+    setQuotaSettled((count) => count + 1);
+  }));
+
+  const readQuota = React.useCallback(async (force: boolean) => {
+    setQuotaRead(beginRegionRead);
+    await quotaReadAuthority.run(() => readRegion(() => (force ? modelsApi.refreshQuota() : modelsApi.getQuota())));
+  }, [quotaReadAuthority]);
+
+  /**
+   * Subscription quota is read lazily too, for the same reason as usage: it is
+   * a report, and the landing that decides routing must not wait on a vendor.
+   * While the tab stays open it re-reads on the service's own cadence; the
+   * service caches per Source, so an interval tick costs a vendor call only
+   * when that Source's reading is actually due.
+   */
+  /**
+   * What the service named as still landing: the Sources still reading, and
+   * prices whose first fetch is running. Null while no settled reading is on
+   * screen, '' when nothing is pending.
+   */
+  const quotaPendingKey = foldRegionRead<QuotaSummary, string | null>(quotaRead, {
+    loading: () => null,
+    ready: (data) => [...(data.pending ?? []), ...(data.value?.pending ? ['\u0001pricing'] : [])].join('\u0000'),
+    unread: () => null,
+    degraded: () => null,
+  });
+  const rereadQuota = React.useCallback(() => { void readQuota(false); }, [readQuota]);
+  // A clean re-login closes before the quota re-read it started lands, and a
+  // healthy answer removes the card button focus just went back to.
+  React.useLayoutEffect(() => {
+    const held = quotaFocusHoldRef.current;
+    quotaFocusHoldRef.current = null;
+    if (held && !held.isConnected && document.activeElement === document.body) focusQuotaOpener(held);
+  }, [quotaSettled]);
+  const resetQuotaRereads = usePendingRereads(tab === 'quota', quotaPendingKey, quotaSettled, rereadQuota);
+
+  React.useEffect(() => {
+    if (tab !== 'quota') return undefined;
+    resetQuotaRereads();
+    void readQuota(false);
+    const timer = window.setInterval(() => { void readQuota(false); }, QUOTA_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [tab, readQuota, resetQuotaRereads]);
+
+  const refreshQuotaNow = React.useCallback(async () => {
+    resetQuotaRereads();
+    setRefreshingQuota(true);
+    try {
+      await readQuota(true);
+    } finally {
+      if (aliveRef.current) setRefreshingQuota(false);
+    }
+  }, [readQuota, resetQuotaRereads]);
+
+  const retryQuota = React.useCallback(async () => {
+    await readQuota(false);
+  }, [readQuota]);
 
   const refreshEventHead = React.useCallback(async () => {
     setEventsRead(beginRegionRead);
@@ -1192,11 +1329,6 @@ export const SettingsModelsPage: React.FC = () => {
     if (status?.pending || !status?.failed.size) return;
     routeProjectionReconciler.retry();
   }, [routeProjectionReconciler]);
-  const routeCommitReconciliation = React.useMemo<RouteCommitReconciliation | null>(() => routeCommitStatus ? ({
-    pending: routeCommitStatus.pending,
-    failed: routeCommitStatus.failed.size > 0,
-    retry: retryRouteCommit,
-  }) : null, [retryRouteCommit, routeCommitStatus]);
   React.useEffect(() => {
     const heldBackends = new Set(suspendedRouteAttempts.keys());
     for (const backend of suspendedHubFrontiersRef.current.keys()) {
@@ -1308,8 +1440,8 @@ export const SettingsModelsPage: React.FC = () => {
       void refresh();
       return;
     }
-    // Keep the success panel as the only active dialog until its handoff timer
-    // closes it. The provider dialog then opens and owns its normal autofocus.
+    // The toast already said it connected, so the sign-in dialog hands straight
+    // over to the provider it created, which then owns its normal autofocus.
     sourceEntityAuthority.landLatest(source);
     selectSource({
       sourceId: source.id,
@@ -1317,17 +1449,9 @@ export const SettingsModelsPage: React.FC = () => {
     });
     subscriptionSuccessReconcileRef.current = true;
     void refresh();
-    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
-    subscriptionCloseTimer.current = window.setTimeout(() => {
-      subscriptionCloseTimer.current = null;
-      setSubscriptionVendor(null);
-    }, 1400);
+    setSubscriptionVendor(null);
   }, [refresh, selectSource, sourceEntityAuthority]);
   const closeSubscription = React.useCallback(() => {
-    if (subscriptionCloseTimer.current !== null) {
-      window.clearTimeout(subscriptionCloseTimer.current);
-      subscriptionCloseTimer.current = null;
-    }
     setSubscriptionVendor(null);
     window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
   }, []);
@@ -1341,13 +1465,22 @@ export const SettingsModelsPage: React.FC = () => {
    * one: `_materialize_reauth` can leave other agents without a source, so
    * `/agents` and the chains behind it are stale too, not just this row.
    */
-  const sourceReauthed = React.useCallback(() => { void refresh(); }, [refresh]);
+  const sourceReauthed = React.useCallback(() => {
+    void refresh();
+    // The Source now holds a new grant; the open quota tab re-reads for it
+    // instead of showing the expired one until the next tick.
+    if (tab === 'quota') void readQuota(false);
+  }, [readQuota, refresh, tab]);
   const closeReauth = React.useCallback(() => {
     setReauthSource(null);
     // Back to the detail heading rather than to the button that opened this: a
     // repair that worked unmounts that button (the row is no longer stopped), and
-    // Radix would restore focus to a node that is gone — i.e. to <body>.
-    window.setTimeout(() => sourceDetailHeadingRef.current?.focus(), 0);
+    // Radix would restore focus to a node that is gone — i.e. to <body>. From a
+    // quota card, back to its button, or to the quota tab once it is gone.
+    const opener = quotaReauthOpenerRef.current;
+    quotaReauthOpenerRef.current = null;
+    quotaFocusHoldRef.current = opener;
+    window.setTimeout(() => (opener ? focusQuotaOpener(opener) : sourceDetailHeadingRef.current?.focus()), 0);
   }, []);
   const closeSubscriptionPicker = React.useCallback(() => {
     subscriptionPickerHandoffRef.current = false;
@@ -1368,9 +1501,6 @@ export const SettingsModelsPage: React.FC = () => {
     if (subscriptionPickerOpen) closeSubscriptionPicker();
     else openSubscriptionPicker();
   }, [closeSubscriptionPicker, openSubscriptionPicker, subscriptionPickerOpen]);
-  React.useEffect(() => () => {
-    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
-  }, []);
 
   return (
     <ModelHubShell
@@ -1427,7 +1557,24 @@ export const SettingsModelsPage: React.FC = () => {
                       route to either record. Frame 09 predates these tabs; it still
                       owns the direct-only body of `sources`. */}
                   <HubTabs tab={tab} onChange={setTab} />
-                  {tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
+                  {tab === 'quota' ? <QuotaTab
+                      quota={quotaRead}
+                      refreshing={refreshingQuota}
+                      onRefresh={refreshQuotaNow}
+                      onRetry={retryQuota}
+                      onRequestReauth={(sourceId) => {
+                        const target = sources.find((source) => source.id === sourceId);
+                        if (target && canReauth(target)) {
+                          quotaReauthOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                          setQuotaReauthSource(target);
+                          return;
+                        }
+                        // Not a Source this page can sign in again: show it instead.
+                        const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                        selectSource({ sourceId, returnFocus: () => opener });
+                      }}
+                    />
+                    : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedAgents} onSwitch={switchToGateway} />
                     : <div className="model-hub-overview">
@@ -1502,12 +1649,6 @@ export const SettingsModelsPage: React.FC = () => {
                                   tabIndex={subscriptionPickerIndex === index ? 0 : -1}
                                   onClick={() => {
                                     subscriptionPickerHandoffRef.current = true;
-                                    // A hub-only vendor opens §1.4 straight into its flow — no
-                                    // chooser phase, so no 去登录 gesture inside the dialog to
-                                    // allocate the provider tab. This click is the journey's only
-                                    // gesture, exactly as the re-auth confirm is, so the tab is
-                                    // handed off here or the handoff is popup-blocked (PD-1).
-                                    if (!hasNativeSubscriptionCustody(vendor)) handOffProviderTab();
                                     setSubscriptionPickerOpen(false);
                                     setSubscriptionVendor(vendor);
                                   }}
@@ -1597,6 +1738,27 @@ export const SettingsModelsPage: React.FC = () => {
           onConnected={subscriptionAdded}
         />
       )}
+      {quotaReauthSource && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => {
+            if (open) return;
+            setQuotaReauthSource(null);
+            const opener = quotaReauthOpenerRef.current;
+            quotaReauthOpenerRef.current = null;
+            if (opener) window.setTimeout(() => focusQuotaOpener(opener), 0);
+          }}
+          title={t('settings.models.repair.reauthTitle', { name: quotaReauthSource.display_name })}
+          description={t(reauthBodyKey(quotaReauthSource))}
+          confirmLabel={t('settings.models.repair.reauthConfirm') as string}
+          destructive={reauthCost(quotaReauthSource) === 'immediate'}
+          onConfirm={() => {
+            const target = quotaReauthSource;
+            setQuotaReauthSource(null);
+            setReauthSource(target);
+          }}
+        />
+      )}
       {reauthSource && (
         <OAuthConnectDialog
           open
@@ -1629,18 +1791,17 @@ export const SettingsModelsPage: React.FC = () => {
           setRouteTarget(null);
           if (target) focusRouteDestination(target);
         }}
-        onManageModel={(action, route) => {
+        onManageModel={(action) => {
           // The catalog dialog is the one writer of the model list; the route
           // dialog steps aside while it edits or removes the model it was
           // showing, then reopens on that model.
           if (!routeTarget) return;
           catalogOriginRef.current = routeTarget;
           setRouteTarget(null);
-          setCatalogFocus({ modelId: routeTarget.modelId, action, route });
+          setCatalogFocus({ modelId: routeTarget.modelId, action });
           setMenuBackend(routeTarget.agent.backend);
         }}
         onCommitted={(result) => routeCommitted(result, routeTarget?.opener ?? null)}
-        commitReconciliation={routeCommitReconciliation}
         onObserved={routeObserved}
         readAgents={readRouteAgents}
         readSources={readRouteSources}

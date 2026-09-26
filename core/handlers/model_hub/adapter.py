@@ -567,6 +567,19 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
+        """Read this subscription's rate-limit windows from the vendor's usage report.
+
+        The engine makes the model-free account call with the bound grant; only
+        the parsed ``{plan, windows}`` crosses this boundary, never the grant or
+        the raw body. ``plan`` is the plan this read named, one without a built-in
+        fee included, or None when it could not name one; only None keeps the
+        last known plan. Raise ``SubscriptionQuotaError`` with a sanitized reason
+        (``auth_expired``, ``rate_limited``, ``unsupported``, ``unavailable`` or
+        ``malformed``) on every failure. A report only: never feeds resolution.
+        """
+        ...
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,

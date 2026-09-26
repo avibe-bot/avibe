@@ -55,6 +55,7 @@ from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, Scenario
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
+    CustodiedNativeOAuthScenarioHarness,
     HubOAuthScenarioHarness,
     HubOAuthStartForm,
     NativeOAuthScenarioHarness,
@@ -1830,6 +1831,63 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started["flow"]["channel"], "native_cli")
         self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
 
+    async def test_hub_owned_native_subscription_create_closes_the_loop(self):
+        """Scenario: AUTH-SETUP-910.
+
+        On an install whose Claude backend is already Hub-routed, adding the
+        Claude subscription "managed by the Agent" must reach the CLI login and
+        end in one native Source. The login runs under the real CLI custody
+        check, so a refusal there is exactly what the user saw as "the model
+        gateway is not responding".
+
+        The CLI finishes and releases its credential lease before any status
+        read commits the Source. Until then the native slot still looks empty,
+        so a second start in that window must not open another login over the
+        credential this one just wrote.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = CustodiedNativeOAuthScenarioHarness(Path(state_dir.name))
+        start = {"vendor": "anthropic", "channel": "native_cli"}
+
+        started = await harness.service.oauth_start(dict(start))
+
+        flow = started["flow"]
+        flow_id = flow["flow_id"]
+        self.assertEqual(flow["channel"], "native_cli")
+        self.assertEqual(flow["presentation"]["auth_url"], harness.auth_url)
+        harness.agent_auth._start_claude_control_flow.assert_awaited_once()
+
+        with self.assertRaises(ModelHubError) as busy:
+            await harness.service.oauth_start(dict(start))
+        self.assertEqual(busy.exception.code, "native_login_in_progress")
+
+        await harness.service.oauth_submit(
+            {"flow_id": flow_id, "value": "auth-code#oauth-state"}
+        )
+        await harness.login_settled(flow_id)
+        self.assertEqual(harness.callbacks, [("auth-code", "oauth-state")])
+        self.assertEqual(V2Config.load().model_hub.sources, [])
+
+        with self.assertRaises(ModelHubError) as occupied:
+            await harness.service.oauth_start(dict(start))
+
+        self.assertEqual(occupied.exception.code, "native_source_already_exists")
+        harness.agent_auth._start_claude_control_flow.assert_awaited_once()
+        (source,) = V2Config.load().model_hub.sources
+        self.assertEqual(occupied.exception.data, {"existing_source_id": source.id})
+        self.assertEqual(source.id, flow["source_id"])
+        self.assertEqual(
+            (source.vendor, source.supply_channel, source.account_label),
+            ("anthropic", "native_cli", "owner@example.com"),
+        )
+        self.assertEqual(source.state.status, "standby")
+
+        completed = await harness.service.oauth_status(flow_id)
+
+        self.assertEqual(completed["flow"]["state"], "success")
+        self.assertEqual(completed["source"]["id"], source.id)
+
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
 
@@ -1917,6 +1975,70 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         agent = harness.service.get_agent_sources("claude")
         self.assertEqual(agent["sources"]["order"], [source.id])
         self.assertEqual(agent["supply_status"], "ok")
+
+    async def test_quota_card_reauth_reaches_a_fresh_quota_reading(self):
+        """Scenario: AUTH-SETUP-909.
+
+        The quota tab is a second entry into Hub re-auth. An expired grant reads
+        `auth_expired`; the same acknowledged re-auth as AUTH-SETUP-109 then
+        commits, and the next quota read reaches the new grant at once instead
+        of waiting out the old failure's refresh interval.
+        """
+        from core.handlers.model_hub.quota import SubscriptionQuotaError
+
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = HubOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig.from_payload(
+            {
+                "id": "src_hubquota01",
+                "created_at": "2026-07-25T00:00:00+00:00",
+                "last_discovered_at": "2026-07-25T00:00:00+00:00",
+                "kind": "subscription",
+                "vendor": "anthropic",
+                "display_name": "Claude Hub subscription",
+                "protocol": "anthropic",
+                "base_url": None,
+                "supply_channel": "hub",
+                "billing": "monthly",
+                "state": {
+                    "status": "needs_action",
+                    "retry_at": None,
+                    "detail_key": "models.source.needs_action.oauth_expired",
+                },
+                "models": [],
+                "credential_ref": "cred_hubold01",
+                "account_label": None,
+                "masked_credential": None,
+            }
+        )
+        harness.store.config.sources.append(source)
+        reads: list[str] = []
+
+        async def subscription_quota(source_id, vendor, credential_ref):
+            reads.append(credential_ref)
+            if credential_ref == "cred_hubold01":
+                raise SubscriptionQuotaError("auth_expired")
+            return {"plan": "max", "windows": [{
+                "id": "five_hour", "kind": "session", "label": "five_hour", "used_pct": 12.0,
+                "window_seconds": 18000, "resets_at": "2026-07-25T05:00:00Z",
+            }]}
+
+        harness.adapter.subscription_quota = subscription_quota
+        expired = (await harness.service.quota_summary())["sources"][0]
+        self.assertEqual(expired["state"], "auth_expired")
+
+        started = await harness.service.reauth_source(source.id, {"acknowledge_irreversible": True})
+        flow_id = started["flow"]["flow_id"]
+        harness.adapter.complete(flow_id)
+        terminal = await harness.service.oauth_status(flow_id)
+        self.assertEqual(terminal["flow"]["state"], "success")
+
+        # Inside the old failure's five-minute interval, an unforced read still reaches the new grant.
+        fresh = (await harness.service.quota_summary())["sources"][0]
+        self.assertEqual(reads, ["cred_hubold01", "cred_consent01"])
+        self.assertEqual(fresh["state"], "ok")
+        self.assertEqual(fresh["windows"][0]["used_pct"], 12.0)
 
     async def test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody(self):
         """Scenario: AUTH-SETUP-115, AUTH-SETUP-116.
@@ -3612,7 +3734,11 @@ def test_hub_oauth_model_free_observation_closed_loop(
         else "sk-ant-oat01-test-valid" if credential_valid else "sk-ant-oat01-test-expired"
     )
     auth_name = "oauth-test.json"
-    grant = {"access_token": bound_token, "refresh_token": "test-refresh-grant"}
+    grant = {
+        "type": "codex" if is_openai else "claude",
+        "access_token": bound_token,
+        "refresh_token": "test-refresh-grant",
+    }
     state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
 
     def management_request(method, path, *, query=None, payload=None):
@@ -3678,6 +3804,8 @@ def test_hub_oauth_model_free_observation_closed_loop(
     async def complete_consent(h):
         flow = adapter.flows[h.flow_id]
         h.credential_ref = state_store.bind_oauth_credential(flow.source_id, vendor, auth_name)
+        grant["prefix"] = state_store.credential_metadata(h.credential_ref)["prefix"]
+        state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
         adapter.flows[h.flow_id] = replace(flow, state="success", credential_ref=h.credential_ref)
 
     async def materialize_source(h):
@@ -3694,7 +3822,10 @@ def test_hub_oauth_model_free_observation_closed_loop(
         assert source["state"]["status"] == "standby"
         assert [model["id"] for model in source["models"]] == ["gpt-5.6"]
         assert service.list_sources() == [source]
-        assert all(secret not in json.dumps(terminal) for secret in grant.values())
+        assert all(
+            grant[key] not in json.dumps(terminal)
+            for key in ("access_token", "refresh_token")
+        )
         assert (await service.oauth_status(h.flow_id))["source"] == source
         assert adapter.revoked == []
         assert len(api_calls) == 1

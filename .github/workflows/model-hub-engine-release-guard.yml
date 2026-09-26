@@ -5,6 +5,8 @@ on:
     branches: [master]
     paths:
       - "vibe/model_hub_runtime/cliproxyapi_manifest.json"
+      - "patches/model-hub-cpa-v7.3.16/**"
+      - "scripts/build_model_hub_engine.py"
       - "scripts/model_hub_engine_release_guard.py"
       - ".github/workflows/model-hub-engine-release-guard.yml"
   schedule:
@@ -21,8 +23,121 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build-patched-source:
+    name: Build patched source assets
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version: "1.26.0"
+
+      - name: Build and verify patched source assets
+        run: |
+          python3 scripts/model_hub_engine_release_guard.py fetch-source \
+            --output-dir "$RUNNER_TEMP/model-hub-engine-patched"
+
+      - name: Upload patched source assets
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: model-hub-engine-patched-source-${{ github.sha }}
+          path: ${{ runner.temp }}/model-hub-engine-patched
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  publish-patched-source:
+    name: Publish patched source assets
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-patched-source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Download verified patched source assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: model-hub-engine-patched-source-${{ github.sha }}
+          path: ${{ runner.temp }}/model-hub-engine-patched
+
+      - name: Verify patched source assets
+        run: |
+          python3 scripts/model_hub_engine_release_guard.py verify \
+            --asset-dir "$RUNNER_TEMP/model-hub-engine-patched"
+
+      - name: Publish or verify the pinned release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="vibe/model_hub_runtime/cliproxyapi_manifest.json"
+          release_tag="$(jq -er '.asset_release_tag' "$manifest")"
+          version="$(jq -er '.version' "$manifest")"
+          asset_dir="$RUNNER_TEMP/model-hub-engine-patched"
+          assets=("$asset_dir"/*)
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json isDraft \
+                --jq '.isDraft'
+            )"
+            declare -A existing_assets=()
+            while IFS= read -r asset_name; do
+              existing_assets["$asset_name"]=1
+            done < <(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json assets \
+                --jq '.assets[].name'
+            )
+
+            missing_assets=()
+            for asset in "${assets[@]}"; do
+              asset_name="${asset##*/}"
+              if [ -z "${existing_assets[$asset_name]:-}" ]; then
+                missing_assets+=("$asset")
+              fi
+            done
+            if [ "${#missing_assets[@]}" -gt 0 ]; then
+              gh release upload "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                "${missing_assets[@]}"
+            else
+              echo "All expected release asset names already exist; preserving their bytes."
+            fi
+            if [ "$is_draft" = "true" ]; then
+              python3 scripts/model_hub_engine_release_guard.py publish-draft \
+                --repo "$GITHUB_REPOSITORY" \
+                --asset-dir "$asset_dir"
+            fi
+          else
+            gh release create "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --latest=false \
+              --title "Avibe Model Hub engine $version" \
+              --notes "Avibe-managed patched CPA assets." \
+              "${assets[@]}"
+          fi
+          python3 scripts/model_hub_engine_release_guard.py fetch \
+            --output-dir "$RUNNER_TEMP/model-hub-engine-published"
+
   guard:
     name: Verify and recover pinned assets
+    if: >-
+      always() &&
+      (github.event_name != 'workflow_dispatch' ||
+      needs.publish-patched-source.result == 'success')
+    needs: [publish-patched-source]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -92,6 +207,12 @@ jobs:
           assets=("$RESTORE_DIR"/*)
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(
+              gh release view "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json isDraft \
+                --jq '.isDraft'
+            )"
             declare -A existing_assets=()
             while IFS= read -r asset_name; do
               existing_assets["$asset_name"]=1
@@ -110,16 +231,25 @@ jobs:
               fi
             done
             if [ "${#missing_assets[@]}" -eq 0 ]; then
-              echo "::error::Every expected asset name exists but verification failed; refusing to overwrite pinned bytes."
-              exit 1
+              if [ "$is_draft" != "true" ]; then
+                echo "::error::Every expected asset name exists but verification failed; refusing to overwrite pinned bytes."
+                exit 1
+              fi
+              echo "All expected names exist on the draft; verifying its bytes before publication."
+            else
+              gh release upload "$release_tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                "${missing_assets[@]}"
             fi
-            gh release upload "$release_tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              "${missing_assets[@]}"
+            if [ "$is_draft" = "true" ]; then
+              python3 scripts/model_hub_engine_release_guard.py publish-draft \
+                --repo "$GITHUB_REPOSITORY" \
+                --asset-dir "$RESTORE_DIR"
+            fi
           else
             gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
+              --target "$GITHUB_SHA" \
               --latest=false \
               --title "Avibe Model Hub engine $version" \
               --notes "Avibe-managed CPA assets recovered from a manifest-verified backup." \

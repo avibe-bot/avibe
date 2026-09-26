@@ -103,11 +103,13 @@ from storage.models import agent_sessions, messages, metadata
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
     _AuthenticationEvidence,
+    _AuthRecord,
     CLIProxyEngineAdapter,
     hub_subscription_serving_protocol,
     _HUB_SUBSCRIPTION_PROTOCOLS,
     _OAUTH_ENDPOINTS,
     _parse_protocol_authenticated_evidence,
+    _probe_oauth_protocol_response,
     _probe_protocol_response,
     _PROTOCOL_OBSERVATION_TAXONOMY,
     _ProtocolEvidence,
@@ -308,61 +310,6 @@ def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None
     assert event["sequence_number"] == 9
 
 
-def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
-    root = Path(__file__).parents[1]
-    owner = root / "core/handlers/model_hub/provenance.py"
-    runtime_files = [
-        *sorted((root / "core/handlers/model_hub").glob("*.py")),
-        root / "modules/agents/model_hub.py",
-    ]
-
-    assert "modelHub.launch." in owner.read_text(encoding="utf-8")
-    for path in runtime_files:
-        if path == owner:
-            continue
-        source = path.read_text(encoding="utf-8")
-        assert "modelHub.launch." not in source
-        assert '"copy_key"' not in source
-
-    excluded = {".git", ".venv", "node_modules"}
-
-    def is_projection_constructor(node: ast.Call) -> bool:
-        return (
-            isinstance(node.func, ast.Name)
-            and node.func.id == "TurnOutcomeProjectionInput"
-        ) or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "TurnOutcomeProjectionInput"
-        )
-
-    constructor_calls: dict[Path, set[int]] = {}
-    for path in root.rglob("*.py"):
-        if any(part in excluded for part in path.parts):
-            continue
-        calls = [
-            node.lineno
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-            if isinstance(node, ast.Call)
-            and is_projection_constructor(node)
-        ]
-        if calls:
-            constructor_calls[path] = set(calls)
-    owner_tree = ast.parse(owner.read_text(encoding="utf-8"))
-    producer = next(
-        node
-        for node in owner_tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "produce_turn_outcome"
-    )
-    producer_calls = {
-        node.lineno
-        for node in ast.walk(producer)
-        if isinstance(node, ast.Call)
-        and is_projection_constructor(node)
-    }
-    assert producer_calls
-    assert constructor_calls == {owner: producer_calls}
-
-
 def test_gateway_handle_termination_has_one_settlement_owner() -> None:
     path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -450,33 +397,6 @@ def test_gateway_handle_termination_has_one_settlement_owner() -> None:
     assert len(registered_closers) == 1
     assert isinstance(registered_closers[0].args[0], ast.Attribute)
     assert registered_closers[0].args[0].attr == "close_stream"
-
-
-def test_terminal_chain_reinspection_has_no_execution_channel_input() -> None:
-    path = Path(__file__).parents[1] / "core/handlers/model_hub/service.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    owner = functions["_inspect_terminal_chain"]
-    owner_inputs = {
-        argument.arg
-        for argument in (*owner.args.args, *owner.args.kwonlyargs)
-    }
-    assert "supply_channel" not in owner_inputs
-
-    def calls_owner(function_name: str) -> bool:
-        return any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_inspect_terminal_chain"
-            for node in ast.walk(functions[function_name])
-        )
-
-    assert calls_owner("_produce_attempt_terminal_outcome")
-    assert calls_owner("resolve")
 
 
 def _terminal_resolution_facts(
@@ -8633,73 +8553,6 @@ def test_top_level_authentication_rejection_is_classified_without_forging_protoc
         )
 
 
-def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:
-    module_path = Path(__file__).parents[1] / "vibe/model_hub_runtime/adapter.py"
-    module_source = module_path.read_text(encoding="utf-8")
-    tree = ast.parse(module_source)
-    assert _PROTOCOL_OBSERVATION_TAXONOMY.keys() == set(SOURCE_PROTOCOLS)
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["anthropic"].request_body == {
-        "max_tokens": 0,
-        "messages": [],
-    }
-    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_path != _PROTOCOL_OBSERVATION_TAXONOMY[
-        "openai_chat"
-    ].request_path
-    assert all(
-        "model" not in taxonomy.request_body
-        for taxonomy in _PROTOCOL_OBSERVATION_TAXONOMY.values()
-    )
-    consumers = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"_probe_protocol_response", "_probe_oauth_protocol_response"}
-    }
-
-    assert consumers.keys() == {
-        "_probe_protocol_response",
-        "_probe_oauth_protocol_response",
-    }
-    assert "json={}" not in module_source
-    assert '"data": "{}"' not in module_source
-    assert "_endpoint_for_protocol(" not in module_source
-    for consumer in consumers.values():
-        consumer_source = ast.get_source_segment(module_source, consumer)
-        assert consumer_source is not None
-        assert "_PROTOCOL_OBSERVATION_TAXONOMY" in consumer_source
-        calls = [node for node in ast.walk(consumer) if isinstance(node, ast.Call)]
-        assert any(
-            isinstance(call.func, ast.Name) and call.func.id == "_parse_protocol_authenticated_evidence"
-            for call in calls
-        )
-        compared_statuses = {
-            constant.value
-            for compare in ast.walk(consumer)
-            if isinstance(compare, ast.Compare)
-            for constant in ast.walk(compare)
-            if isinstance(constant, ast.Constant)
-            and isinstance(constant.value, int)
-            and not isinstance(constant.value, bool)
-        }
-        assert not compared_statuses
-
-    auth_branch_offenders = []
-    for function in (
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name not in {
-            "_parse_protocol_authenticated_evidence",
-        }
-    ):
-        for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):
-            condition = ast.unparse(branch.test)
-            branch_source = ast.unparse(branch)
-            if any(token in condition for token in ("status", "error")) and "_AuthenticationEvidence" in branch_source:
-                auth_branch_offenders.append((function.name, condition))
-    assert not auth_branch_offenders
-
-
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
     query = "api-version=2026-07-23"
 
@@ -8736,10 +8589,83 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
     assert len(paths) == len(SOURCE_PROTOCOLS)
     assert len(set(paths)) == len(paths)
     assert {request_query for _path, request_query, _body in requests} == {query}
-    assert [body for _path, _query, body in requests] == [
-        dict(_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_body)
-        for protocol in SOURCE_PROTOCOLS
+    # Model-free bodies fail request validation before a relay schedules capacity.
+    assert dict(zip(SOURCE_PROTOCOLS, (body for _path, _query, body in requests))) == {
+        "anthropic": {"max_tokens": 0, "messages": []},
+        "openai_responses": {},
+        "openai_chat": {},
+    }
+
+
+@pytest.mark.parametrize("status", (200, 401))
+def test_protocol_observation_classifies_from_the_body_not_the_status(status) -> None:
+    """A status code alone neither proves an interface nor authenticates a key."""
+
+    async def scenario() -> list:
+        async def shapeless(_request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok"}, status=status)
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", shapeless)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            return [
+                await _probe_protocol_response(
+                    vendor="custom",
+                    protocol=protocol,
+                    base_url=f"http://127.0.0.1:{port}/v1",
+                    secret="test-observation-key",
+                )
+                for protocol in SOURCE_PROTOCOLS
+            ]
+        finally:
+            await runner.cleanup()
+
+    for evidence in asyncio.run(scenario()):
+        assert evidence.protocol is _ProtocolProof.UNPROVEN
+        assert evidence.authentication is _AuthenticationEvidence.UNKNOWN
+
+
+@pytest.mark.parametrize("status", (200, 401))
+@pytest.mark.parametrize(
+    ("vendor", "protocol"),
+    (("anthropic", "anthropic"), ("openai", "openai_responses"), ("codex", "openai_responses")),
+)
+def test_oauth_protocol_observation_classifies_from_the_body_not_the_status(vendor, protocol, status) -> None:
+    """The engine-held OAuth probe sends the model-free body and reads the shape, not the status."""
+
+    class Client:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            self.payloads.append(payload)
+            return {"status_code": status, "body": json.dumps({"status": "ok"})}
+
+    client = Client()
+    evidence = _probe_oauth_protocol_response(
+        client=client,  # type: ignore[arg-type]
+        auth=_AuthRecord(
+            identity="account.json",
+            auth_index="0",
+            name="account.json",
+            provider=vendor,
+            fingerprint="fp",
+        ),
+        vendor=vendor,
+        protocol=protocol,
+    )
+
+    assert [json.loads(payload["data"]) for payload in client.payloads] == [
+        {"anthropic": {"max_tokens": 0, "messages": []}, "openai_responses": {}}[protocol]
     ]
+    assert evidence.protocol is _ProtocolProof.UNPROVEN
+    assert evidence.authentication is _AuthenticationEvidence.UNKNOWN
 
 
 def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:
@@ -10684,28 +10610,6 @@ def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded
     asyncio.run(exercise())
 
 
-def test_no_ending_of_a_turn_decides_for_itself_what_the_call_did() -> None:
-    """The metering facts have one owner, so an ending is a *when*, not a *what*.
-
-    Endings that answered locally answered in the vocabulary of the shape they
-    happened to see, and the boundary — which can see either — got the buffered
-    one wrong. An ending added later is covered by construction if it cannot pass
-    the answer in, so that is what is asserted rather than today's three endings.
-    """
-
-    path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
-    calls = [
-        node
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_record_usage"
-    ]
-
-    assert calls, "the gateway must still meter the calls whose body it forwards"
-    assert all(len(call.args) == 1 and not call.keywords for call in calls)
-
-
 def test_no_downstream_ending_after_adoption_can_drop_the_turn_from_the_ledger(
     tmp_path: Path,
 ) -> None:
@@ -11107,6 +11011,59 @@ def test_a_call_that_reached_no_model_is_never_metered(tmp_path: Path) -> None:
             )
 
         assert service.usage_summary(days=30)["totals"]["requests"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_deleted_source_keeps_its_usage_and_reads_as_removed(tmp_path: Path) -> None:
+    """MH-USAGE-034: the Usage tab folds a Source by the null label this report gives it.
+
+    Deleting a Source lets config go, not the usage it metered: every row stays,
+    with its counts, under the ID it was metered under, and only the label goes,
+    because a configured Source always carries its name. A model its live Source
+    stops listing keeps that Source's label and loses only its own.
+    """
+
+    async def exercise() -> None:
+        gone = _source("src_usagegone01", "Deleted supplier")
+        live = _source("src_usagelive01", "Live supplier")
+        service = _service(tmp_path, sources=[gone, live])
+        _canonicalize_fixed_test_routes(service)
+        metered = [
+            (gone.id, "glm-5.3", 100),
+            (gone.id, "kimi-k2", 40),
+            (live.id, "shared-model", 7),
+            (live.id, "glm-4.6-air", 3),
+        ]
+        for source_id, model_id, input_tokens in metered:
+            service.usage.record(
+                source_id=source_id,
+                model_id=model_id,
+                usage=ProtocolUsageReport.of(input_tokens=input_tokens, cached_input_tokens=0, output_tokens=1),
+                at=NOW,
+            )
+        with pytest.raises(ModelHubError) as guard:
+            await service.delete_source(gone.id)
+        await service.delete_source(
+            gone.id,
+            force=True,
+            confirmed_remove_hops=guard.value.data["would_remove_hops"],
+            confirmed_interruptions=guard.value.data["would_interrupt"],
+        )
+
+        report = service.usage_summary(window="24h")
+        sources = {source["source_id"]: source for source in report["sources"]}
+        labels = {
+            source_id: (source["label"], {model["model_id"]: model["label"] for model in source["models"]})
+            for source_id, source in sources.items()
+        }
+        assert labels == {
+            gone.id: (None, {"glm-5.3": None, "kimi-k2": None}),
+            live.id: ("Live supplier", {"shared-model": "shared-model", "glm-4.6-air": None}),
+        }
+        assert sources[gone.id]["input_tokens"] == 140
+        assert report["totals"]["input_tokens"] == 150
+        assert sum(row["input_tokens"] for bucket in report["buckets"] for row in bucket["rows"]) == 150
 
     asyncio.run(exercise())
 

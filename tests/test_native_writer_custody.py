@@ -111,6 +111,31 @@ def test_retained_subscription_requires_matching_source_binding(backend, vendor)
             lease.assert_auth_custody(backend, source_id=source.id)
 
 
+@pytest.mark.parametrize("backend,vendor", [("codex", "openai"), ("claude", "anthropic")])
+def test_hub_backend_admits_creating_the_empty_native_subscription_slot(backend, vendor):
+    saved_config(enabled=False)
+    with NativeCredentialLease((backend,)) as lease:
+        lease.assert_auth_custody(backend, source_id="src_new000001", new_source=True)
+        # Generic Settings/IM login carries no Source to create.
+        for source_id, new_source in ((None, True), ("src_new000001", False)):
+            with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
+                lease.assert_auth_custody(backend, source_id=source_id, new_source=new_source)
+    source = native_source(vendor=vendor)
+    saved_config(source=source)
+    with NativeCredentialLease((backend,)) as lease:
+        # The vendor's single native credential already belongs to a Source.
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
+            lease.assert_auth_custody(backend, source_id="src_new000001", new_source=True)
+    source.supply_channel = "hub"
+    source.credential_ref = "fixture-ref"
+    saved_config(source=source)
+    with NativeCredentialLease((backend,)) as lease:
+        # A Hub Source id cannot be reused as a new native Source.
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_hub_owned"):
+            lease.assert_auth_custody(backend, source_id=source.id, new_source=True)
+        lease.assert_auth_custody(backend, source_id="src_new000001", new_source=True)
+
+
 def test_other_vendor_source_cannot_authorize_backend():
     saved_config(source=native_source(vendor="anthropic"))
     with NativeCredentialLease(("codex",)) as lease:

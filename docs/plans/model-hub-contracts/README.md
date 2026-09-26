@@ -196,7 +196,8 @@ comparison. A gate may not report success by comparing stale input with itself.
 - `tests/test_model_hub_runtime.py`
 - `ui/src/components/settings/models/*.test.*`
 
-`tests/test_model_hub_config.py::test_every_versioned_object_ends_at_the_terminal_version_the_code_writes`
+`scripts/check_model_hub_authorities.py`, run by
+`tests/test_model_hub_config.py::test_model_hub_authority_closure_is_generated_from_live_files`,
 enforces the closure over whatever files this directory holds rather than over this list
 — versioned objects by their shape, and every `contract_version` a document writes as
 text — so an object or declaration added later is covered without an edit here. This
@@ -230,7 +231,8 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `source-probe-result.schema.json` | Explicit API-key Source/model test, without Agent routing, fallback or provider-wide health mutation. |
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, protocol-establishment, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
-| `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
+| `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns, with its list-API-price valuation. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
+| `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report only; carries no grant or raw body. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |

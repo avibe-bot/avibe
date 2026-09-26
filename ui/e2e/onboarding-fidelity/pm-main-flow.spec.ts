@@ -64,6 +64,7 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   const card=page.locator(`[data-setup-screen-root="assistants"] .onboarding-assistant[aria-label="${chosen==='claude'?'Claude Code':'Codex'}"]`);
   await card.getByRole('button',{name:en.onboarding.setup.configureRoute,exact:true}).click();
   const add=()=>page.getByRole('button',{name:en.settings.models.routeDialog.addHop,exact:true});
+  await page.getByRole('radio',{name:en.settings.models.routeDialog.mode.custom,exact:true}).click();
   await add().click();await page.getByRole('option',{name:/gpt-5/}).click();await page.getByRole('button',{name:en.settings.models.routeDialog.add.confirm,exact:true}).click();
   await add().click();await page.getByRole('option',{name:/gpt-4.1/}).click();await page.getByRole('button',{name:en.settings.models.routeDialog.add.confirm,exact:true}).click();
   await page.screenshot({path:info.outputPath('route.png'),fullPage:true});

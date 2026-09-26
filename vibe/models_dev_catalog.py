@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -10,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -19,6 +20,8 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
 
+
+logger = logging.getLogger(__name__)
 
 MODELS_DEV_URL_ENV = "AVIBE_MODELS_DEV_URL"
 DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json"
@@ -201,6 +204,79 @@ def load_models_dev_catalog() -> dict[str, Any]:
             raise RuntimeError("models.dev catalog is unavailable") from None
 
 
+# One background fetch at a time. The claim and the answer to "will one land"
+# are read under one lock, so two readers cannot both start a fetch and no
+# reader can miss one that finished in between.
+_REFRESH_LOCK = threading.Lock()
+_refresh_in_flight = False
+_last_refresh_failed = False
+
+
+def _refresh_in_background() -> bool:
+    """Start a background fetch unless one is running; whether a fetch is expected to land.
+
+    A fetch retried after a failed one is not expected to: the reader says "no
+    price" rather than "fetching" for as long as the network keeps failing.
+    """
+
+    global _refresh_in_flight
+
+    def refresh() -> None:
+        global _refresh_in_flight, _last_refresh_failed
+        failed = True
+        try:
+            # Only the read is locked: request-path readers must not wait on the
+            # network, and the write is atomic on its own.
+            with _CACHE_LOCK:
+                cached = _read_cache()
+            _fetch_catalog(cached)
+            failed = False
+        except Exception:  # noqa: BLE001 - a background refresh has no one to report to
+            logger.debug("models.dev background refresh failed", exc_info=True)
+        finally:
+            with _REFRESH_LOCK:
+                _refresh_in_flight = False
+                _last_refresh_failed = failed
+
+    with _REFRESH_LOCK:
+        expected = not _last_refresh_failed
+        if _refresh_in_flight:
+            return expected
+        _refresh_in_flight = True
+    try:
+        threading.Thread(target=refresh, name="models-dev-refresh", daemon=True).start()
+    except RuntimeError:  # no thread to be had: release the claim, or no fetch ever runs again
+        with _REFRESH_LOCK:
+            _refresh_in_flight = False
+        return False
+    return expected
+
+
+def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None, bool]:
+    """The catalog, when it was fetched, and whether a first copy is on its way.
+
+    For readers on a request path, such as usage valuation, which never wait on
+    the network when a copy exists: a stale cached copy is returned at once and
+    refreshed in the background, since a day-old price table is still the best
+    one there is and the reader shows its date. With no cached copy at all it
+    starts that fetch and returns an empty catalog, so the first read reports
+    nothing as priced rather than holding a page on the network; the third value
+    says a fetch is running that should land, so the reader can read again soon.
+    """
+
+    with _CACHE_LOCK:
+        cached = _read_cache()
+    catalog = _catalog_from_cache(cached) if cached.get("url") == _models_dev_url() else None
+    fetched_at = cached.get("fetched_at")
+    fetched = float(fetched_at) if isinstance(fetched_at, (int, float)) and not isinstance(fetched_at, bool) else None
+    if catalog is not None:
+        age = time.time() - fetched if fetched is not None else None
+        if age is None or not 0 <= age < MODELS_DEV_CACHE_TTL_SECONDS:
+            _refresh_in_background()
+        return catalog, fetched, False
+    return {}, None, _refresh_in_background()
+
+
 def _search_tokens(query: str) -> tuple[str, ...]:
     lowered = query.strip().lower()
     tokens = [lowered]
@@ -283,12 +359,18 @@ def _modalities(model: dict[str, Any], direction: str) -> list[str]:
     )
 
 
-def search_models_dev(query: str) -> list[dict[str, Any]]:
-    tokens = _search_tokens(query)
-    catalog = load_models_dev_catalog()
-    vendor_map = load_model_vendor_map()
-    aggregators = vendor_map["aggregators"]
-    candidates: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+def _catalog_rows(
+    catalog: dict[str, Any],
+    vendor_map: dict[str, Any],
+    admit: Any,
+) -> dict[str, list[tuple[Any, str, dict[str, Any]]]]:
+    """Every admissible catalog copy, grouped by admitted model id.
+
+    ``admit(provider_id, model_id, display_name)`` returns a sort key for a copy
+    worth keeping, or ``None`` to skip it before any normalization work.
+    """
+
+    candidates: dict[str, list[tuple[Any, str, dict[str, Any]]]] = {}
     for provider_key, provider in catalog.items():
         if not isinstance(provider_key, str) or not isinstance(provider, dict):
             continue
@@ -325,7 +407,7 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
             reasoning_efforts = _reasoning_efforts(model)
             if display_name is None or reasoning_efforts is None:
                 continue
-            score = _match_score(tokens, provider_id, model_id, display_name)
+            score = admit(provider_id, model_id, display_name)
             if score is None:
                 continue
             limit = model.get("limit")
@@ -403,23 +485,44 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                 }
             )
             candidates.setdefault(admitted.id, []).append((score, provider_id, row))
+    return candidates
+
+
+def _preferred_copy(
+    model_id: str,
+    copies: list[tuple[Any, str, dict[str, Any]]],
+    vendor_map: dict[str, Any],
+) -> dict[str, Any]:
+    first_party_vendor = _first_party_vendor(model_id, vendor_map)
+    _score, _vendor_id, row = min(
+        copies,
+        key=lambda item: _vendor_rank(
+            item[1],
+            first_party_vendor=first_party_vendor,
+            aggregators=vendor_map["aggregators"],
+        ),
+    )
+    return {**row, "first_party": row["provider_id"] == first_party_vendor}
+
+
+def search_models_dev(query: str) -> list[dict[str, Any]]:
+    tokens = _search_tokens(query)
+    catalog = load_models_dev_catalog()
+    vendor_map = load_model_vendor_map()
+    candidates = _catalog_rows(
+        catalog,
+        vendor_map,
+        lambda provider_id, model_id, display_name: _match_score(
+            tokens, provider_id, model_id, display_name
+        ),
+    )
 
     matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []
     for model_id, copies in candidates.items():
-        first_party_vendor = _first_party_vendor(model_id, vendor_map)
-        _score, _vendor_id, row = min(
-            copies,
-            key=lambda item: _vendor_rank(
-                item[1],
-                first_party_vendor=first_party_vendor,
-                aggregators=aggregators,
-            ),
-        )
-        first_party = row["provider_id"] == first_party_vendor
-        row["first_party"] = first_party
+        row = _preferred_copy(model_id, copies, vendor_map)
         matches.append(
             (
-                not first_party,
+                not row["first_party"],
                 min(item[0] for item in copies),
                 row["display_name"].lower(),
                 model_id,
@@ -428,3 +531,49 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
         )
     matches.sort(key=lambda item: item[:-1])
     return [row for *_, row in matches[:MODELS_DEV_MAX_MATCHES]]
+
+
+def exact_models_dev_matches(
+    model_ids: Iterable[str],
+    catalog: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """The preferred models.dev copy for each id that names one exactly.
+
+    Exact means the full ``provider/model`` identity or, failing that, the bare
+    model id — the id as given or a relay's last path segment — spelled
+    identically. No case, punctuation, or alias folding and no substring hits:
+    this answer is applied without the user choosing it, so any looser rule
+    lets a near neighbour silently describe a different model.
+    """
+
+    wanted: dict[str, list[str]] = {}
+    for model_id in dict.fromkeys(model_ids):
+        for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
+            wanted.setdefault(key, []).append(model_id)
+    if not wanted or not catalog:
+        return {}
+    vendor_map = load_model_vendor_map()
+    by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+
+    def admit(provider_id: str, model_id: str, _display_name: str):
+        hits = [(0, requested) for requested in wanted.get(f"{provider_id}/{model_id}", ())]
+        hits += [(1, requested) for requested in wanted.get(model_id, ())]
+        return hits or None
+
+    for copies in _catalog_rows(catalog, vendor_map, admit).values():
+        for hits, provider_id, row in copies:
+            for requested in dict.fromkeys(requested for _rank, requested in hits):
+                rank = min(rank for rank, other in hits if other == requested)
+                by_request.setdefault(requested, []).append((rank, provider_id, row))
+    matches: dict[str, dict[str, Any]] = {}
+    for requested, copies in by_request.items():
+        best = min(rank for rank, _provider, _row in copies)
+        closest = [copy for copy in copies if copy[0] == best]
+        # Every closest copy names one catalog model id, so the family that
+        # decides first-party ownership is read off the catalog row.
+        matches[requested] = _preferred_copy(
+            closest[0][2]["model_id"],
+            closest,
+            vendor_map,
+        )
+    return matches

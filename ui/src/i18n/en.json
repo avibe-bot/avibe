@@ -917,6 +917,7 @@
         },
         "tab": {
           "hub": "Sources & gateway",
+          "quota": "Subscription quota",
           "usage": "Usage",
           "logs": "Logs"
         }
@@ -1043,6 +1044,8 @@
           "reorder": "Reorder {{model}}",
           "removeConfirm": "Remove",
           "removeTitle": "Remove {{model}}?",
+          "guardTitle": "Save the model list?",
+          "guardSubtitle": "Removing these models also removes their routes.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
@@ -1268,22 +1271,16 @@
           "passthrough": "Passthrough",
           "unconfigured": "Unconfigured"
         },
-        "originNow": "Current",
         "help": {
           "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
           "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the upstream to handle.",
           "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
         },
-        "frozen": "This model uses a saved, fixed route",
-        "follows": "Follows {{backend}} default routing",
+        "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
         "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
-        "editHint": "Editing and saving gives this model a manual route.",
-        "restoreAutomatic": "Restore automatic",
-        "undoRestore": "Undo restore",
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
-        "afterSave": "Route after saving",
         "preview": {
           "automatic": "After restore: automatic matching",
           "passthrough": "After restore: original-name passthrough",
@@ -1295,15 +1292,14 @@
         "noDefaults": "No default provider can route this model. Add a matching provider or an eligible API-key provider.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
-        "defaultRouting": "Default routing",
         "close": "Close",
-        "pinRoute": "Pin current route",
         "cancelChanges": "Cancel changes",
         "manualPending": "After saving, this model will use a manual route and no longer follow default routing.",
         "exactModel": "Exact model ID",
         "moveUp": "Move source up",
         "moveDown": "Move source down",
-        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes"
+        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
+        "errorShort": "Error"
       },
       "order": {
         "title": "{{backend}} · Default routing",
@@ -1350,15 +1346,165 @@
         "needs_action": "Needs attention",
         "error": "Needs attention"
       },
+      "quota": {
+        "title": "Subscription quota",
+        "header_one": "{{count}} signed-in subscription account",
+        "header_other": "{{count}} signed-in subscription accounts",
+        "autoRefresh": "Refreshes every 5 minutes",
+        "refresh": "Refresh now",
+        "refreshing": "Refreshing…",
+        "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Sources & gateway to see its quota here.",
+        "left": "left",
+        "window": {
+          "session": "5-hour limit",
+          "weekly": "Weekly limit",
+          "model": "{{model}} weekly limit",
+          "span": {
+            "hours": "{{hours}}-hour",
+            "days": "{{days}}-day"
+          }
+        },
+        "hint": {
+          "shared": "Shared by all models",
+          "model": "Counts {{model}} only"
+        },
+        "scoped": {
+          "title": "Per-model limits",
+          "note": "These models also count toward the weekly limit; whichever runs out first pauses use"
+        },
+        "pace": {
+          "ok": "Lasts until reset",
+          "slightlyFast": "A little fast, still lasts until reset",
+          "fast": "Running fast, expected to run out in {{duration}}",
+          "exhausted": "Used up, back in {{duration}}",
+          "exhaustedUnknown": "Used up",
+          "paused": "Updates paused",
+          "reset": "Reset"
+        },
+        "reset": {
+          "in": "Resets in {{duration}}",
+          "done": "Reset, waiting for refresh"
+        },
+        "meter": "{{label}}: {{pct}}% used",
+        "status": {
+          "ok": "Available",
+          "exhausted": "{{label}} used up",
+          "reauth": "Sign in again",
+          "paused": "Updates paused"
+        },
+        "stale": {
+          "authExpired": "Sign-in expired; showing data from {{ago}}",
+          "retained": "Can't read the latest quota; showing data from {{ago}}",
+          "reauth": "Sign in again"
+        },
+        "unread": {
+          "auth_expired": "Sign-in expired; quota unavailable",
+          "unsupported": "This subscription doesn't report quota",
+          "error": "Quota unavailable right now; retrying automatically"
+        },
+        "ago": {
+          "minutes_one": "{{count}} minute ago",
+          "minutes_other": "{{count}} minutes ago",
+          "long": "{{duration}} ago"
+        },
+        "duration": {
+          "days": "{{days}}d {{hours}}h",
+          "daysOnly": "{{days}}d",
+          "hours": "{{hours}}h {{minutes}}m",
+          "hoursOnly": "{{hours}}h",
+          "minutes": "{{minutes}}m"
+        },
+        "stat": {
+          "tightest": "Lowest remaining limit",
+          "tightestAllSpent": "Every limit is used up",
+          "tightestUnread": "No current reading yet",
+          "exhausted": "Used up",
+          "exhaustedUnit": "limits",
+          "exhaustedNone": "Every account is usable",
+          "exhaustedNoneObserved": "None used up in current readings",
+          "exhaustedNote": "{{name}} · back in {{duration}}",
+          "resetsIn": "resets in {{duration}}",
+          "weekValue": "Last 7 days at API price",
+          "weekValueNote": "All subscription use, at the vendors’ published API prices",
+          "payback": "Paid back this period",
+          "paybackMultiple": "{{multiple}}×",
+          "paybackUnit": "the monthly fee",
+          "paybackPaid": "Paid back, {{amount}} ahead",
+          "paybackShort": "{{amount}} to pay back",
+          "paybackShortUnknown": "Some usage has no price, so the gap isn’t shown",
+          "paybackRolling": "Accounts without a renewal day use the last 30 days",
+          "paybackPartial_one": "{{count}} account with an unknown plan left out",
+          "paybackPartial_other": "{{count}} accounts with an unknown plan left out",
+          "paybackUnknown": "Plan unknown, so payback isn’t shown"
+        },
+        "upcoming": "Resetting soon",
+        "footnote": "The bar is the part used; the thin mark is how much of this period has passed. A bar past the mark is spending faster than time.",
+        "pending": "Reading quota…",
+        "footnoteValue": "“At API price” is what the same use would cost at the vendor’s published API price — a way to judge the plan, not a charge.",
+        "priceTableDate": "Price table from {{date}}.",
+        "priceTableUnknown": "Price table date unknown.",
+        "priceTableFetching": "Fetching the price table…",
+        "value": {
+          "week": "Last 7 days at API price",
+          "period": {
+            "billing_cycle": "This cycle at API price",
+            "rolling_30d": "Last 30 days at API price"
+          },
+          "noPrice": "No price yet",
+          "fetching": "Fetching prices…",
+          "paid": "Paid back {{multiple}}×",
+          "even": "Just paid back",
+          "short": "{{amount}} to pay back",
+          "shortUnknown": "Not all usage is priced, so the gap isn’t shown",
+          "renews": "Next renewal",
+          "renewsIn_one": "in {{count}} day",
+          "renewsIn_other": "in {{count}} days",
+          "excluded": "{{tokens}} tokens have no price and are left out"
+        },
+        "plan": {
+          "openai": {
+            "free": "Free",
+            "go": "Go",
+            "plus": "Plus",
+            "pro": "Pro",
+            "prolite": "Pro 5x",
+            "pro_5x": "Pro 5x",
+            "team": "Team",
+            "business": "Business",
+            "enterprise": "Enterprise",
+            "edu": "Edu"
+          },
+          "anthropic": {
+            "pro": "Pro",
+            "max_5x": "Max 5x",
+            "max_20x": "Max 20x",
+            "team": "Team",
+            "enterprise": "Enterprise"
+          }
+        }
+      },
       "usage": {
         "title": "Usage",
         "detail": "Metered tokens from the turns the gateway proxied, by local day.",
         "window": {
           "label": "Window",
-          "option": "{{days}}d"
+          "option": "{{days}}d",
+          "24h": "24 hours",
+          "7d": "7 days",
+          "30d": "30 days",
+          "60d": "60 days"
         },
         "range": "{{from}} – {{to}} · trailing {{days}} days",
-        "empty": "Nothing metered yet. A window fills once a gateway source serves a request.",
+        "empty": {
+          "report": {
+            "title": "No usage in this window",
+            "body": "The gateway has not recorded a request in the selected time range."
+          },
+          "filter": {
+            "title": "No matching usage",
+            "body": "Try another Source or model, or reset the filters."
+          }
+        },
         "blank": "—",
         "tokens": {
           "label": "Tokens",
@@ -1367,6 +1513,7 @@
         },
         "requests": {
           "label": "Requests",
+          "unit": "requests",
           "reported": "Every request reported its tokens",
           "shortfall_one": "{{count}} request came back with no token report",
           "shortfall_other": "{{count}} requests came back with no token report"
@@ -1400,6 +1547,140 @@
           "quiet": "No day in this window carried a metered turn",
           "unreported": "Requests ran, but no day reported its tokens",
           "zero": "Every day that reported its tokens reported zero"
+        },
+        "metric": {
+          "label": "Metric",
+          "tokens": "All tokens",
+          "input": "Input (including cache)",
+          "output": "Output",
+          "cache": "Cache reads",
+          "requests": "Requests",
+          "cost": "At API price"
+        },
+        "filters": {
+          "source": "Source",
+          "model": "Model",
+          "all": "All {{label}}",
+          "selected_one": "{{label}} · {{count}} selected",
+          "selected_other": "{{label}} · {{count}} selected",
+          "search": "Search {{label}}",
+          "noMatch": "No matching options",
+          "hint": "Multi-select updates the report",
+          "reset": "Reset filters",
+          "allSources": "All sources",
+          "allModels": "All models",
+          "sourceCount_one": "{{count}} source",
+          "sourceCount_other": "{{count}} sources",
+          "modelCount_one": "{{count}} model",
+          "modelCount_other": "{{count}} models"
+        },
+        "stats": {
+          "tokens": "All tokens",
+          "requests": "Requests",
+          "cached": "Cached input share",
+          "tokenSplit": "{{input}} input · {{output}} output",
+          "shortfall_one": "{{count}} request has no token report",
+          "shortfall_other": "{{count}} requests have no token report",
+          "allReported": "Every request reported tokens",
+          "cacheUnknown": "No measured input available",
+          "cacheSplit": "{{cached}} cached of {{input}} input",
+          "cost": "At API price"
+        },
+        "unknownTokens": "Some requests have no token report; token values are unavailable",
+        "partialHistory": "Some buckets have incomplete history",
+        "historicalHourly": "Includes historical usage without hourly time",
+        "unknownModel": "Unknown model",
+        "removedSources": "Removed providers",
+        "removedSourcesHint": "Usage kept after these providers were deleted",
+        "removedModel": "Removed",
+        "granularity": {
+          "hour": "hourly",
+          "day": "daily"
+        },
+        "group": {
+          "label": "Group",
+          "total": "Total",
+          "type": "Token type",
+          "model": "Model",
+          "source": "Source"
+        },
+        "series": {
+          "input": "Input (non-cache)",
+          "cache": "Cache reads",
+          "output": "Output",
+          "requests": "Requests"
+        },
+        "chart": {
+          "title": "Usage trend",
+          "subtitle": "Exact counts by the selected time bucket",
+          "aria": "{{kind}} usage trend",
+          "lines": "line",
+          "bars": "stacked bar",
+          "bucket": "Usage bucket {{bucket}}",
+          "detail": "Usage bucket details",
+          "legend": "Chart legend",
+          "pin": "Pin this bucket",
+          "unpin": "Unpin this bucket",
+          "pinned": "Pinned",
+          "currentPartial": "Current partial hour",
+          "complete": "History complete",
+          "partial": "Partial history",
+          "points_one": "{{count}} {{granularity}} point",
+          "points_other": "{{count}} {{granularity}} points",
+          "legendOnly": "Legend visibility only changes the chart",
+          "interaction": "Hover or focus a bucket · click for details"
+        },
+        "table": {
+          "title": "Exact usage details",
+          "range": "The table uses the same filters as the chart",
+          "bucket": "Showing {{bucket}}",
+          "allBuckets": "View all buckets",
+          "group": "Table grouping",
+          "byModel": "By model",
+          "bySource": "By source",
+          "export": "Export CSV",
+          "identity": "Model / source",
+          "requests": "Requests",
+          "input": "Input",
+          "nonCache": "Non-cache input",
+          "cache": "Cache reads",
+          "output": "Output",
+          "tokens": "All tokens",
+          "share": "Share",
+          "sortAscending": "{{metric}}: Sorted ascending",
+          "sortDescending": "{{metric}}: Sorted descending",
+          "total": "Total",
+          "empty": "No matching usage",
+          "accounting": "All tokens = input + output. Cache reads are included in input and shown separately."
+        },
+        "csv": {
+          "bucketKey": "Bucket key",
+          "startAt": "Start at",
+          "endAt": "End at",
+          "historyComplete": "History complete",
+          "sourceId": "Source ID",
+          "modelId": "Model ID",
+          "ledgerKey": "Internal ledger key",
+          "sourceLabel": "Source",
+          "modelLabel": "Model",
+          "tokenReports": "Token reports",
+          "inputTokens": "Input tokens",
+          "nonCachedInputTokens": "Non-cache input tokens",
+          "cachedInputTokens": "Cached input tokens",
+          "outputTokens": "Output tokens",
+          "totalTokens": "Total tokens"
+        },
+        "failure": "The usage report could not be read.",
+        "retry": "Retry",
+        "cost": {
+          "notBilled": "At published API prices, not a charge",
+          "noPrice": "No price yet",
+          "fetching": "Fetching prices…",
+          "excluded_one": "{{tokens}} token has no price and is left out",
+          "excluded_other": "{{tokens}} tokens have no price and are left out",
+          "tableDate": "Price table from {{date}}",
+          "tableDateUnknown": "Price table date unknown",
+          "tableFetching": "Fetching the price table…"
         }
       },
       "supplyTooltip": {
@@ -1468,7 +1749,6 @@
         "open": "Open {{model}} route chain",
         "openWithMapping": "Open {{model}} route chain · {{mapping}}",
         "label": "Route chain for this model",
-        "section": "Route chain for this model",
         "removeHop": "Remove hop",
         "editHop": "Edit hop",
         "addHop": "Add a hop",
@@ -1503,7 +1783,6 @@
         "cancel": "Cancel",
         "save": "Save",
         "saving": "Saving route chain…",
-        "refreshing": "Route chain saved. Refreshing…",
         "fail": {
           "read": "The route chain could not be read",
           "save": "The route chain was not saved",
@@ -1513,12 +1792,19 @@
         "retry": "Retry",
         "empty": "This model follows default routing, but no eligible provider can route it.",
         "impact": {
-          "title": "The route chain was saved",
-          "detail": "These are the items this save actually removed or interrupted.",
-          "refreshFail": "The route chain was saved, but the display could not be refreshed.",
-          "done": "Done"
+          "refreshFail": "The route chain was saved, but the display could not be refreshed."
         },
-        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it."
+        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it.",
+        "mode": {
+          "label": "Routing mode",
+          "follow": "Follow defaults",
+          "custom": "Custom",
+          "undo": "Undo",
+          "viewDefaults": "View default routing",
+          "adjustDefaults": "Adjust default routing"
+        },
+        "hopActions": "Hop actions",
+        "modelActions": "Model actions"
       },
       "recent": {
         "title": "Recent switches",
@@ -1702,11 +1988,6 @@
         "noSources": "On the gateway · no source enabled yet, the next turn will fail",
         "nothingRunnable": "On the gateway · no enabled source can serve right now, the next turn will fail"
       },
-      "adoption": {
-        "enabled": "Added to {{list}}",
-        "route": "{{backend}} · {{model}} · hop {{position}}",
-        "none": "Connected. Add it to a model's route when you want to use it."
-      },
       "supplyMode": {
         "title": "Supply mode",
         "currentHub": "Current: Gateway",
@@ -1785,8 +2066,11 @@
       },
       "sourceTest": {
         "open": "Test",
+        "testNow": "Test now",
         "title": "Test {{source}}",
         "hint": "Send one short request using this provider and the selected model. This can incur a small charge. The result applies only to this model.",
+        "cooldownHint": "A successful test makes this provider available again right away.",
+        "stillUnavailable": "The provider is still marked unavailable.",
         "model": "Test model",
         "empty": "No models available. Close this dialog to fetch the list or add a model ID manually.",
         "run": "Run test",
@@ -2143,6 +2427,15 @@
       },
       "error": {
         "unclassified": "Unknown error — temporarily unavailable"
+      }
+    },
+    "quota": {
+      "error": {
+        "auth_expired": "Sign-in expired",
+        "rate_limited": "The provider is limiting quota reads",
+        "unsupported": "This subscription doesn't report quota",
+        "unavailable": "Quota unavailable right now",
+        "malformed": "The provider returned an unreadable quota report"
       }
     }
   },

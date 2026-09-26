@@ -129,6 +129,7 @@ def _claude_stop_case():
     agent = object.__new__(ClaudeAgent)
     agent.claude_sessions = {composite_key: SimpleNamespace(interrupt=AsyncMock())}
     agent._pending_requests = {}
+    agent._synthetic_pending_owners = {}
     agent._suppress_receiver_runtime_release = set()
     agent._cleanup_runtime_session = AsyncMock()
     agent._mark_session_idle_if_no_pending_requests = lambda _key: True

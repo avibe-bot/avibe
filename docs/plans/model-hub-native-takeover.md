@@ -344,7 +344,12 @@ reintroduce credentials after a successful handoff. The correction covers
 every Avibe writer of those shared documents for the full read-modify-write
 duration. Authentication writes also consult persisted Direct/native-Source
 ownership after acquiring the lease; stopping the Hub runtime does not hand
-custody back. Non-authentication edits may continue under the shared lease.
+custody back. A Hub-owned backend admits a native login only for its bound
+native Source, or for an explicit Model Hub create while that vendor's single
+native slot is empty and the new Source id is unused; generic Settings and IM
+login stay refused. That slot stays claimed from the start until the finished
+create is committed as a Source: the next native start commits it or waits,
+because the CLI lease ends before the Source exists. Non-authentication edits may continue under the shared lease.
 Claude's interrupted-OAuth settings backup is included in the migration
 inventory and cleanup, so constructor recovery cannot restore a replaced key.
 This scope preserves legacy native subscription Sources until explicit

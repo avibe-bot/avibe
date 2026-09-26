@@ -1108,6 +1108,7 @@ def test_source_sync_keeps_uncommitted_inputs_and_nested_artifact_fixtures(tmp_p
         "draft.py", "新目录/未提交.py",
         "fixtures/vibe/_version.py", "fixtures/vibe/show_runtime_manifest.json",
         "fixtures/.bot.pid", "fixtures/.gstack/example", "fixtures/.tmp/example",
+        "fixtures/desktop/target/example", "desktop/src/main.rs",
     ]
     (source / ".gitignore").write_text("draft.py\n")
     for relative in inputs:
@@ -1119,6 +1120,41 @@ def test_source_sync_keeps_uncommitted_inputs_and_nested_artifact_fixtures(tmp_p
 
     assert all(not incus_regression.should_exclude(relative) for relative in inputs)
     assert all((deployed / relative).read_text() == "source fixture" for relative in inputs)
+
+
+@pytest.mark.parametrize("shape", ["directory", "symlink", "dangling-symlink"])
+def test_source_sync_omits_desktop_builds_and_removes_stale_copies(tmp_path, monkeypatch, shape):
+    """Build output is host-only, including links to external or missing trees."""
+    source, deployed, outside = (tmp_path / name for name in ("source", "deployed", "outside"))
+    for root in (source, deployed, outside):
+        root.mkdir()
+    sentinel = outside / "artifact"
+    sentinel.write_text("external build output")
+    host = source / "desktop/target"
+    receiver = deployed / "desktop/target"
+    for entry in (host, receiver):
+        entry.parent.mkdir()
+        if shape == "directory":
+            entry.mkdir()
+            (entry / "artifact").write_text("local build output")
+        else:
+            entry.symlink_to(outside if shape == "symlink" else outside / "missing", target_is_directory=True)
+    host_before = host.lstat()
+    sentinel_before = sentinel.stat()
+
+    local_source_sync(monkeypatch, source, deployed)
+
+    assert not os.path.lexists(receiver)
+    assert incus_regression.should_exclude("desktop/target")
+    assert incus_regression.should_exclude("desktop/target/debug/artifact")
+    assert host.lstat().st_ino == host_before.st_ino
+    assert host.lstat().st_ctime_ns == host_before.st_ctime_ns
+    if shape == "directory":
+        assert (host / "artifact").read_text() == "local build output"
+    else:
+        assert host.readlink() == (outside if shape == "symlink" else outside / "missing")
+    assert sentinel.read_text() == "external build output"
+    assert sentinel.stat().st_ctime_ns == sentinel_before.st_ctime_ns
 
 
 def test_source_sync_leaves_only_empty_parents_of_excluded_caches(tmp_path, monkeypatch):

@@ -17,6 +17,27 @@ afterEach(() => {
   resetEditorFontSize();
 });
 
+describe('FilePreview media', () => {
+  it.each([
+    ['voice.wav', 'audio'],
+    ['clip.mp4', 'video'],
+  ])('plays %s with a native <%s> pointed at the content URL', (name, tag) => {
+    const { container } = render(<FilePreview source={{ name, url: '/api/media/tok' }} />);
+    const el = container.querySelector<HTMLMediaElement>(tag);
+    expect(el?.getAttribute('src')).toBe('/api/media/tok');
+    expect(el?.hasAttribute('controls')).toBe(true);
+  });
+
+  it('falls back to the failure message when the browser cannot load the media', () => {
+    const { container } = render(<FilePreview source={{ name: 'voice.wav', url: '/api/media/tok' }} />);
+    act(() => {
+      container.querySelector('audio')?.dispatchEvent(new Event('error'));
+    });
+    expect(container.querySelector('audio')).toBeNull();
+    expect(container.textContent).toContain('preview.failed');
+  });
+});
+
 describe('FilePreview font size', () => {
   it('tracks the Editor font-size preference for Markdown previews', () => {
     const { container } = render(

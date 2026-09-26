@@ -126,12 +126,13 @@ export const blankBackendModel = (): BackendModel => ({
 /**
  * A picked candidate, poured into a draft row.
  *
- * Copies exactly the three values the server proposed (C2) and leaves every
- * other field unstated. That asymmetry is the contract: the proposal covers what
- * the product already knows about the model — its label and the efforts its
- * suppliers accept — and the rest stays empty until the user fills it, because
- * `PUT` stores the request literally and an invented context window would
- * persist as if the user had stated it.
+ * Copies exactly the values the server proposed (C2) and leaves every other
+ * field unstated. That asymmetry is the contract: the proposal covers what the
+ * product already knows about the model — its label, the efforts its suppliers
+ * accept, and the exact models.dev description when one names this id — and the
+ * rest stays empty until the user fills it, because `PUT` stores the request
+ * literally and an invented context window would persist as if the user had
+ * stated it.
  *
  * Unstated, NOT the blank floor. The blank floor's `text`/`text`/tools-on/
  * reasoning-off belong to a row the editor is about to show, where they are on
@@ -153,6 +154,17 @@ export const candidateBackendModel = (candidate: ModelCandidate): BackendModel =
   origin: candidate.origin,
   reasoning_efforts: [...candidate.reasoning_efforts],
   ...(candidate.native_protocol ? { native_protocol: candidate.native_protocol } : {}),
+  ...(candidate.models_dev_id
+    ? {
+        models_dev_id: candidate.models_dev_id,
+        context_window: candidate.context_window ?? null,
+        max_output_tokens: candidate.max_output_tokens ?? null,
+        input_modalities: [...(candidate.input_modalities ?? [])],
+        output_modalities: [...(candidate.output_modalities ?? [])],
+        supports_tools: candidate.supports_tools ?? null,
+        supports_reasoning: candidate.supports_reasoning ?? null,
+      }
+    : {}),
 });
 
 /**
@@ -454,70 +466,6 @@ export const sameBackendModel = (left: BackendModel, right: BackendModel): boole
 export const sameCatalog = (left: readonly BackendModel[], right: readonly BackendModel[]): boolean =>
   left.length === right.length && left.every((model, index) => sameBackendModel(model, right[index]));
 
-/** A value written so that two equal values always read the same: object keys in
- *  one fixed order, absent and undefined fields spelled the same way. */
-const canonicalJson = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const fields = Object.entries(value as Record<string, unknown>)
-      .filter(([, field]) => field !== undefined)
-      .sort(([left], [right]) => (left < right ? -1 : 1));
-    return `{${fields.map(([key, field]) => `${JSON.stringify(key)}:${canonicalJson(field)}`).join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
-};
-
-/**
- * Whether two halves of a guard plan name the same consequences, in whatever
- * order each of them happens to list them.
- *
- * It exists for one decision and produces nothing that is sent: it answers
- * 「is the server's refusal the one the user already confirmed?」, so a retry
- * that would ask the same question twice can be automatic instead. The arrays
- * the client echoes with `force` are always the server's own, verbatim and in
- * the server's order (C3) — which is exactly why comparing as a set is safe
- * here. Both orders are legitimate: the client's preview follows the order the
- * user clicked, the server's follows its own walk of the baseline, and neither
- * is a disagreement about what would happen.
- *
- * Only that outer list is read as a set. A list nested inside one element — a
- * gap's `agents`, say — has no such story: one side produced it, so an order
- * that differs there is a real change and the user is asked again. Strictness
- * costs a question; laxity would skip one.
- */
-export const samePlanContents = (left: readonly unknown[], right: readonly unknown[]): boolean =>
-  left.length === right.length
-  && sameList(left.map(canonicalJson).sort(), right.map(canonicalJson).sort());
-
-/**
- * Whether a stored guard refusal may still be echoed back with `force`.
- *
- * `force` is the client saying 「the user has been shown this consequence and
- * still wants it」, and two independent things have to be true before it can
- * say that honestly. `owed` empty is the acceptance: every removal the server
- * refused has been put to the user and confirmed. The two catalogs are the
- * subject: the refusal answers *this* save — same starting point, same request
- * — and not a later, different one.
- *
- * Neither implies the other, so neither alone is enough. A refusal the user
- * never answered must not be forced however exactly its catalogs match, and an
- * accepted one must not be carried onto a save it was never about. Either way
- * the fallback is the same and is not a failure: the save goes out unforced and
- * the server asks again.
- */
-export const echoableRefusal = (
-  refusal: {
-    baseline: readonly BackendModel[];
-    models: readonly BackendModel[];
-    owed: ReadonlySet<string>;
-  } | null,
-  baseline: readonly BackendModel[],
-  requested: readonly BackendModel[],
-): boolean => refusal !== null
-  && refusal.owed.size === 0
-  && sameCatalog(refusal.baseline, baseline)
-  && sameCatalog(refusal.models, requested);
-
 export type BackendCatalogIntent = {
   removed: ReadonlySet<string>;
   /** Rows this caller added or changed, keyed by id. */
@@ -543,41 +491,6 @@ export const backendCatalogIntent = (
     }),
     order: draft.map((model) => model.id),
   };
-};
-
-/**
- * An order with cancelled removals put back where they were.
- *
- * A removal the server refuses was never a decision, so undoing it may not cost
- * the row its place: the requested order is the list with the row already gone,
- * and appending it back would answer 「are you sure?」 with a reordered catalog
- * the user never asked for. The baseline is what says where it belongs — each
- * restored id goes back after its nearest baseline predecessor that is still on
- * screen, or at the front when it had none — so a removal that is cancelled
- * leaves the draft byte-identical to the baseline, and the position is recovered
- * from the two lists rather than from a snapshot somebody has to remember to
- * take.
- *
- * Only the restored ids move. Anything else the user did to the order is a
- * separate edit the refusal said nothing about, and an independent reorder is
- * still theirs afterwards — which is why the baseline is read for positions
- * rather than replayed as the order. Walking the baseline in its own order is
- * what keeps two restored neighbours in their original sequence, since the
- * earlier one is on screen by the time the later one looks for its anchor.
- */
-export const orderWithRestored = (
-  requested: readonly string[],
-  baseline: readonly string[],
-  restored: ReadonlySet<string>,
-): string[] => {
-  const order = requested.filter((id) => !restored.has(id));
-  const before = new Map(baseline.map((id, index) => [id, baseline.slice(0, index)]));
-  for (const id of baseline) {
-    if (!restored.has(id)) continue;
-    const anchor = [...(before.get(id) ?? [])].reverse().find((previous) => order.includes(previous));
-    order.splice(anchor === undefined ? 0 : order.indexOf(anchor) + 1, 0, id);
-  }
-  return order;
 };
 
 /**

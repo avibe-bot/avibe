@@ -168,7 +168,7 @@ describe('Model Hub visual token policy', () => {
       return values;
     };
     expect(declarations('.model-hub-route-hop')).toMatchObject({
-      'min-height': 'var(--model-hub-route-hop-height)', height: 'auto', padding: '6px 10px',
+      'min-height': 'var(--model-hub-route-hop-height)', height: 'auto', padding: '6px 8px',
     });
     for (const selector of ['.model-hub-route-hop-name', '.model-hub-route-hop-model']) {
       expect(declarations(selector)).toMatchObject({ 'overflow-wrap': 'anywhere', 'white-space': 'normal' });

@@ -9,7 +9,6 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { ApiCallError, modelsApi, type OAuthResult } from './modelsApi';
-import { disposeProviderTab } from './providerTab';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -20,8 +19,6 @@ import type { Source } from './types';
 
 afterEach(() => {
   cleanup();
-  disposeProviderTab('cleanup');
-  disposeProviderTab('cleanup');
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -60,19 +57,6 @@ const dialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> 
 
 const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
   render(dialog(props));
-
-const providerTab = () => {
-  const tab = {
-    closed: false,
-    close: vi.fn(),
-    opener: {} as unknown,
-    location: { href: '' },
-  };
-  tab.close.mockImplementation(() => {
-    tab.closed = true;
-  });
-  return tab;
-};
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -138,10 +122,32 @@ describe('add-subscription start recovery', () => {
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
   });
 
-  it('keeps the Retry tab across effect cleanup and navigates the replacement flow', async () => {
+  it('leaves the provider page to the user: sign-in opens no window and offers the link to click or copy', async () => {
+    const authUrl = 'https://provider.example/authorize?code=1';
+    const open = vi.spyOn(window, 'open');
+    vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue({
+      flow_id: 'oaf_manual',
+      client_nonce: 'ofn_manual',
+      vendor: 'anthropic',
+      channel: 'native_cli',
+      state: 'awaiting_action',
+      presentation: { expects: 'paste_code', auth_url: authUrl },
+      expires_at: '2099-01-01T00:00:00Z',
+    });
+    renderDialog();
+
+    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+
+    const link = await screen.findByRole('link', { name: authUrl });
+    expect(link.getAttribute('href')).toBe(authUrl);
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(screen.getByRole('button', { name: /^Copy$|^复制$/i })).toBeTruthy();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('shows the replacement flow\'s link after Retry without opening a window', async () => {
     const authUrl = 'https://provider.example/retry';
-    const tab = providerTab();
-    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const open = vi.spyOn(window, 'open');
     const reauth = vi
       .spyOn(modelsApi, 'reauthSource')
       .mockRejectedValueOnce(new ApiCallError('engine_down'))
@@ -159,62 +165,54 @@ describe('add-subscription start recovery', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(tab.location.href).toBe(authUrl));
-    expect(tab.close).not.toHaveBeenCalled();
+    expect((await screen.findByRole('link', { name: authUrl })).getAttribute('href')).toBe(authUrl);
+    expect(open).not.toHaveBeenCalled();
   });
+});
 
-  it('disposes the blank tab when acquisition is refused', async () => {
-    const tab = providerTab();
-    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
-    vi.spyOn(modelsApi, 'startOAuth').mockRejectedValue(new ApiCallError('engine_down'));
-    renderDialog();
-
-    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
-    await screen.findByRole('button', { name: /^Retry$|^重试$/i });
-
-    expect(tab.close).toHaveBeenCalledOnce();
-    expect(tab.location.href).toBe('');
-  });
-
-  it('disposes without navigating an already-terminal nonce replay', async () => {
-    const authUrl = 'https://provider.example/stale';
-    const tab = providerTab();
-    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
-    const terminal = {
-      flow_id: 'oaf_terminal',
-      client_nonce: 'ofn_terminal',
+describe('reauth terminal', () => {
+  const finishedReauth = (repaired: OAuthResult['repaired']) => {
+    const flow = {
+      flow_id: 'oaf_reauth_done',
+      intent: 'reauth' as const,
       vendor: 'anthropic',
       channel: 'native_cli' as const,
-      state: 'failed' as const,
-      presentation: { expects: 'paste_code' as const, auth_url: authUrl },
-      error_key: 'settings.models.oauth.error.generic',
+      state: 'success' as const,
+      presentation: { expects: 'none' as const },
       expires_at: '2099-01-01T00:00:00Z',
     };
-    vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(terminal);
-    const status = vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({
-      flow: terminal,
-      created: null,
-      repaired: null,
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(flow);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow, created: null, repaired });
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+  };
+
+  // The toast is the whole report of a clean repair; a success panel held open on
+  // a timer after it only makes the person wait to be let go.
+  it('closes a clean repair as soon as it lands', async () => {
+    finishedReauth({ source: subscription(), recovered: true, interrupted_pairs: [] });
+    const onClose = vi.fn();
+    renderDialog({ reauth: subscription(), onClose });
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1), { timeout: 500 });
+  });
+
+  it('keeps a repair that stranded models on screen to be read', async () => {
+    finishedReauth({
+      source: subscription(),
+      recovered: true,
+      interrupted_pairs: [{ backend: 'claude', model_id: 'claude-opus-5', agents: [] }],
     });
-    renderDialog();
+    const onClose = vi.fn();
+    renderDialog({ reauth: subscription(), onClose });
 
-    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
-    await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
-
-    expect(tab.close).toHaveBeenCalledOnce();
-    expect(tab.location.href).toBe('');
+    expect(await screen.findByText(/claude-opus-5/)).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
 describe('OAuth failure class behavior', () => {
   it('keeps a held flow when its timeout reread is inconclusive', async () => {
     vi.useFakeTimers();
-    const providerTab = {
-      closed: false,
-      close: vi.fn(),
-      opener: {},
-    };
-    vi.spyOn(window, 'open').mockReturnValue(providerTab as unknown as Window);
     const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue({
       flow_id: 'oaf_timeout',
       intent: 'reauth',
@@ -240,7 +238,6 @@ describe('OAuth failure class behavior', () => {
 
     expect(status).toHaveBeenCalledWith('oaf_timeout');
     expect(reauth).toHaveBeenCalledTimes(1);
-    expect(providerTab.close).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -254,10 +251,8 @@ describe('OAuth failure class behavior', () => {
       finish: (pending: ReturnType<typeof deferred<OAuthResult>>, flow: OAuthResult['flow']) =>
         pending.resolve({ flow: { ...flow, state: 'failed' }, created: null, repaired: null }),
     },
-  ])('keeps Retry\'s tab when the timed-out flow ignores a late submit $label', async ({ finish }) => {
+  ])('keeps Retry\'s replacement flow when the timed-out flow ignores a late submit $label', async ({ finish }) => {
     vi.useFakeTimers();
-    const tab = providerTab();
-    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
     const expiredFlow: OAuthResult['flow'] = {
       flow_id: 'oaf_late_submit',
       intent: 'reauth',
@@ -296,15 +291,13 @@ describe('OAuth failure class behavior', () => {
       finish(submit, expiredFlow);
       await Promise.resolve();
     });
-    expect(tab.close).not.toHaveBeenCalled();
 
     await act(async () => {
       reread.resolve({ flow: expiredFlow, created: null, repaired: null });
       await Promise.resolve();
     });
     expect(reauth).toHaveBeenCalledTimes(2);
-    expect(tab.location.href).toBe(replacementUrl);
-    expect(tab.close).not.toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: replacementUrl }).getAttribute('href')).toBe(replacementUrl);
   });
 
   it('ignores a held-flow reread rejection after its journey is retired', async () => {

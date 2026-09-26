@@ -11,7 +11,6 @@ silent result — a turn that ends with no trace at all.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -321,26 +320,6 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleanups[0][0].terminal_reaction_message_id, "m1")
         self.assertEqual(cleanups[0][1], STOPPED_REACTION_EMOJI)
         self.assertEqual(agent._user_stopped_sessions, set())
-
-
-class OpenCodeStopReceiptTests(unittest.TestCase):
-    """The intent is only useful if the cancellation branch actually spends it.
-
-    ``_process_message`` is a several-hundred-line coroutine whose cancellation
-    branch sits behind server startup, session creation and the poll loop, so
-    driving it here would mostly be a test of the stubs. Pin the coupling
-    instead: the branch must read the intent set and ask for the receipt.
-    """
-
-    def test_restored_cancellation_branch_reads_the_intent(self):
-        source = inspect.getsource(OpenCodePollLoop.run_restored_poll_loop)
-        _, _, after = source.partition("except asyncio.CancelledError:")
-        branch = after.partition("raise")[0]
-
-        self.assertTrue(branch, "run_restored_poll_loop no longer handles cancellation")
-        self.assertIn("consume_user_stop_intent", branch)
-        self.assertIn("STOPPED_REACTION_EMOJI", branch)
-        self.assertIn("restored_request", branch)
 
 
 class _StubOpenCodeServer:

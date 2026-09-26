@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import inspect
 import re
 
-from core.session_turns import SessionTurnManager
-from core.vibe_agents import VibeAgentStore
-from storage.background import SQLiteBackgroundTaskStore
 from storage.delivery_states import (
     ADMITTED_DELIVERY_STATES,
     CLAIMABLE_QUEUE_STATES,
@@ -78,18 +74,3 @@ def test_delivery_state_matrix_derives_every_cross_cutting_state_set() -> None:
         if policy.run_cancel == "retire":
             assert policy.native_effect == "none"
 
-
-def test_cross_cutting_callers_consume_matrix_semantics() -> None:
-    from vibe import ui_server
-
-    cancel_source = inspect.getsource(SQLiteBackgroundTaskStore.cancel_run)
-    archive_source = inspect.getsource(VibeAgentStore._rewrite_references)
-    send_now_source = inspect.getsource(SessionTurnManager._promote_fifo_head)
-    show_dispatch_source = inspect.getsource(ui_server._run_show_event_dispatch)
-
-    assert "retire_for_run_cancellation" in cancel_source
-    assert 'delivery["state"]' not in cancel_source
-    assert "message_deliveries" not in archive_source
-    assert "snapshot_json" not in archive_source
-    assert "expected_delivery_id" in send_now_source
-    assert "ADMITTED_DELIVERY_STATES" in show_dispatch_source

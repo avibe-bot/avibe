@@ -52,6 +52,12 @@ class FakeSocket {
   }
 }
 
+const connect = (socket: FakeSocket, capabilities: string[] = []) =>
+  async () => ({ socket: socket as unknown as WebSocket, capabilities });
+
+const startFrame = (socket: FakeSocket): Record<string, unknown> =>
+  JSON.parse(socket.sent.find((frame) => JSON.parse(frame).type === 'start') ?? 'null');
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -82,7 +88,7 @@ describe('voice realtime client protocol', () => {
     const session = new VoiceRealtimeSession({
       before: '',
       after: '',
-      openSocket: async () => socket as unknown as WebSocket,
+      openSocket: connect(socket),
     });
     const start = session.start();
     expect(session.sendPcm(new Int16Array([1]))).toBe(true);
@@ -101,7 +107,7 @@ describe('voice realtime client protocol', () => {
     const session = new VoiceRealtimeSession({
       before: '',
       after: '',
-      openSocket: async () => socket as unknown as WebSocket,
+      openSocket: connect(socket),
     });
     const start = session.start();
     socket.open();
@@ -120,7 +126,7 @@ describe('voice realtime client protocol', () => {
     const session = new VoiceRealtimeSession({
       before: '',
       after: '',
-      openSocket: async () => socket as unknown as WebSocket,
+      openSocket: connect(socket),
     });
     const start = session.start();
     await Promise.resolve();
@@ -140,7 +146,7 @@ describe('voice realtime client protocol', () => {
       before: '',
       after: '',
       onError,
-      openSocket: async () => socket as unknown as WebSocket,
+      openSocket: connect(socket),
     });
     const start = session.start();
     socket.open();
@@ -158,7 +164,7 @@ describe('voice realtime client protocol', () => {
     const session = new VoiceRealtimeSession({
       before: '',
       after: '',
-      openSocket: async () => socket as unknown as WebSocket,
+      openSocket: connect(socket),
     });
     const start = session.start();
     await Promise.resolve();
@@ -176,7 +182,7 @@ describe('voice realtime client protocol', () => {
     const session = new VoiceRealtimeSession({
       before: '',
       after: '',
-      openSocket: async () => socket as unknown as WebSocket,
+      openSocket: connect(socket),
     });
     const start = session.start();
     await Promise.resolve();
@@ -189,5 +195,48 @@ describe('voice realtime client protocol', () => {
 
     await expectation;
     expect(socket.readyState).toBe(3);
+  });
+
+  it.each([
+    ['a backend that declares reply context', ['realtime_reply_context'], 'Deploy notes: run make release.', true],
+    ['a backend without the capability', [], 'Deploy notes: run make release.', false],
+    ['an empty reply', ['realtime_reply_context'], '  ', false],
+    ['a reply over the client cap', ['realtime_reply_context'], 'x'.repeat(200_001), false],
+  ])('sends the latest Agent reply in start only for %s', async (_case, capabilities, reply, included) => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const socket = new FakeSocket();
+    const session = new VoiceRealtimeSession({
+      before: '前文',
+      after: '后文',
+      reply,
+      openSocket: connect(socket, capabilities),
+    });
+    const start = session.start();
+    socket.open();
+    await start;
+
+    expect(startFrame(socket)).toEqual({
+      type: 'start',
+      before: '前文',
+      after: '后文',
+      ...(included ? { reply } : {}),
+    });
+  });
+
+  it('sends a reply at the client cap in full', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const socket = new FakeSocket();
+    const reply = 'x'.repeat(200_000);
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      reply,
+      openSocket: connect(socket, ['realtime_reply_context']),
+    });
+    const start = session.start();
+    socket.open();
+    await start;
+
+    expect(startFrame(socket).reply).toBe(reply);
   });
 });

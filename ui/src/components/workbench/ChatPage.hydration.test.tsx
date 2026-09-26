@@ -600,6 +600,58 @@ describe('ChatPage transcript hydration', () => {
     }
   });
 
+  it.each(['live tail', 'search history'])(
+    'offers the latest Agent reply body as dictation context from the %s',
+    async (view) => {
+      const prompt = { ...projectedMessage('prompt', 'deploy it'), projection: undefined };
+      const olderReply = {
+        ...prompt, id: 'older-reply', author: 'agent', type: 'result', source: 'agent', text: 'Older reply',
+        delivered_at: '2026-08-15T00:00:02Z',
+      };
+      const reply = {
+        ...olderReply,
+        id: 'latest-reply',
+        text: 'Run make release on prod-7.\n\n✅ 12s · 3k tokens',
+        content: { result_footer: '✅ 12s · 3k tokens' },
+        delivered_at: '2026-08-15T00:00:03Z',
+      };
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        messages: [prompt, olderReply, reply],
+      });
+      // The searched window holds an old reply, not the chat's latest one.
+      mocks.api.listSessionMessages.mockResolvedValue({
+        messages: [
+          { ...projectedMessage('historical-prompt', 'historical prompt'), projection: undefined },
+          { ...olderReply, id: 'historical-reply', text: 'historical reply' },
+        ],
+        next_after_id: 'historical-reply',
+      });
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <SessionSwitcher sessionId="session-new" search="?msg=historical-prompt" label="read history" />
+          <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+        </MemoryRouter>,
+      );
+      await screen.findByText('Run make release on prod-7.');
+      if (view === 'search history') {
+        act(() => screen.getByRole('button', { name: 'read history' }).click());
+        await screen.findByText('historical prompt');
+      } else {
+        // A later prompt starts a Turn; the committed reply stays the context.
+        act(() => mocks.events?.onMessageNew({
+          ...prompt, id: 'next-prompt', text: 'and then?', delivered_at: '2026-08-15T00:00:04Z',
+        }));
+        await screen.findByText('and then?');
+      }
+
+      expect(mocks.composer?.readLatestAgentReply?.()).toBe(
+        view === 'live tail' ? 'Run make release on prod-7.' : undefined,
+      );
+    },
+  );
+
   it('keeps the loading view when SSE Session-row recovery beats transcript bootstrap', async () => {
     render(
       <MemoryRouter initialEntries={['/chat/session-new']}>

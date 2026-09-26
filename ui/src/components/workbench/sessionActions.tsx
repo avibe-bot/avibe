@@ -57,6 +57,7 @@ export const SessionActionsTrigger = React.forwardRef<HTMLButtonElement, Session
     <Button
       ref={ref}
       type="button"
+      data-settings-interaction-owner="true"
       variant="ghost"
       size="icon"
       aria-label={label}
@@ -226,6 +227,7 @@ export const SessionActionMenuContent: React.FC<{
   return (
     <PopoverContent
       align={align}
+      data-settings-interaction-owner="true"
       className={clsx('w-[176px] p-1', className)}
       onCloseAutoFocus={(event) => {
         if (!transferredFocus.current) return;

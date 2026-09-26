@@ -181,6 +181,7 @@ const InboxHoverPopover: React.FC<{
       side="right"
       align="start"
       sideOffset={12}
+      data-settings-interaction-owner="true"
       onOpenAutoFocus={(e) => e.preventDefault()}
       role="dialog"
       aria-label={t('workbench.inbox.title')}
@@ -406,6 +407,7 @@ export const SessionRow: React.FC<{
     <Popover open={canManageMetadata && menuOpen} onOpenChange={(open) => canManageMetadata && setMenuOpen(open)}>
       <PopoverAnchor asChild>
         <div
+          data-settings-interaction-owner="true"
           onContextMenu={(e) => {
             if (!canManageMetadata) return;
             e.preventDefault();
@@ -424,6 +426,7 @@ export const SessionRow: React.FC<{
         >
           <button
             type="button"
+            data-settings-interaction-owner="true"
             onClick={() => navigate(`/chat/${encodeURIComponent(session.id)}`)}
             className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none"
           >
@@ -559,6 +562,7 @@ const ProjectRow: React.FC<{
   return (
     <div className="flex flex-col gap-0.5">
       <div
+        data-settings-interaction-owner="true"
         className="group flex items-center gap-1.5 rounded-md py-1.5 pl-1 pr-2 transition hover:bg-foreground/[0.04]"
         title={project.folder_path}
         onContextMenu={(e) => {
@@ -615,6 +619,7 @@ const ProjectRow: React.FC<{
               <PopoverTrigger asChild>
                 <button
                   type="button"
+                  data-settings-interaction-owner="true"
                   aria-label={t('workbench.projectActions')}
                   className={clsx(
                     'flex size-5 shrink-0 items-center justify-center rounded-md text-muted transition',
@@ -625,7 +630,11 @@ const ProjectRow: React.FC<{
                   <Ellipsis className="size-3" />
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="end" className="w-[160px] p-1">
+              <PopoverContent
+                align="end"
+                data-settings-interaction-owner="true"
+                className="w-[160px] p-1"
+              >
                 <button
                   type="button"
                   onClick={() => {
@@ -697,6 +706,7 @@ const ProjectRow: React.FC<{
             </Popover>}
             {canChat && <button
               type="button"
+              data-settings-interaction-owner="true"
               aria-label={t('workbench.addSession')}
               onClick={onCreateSession}
               disabled={creatingSession}

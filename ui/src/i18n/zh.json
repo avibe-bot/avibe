@@ -917,6 +917,7 @@
         },
         "tab": {
           "hub": "供应商与路由",
+          "quota": "订阅额度",
           "usage": "用量",
           "logs": "日志"
         }
@@ -1043,6 +1044,8 @@
           "reorder": "调整 {{model}} 的顺序",
           "removeConfirm": "移除",
           "removeTitle": "移除 {{model}}？",
+          "guardTitle": "保存模型列表？",
+          "guardSubtitle": "移除这些模型会同时移除它们的路由。",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
@@ -1268,22 +1271,16 @@
           "passthrough": "透传",
           "unconfigured": "未配置"
         },
-        "originNow": "当前",
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
           "passthrough": "未在供应商列表中匹配到此模型。\n按默认顺序向符合条件的 API Key 供应商透传原模型名，由上游处理。",
           "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
         },
-        "frozen": "此模型使用已保存的固定路由",
-        "follows": "跟随 {{backend}} 的默认路由",
+        "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
         "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
-        "editHint": "编辑并保存后，此模型将使用手动路由。",
-        "restoreAutomatic": "恢复自动",
-        "undoRestore": "撤销恢复",
         "undoDone": "已恢复之前的手动草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
-        "afterSave": "保存后的路由",
         "preview": {
           "automatic": "恢复后：自动匹配",
           "passthrough": "恢复后：原名透传",
@@ -1295,15 +1292,14 @@
         "noDefaults": "暂无可路由此模型的默认供应商。请加入匹配的供应商或符合条件的 API Key 供应商。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
-        "defaultRouting": "默认路由",
         "close": "关闭",
-        "pinRoute": "固定当前路由",
         "cancelChanges": "取消修改",
         "manualPending": "保存后，此模型将使用手动路由，不再跟随默认路由。",
         "exactModel": "准确模型 ID",
         "moveUp": "上移供应商",
         "moveDown": "下移供应商",
-        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由"
+        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由",
+        "errorShort": "错误"
       },
       "order": {
         "title": "{{backend}} · 默认路由",
@@ -1350,15 +1346,165 @@
         "needs_action": "需要处理",
         "error": "需要处理"
       },
+      "quota": {
+        "title": "订阅额度",
+        "header_one": "{{count}} 个已登录的订阅账号",
+        "header_other": "{{count}} 个已登录的订阅账号",
+        "autoRefresh": "每 5 分钟自动刷新",
+        "refresh": "立即刷新",
+        "refreshing": "刷新中…",
+        "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
+        "left": "剩余",
+        "window": {
+          "session": "5 小时额度",
+          "weekly": "每周额度",
+          "model": "{{model}} 每周额度",
+          "span": {
+            "hours": "{{hours}} 小时",
+            "days": "{{days}} 天"
+          }
+        },
+        "hint": {
+          "shared": "所有模型共用",
+          "model": "只算 {{model}} 的用量"
+        },
+        "scoped": {
+          "title": "单独计算的模型额度",
+          "note": "这些模型也会同时扣每周额度，任一项用完就会暂停"
+        },
+        "pace": {
+          "ok": "够用到重置",
+          "slightlyFast": "稍快，仍够用到重置",
+          "fast": "用得偏快，预计 {{duration}}后用完",
+          "exhausted": "已用完，{{duration}}后恢复",
+          "exhaustedUnknown": "已用完",
+          "paused": "暂停更新",
+          "reset": "已重置"
+        },
+        "reset": {
+          "in": "{{duration}}后重置",
+          "done": "已重置，等待刷新"
+        },
+        "meter": "{{label}} 已用 {{pct}}%",
+        "status": {
+          "ok": "可用",
+          "exhausted": "{{label}}已用完",
+          "reauth": "需重新登录",
+          "paused": "暂停更新"
+        },
+        "stale": {
+          "authExpired": "登录已过期，下面是 {{ago}}的数据",
+          "retained": "暂时读不到最新额度，下面是 {{ago}}的数据",
+          "reauth": "重新登录"
+        },
+        "unread": {
+          "auth_expired": "登录已过期，读不到额度",
+          "unsupported": "这个订阅不提供额度数据",
+          "error": "暂时读不到额度，稍后会自动重试"
+        },
+        "ago": {
+          "minutes_one": "{{count}} 分钟前",
+          "minutes_other": "{{count}} 分钟前",
+          "long": "{{duration}}前"
+        },
+        "duration": {
+          "days": "{{days}} 天 {{hours}} 小时",
+          "daysOnly": "{{days}} 天",
+          "hours": "{{hours}} 小时 {{minutes}} 分",
+          "hoursOnly": "{{hours}} 小时",
+          "minutes": "{{minutes}} 分钟"
+        },
+        "stat": {
+          "tightest": "余量最少的额度",
+          "tightestAllSpent": "所有额度都已用完",
+          "tightestUnread": "暂时没有可读的额度",
+          "exhausted": "已用完",
+          "exhaustedUnit": "项额度",
+          "exhaustedNone": "所有账号都能正常使用",
+          "exhaustedNoneObserved": "已读到的额度都没用完",
+          "exhaustedNote": "{{name}} · {{duration}}后恢复",
+          "resetsIn": "{{duration}}后重置",
+          "weekValue": "近 7 天按 API 价格",
+          "weekValueNote": "所有订阅账号的用量，按官方 API 标价计算",
+          "payback": "本期回本",
+          "paybackMultiple": "{{multiple}} 倍",
+          "paybackUnit": "月费",
+          "paybackPaid": "已回本，多薅了 {{amount}}",
+          "paybackShort": "还差 {{amount}} 回本",
+          "paybackShortUnknown": "部分用量暂无价格，差额暂不显示",
+          "paybackRolling": "未设续费日的账号按近 30 天计",
+          "paybackPartial_one": "{{count}} 个账号套餐未知，未计入",
+          "paybackPartial_other": "{{count}} 个账号套餐未知，未计入",
+          "paybackUnknown": "套餐未知，暂不计算回本"
+        },
+        "upcoming": "即将重置",
+        "footnote": "进度条是已用的部分，细竖线是这个周期已经过去的时间：进度条超过竖线，就是用得比时间快。",
+        "pending": "正在读取额度…",
+        "footnoteValue": "“按 API 价格”指同样的用量按官方 API 标价要花多少钱，用来看订阅值不值，不是实际扣费。",
+        "priceTableDate": "价格表日期 {{date}}。",
+        "priceTableUnknown": "暂无价格表日期。",
+        "priceTableFetching": "正在获取价格表…",
+        "value": {
+          "week": "近 7 天按 API 价格",
+          "period": {
+            "billing_cycle": "本期按 API 价格",
+            "rolling_30d": "近 30 天按 API 价格"
+          },
+          "noPrice": "暂无价格",
+          "fetching": "正在获取价格…",
+          "paid": "回本 {{multiple}} 倍",
+          "even": "刚好回本",
+          "short": "还差 {{amount}} 回本",
+          "shortUnknown": "部分用量暂无价格，差额暂不显示",
+          "renews": "距下次续费",
+          "renewsIn_one": "{{count}} 天",
+          "renewsIn_other": "{{count}} 天",
+          "excluded": "{{tokens}} tokens 暂无价格，未计入"
+        },
+        "plan": {
+          "openai": {
+            "free": "Free",
+            "go": "Go",
+            "plus": "Plus",
+            "pro": "Pro",
+            "prolite": "Pro 5x",
+            "pro_5x": "Pro 5x",
+            "team": "Team",
+            "business": "Business",
+            "enterprise": "Enterprise",
+            "edu": "Edu"
+          },
+          "anthropic": {
+            "pro": "Pro",
+            "max_5x": "Max 5x",
+            "max_20x": "Max 20x",
+            "team": "Team",
+            "enterprise": "Enterprise"
+          }
+        }
+      },
       "usage": {
         "title": "用量",
         "detail": "模型网关代理的对话所计量的 token，按本地日期汇总。",
         "window": {
           "label": "区间",
-          "option": "{{days}} 天"
+          "option": "{{days}} 天",
+          "24h": "24 小时",
+          "7d": "7 天",
+          "30d": "30 天",
+          "60d": "60 天"
         },
         "range": "{{from}} – {{to}} · 近 {{days}} 天",
-        "empty": "还没有计量数据。模型网关完成请求后，这里就会有内容。",
+        "empty": {
+          "report": {
+            "title": "这个区间没有用量",
+            "body": "模型网关在所选时间范围内还没有记录请求。"
+          },
+          "filter": {
+            "title": "没有符合条件的用量",
+            "body": "试试其他供应商或模型，或重置筛选。"
+          }
+        },
         "blank": "—",
         "tokens": {
           "label": "Tokens",
@@ -1367,6 +1513,7 @@
         },
         "requests": {
           "label": "请求数",
+          "unit": "次请求",
           "reported": "每次请求都回报了 token",
           "shortfall_one": "{{count}} 次请求没有回报 token",
           "shortfall_other": "{{count}} 次请求没有回报 token"
@@ -1400,6 +1547,140 @@
           "quiet": "这个区间没有任何一天有计量数据",
           "unreported": "有请求，但没有任何一天回报了 token",
           "zero": "有回报 token 的日子，回报的都是 0"
+        },
+        "metric": {
+          "label": "指标",
+          "tokens": "全部 Tokens",
+          "input": "输入（含缓存）",
+          "output": "输出",
+          "cache": "缓存读取",
+          "requests": "请求数",
+          "cost": "折合 API 价格"
+        },
+        "filters": {
+          "source": "供应商",
+          "model": "模型",
+          "all": "全部{{label}}",
+          "selected_one": "{{label}} · 已选 {{count}} 个",
+          "selected_other": "{{label}} · 已选 {{count}} 个",
+          "search": "搜索{{label}}",
+          "noMatch": "没有匹配项",
+          "hint": "多选会同步更新整份报表",
+          "reset": "重置筛选",
+          "allSources": "全部供应商",
+          "allModels": "全部模型",
+          "sourceCount_one": "{{count}} 个供应商",
+          "sourceCount_other": "{{count}} 个供应商",
+          "modelCount_one": "{{count}} 个模型",
+          "modelCount_other": "{{count}} 个模型"
+        },
+        "stats": {
+          "tokens": "全部 Tokens",
+          "requests": "请求数",
+          "cached": "输入缓存占比",
+          "tokenSplit": "输入 {{input}} · 输出 {{output}}",
+          "shortfall_one": "{{count}} 次请求没有回报 token",
+          "shortfall_other": "{{count}} 次请求没有回报 token",
+          "allReported": "每次请求都回报了 token",
+          "cacheUnknown": "暂无已知输入 token",
+          "cacheSplit": "输入 {{input}} 中有 {{cached}} 来自缓存",
+          "cost": "折合 API 价格"
+        },
+        "unknownTokens": "部分请求没有回报 token，相关 token 数值不可用",
+        "partialHistory": "部分时间桶的历史记录不完整",
+        "historicalHourly": "含无具体小时记录的历史用量",
+        "unknownModel": "未知模型",
+        "removedSources": "已移除的供应商",
+        "removedSourcesHint": "这些供应商删除前留下的用量",
+        "removedModel": "已移除",
+        "granularity": {
+          "hour": "按小时",
+          "day": "按天"
+        },
+        "group": {
+          "label": "分组",
+          "total": "总量",
+          "type": "Token 类型",
+          "model": "模型",
+          "source": "供应商"
+        },
+        "series": {
+          "input": "输入（非缓存）",
+          "cache": "缓存读取",
+          "output": "输出",
+          "requests": "请求数"
+        },
+        "chart": {
+          "title": "用量趋势",
+          "subtitle": "按所选时间桶显示精确数量",
+          "aria": "{{kind}}用量趋势",
+          "lines": "折线",
+          "bars": "堆叠柱状图",
+          "bucket": "用量时间桶 {{bucket}}",
+          "detail": "时间桶用量详情",
+          "legend": "图表图例",
+          "pin": "固定这个时间桶",
+          "unpin": "取消固定时间桶",
+          "pinned": "已固定",
+          "currentPartial": "当前小时未结束",
+          "complete": "历史完整",
+          "partial": "历史不完整",
+          "points_one": "{{count}} 个{{granularity}}数据点",
+          "points_other": "{{count}} 个{{granularity}}数据点",
+          "legendOnly": "图例显隐只影响图表",
+          "interaction": "悬停或聚焦时间桶 · 点击查看详情"
+        },
+        "table": {
+          "title": "精确用量明细",
+          "range": "明细表与图表使用相同筛选条件",
+          "bucket": "正在显示 {{bucket}}",
+          "allBuckets": "查看全部时间桶",
+          "group": "明细分组",
+          "byModel": "按模型",
+          "bySource": "按供应商",
+          "export": "导出 CSV",
+          "identity": "模型 / 供应商",
+          "requests": "请求数",
+          "input": "输入",
+          "nonCache": "非缓存输入",
+          "cache": "缓存读取",
+          "output": "输出",
+          "tokens": "全部 Tokens",
+          "share": "占比",
+          "sortAscending": "{{metric}}：升序排列",
+          "sortDescending": "{{metric}}：降序排列",
+          "total": "合计",
+          "empty": "没有符合条件的用量",
+          "accounting": "全部 Tokens = 输入 + 输出。缓存读取已包含在输入中，同时单独列出。"
+        },
+        "csv": {
+          "bucketKey": "时间桶键",
+          "startAt": "开始时间",
+          "endAt": "结束时间",
+          "historyComplete": "历史完整",
+          "sourceId": "供应商 ID",
+          "modelId": "模型 ID",
+          "ledgerKey": "内部账本键",
+          "sourceLabel": "供应商",
+          "modelLabel": "模型",
+          "tokenReports": "Token 报告数",
+          "inputTokens": "输入 token",
+          "nonCachedInputTokens": "非缓存输入 token",
+          "cachedInputTokens": "缓存输入 token",
+          "outputTokens": "输出 token",
+          "totalTokens": "总 token"
+        },
+        "failure": "暂时没能读取用量报表。",
+        "retry": "重试",
+        "cost": {
+          "notBilled": "按官方 API 标价折算，不是实际扣费",
+          "noPrice": "暂无价格",
+          "fetching": "正在获取价格…",
+          "excluded_one": "{{tokens}} tokens 暂无价格，未计入",
+          "excluded_other": "{{tokens}} tokens 暂无价格，未计入",
+          "tableDate": "价格表日期 {{date}}",
+          "tableDateUnknown": "暂无价格表日期",
+          "tableFetching": "正在获取价格表…"
         }
       },
       "supplyTooltip": {
@@ -1468,7 +1749,6 @@
         "open": "打开 {{model}} 的路由",
         "openWithMapping": "打开 {{model}} 的路由 · {{mapping}}",
         "label": "这个模型的路由",
-        "section": "这个模型的路由",
         "removeHop": "移除这个路由项",
         "editHop": "修改这个路由项",
         "addHop": "添加路由项",
@@ -1503,7 +1783,6 @@
         "cancel": "取消",
         "save": "保存",
         "saving": "正在保存路由…",
-        "refreshing": "路由已保存，正在刷新…",
         "fail": {
           "read": "路由暂时不可用",
           "save": "路由没有保存",
@@ -1513,12 +1792,19 @@
         "retry": "重试",
         "empty": "此模型跟随默认路由，但目前没有符合条件的供应商。",
         "impact": {
-          "title": "路由已保存",
-          "detail": "以下是这次保存实际移除或中断的项目。",
-          "refreshFail": "路由已保存，但暂时无法刷新显示。",
-          "done": "完成"
+          "refreshFail": "路由已保存，但暂时无法刷新显示。"
         },
-        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。"
+        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。",
+        "mode": {
+          "label": "路由方式",
+          "follow": "跟随默认",
+          "custom": "自定义",
+          "undo": "撤销",
+          "viewDefaults": "查看默认路由",
+          "adjustDefaults": "调整默认路由"
+        },
+        "hopActions": "路由项操作",
+        "modelActions": "模型操作"
       },
       "recent": {
         "title": "最近切换",
@@ -1702,11 +1988,6 @@
         "noSources": "已接入模型网关 · 还没有启用任何供应商，下一个回合会失败",
         "nothingRunnable": "已接入模型网关 · 已启用的供应商当前都不可用，下一个回合会失败"
       },
-      "adoption": {
-        "enabled": "已加入 {{list}}",
-        "route": "{{backend}} · {{model}} · 第 {{position}} 个路由项",
-        "none": "已连接。需要使用时，把它加到对应模型的路由中。"
-      },
       "supplyMode": {
         "title": "模型管理方式",
         "currentHub": "当前：模型网关",
@@ -1785,8 +2066,11 @@
       },
       "sourceTest": {
         "open": "测试",
+        "testNow": "立即测试",
         "title": "测试 {{source}}",
         "hint": "使用此供应商和选中的模型发送一次简短请求，可能产生少量费用。结果仅代表这个模型。",
+        "cooldownHint": "测试成功会立即恢复这个供应商。",
+        "stillUnavailable": "供应商仍标记为暂不可用。",
         "model": "测试模型",
         "empty": "暂无模型。关闭此窗口后，可拉取列表或手动添加模型 ID。",
         "run": "开始测试",
@@ -2143,6 +2427,15 @@
       },
       "error": {
         "unclassified": "未知错误，暂时不可用"
+      }
+    },
+    "quota": {
+      "error": {
+        "auth_expired": "登录已过期",
+        "rate_limited": "服务商暂时限制了额度查询",
+        "unsupported": "这个订阅不提供额度数据",
+        "unavailable": "暂时读不到额度",
+        "malformed": "服务商返回的额度数据读不懂"
       }
     }
   },

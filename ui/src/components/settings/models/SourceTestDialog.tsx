@@ -1,10 +1,11 @@
 import * as React from 'react';
-import { FlaskConical, LoaderCircle } from 'lucide-react';
+import { CheckCircle2, CircleX, FlaskConical, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 import { Field } from './dialogFields';
 import { apiFailure, modelsApi } from './modelsApi';
 import { createContinuationSettlement, type TrackSourceMutation } from './mutationSettlement';
@@ -13,7 +14,7 @@ import { serverText } from './serverCopy';
 import { selectTestModel } from './testModelPreference';
 import type { Source, SourceProbeResult } from './types';
 
-type TestStatus = { kind: 'result'; result: SourceProbeResult } | { kind: 'unconfirmed' } | null;
+type TestStatus = { kind: 'result'; result: SourceProbeResult; stillCooling: boolean } | { kind: 'unconfirmed' } | null;
 
 export const SourceTestDialog: React.FC<{
   source: Source;
@@ -73,8 +74,11 @@ export const SourceTestDialog: React.FC<{
           && current.base_url === latest.base_url && current.protocol === latest.protocol
           && (!current.verification_pending || current.verification_pending === latest.verification_pending)
           && current.models.some((model) => model.id === selected && !model.retired);
+        // Only a verified reply lifts a cooldown, so the reconciled state, not
+        // `reachable`, says whether this test restored the provider.
         continuation.settle(ticket, () => setStatus(matches
-          ? { kind: 'result', result: answer } : { kind: 'unconfirmed' }));
+          ? { kind: 'result', result: answer, stillCooling: current.state.status === 'cooldown' }
+          : { kind: 'unconfirmed' }));
       });
     } catch {
       continuation.settle(ticket, () => setStatus({ kind: 'unconfirmed' }));
@@ -84,24 +88,30 @@ export const SourceTestDialog: React.FC<{
     }
   };
   const result = status?.kind === 'result' ? status.result : null;
+  const stillCooling = status?.kind === 'result' && status.stillCooling;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent closeLabel={t('common.close')}>
         <DialogTitle className="min-w-0 break-words pr-6">{t('settings.models.sourceTest.title', { source: source.display_name })}</DialogTitle>
-        <DialogDescription>{t('settings.models.sourceTest.hint')}</DialogDescription>
+        <DialogDescription>
+          {t('settings.models.sourceTest.hint')}
+          {source.state.status === 'cooldown' && ` ${t('settings.models.sourceTest.cooldownHint')}`}
+        </DialogDescription>
         <Field label={t('settings.models.sourceTest.model')}>
           {(id) => <Combobox id={id} ariaLabel={t('settings.models.sourceTest.model')} options={options}
             value={selected} disabled={busy || options.length === 0} allowCustomValue={false}
             onValueChange={(value) => { setSelection(value); setStatus(null); }} />}
         </Field>
         {options.length === 0 && <p className="text-sm text-muted">{t('settings.models.sourceTest.empty')}</p>}
-        {result && <p role="status" className="min-w-0 break-words text-sm">
+        {result && <p role="status" className={cn('min-w-0 break-words text-sm', result.reachable ? 'model-hub-ink-mint' : 'text-destructive-ink')}>
+          {result.reachable ? <CheckCircle2 aria-hidden className="mr-1.5 inline size-4 align-[-3px]" /> : <CircleX aria-hidden className="mr-1.5 inline size-4 align-[-3px]" />}
           {result.reachable
             ? t('settings.models.sourceTest.success', { model: result.model_id, ms: result.latency_ms })
             : t('settings.models.sourceTest.failure', {
               model: result.model_id,
               reason: serverText(t, result.error, 'settings.models.sourceTest.unknown'),
             })}
+          {result.reachable && stillCooling && ` ${t('settings.models.sourceTest.stillUnavailable')}`}
         </p>}
         {status?.kind === 'unconfirmed' && <p role="alert" className="text-sm text-destructive-ink">{t('settings.models.sourceTest.requestFailed')}</p>}
         <DialogFooter>

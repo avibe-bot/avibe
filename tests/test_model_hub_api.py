@@ -7,7 +7,6 @@ import inspect
 import io
 import json
 import re
-import textwrap
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -29,6 +28,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.backend_restart import NativeMigrationBlockedError
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     EngineEnsureResult,
@@ -47,6 +47,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.identifiers import canonical_model_id, usage_ledger_key
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import (
@@ -403,6 +404,20 @@ class FakeAdapter:
         )
 
 
+_PRICE_TABLE = PriceTable(
+    catalog={"anthropic": {"models": {"claude-opus-5": {"cost": {
+        "input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25,
+    }}}}},
+    vendor_map={"families": [{"prefix": "claude-", "vendor_id": "anthropic"}]},
+    overrides={},
+    price_table_date="2026-07-22",
+)
+
+
+# Hermetic: the default reads the machine's cached models.dev copy.
+_MODELS_DEV_CATALOG: dict = {}
+
+
 def _service(tmp_path, adapter=None):
     store = MemoryStore()
     adapter = adapter or FakeAdapter()
@@ -424,6 +439,8 @@ def _service(tmp_path, adapter=None):
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
         requested_model_override=lambda backend: store.requested_model(backend),
         migration_home=tmp_path / "native-home",
+        price_table=lambda: _PRICE_TABLE,
+        models_dev_catalog=lambda: _MODELS_DEV_CATALOG,
     )
     return service, store, adapter
 
@@ -2585,6 +2602,137 @@ def test_candidate_protocol_projection_is_total_only_for_opencode(tmp_path):
                 )
 
 
+def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_enrich001",
+        kind="api_key",
+        vendor="custom",
+        display_name="Relay",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            # Bare `/v1/models` discovery: nothing but the id.
+            ModelHubModelConfig(id="gpt-described", provenance="discovered"),
+            ModelHubModelConfig(
+                id="gpt-supplier-says",
+                provenance="discovered",
+                display_name="Relay label",
+                reasoning_efforts=["high"],
+            ),
+            ModelHubModelConfig(id="gpt-unknown", provenance="discovered"),
+            ModelHubModelConfig(id="gpt-no-reasoning", provenance="discovered"),
+            # A near neighbour of a catalog id, which must not borrow its row.
+            ModelHubModelConfig(id="gpt-described-mini", provenance="discovered"),
+            ModelHubModelConfig(id="claude-unknown", provenance="discovered"),
+            ModelHubModelConfig(
+                id="gpt-relay-reasons",
+                provenance="discovered",
+                reasoning_efforts=["low", "high"],
+            ),
+        ],
+        credential_ref="cred_enrich001",
+    )
+    store.config.sources = [source]
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id]
+    service.models_dev_catalog = lambda: {
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "gpt-described": {
+                    "name": "GPT Described",
+                    "reasoning": True,
+                    "reasoning_options": [{"type": "effort", "values": ["low", "high"]}],
+                    "tool_call": True,
+                    "modalities": {"input": ["text", "image"], "output": ["text"]},
+                    "limit": {"context": 400_000, "output": 128_000},
+                },
+                "gpt-supplier-says": {
+                    "name": "Catalog label",
+                    "reasoning": True,
+                    "reasoning_options": [{"type": "effort", "values": ["low"]}],
+                },
+                "gpt-no-reasoning": {"name": "GPT No Reasoning", "reasoning": False},
+                "gpt-relay-reasons": {"name": "GPT Relay Reasons", "reasoning": False},
+            },
+        }
+    }
+
+    rows = {row["id"]: row for row in service.agent_model_candidates("codex")["providers"]}
+
+    assert rows["gpt-described"] == {
+        "id": "gpt-described",
+        "display_name": "GPT Described",
+        "reasoning_efforts": ["low", "high"],
+        "suppliers": rows["gpt-described"]["suppliers"],
+        "origin": "provider",
+        "models_dev_id": "openai/gpt-described",
+        "context_window": 400_000,
+        "max_output_tokens": 128_000,
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"],
+        "supports_tools": True,
+        "supports_reasoning": True,
+    }
+    # What the suppliers state wins; models.dev only fills what they left unsaid.
+    assert rows["gpt-supplier-says"]["display_name"] == "Relay label"
+    assert rows["gpt-supplier-says"]["reasoning_efforts"] == ["high"]
+    assert rows["gpt-supplier-says"]["models_dev_id"] == "openai/gpt-supplier-says"
+    # Nobody states a ladder: the tiers the backend's request protocol accepts —
+    # fixed for Codex and Claude, the model family's for OpenCode — and no
+    # description.
+    openai = ["minimal", "low", "medium", "high", "xhigh"]
+    anthropic = ["low", "medium", "high", "xhigh", "max"]
+    for model_id in ("gpt-unknown", "gpt-described-mini", "claude-unknown"):
+        assert rows[model_id]["reasoning_efforts"] == openai
+    assert "models_dev_id" not in rows["gpt-unknown"]
+    assert "models_dev_id" not in rows["gpt-described-mini"]
+    elsewhere = {
+        backend: {row["id"]: row for row in service.agent_model_candidates(backend)["providers"]}
+        for backend in ("claude", "opencode")
+    }
+    assert elsewhere["claude"]["gpt-unknown"]["reasoning_efforts"] == anthropic
+    assert elsewhere["opencode"]["gpt-unknown"]["reasoning_efforts"] == openai
+    assert elsewhere["opencode"]["claude-unknown"]["reasoning_efforts"] == anthropic
+    # A supplier's ladder is not switched off by the catalog's reasoning flag.
+    assert rows["gpt-relay-reasons"]["reasoning_efforts"] == ["low", "high"]
+    assert rows["gpt-relay-reasons"]["supports_reasoning"] is None
+    # A model stated not to reason gets no invented ladder.
+    assert rows["gpt-no-reasoning"]["reasoning_efforts"] == []
+    assert rows["gpt-no-reasoning"]["supports_reasoning"] is False
+
+
+def test_provider_candidates_survive_an_unreadable_models_dev_catalog(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_enrich002",
+        kind="api_key",
+        vendor="custom",
+        display_name="Relay",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="gpt-described", provenance="discovered")],
+        credential_ref="cred_enrich002",
+    )
+    store.config.sources = [source]
+    store.config.agents["codex"].sources.order = [source.id]
+
+    def unreadable():
+        raise RuntimeError("cache is corrupt")
+
+    service.models_dev_catalog = unreadable
+
+    [row] = service.agent_model_candidates("codex")["providers"]
+
+    assert row["id"] == "gpt-described"
+    assert "models_dev_id" not in row
+
+
 def test_candidates_exclude_only_noncanonical_ids(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     invalid_claude_id = "not-a-claude-family"
@@ -4371,6 +4519,27 @@ def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):
     assert summarised_on and loop_thread not in summarised_on
 
 
+def test_usage_summary_rpc_forwards_the_modern_window_without_days(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    observed: list[dict] = []
+
+    def usage_summary(**kwargs):
+        observed.append(kwargs)
+        return {"window_key": kwargs["window"]}
+
+    service.usage_summary = usage_summary
+
+    async def exercise():
+        return await dispatch_model_hub_rpc(service, "usage_summary", {"window": "24h"})
+
+    payload = asyncio.run(exercise())
+
+    assert payload == {"window_key": "24h"}
+    assert observed == [{"window": "24h"}]
+
+
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.requested_model = lambda backend: {
@@ -4482,6 +4651,15 @@ def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
     assert adapter.synced == []
 
 
+async def _confirm_guard(call):
+    try:
+        return await call({})
+    except ModelHubError as refusal:
+        if "would_remove_hops" not in (refusal.data or {}):
+            raise
+        return await call({"force": True, **refusal.data})
+
+
 def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
     service_node = next(
         node
@@ -4574,6 +4752,137 @@ def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
     asyncio.run(service._commit_synced(previous, changed))
 
     assert len(adapter.synced) == 1
+    assert service._engine_synced is True
+
+
+def _catalog_without(service, model_id):
+    baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "claude")
+    return baseline, [model for model in baseline if model["id"] != model_id]
+
+
+async def _delete_seeded_custom_model(service):
+    service.store.config.sources[0].models.append(
+        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+    )
+    return await service.delete_custom_model("src_first0001", "claude-extra-model")
+
+
+async def _reconcile_builtin_supplied_model(service):
+    service.store.config.sources[0].models.append(
+        ModelHubModelConfig(id="claude-extra-model", provenance="manual")
+    )
+    catalog = [{"id": model.id} for model in service.store.config.agents["claude"].models]
+    service._builtin_snapshots = lambda _backends: {
+        "claude": {"complete": True, "models": [*catalog, {"id": "claude-extra-model"}]},
+    }
+    return await service.reconcile_builtin_models(("claude",))
+
+
+_PROJECTION_MODEL = "claude-opus-4-6"
+_PROJECTION_MUTATIONS = {
+    "rename_source": (
+        lambda service: service.patch_source("src_first0001", {"display_name": "Renamed"}),
+        None,
+    ),
+    "switch_mode_direct": (
+        lambda service: service.set_agent_mode("claude", "direct"),
+        None,
+    ),
+    "reorder_agent_sources": (
+        lambda service: service.set_agent_sources("claude", {"order": ["src_second001", "src_first0001"]}),
+        None,
+    ),
+    "reorder_chain": (
+        lambda service: service.set_agent_chain(
+            "claude",
+            _PROJECTION_MODEL,
+            {"hops": [
+                {"source_id": "src_second001", "model_id": _PROJECTION_MODEL},
+                {"source_id": "src_first0001", "model_id": _PROJECTION_MODEL},
+            ]},
+        ),
+        None,
+    ),
+    "retarget_base_url": (
+        lambda service: _confirm_guard(lambda guard: service.patch_source(
+            "src_first0001", {"base_url": "https://relay.example/v1", **guard},
+        )),
+        lambda bindings: bindings["src_first0001"].base_url == "https://relay.example/v1",
+    ),
+    "delete_source": (
+        lambda service: _confirm_guard(lambda guard: service.delete_source(
+            "src_second001",
+            force=guard.get("force", False),
+            confirmed_remove_hops=guard.get("would_remove_hops"),
+            confirmed_interruptions=guard.get("would_interrupt"),
+        )),
+        lambda bindings: set(bindings) == {"src_first0001"},
+    ),
+    "add_custom_model": (
+        lambda service: service.add_custom_model(
+            "src_first0001", {"model_id": "claude-extra-model", "reasoning_efforts": []},
+        ),
+        lambda bindings: "claude-extra-model" in bindings["src_first0001"].model_ids,
+    ),
+    "delete_custom_model": (
+        _delete_seeded_custom_model,
+        lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL,),
+    ),
+    "reconcile_builtin_models": (
+        _reconcile_builtin_supplied_model,
+        lambda bindings: "claude-extra-model" in bindings["src_first0001"].route_model_ids,
+    ),
+    "refresh_source": (
+        lambda service: service.refresh_source("src_first0001"),
+        lambda bindings: bindings["src_first0001"].model_ids == (_PROJECTION_MODEL, "claude-sonnet-4-6"),
+    ),
+    "set_reasoning_efforts": (
+        lambda service: service.update_model_reasoning_efforts(
+            "src_first0001", _PROJECTION_MODEL, {"reasoning_efforts": ["low"]},
+        ),
+        lambda bindings: bindings["src_first0001"].model_reasoning_efforts == ((_PROJECTION_MODEL, ("low",)),),
+    ),
+    "drop_agent_source": (
+        lambda service: _confirm_guard(lambda guard: service.set_agent_sources(
+            "claude", {"order": ["src_first0001"], **guard},
+        )),
+        lambda bindings: bindings["src_second001"].route_model_ids == (_PROJECTION_MODEL,),
+    ),
+    "shorten_chain": (
+        lambda service: _confirm_guard(lambda guard: service.set_agent_chain(
+            "claude",
+            _PROJECTION_MODEL,
+            {"hops": [{"source_id": "src_first0001", "model_id": _PROJECTION_MODEL}], **guard},
+        )),
+        lambda bindings: _PROJECTION_MODEL not in bindings["src_second001"].route_model_ids,
+    ),
+    "remove_catalog_model": (
+        lambda service: _confirm_guard(lambda guard: service.set_agent_models(
+            "claude",
+            *_catalog_without(service, "claude-opus-4-7"),
+            force=guard.get("force", False),
+            confirmed_remove_hops=guard.get("would_remove_hops"),
+            confirmed_interruptions=guard.get("would_interrupt"),
+        )),
+        lambda bindings: "claude-opus-4-7" not in bindings["src_first0001"].route_model_ids,
+    ),
+}
+
+
+@pytest.mark.parametrize("mutation", _PROJECTION_MUTATIONS)
+def test_public_mutations_sync_the_engine_only_when_bindings_change(tmp_path, mutation):
+    service, store, adapter = _service(tmp_path)
+    _set_claude_route_fixture(store, ("src_first0001", "src_second001"), _PROJECTION_MODEL)
+    service._engine_synced = True
+    call, synced_projection = _PROJECTION_MUTATIONS[mutation]
+
+    asyncio.run(call(service))
+
+    if synced_projection is None:
+        assert adapter.synced == []
+    else:
+        assert len(adapter.synced) == 1
+        assert synced_projection({binding.source_id: binding for binding in adapter.synced[0]})
     assert service._engine_synced is True
 
 
@@ -5571,6 +5880,28 @@ def test_native_oauth_preserves_transient_login_conflict_identity(tmp_path):
     assert exc_info.value.code == "native_login_in_progress"
     assert exc_info.value.detail == "modelHub.errors.native_login_in_progress"
     assert exc_info.value.data == {}
+
+
+@pytest.mark.parametrize(
+    "reason,code",
+    [
+        ("native_auth_hub_owned", "migration_native_busy"),
+        ("migration_recovery_pending", "migration_recovery_pending"),
+        ("config_recovery", "config_recovery"),
+    ],
+)
+def test_native_oauth_custody_refusal_is_not_reported_as_engine_down(tmp_path, reason, code):
+    class CustodyRefusedAdapter(FakeAdapter):
+        async def start_oauth(self, source_id, vendor):
+            raise NativeMigrationBlockedError(reason, ("claude",))
+
+    service, _, _ = _service(tmp_path, CustodyRefusedAdapter())
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == code
 
 
 def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tmp_path):
@@ -6780,6 +7111,8 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     tmp_path,
 ):
     service, store, adapter = _service(tmp_path)
+    from core.handlers.model_hub.quota import SubscriptionQuotaError
+
     source = ModelHubSourceConfig(
         id="src_huboauth01",
         kind="subscription",
@@ -6802,6 +7135,14 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
+    quota_reads = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        quota_reads.append(source_id)
+        raise SubscriptionQuotaError("auth_expired")
+
+    adapter.subscription_quota = subscription_quota
+    assert asyncio.run(service.quota_summary())["sources"][0]["state"] == "auth_expired"
 
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
@@ -6812,6 +7153,9 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
         }
     )
     result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    # The same ref names a new grant: its quota is re-read, not held behind the old failure.
+    asyncio.run(service.quota_summary())
+    assert quota_reads == [source.id, source.id]
 
     assert result["recovered"] is True
     assert result["source"]["state"]["status"] == "standby"
@@ -6985,6 +7329,14 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
+    quota_reads = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        quota_reads.append(source_id)
+        return {"plan": None, "windows": []}
+
+    adapter.subscription_quota = subscription_quota
+    assert asyncio.run(service.quota_summary())["sources"][0]["state"] == "ok"
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
@@ -7023,6 +7375,53 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     assert adapter.revoked == []
     assert adapter.orphan_cleanup_calls == []
     assert service.revocations.list() == []
+    # The fail-closed grant does not keep its pre-failure quota reading inside the refresh window.
+    asyncio.run(service.quota_summary())
+    assert quota_reads == [source.id, source.id]
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    [RetainedMaterialDisposition.FLOW_SOURCE_REF, RetainedMaterialDisposition.UNKNOWN],
+)
+def test_hub_reauth_fail_closed_syncs_the_pruned_binding(tmp_path, disposition):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered"),
+            ModelHubModelConfig(id="manual-model", provenance="manual"),
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": None,
+        }
+    )
+    service._engine_synced = True
+    adapter.synced.clear()
+
+    asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert len(adapter.synced) == 1
+    synced = {binding.source_id: binding for binding in adapter.synced[0]}
+    assert synced[source.id].model_ids == ("manual-model",)
 
 
 @pytest.mark.parametrize(
@@ -7227,6 +7626,15 @@ def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
             payload=None,
             timeout=None,
         ):
+            if (method, path) == ("GET", "/auth-files"):
+                return {
+                    "files": [{
+                        "id": "claude-account",
+                        "auth_index": "claude-account",
+                        "name": auth_file.name,
+                        "provider": "claude",
+                    }]
+                }
             assert (method, path) == ("DELETE", "/auth-files")
             return {"status": "ok"}
 
@@ -7252,12 +7660,17 @@ def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
     state = EngineStateStore(tmp_path / "runtime-state")
     state.prepare_instance("install-1")
     auth_file = state.auth_dir / "claude-account.json"
-    auth_file.write_text("{}", encoding="utf-8")
-    auth_file.chmod(0o600)
     credential_ref = state.bind_oauth_credential(
         "src_pending01",
         "anthropic",
         auth_file.name,
+    )
+    state._secure_write_json(
+        auth_file,
+        {
+            "type": "claude",
+            "prefix": state.credential_metadata(credential_ref)["prefix"],
+        },
     )
     runtime_adapter = CLIProxyEngineAdapter(
         supervisor=Supervisor(Client()),  # type: ignore[arg-type]
@@ -7375,6 +7788,171 @@ def test_failed_hub_create_keeps_flow_when_ref_cleanup_is_not_durable(tmp_path):
     assert adapter.revoked == ["cred_create_flow"]
     assert service.revocations.list() == []
     assert service.oauth_flows.binding(flow["flow_id"]) is not None
+
+
+def _make_ref_cleanup_non_durable(service, adapter):
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    async def fail_revocation(credential_ref):
+        adapter.revoked.append(credential_ref)
+        raise RuntimeError("engine is unavailable")
+
+    service.revocations.add = fail_journal_write
+    adapter.revoke_credential = fail_revocation
+
+
+def test_unbound_hub_start_fails_when_ref_cleanup_is_not_durable(tmp_path):
+    service, _, adapter = _service(tmp_path)
+    start_oauth = adapter.start_oauth
+
+    async def start_foreign_flow_with_material(source_id, vendor):
+        flow = await start_oauth(source_id, vendor)
+        return OAuthFlowState(
+            **{
+                **flow.__dict__,
+                "source_id": "src_foreign001",
+                "credential_ref": "cred_unbound_flow",
+            }
+        )
+
+    adapter.start_oauth = start_foreign_flow_with_material
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked == ["cred_unbound_flow"]
+    assert service.revocations.list() == []
+
+
+def test_failed_hub_oauth_source_creation_keeps_flow_when_ref_cleanup_is_not_durable(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_rollback",
+        }
+    )
+    adapter.fail_sync = True
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            _create_source(
+                service,
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Rollback subscription",
+                    "supply_channel": "hub",
+                    "oauth_flow_ref": flow["flow_id"],
+                },
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked == ["cred_oauth_rollback"]
+    assert store.config.sources == []
+    assert service.revocations.list() == []
+    assert service.oauth_flows.channel(flow["flow_id"]) == "hub"
+
+
+def test_cancelled_hub_oauth_source_creation_fails_when_ref_cleanup_is_not_durable(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_cancelled",
+        }
+    )
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    async def scenario():
+        observing = asyncio.Event()
+
+        async def blocked_observation(*_args, **_kwargs):
+            observing.set()
+            await asyncio.Event().wait()
+
+        adapter.observe_source = blocked_observation
+        task = asyncio.create_task(
+            _create_source(
+                service,
+                {
+                    "kind": "subscription",
+                    "vendor": "anthropic",
+                    "display_name": "Cancelled subscription",
+                    "supply_channel": "hub",
+                    "oauth_flow_ref": flow["flow_id"],
+                },
+            )
+        )
+        await observing.wait()
+        task.cancel()
+        with pytest.raises(ModelHubError) as exc_info:
+            await task
+        return exc_info.value
+
+    refusal = asyncio.run(scenario())
+
+    assert (refusal.code, refusal.status) == ("engine_down", 503)
+    assert adapter.revoked == ["cred_oauth_cancelled"]
+    assert store.config.sources == []
+    assert service.revocations.list() == []
+
+
+def test_orphaned_hub_reauth_fails_when_ref_cleanup_is_not_durable(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
+    with pytest.raises(ModelHubError) as delete_refusal:
+        asyncio.run(service.delete_source(source.id))
+    asyncio.run(
+        service.delete_source(
+            source.id,
+            force=True,
+            confirmed_remove_hops=delete_refusal.value.data["would_remove_hops"],
+            confirmed_interruptions=delete_refusal.value.data["would_interrupt"],
+        )
+    )
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_orphan",
+        }
+    )
+    _make_ref_cleanup_non_durable(service, adapter)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked[-1] == "cred_hub_orphan"
+    assert service.revocations.list() == []
 
 
 @pytest.mark.parametrize(
@@ -8188,36 +8766,44 @@ def test_nonce_oauth_start_owner_cancellation_releases_waiter_and_tuple(tmp_path
     assert len(adapter.oauth_start_calls) == 1
 
 
-def test_oauth_start_keeps_every_owner_await_inside_the_installed_task(tmp_path):
+@pytest.mark.parametrize("channel", ("native_cli", "hub"))
+def test_nonce_oauth_start_retry_arriving_at_the_claim_joins_the_owner(tmp_path, channel):
     """A claimed nonce stays awaitable and releasable from the claim onward.
 
     The claim is what a concurrent same-tuple retry looks for, and the only
-    release is ``start_and_remember``'s own ``finally``. An owner await placed
-    before the task is installed therefore strands the tuple until restart, so
-    this asserts the property rather than the one pre-check that broke it: on the
-    owner path from claim to install there is nothing to wait on at all.
+    release is the owner task's own ``finally``. The retry is scheduled the
+    instant the owner claims, so any owner await before its task is installed
+    lets the retry find a pending claim with no task and fail ``engine_down``.
     """
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(ModelHubService.oauth_start)))
-    body = tree.body[0].body
-    claim = next(i for i, stmt in enumerate(body) if "claim_nonce" in ast.unparse(stmt))
-    install = next(i for i, stmt in enumerate(body) if "_oauth_start_tasks[nonce_key] = task" in ast.unparse(stmt))
+    async def run_retry_at_claim():
+        service, _, adapter = _service(tmp_path)
+        request = {
+            "vendor": "anthropic",
+            "channel": channel,
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+        claim_nonce = service.oauth_flows.claim_nonce
+        retries = []
 
-    for stmt in body[claim + 1 : install]:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # The task's own awaits are the safe ones: it is installed before it
-            # is awaited, and it owns the release.
-            continue
-        if isinstance(stmt, ast.If) and ast.unparse(stmt.test) == "nonce_key is None":
-            # No nonce, no claim — nothing for a retry to await or for a
-            # cancellation to leak.
-            continue
-        waits = [node for node in ast.walk(stmt) if isinstance(node, (ast.Await, ast.AsyncWith, ast.AsyncFor))]
-        assert not waits, f"owner awaits before its task is installed: {ast.unparse(stmt)}"
+        def claim_then_retry(*args, **kwargs):
+            claim = claim_nonce(*args, **kwargs)
+            if claim.owner:
+                retries.append(asyncio.create_task(service.oauth_start(dict(request))))
+            return claim
+
+        service.oauth_flows.claim_nonce = claim_then_retry
+        first = await service.oauth_start(request)
+        return first, await retries[0], adapter
+
+    first, retried, adapter = asyncio.run(run_retry_at_claim())
+
+    assert retried == first
+    assert len(adapter.oauth_start_calls) == 1
 
 
 def test_nonce_oauth_start_coalesces_a_retry_while_the_native_slot_read_waits(tmp_path):
-    """The member the structure guard above exists for, end to end."""
+    """A retry that waits behind the native-slot lock still joins the owner."""
 
     async def run_concurrent_start():
         service, _, adapter = _service(tmp_path)
@@ -9533,3 +10119,68 @@ def test_signed_organization_member_completes_models_page_bootstrap(monkeypatch,
     # A valid signed session still needs CSRF for writes.
     response = client.post("/api/models/runtime/start", json={}, base_url=base_url, environ_base=remote_peer())
     assert response.status_code == 403
+
+
+def test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh(monkeypatch, tmp_path):
+    """MH-QUOTA-012: GET and forced-refresh routes return only hub subscriptions' parsed windows, per-Source failures, and a cached forced re-read."""
+
+    from core.handlers.model_hub.quota import SubscriptionQuotaError
+
+    service = _seed_response_conformance_service(tmp_path)
+    service.store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_codexsub01",
+            kind="subscription",
+            vendor="openai",
+            display_name="ChatGPT Pro",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[],
+            credential_ref="cred_codexsub01",
+        )
+    )
+    calls = []
+
+    async def subscription_quota(source_id, vendor, credential_ref):
+        calls.append(source_id)
+        if source_id == "src_codexsub01":
+            raise SubscriptionQuotaError("auth_expired")
+        return {"plan": None, "windows": [{
+            "id": "five_hour", "kind": "session", "label": "five_hour", "used_pct": 38.0,
+            "window_seconds": 18000, "resets_at": "2026-07-23T05:00:00Z",
+        }]}
+
+    service.adapter.subscription_quota = subscription_quota
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
+    client = app.test_client()
+    origin = "http://127.0.0.1:15131"
+
+    response = client.get("/api/models/quota", base_url=origin)
+    assert response.status_code == 200
+    body = response.get_json()
+    _assert_valid("quota-summary.schema.json", body["quota"])
+    sources = {source["source_id"]: source for source in body["quota"]["sources"]}
+    # API-key Sources have no subscription quota and are absent.
+    assert set(sources) == {"src_subscribe01", "src_codexsub01"}
+    assert sources["src_subscribe01"]["state"] == "ok"
+    assert sources["src_subscribe01"]["windows"][0]["used_pct"] == 38.0
+    assert sources["src_codexsub01"]["state"] == "auth_expired"
+    assert "cred_" not in json.dumps(body)
+    assert sorted(calls) == ["src_codexsub01", "src_subscribe01"]
+
+    # Each subscription carries its API-price value; an unknown plan hides only the payback.
+    assert sources["src_subscribe01"]["value"]["plan_key"] is None
+    assert sources["src_subscribe01"]["value"]["multiple"] is None
+    assert sources["src_subscribe01"]["value"]["period"]["basis"] == "rolling_30d"
+    assert body["quota"]["value"]["price_table_date"] == "2026-07-22"
+    assert body["quota"]["value"]["period"] is None
+    assert "pending" not in body["quota"]
+
+    headers = csrf_headers(client, origin)
+    refreshed = client.post("/api/models/quota/refresh", headers=headers, base_url=origin)
+    assert refreshed.status_code == 200
+    _assert_valid("quota-summary.schema.json", refreshed.get_json()["quota"])
+    # Inside the forced-refresh interval the cached snapshot answers.
+    assert len(calls) == 2

@@ -322,7 +322,10 @@ def test_a_recorded_outcome_reports_the_job_and_nothing_about_liveness(monkeypat
     assert "service_alive" not in status
 
 
-def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
+@pytest.mark.parametrize("scope,ready", [("full", True), ("service", True), ("full", False)])
+def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path, scope, ready):
+    from vibe import install_generations
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
@@ -334,10 +337,24 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda *args, **kwargs: 222 if ready else None)
+    collected = []
 
-    rc = restart_supervisor._run_restart_job(job_id="jobabc", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
+    def collect(launcher):
+        assert runtime.read_json(runtime.get_restart_status_path())["state"] == "succeeded"
+        collected.append(launcher)
+
+    monkeypatch.setattr(install_generations, "collect_install_generations", collect)
+    rc = restart_supervisor._run_restart_job(
+        job_id="jobabc", delay_seconds=0, vibe_path="/bin/vibe", trigger="test", scope=scope,
+    )
+    if not ready:
+        assert rc != 0
+        assert collected == []
+        return
 
     assert rc == 0
+    assert collected == (["/bin/vibe"] if scope == "full" else [])
     assert calls == ["stop_runtime", "start_runtime"]
     status = runtime.read_json(runtime.get_restart_status_path())
     assert status["ok"] is True

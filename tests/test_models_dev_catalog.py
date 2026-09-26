@@ -333,3 +333,75 @@ def test_models_dev_caps_matches_at_eight(monkeypatch):
 
     assert len(matches) == models_dev_catalog.MODELS_DEV_MAX_MATCHES == 8
     assert [item["model_id"] for item in matches] == sorted(item["model_id"] for item in matches)
+
+
+def test_exact_models_dev_matches_never_borrow_a_neighbour():
+    catalog = {
+        "openrouter": {
+            "name": "OpenRouter",
+            "models": {
+                "gpt-target": {"name": "Proxy"},
+                "claude-3-5-target": {"name": "Claude 3.5 proxy"},
+            },
+        },
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "gpt-target": {"name": "GPT target"},
+                "gpt-target-mini": {"name": "GPT target mini"},
+                "foo": {"name": "Foo"},
+                "Case-Target": {"name": "Case target"},
+            },
+        },
+    }
+
+    matches = models_dev_catalog.exact_models_dev_matches(
+        [
+            "gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini",
+            "open_router/gpt.target", "claude-3.5-target", "gpt", "gpt-target-max",
+            "avibe-foo", "case-target",
+        ],
+        catalog,
+    )
+
+    # A bare id prefers the first-party copy; a full identity names its own.
+    assert matches["gpt-target"]["models_dev_id"] == "openai/gpt-target"
+    assert matches["openrouter/gpt-target"]["models_dev_id"] == "openrouter/gpt-target"
+    # A relay prefix falls back to the last segment.
+    assert matches["relay/gpt-target-mini"]["models_dev_id"] == "openai/gpt-target-mini"
+    # Only identical spellings match: no punctuation, case, or alias folding and
+    # no substrings.
+    assert set(matches) == {"gpt-target", "openrouter/gpt-target", "relay/gpt-target-mini"}
+    assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}
+
+
+def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):
+    """MH-PRICE-014: With no cached copy, readers start one fetch and say one is coming; after a failure they do not."""
+
+    import threading
+
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: tmp_path / "models_dev_catalog.json")
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_flight", False, raising=False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_failed", False, raising=False)
+    release = threading.Event()
+    fetches = []
+
+    def fetch(_previous):
+        fetches.append(threading.current_thread().name)
+        release.wait(timeout=5)
+        raise OSError("offline")
+
+    monkeypatch.setattr(models_dev_catalog, "_fetch_catalog", fetch)
+    readers = [threading.Thread(target=models_dev_catalog.load_models_dev_catalog_with_date) for _ in range(8)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(timeout=5)
+    assert models_dev_catalog.load_models_dev_catalog_with_date() == ({}, None, True)
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "models-dev-refresh":
+            thread.join(timeout=5)
+    assert fetches == ["models-dev-refresh"]
+    # The fetch failed: the next read retries it, but no longer promises prices.
+    assert models_dev_catalog.load_models_dev_catalog_with_date() == ({}, None, False)

@@ -24,7 +24,6 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
-import { AdoptionNote } from './AdoptionNote';
 import {
   classifyOAuthFailure,
   createFlowAuthority,
@@ -39,13 +38,7 @@ import {
   type FlowView,
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
-import {
-  commitProviderTabRetry,
-  disposeProviderTab,
-  preopenProviderTab,
-  takeProviderTabForNavigation,
-} from './providerTab';
-import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
+import { REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import {
   NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
   PASTE_REJECTED_KEY,
@@ -121,18 +114,8 @@ export const OAuthConnectDialog: React.FC<{
   );
   const [startAttempt, setStartAttempt] = React.useState(0);
   const [startFailureCode, setStartFailureCode] = React.useState<string | null>(null);
-  // Which Agents took the new subscription in, frozen at commit (api.md). Same
-  // note as the API-key dialog: connecting a credential is not the same as
-  // putting it into service, and an Agent with no accepted match is absent.
-  //
-  // `null` means the terminal response did not report a creation — which is not
-  // 「没有 Agent 采用」 and must not be rendered as it.
-  //
-  // The whole tail rather than the adopter list alone, held as one value: the note
-  // reads both halves, and two states can hold one half of an older arrival.
-  const [adoption, setAdoption] = React.useState<Adoption | null>(null);
-  // The reauth counterpart of `adoption`, read through the same owner the key
-  // replacement uses so 「did that fix it?」 has one answer on the page.
+  // What a finished reauth says about the source it repaired, read through the
+  // same owner the key replacement uses so 「did that fix it?」 has one answer.
   const [repair, setRepair] = React.useState<RepairOutcome | null>(null);
   // What a FAILED reauth stranded on its way down. Not the same thing as
   // `repair`'s gap report: that one describes a write that landed, this one
@@ -146,7 +129,6 @@ export const OAuthConnectDialog: React.FC<{
   // terminal side effects.
   const flowAuthorityRef = React.useRef<FlowAuthority | null>(null);
   const settleRef = React.useRef<((result: OAuthResult) => void) | null>(null);
-  const successTimer = React.useRef<number | null>(null);
   // Mirrored for the flow effect, which is built once per attempt and would
   // otherwise read this from the render that built it — i.e. always `false`.
   const submittingRef = React.useRef(false);
@@ -210,9 +192,7 @@ export const OAuthConnectDialog: React.FC<{
     setChannel(initialSubscriptionChannel(vendor, sources));
     // A vendor with no chooser copy has no channel choice to put in front of the
     // user, so it opens straight into its flow — the same entry the re-auth
-    // journey takes above. The gesture that allocated its provider tab was the
-    // menu item that opened this dialog (PD-1), since there is no 去登录 here to
-    // allocate one.
+    // journey takes above.
     setPhase(chooser === null ? 'flow' : 'choose');
   }, [chooser, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
@@ -341,19 +321,16 @@ export const OAuthConnectDialog: React.FC<{
           t(toast?.key ?? 'settings.models.oauth.status.success') as string,
           toast?.tone ?? 'success',
         );
-        // Same shape as the adoption auto-close below, on the same footing now that
-        // both halves are server facts: 「nothing was stranded」 is a field the
-        // server sends, so a clean repair may dismiss itself while a gap report
-        // stays on screen to be read. An absent tail says nothing to read either,
-        // so it closes too.
-        if (!verdict || repairSettles(verdict))
-          successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
+        // The toast is the whole report of a clean repair, so the journey ends
+        // with it: 「nothing was stranded」 is a field the server sends, and only a
+        // verdict that leaves something to read keeps the dialog on screen. An
+        // absent tail says nothing to read either, so it closes too.
+        if (!verdict || repairSettles(verdict)) onCloseRef.current();
       } else if (step.action === 'succeed') {
         // The Source already exists. The status/submit call that first reports
         // success materializes it server-side and consumes the flow binding doing
         // it — there is nothing left to finalize, and a POST /sources afterwards
         // is refused as `flow_not_found` on a connect that in fact succeeded.
-        setAdoption(created ? { added_to: created.added_to, adopted_by: created.adopted_by } : null);
         showToast(t('settings.models.oauth.status.success') as string, 'success');
         if (created) onConnectedRef.current(created.source, created);
       }
@@ -373,11 +350,6 @@ export const OAuthConnectDialog: React.FC<{
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
       if (isDone(step.action)) stop();
-      if (terminalArrivalMovedRows(step.action)) {
-        disposeProviderTab(
-          step.view.failureClass ?? (step.action === 'succeed' ? 'success' : undefined),
-        );
-      }
       return isDone(step.action);
     };
     settleRef.current = settle;
@@ -405,13 +377,10 @@ export const OAuthConnectDialog: React.FC<{
             } catch (err) {
               // The success and rejection paths belong to the same read. Once
               // this authority is retired, neither outcome may update the view
-              // or dispose a provider tab owned by its replacement.
+              // owned by its replacement.
               if (cancelled || flowAuthorityRef.current !== authority) return true;
               const failure = apiFailure(err);
               const failureClass = classifyOAuthFailure(failure);
-              // This reread did not start a provider journey, so the tab opened
-              // by the Retry gesture has no URL to receive.
-              disposeProviderTab(failureClass);
               // An unread flow is still held. Retry may ask again, but it may not
               // turn missing evidence into permission to mint a replacement.
               if (failureClass === 'inconclusive') return true;
@@ -466,7 +435,6 @@ export const OAuthConnectDialog: React.FC<{
           pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
           return;
         }
-        disposeProviderTab(failureClass);
         // The authority goes first because its answer is what decides whether these
         // pairs are the ones on screen — see `failureLanded`. The refetch below is
         // owed whatever it answers.
@@ -485,7 +453,6 @@ export const OAuthConnectDialog: React.FC<{
     setCode('');
     setPasteError(null);
     setSubmitting(false);
-    setAdoption(null);
     setRepair(null);
     setStranded([]);
     void (async () => {
@@ -571,7 +538,6 @@ export const OAuthConnectDialog: React.FC<{
           failureClass,
         });
         if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
-        disposeProviderTab(failureClass);
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -580,7 +546,6 @@ export const OAuthConnectDialog: React.FC<{
       cancelled = true;
       stop();
       settleRef.current = null;
-      if (successTimer.current !== null) window.clearTimeout(successTimer.current);
       transition({ kind: 'reset' });
       // Read ownership BEFORE releasing it. React runs this cleanup ahead of the
       // next effect body, so at this instant the ref is still ours whenever it is
@@ -606,7 +571,6 @@ export const OAuthConnectDialog: React.FC<{
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
       const opened = openedFlowId;
-      disposeProviderTab('cleanup');
       if (heldFlowId.current === opened) heldFlowId.current = null;
       rereadHeldFlow.current = null;
       void releaseFlow(authority, owner, {
@@ -681,7 +645,6 @@ export const OAuthConnectDialog: React.FC<{
         errorKey: oauthFailureKey(failure?.code, journey),
         failureClass,
       });
-      if (failureLanded(step.action)) disposeProviderTab(failureClass);
       rowsBehindAreStale(failure, failureLanded(step.action));
     } finally {
       if (isCurrent()) setSubmitting(false);
@@ -695,7 +658,6 @@ export const OAuthConnectDialog: React.FC<{
       setNativeSlotTaken(true);
       setChannel('hub');
       setStartFailureCode(null);
-      disposeProviderTab(view.failureClass ?? 'retryable-provider');
       setPhase('choose');
       return;
     }
@@ -706,7 +668,6 @@ export const OAuthConnectDialog: React.FC<{
     const freshAcquisition = startFailureCode === null;
     setStartFailureCode(null);
     if (freshAcquisition) clientNonce.current = null;
-    commitProviderTabRetry();
     setStartAttempt((attempt) => attempt + 1);
     setPhase('flow');
   };
@@ -737,28 +698,6 @@ export const OAuthConnectDialog: React.FC<{
       ? 'settings.models.oauth.callback.hint'
       : 'settings.models.oauth.pasteCode.hint';
   const step2Label = serverText(t, presentation?.instructions_key, step2Fallback) ?? '';
-
-  const flowActive = Boolean(
-    flow
-      && !view.settled
-      && (flow.state === 'starting' || flow.state === 'awaiting_action' || flow.state === 'verifying'),
-  );
-  React.useEffect(() => {
-    if (!flowActive || !presentation?.auth_url) return;
-    // Claimed at the point of use, not when the dialog opens: the re-auth journey's
-    // tab is allocated by the confirm gesture before this component exists, and a
-    // claim taken at mount is stranded by anything that remounts (StrictMode
-    // replays effects in development) with the tab still open and unreachable.
-    // Claiming here also means a run with nothing to navigate keeps the handoff.
-    const target = takeProviderTabForNavigation();
-    if (!target || target.closed) return;
-    try {
-      target.location.href = presentation.auth_url;
-    } catch {
-      // A popup may become inaccessible after opening; the visible link remains
-      // the fallback in that case.
-    }
-  }, [flowActive, presentation?.auth_url]);
 
   // The chooser is only for a vendor whose copy exists. A hub-held subscription
   // has no channel choice to make, so it opens straight into its flow (the open
@@ -906,10 +845,7 @@ export const OAuthConnectDialog: React.FC<{
               variant="brand"
               size="sm"
               className="model-hub-dialog-action"
-              onClick={() => {
-                preopenProviderTab();
-                setPhase('flow');
-              }}
+              onClick={() => setPhase('flow')}
             >
               {t('settings.models.addSub.signIn')}
               <ArrowRight className="size-3.5" />
@@ -957,11 +893,9 @@ export const OAuthConnectDialog: React.FC<{
           )}
 
           {success && isReauth ? (
-            // A repair reports on the source it repaired, not on a new connection:
-            // 「已恢复可用」 when the login cleared the blocker, 「已更新」 when there
-            // was nothing to clear, 「仍然不可用」 when the flow finished and the
-            // source came back stopped anyway, and the stranded pairs when
-            // something is still without a source. Only the last stays on screen.
+            // A repair reports on the source it repaired, not on a new connection.
+            // A clean one closed on its toast; only a verdict that leaves something
+            // to read stays: the stranded pairs, or a source that came back stopped.
             repair?.kind === 'gaps' ? (
               <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
                 <span className="model-hub-ink-gold text-[12.5px] font-semibold leading-relaxed">
@@ -979,26 +913,13 @@ export const OAuthConnectDialog: React.FC<{
                 <TriangleAlert className="size-4 shrink-0" />
                 {t('settings.models.repair.unresolved')}
               </div>
-            ) : (
-              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
-                <CheckCircle2 className="size-4 shrink-0" />
-                {repair
-                  ? t(REPAIR_LINE_KEY[repair.kind])
-                  : t('settings.models.oauth.connected')}
-              </div>
-            )
+            ) : null
           ) : success ? (
-            <div className="flex flex-col gap-2">
-              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
-                <CheckCircle2 className="size-4 shrink-0" />
-                {t('settings.models.oauth.connected')}
-              </div>
-              {/* Only when the response actually reported the creation: an absent
-                  `adopted_by` is not an empty one, and 「没有 Agent 采用」 would be
-                  a claim this response never made. The two halves come off ONE
-                  value, so the note can never read a skip list from one arrival
-                  against an adopter list from another. */}
-              <AdoptionNote addedTo={adoption?.added_to ?? null} adoptedBy={adoption?.adopted_by ?? null} />
+            // A create that handed its source over has already closed into it; this
+            // line is for a success whose response reported no source to hand over.
+            <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
+              <CheckCircle2 className="size-4 shrink-0" />
+              {t('settings.models.oauth.connected')}
             </div>
           ) : (
             active && (
@@ -1068,10 +989,7 @@ export const OAuthConnectDialog: React.FC<{
                   variant="brand"
                   size="sm"
                   className="h-10 sm:h-9"
-                  onClick={() => {
-                    preopenProviderTab('retry');
-                    void retryStart();
-                  }}
+                  onClick={() => void retryStart()}
                 >
                   {t('settings.models.addSub.retry')}
                 </Button>

@@ -69,6 +69,19 @@ describe('SourceTestDialog', () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['lifted', 'standby', false],
+    ['kept', 'cooldown', true],
+  ] as const)('reports a passing test that %s the cooldown', async (_case, landed, warned) => {
+    const cooling: Source = { ...source, state: { status: 'cooldown', retry_at: null, detail_key: 'models.source.cooldown.server_error' } };
+    vi.mocked(settlement.unread).mockResolvedValue(landing([{ ...cooling, state: { ...cooling.state, status: landed } }]));
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
+    render(view(cooling));
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    const reported = await screen.findByText(/responded successfully/);
+    expect(reported.textContent?.includes('still marked unavailable')).toBe(warned);
+  });
+
   it('keeps the result when success clears pending verification', async () => {
     vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
     const rendered = render(view());
@@ -215,6 +228,20 @@ describe('SourceTestDialog', () => {
     rendered.rerender(view({ ...source, models: [...source.models].reverse() }));
     expect(screen.getByRole('combobox').textContent).toContain('gpt-5.6-luna');
     expect(screen.getByText(/responded successfully/)).toBeTruthy();
+  });
+
+  it.each([
+    [true, 'model-hub-ink-mint', 'text-destructive-ink'],
+    [false, 'text-destructive-ink', 'model-hub-ink-mint'],
+  ] as const)('colours the result by outcome: reachable=%s', async (reachable, shown, absent) => {
+    vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer({ reachable }));
+    render(view());
+    await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
+    const reported = await screen.findByRole('status');
+    expect(reported.classList.contains(shown)).toBe(true);
+    expect(reported.classList.contains(absent)).toBe(false);
+    expect(reported.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(reported.textContent).toMatch(reachable ? /responded successfully/ : /did not pass this test/);
   });
 
   it('lets an empty inventory exit to the existing manual model editor', () => {

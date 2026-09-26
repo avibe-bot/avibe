@@ -57,10 +57,11 @@ describe('MentionEditor voice preview', () => {
     expect(onChange.mock.calls.at(-1)?.[3]).toBe(true);
 
     act(() => {
-      expect(ref.current?.commitVoicePreview(
+      const inserted = ref.current?.commitVoicePreview(
         voiceInsertionSnapshot('Plan today', 5, 5),
         'The launch is tomorrow.',
-      )).toBe(true);
+      );
+      expect(inserted).toMatchObject({ start: 5, end: 29 });
     });
     await waitFor(() => expect(editor.textContent).toBe('Plan The launch is tomorrow. today'));
     expect(onChange.mock.calls.at(-1)?.[3]).toBe(false);

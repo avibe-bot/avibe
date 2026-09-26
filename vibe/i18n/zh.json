@@ -322,6 +322,11 @@
       "message": "这个一次性 Task 的计划已经结束。",
       "hint": "请先用 `vibe task update {id} --at <time>` 设置新的未来时间，再恢复它。"
     },
+    "cronNumericWeekday": {
+      "message": "cron 的星期字段使用了数字：{field}",
+      "readings": "Avibe（APScheduler）解析为 {avibe}；标准 crontab(5) 解析为 {crontab}。",
+      "hint": "请改用星期英文名（mon、tue、wed、thu、fri、sat、sun），它们在两种规则下含义一致。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
@@ -422,9 +427,11 @@
     "agentMemoryLimit": "共享 Agent cgroup 记录到内存上限事件；并发 Agent 进程可能受到影响。",
     "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请在原工作目录恢复原会话，再手动重试待发送的输入；也可以在当前目录开始一个新会话。",
+    "claudeInputRuntimeChanged": "这条消息尚未发送，因为 Claude 连接在本地写入前发生了变化。会话和后台任务均已保留，请在准备好后重试待发送的消息。",
     "sessionGeneric": "发生错误：{error}",
     "codexPromptRefreshUnavailable": "Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
     "codexForkBoundaryUnavailable": "Codex 无法确定此次分叉的安全历史边界。请等待源会话当前回合结束后重试；如果问题持续，请检查或升级 Codex。",
+    "codexRuntimeChangeBlocked": "此工作目录中另一个 Codex 回合仍在使用不同的模型运行时，所选模型暂时无法启动。请在该回合结束后重试这条输入，或改用其他工作目录。",
     "codexResponseTooLarge": "Codex 返回的响应超过 {limitMiB} MiB，此连接无法继续。请检查或升级 Codex 后重试。",
     "opencodeModelHubOverlayRequired": "OpenCode 仍在准备 Gateway 模式，请稍后重试。",
     "opencodePolicyRefreshPending": "OpenCode 仍在完成已有回合，暂时无法按 Avibe 当前的 Skill 策略重启。请在该回合结束后重试。",
@@ -1149,6 +1156,7 @@
       "noExtraServiceProcess": "未发现额外 Avibe 服务进程",
       "deepScanSkipped": "快速诊断已跳过深度服务进程扫描",
       "showGitUnavailable": "Git 不可用，Show Page 检查点功能已降级",
+      "cronNumericWeekday": "{count} 个 cron 任务用数字表示星期；Avibe 按 0=周一 到 6=周日 解析（标准 crontab 的 0 是周日），这些任务可能比预期晚一天运行：{tasks}",
       "dependencyHttp404": "{label} 发布资源不存在（HTTP 404）：{url}",
       "dependencyHttpError": "{label} 请求返回 HTTP {status}：{url}",
       "dependencyHttpErrorRetried": "{label} 请求经过 {attempts} 次尝试后返回 HTTP {status}：{url}",
@@ -1305,6 +1313,7 @@
       "slackValidationFailed": "在设置向导中检查 Slack token",
       "agentCliMissing": "安装 {agent} 或更新 CLI 路径",
       "workingDirectoryMissing": "在设置中更新 default_cwd",
+      "cronNumericWeekday": "确认每个任务原本想要的日期后，改用星期英文名，例如 vibe task update <id> --cron '0 9 * * mon-fri'",
       "cliMissing": "使用 uv tool 安装 Avibe，或将预期的 vibe 可执行文件加入 PATH。",
       "cliPathPrecedence": "使用 uv tool 安装时，将 ~/.local/bin 放在系统 Python bin 目录之前。",
       "cliNotUvTool": "此可执行文件将跳过 uv tool 包完整性检查。",

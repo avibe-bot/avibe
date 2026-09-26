@@ -92,10 +92,54 @@ def test_mh_routing_008_real_gateway_cpa_exact_model_and_source(tmp_path, monkey
         paths = {"anthropic": "messages", "openai_responses": "responses", "openai_chat": "chat/completions"}
         prompt = "Original request: \u4e2d\u6587"
         payload = {"model": menu, "stream": stream}
+        tool_name = "lookup_weather"
+        tool_id = "call_weather"
+        arguments = {"city": "上海"}
+        tool_result = "晴朗"
+        schema = {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        }
+        function = {"name": tool_name, "description": "Look up weather", "parameters": schema}
         if protocol == "openai_responses":
-            payload["input"] = prompt
+            payload.update(
+                tools=[{"type": "function", **function}],
+                input=[
+                    {"role": "user", "content": prompt},
+                    {"type": "function_call", "call_id": tool_id, "name": tool_name,
+                     "arguments": json.dumps(arguments, ensure_ascii=False)},
+                    {"type": "function_call_output", "call_id": tool_id, "output": tool_result},
+                ],
+            )
+        elif protocol == "anthropic":
+            payload.update(
+                max_tokens=32,
+                tools=[{"name": tool_name, "description": "Look up weather", "input_schema": schema}],
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": tool_id, "name": tool_name, "input": arguments},
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": tool_id, "content": tool_result},
+                    ]},
+                ],
+            )
         else:
-            payload.update(max_tokens=32, messages=[{"role": "user", "content": prompt}])
+            payload.update(
+                max_completion_tokens=32,
+                tools=[{"type": "function", "function": function}],
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "tool_calls": [
+                        {"id": tool_id, "type": "function", "function": {
+                            "name": tool_name, "arguments": json.dumps(arguments, ensure_ascii=False),
+                        }},
+                    ]},
+                    {"role": "tool", "tool_call_id": tool_id, "content": tool_result},
+                ],
+            )
         first.reset_requests()
         second.reset_requests()
         try:
@@ -109,8 +153,37 @@ def test_mh_routing_008_real_gateway_cpa_exact_model_and_source(tmp_path, monkey
             await gateway.close()
         captured = [row for row in first.requests() if row["path"] == f"/v1/{paths[protocol]}"]
         assert len(captured) == 1, first.requests()
-        assert captured[0]["body"]["model"] == target
-        assert prompt in json.dumps(captured[0]["body"], ensure_ascii=False)
+        received = captured[0]["body"]
+        assert received["model"] == target
+        assert prompt in json.dumps(received, ensure_ascii=False)
+        # CPA may add cache-control metadata; the caller's tool contract survives.
+        assert any(
+            all(tool.get(key) == value for key, value in payload["tools"][0].items())
+            for tool in received["tools"]
+        )
+        if protocol == "openai_responses":
+            call = next(item for item in received["input"] if item.get("type") == "function_call")
+            result = next(item for item in received["input"] if item.get("type") == "function_call_output")
+            assert call["call_id"] == result["call_id"] == tool_id
+            assert call["name"] == tool_name
+            assert json.loads(call["arguments"]) == arguments
+            assert result["output"] == tool_result
+        elif protocol == "anthropic":
+            call = received["messages"][1]["content"][0]
+            result = received["messages"][2]["content"][0]
+            assert call["id"] == result["tool_use_id"] == tool_id
+            assert call["name"] == tool_name
+            assert call["input"] == arguments
+            assert result["content"] == tool_result
+        else:
+            call = received["messages"][1]["tool_calls"][0]
+            result = received["messages"][2]
+            assert received.get("max_completion_tokens") == 32
+            assert "max_tokens" not in received
+            assert call["id"] == result["tool_call_id"] == tool_id
+            assert call["function"]["name"] == tool_name
+            assert json.loads(call["function"]["arguments"]) == arguments
+            assert result["content"] == tool_result
         assert not [row for row in second.requests() if row["path"] == f"/v1/{paths[protocol]}"]
         assert [row.id for row in service.store.load().sources[0].models] == inventory
         assert adapter.state_store.get_source(sources[0].id).model_ids == tuple(inventory)

@@ -237,11 +237,11 @@ export const repairOutcome = (tail: SourceRepaired): RepairOutcome =>
  * Provable from the tail alone: 「nothing was stranded, and the source came back
  * working」 is two fields the server sends.
  *
- * An allowlist rather than `!== 'gaps'`: L4's rule is that the 1.4s dismissal is
- * for a plain success and 「every other verdict leaves an instruction on screen
- * that 1.4s is not long enough to read」. Written as an exclusion, the next verdict
- * added would inherit the auto-close silently, which is the wrong default for a
- * verdict that exists because something did not work.
+ * An allowlist rather than `!== 'gaps'`: a plain success closes on its toast,
+ * and every other verdict leaves an instruction on screen that a toast cannot
+ * hold. Written as an exclusion, the next verdict added would inherit the close
+ * silently, which is the wrong default for a verdict that exists because
+ * something did not work.
  */
 export const repairSettles = (outcome: RepairOutcome): boolean =>
   outcome.kind === 'repaired' || outcome.kind === 'refreshed';

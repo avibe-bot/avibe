@@ -419,6 +419,9 @@ export interface ComposerProps {
    *  unset keeps the plain textarea (e.g. the Workbench home). */
   onSearchAgents?: (query: string) => Promise<AgentSearchResult[]>;
   onSearchSessions?: (query: string) => Promise<SessionSearchResult[]>;
+  /** The chat's latest Agent reply, read once when dictation starts and sent to
+   *  realtime recognition as context. Surfaces without one leave it unset. */
+  readLatestAgentReply?: () => string | undefined;
 }
 
 export interface ComposerHandle {
@@ -463,6 +466,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   autoFocus = false,
   onSearchAgents,
   onSearchSessions,
+  readLatestAgentReply,
 }, ref) {
   const { t } = useTranslation();
   const { voiceInput: voiceInputShortcut } = useActionShortcuts();
@@ -513,7 +517,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recordingStartRef = useRef(false);
   const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
   const focusNextVoiceControlRef = useRef(false);
-  const voiceEditorFocusReturnRef = useRef<HTMLElement | null>(null);
+  const voiceEditorFocusReturnRef = useRef<{
+    target: HTMLElement;
+    previousFocus: Element | null;
+  } | null>(null);
+  const voiceTextareaCaretRef = useRef<{ start: number; end: number } | null>(null);
   const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
@@ -786,9 +794,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const inserted = mentionRef.current?.commitVoicePreview(
         session.insertion,
         session.transcript ?? '',
-      ) ?? false;
-      if (inserted) setRealtimeAnnouncement('');
-      return inserted;
+      ) ?? null;
+      if (inserted !== null) setRealtimeAnnouncement('');
+      return inserted !== null;
     }
     const current = valueRef.current;
     const result = applyVoiceInsertionWithSnapshot(
@@ -804,6 +812,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setRealtimeAnnouncement('');
     onDraftChange?.(result.text);
     const caret = session.insertion.start + result.insertion.length;
+    voiceTextareaCaretRef.current = { start: caret, end: caret };
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
     return true;
   }, [onDraftChange, useMentions]);
@@ -816,6 +825,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     const preview = session.previewInsertion;
     session.previewInsertion = undefined;
+    voiceTextareaCaretRef.current = {
+      start: session.insertion.start,
+      end: session.insertion.end,
+    };
     if (preview === undefined || valueRef.current !== preview.text) return;
     valueRef.current = session.insertion.text;
     setValue(session.insertion.text);
@@ -1062,6 +1075,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     const insertion = capturedInsertion ?? captureVoiceInsertion();
+    if (!useMentions) {
+      voiceTextareaCaretRef.current = {
+        start: insertion.start,
+        end: insertion.end,
+      };
+    }
+    const reply = readLatestAgentReply?.();
     recordingStartRef.current = true;
     setRecordingStarting(true);
     let stream: MediaStream | null = null;
@@ -1104,6 +1124,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       session.realtime = new VoiceRealtimeSession({
         before: insertion.before,
         after: insertion.after,
+        reply,
         signal: abortController.signal,
         onPreview: (preview) => {
           if (recordingSessionRef.current !== session || unmountedRef.current) return;
@@ -1358,18 +1379,38 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [voiceControlMode]);
 
-  useLayoutEffect(() => {
+  // Wait for MentionEditor's editable effect before returning keyboard focus.
+  useEffect(() => {
     if (voiceDraftReadOnly || voiceEditorFocusReturnRef.current === null) return;
-    const target = voiceEditorFocusReturnRef.current;
+    const { target, previousFocus } = voiceEditorFocusReturnRef.current;
     voiceEditorFocusReturnRef.current = null;
     const activeElement = document.activeElement;
     if (
-      target.isConnected
-      && (activeElement === null || activeElement === document.body || !activeElement.isConnected)
+      !disabled
+      && target.isConnected
+      && (
+        activeElement === previousFocus
+        || activeElement === null
+        || activeElement === document.body
+        || !activeElement.isConnected
+      )
     ) {
-      target.focus({ preventScroll: true });
+      if (useMentions) {
+        // A DOM focus call is not enough for Lexical: it can leave the editor's
+        // internal selection detached from the contenteditable after a voice
+        // update completed while the editor was blurred. Restore through the
+        // editor bridge so the caret committed by commitVoicePreview is synced
+        // back to the DOM before the next Enter key.
+        mentionRef.current?.focus();
+      } else {
+        target.focus({ preventScroll: true });
+        if (target instanceof HTMLTextAreaElement && voiceTextareaCaretRef.current !== null) {
+          const { start, end } = voiceTextareaCaretRef.current;
+          target.setSelectionRange(start, end);
+        }
+      }
     }
-  }, [voiceDraftReadOnly]);
+  }, [disabled, useMentions, voiceDraftReadOnly]);
 
   const handleVoiceShortcut = useCallback((event: KeyboardEvent, allowStart: boolean): boolean => {
     if (
@@ -1387,8 +1428,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ) return false;
 
     event.preventDefault();
-    if (voiceControlMode === 'finish') stopRecording();
-    else {
+    if (voiceControlMode === 'finish') {
+      const target = textareaRef.current
+        ?? composerRootRef.current?.querySelector<HTMLElement>('[role="textbox"]');
+      if (target && !inForegroundSurface(event.target as Element | null)) {
+        // Finishing from anywhere on Chat should leave the draft ready for Enter,
+        // unless the user moves focus elsewhere while transcription is pending.
+        voiceEditorFocusReturnRef.current = { target, previousFocus: document.activeElement };
+      }
+      stopRecording();
+    } else {
       const activeElement = document.activeElement;
       const editorFocus = (
         activeElement === textareaRef.current
@@ -1398,7 +1447,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           && composerRootRef.current?.contains(activeElement)
         )
       ) ? activeElement as HTMLElement : null;
-      voiceEditorFocusReturnRef.current = editorFocus;
+      voiceEditorFocusReturnRef.current = editorFocus
+        ? { target: editorFocus, previousFocus: editorFocus }
+        : null;
       // Keep the page's current focus when the shortcut started outside the
       // editor. Editor starts still move to Finish, then restore the caret.
       focusNextVoiceControlRef.current = editorFocus !== null;

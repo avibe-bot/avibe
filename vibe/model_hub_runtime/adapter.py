@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -37,6 +39,13 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
+from core.handlers.model_hub.quota import (
+    CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
+    QUOTA_FETCH_TIMEOUT_SECONDS,
+    SubscriptionQuotaError,
+    parse_claude_plan,
+    parse_subscription_quota,
+)
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -99,7 +108,7 @@ _OAUTH_ENDPOINTS = {
 # rather than an endpoint Avibe may synthesize a request against.
 #
 # Read from the engine at the commit `cliproxyapi_manifest.json` pins
-# (v7.2.149, `2a6b87ac`); each row is one of its serving surfaces, not a guess:
+# (v7.3.16, `c404af96`); each row is one of its serving surfaces, not a guess:
 #
 #   gemini  `internal/translator/antigravity/openai/chat-completions/init.go:9`
 #           registers `translator.Register(OpenAI, Antigravity, ...)`, so an
@@ -1146,18 +1155,8 @@ def _parse_oauth_control_plane_witness(
     return False
 
 
-def _probe_oauth_control_plane_witness(
-    *,
-    client: EngineClient,
-    auth: _AuthRecord,
-    vendor: str,
-) -> None:
-    """Use CPA's current auth record for a bodyless control-plane GET."""
-
-    normalized_vendor = vendor.strip().lower()
-    url = _OAUTH_CONTROL_PLANE_URLS.get(normalized_vendor)
-    if url is None:
-        raise EngineClientError("unsupported OAuth control-plane witness")
+def _oauth_account_call_headers(auth: _AuthRecord, normalized_vendor: str) -> dict[str, str]:
+    """Headers for a model-free account GET; CPA substitutes ``$TOKEN$``."""
 
     headers = {
         "Accept": "application/json",
@@ -1175,7 +1174,52 @@ def _probe_oauth_control_plane_witness(
         headers["User-Agent"] = "codex-cli"
         if auth.account_id:
             headers["ChatGPT-Account-ID"] = auth.account_id
+    return headers
 
+
+# The vendors' own quota reports: the same endpoints their CLIs read for
+# `/usage` and `/status`. Anthropic gates its report behind the OAuth beta.
+_SUBSCRIPTION_QUOTA_URLS = {
+    "anthropic": "https://api.anthropic.com/api/oauth/usage",
+    "openai": "https://chatgpt.com/backend-api/wham/usage",
+    "codex": "https://chatgpt.com/backend-api/wham/usage",
+}
+
+
+def _retry_after_seconds(headers: object) -> float | None:
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if not isinstance(key, str) or key.lower() != "retry-after":
+            continue
+        raw = str(value[0] if isinstance(value, list) and value else value).strip()
+        try:
+            seconds = float(raw)
+        except ValueError:
+            # RFC 9110 also allows an HTTP-date.
+            try:
+                moment = email.utils.parsedate_to_datetime(raw)
+            except (TypeError, ValueError, IndexError):
+                return None
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+        return seconds if math.isfinite(seconds) and seconds > 0 else None
+    return None
+
+
+def _fetch_subscription_quota(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+) -> dict[str, Any]:
+    """Read one grant's quota report and keep only the parsed windows."""
+
+    url = _SUBSCRIPTION_QUOTA_URLS[vendor]
+    headers = _oauth_account_call_headers(auth, vendor)
+    if vendor == "anthropic":
+        headers["anthropic-beta"] = "oauth-2025-04-20"
     payload = client.management_request(
         "POST",
         "/api-call",
@@ -1184,6 +1228,69 @@ def _probe_oauth_control_plane_witness(
             "method": "GET",
             "url": url,
             "header": headers,
+        },
+        timeout=QUOTA_FETCH_TIMEOUT_SECONDS,
+    )
+    status = payload.get("status_code")
+    if status in {401, 403}:
+        raise SubscriptionQuotaError("auth_expired")
+    if status == 429:
+        raise SubscriptionQuotaError(
+            "rate_limited",
+            retry_after_seconds=_retry_after_seconds(payload.get("header")),
+        )
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        raise SubscriptionQuotaError("unavailable")
+    parsed = parse_subscription_quota(vendor, payload.get("body"))
+    if vendor == "anthropic" and parsed.get("plan") is None:
+        parsed["plan"] = _fetch_claude_plan(client=client, auth=auth)
+    return parsed
+
+
+def _fetch_claude_plan(*, client: EngineClient, auth: _AuthRecord) -> str | None:
+    """Claude's usage report names no plan; read it from the profile, best effort."""
+
+    try:
+        payload = client.management_request(
+            "POST",
+            "/api-call",
+            payload={
+                "auth_index": auth.auth_index,
+                "method": "GET",
+                "url": _OAUTH_CONTROL_PLANE_URLS["anthropic"],
+                "header": _oauth_account_call_headers(auth, "anthropic"),
+            },
+            timeout=CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
+        )
+    except (EngineClientError, OSError):
+        return None
+    status = payload.get("status_code")
+    if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
+        return None
+    return parse_claude_plan(payload.get("body"))
+
+
+def _probe_oauth_control_plane_witness(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+) -> None:
+    """Use CPA's current auth record for a bodyless control-plane GET."""
+
+    normalized_vendor = vendor.strip().lower()
+    url = _OAUTH_CONTROL_PLANE_URLS.get(normalized_vendor)
+    if url is None:
+        raise EngineClientError("unsupported OAuth control-plane witness")
+
+    payload = client.management_request(
+        "POST",
+        "/api-call",
+        payload={
+            "auth_index": auth.auth_index,
+            "method": "GET",
+            "url": url,
+            "header": _oauth_account_call_headers(auth, normalized_vendor),
         },
     )
     if not _parse_oauth_control_plane_witness(
@@ -1891,7 +1998,7 @@ class CLIProxyEngineAdapter:
             ]
             if len(matches) != 1:
                 raise EngineStateError("OAuth credential validation is inconclusive")
-            # CPA v7.2.149 loses refresh failure details ("token expired") and
+            # CPA v7.3.16 loses refresh failure details ("token expired") and
             # also puts request failures in status_message. None of those
             # inventory strings proves that a refresh grant was rejected.
             try:
@@ -2521,6 +2628,52 @@ class CLIProxyEngineAdapter:
             credential_ref, source_id=source_id, vendor=vendor, auth_provider=endpoint[2],
         )
 
+    async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
+        """Read the bound grant's rate-limit windows without starting the engine."""
+
+        normalized_vendor = vendor.strip().lower()
+        endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
+        if endpoint is None or normalized_vendor not in _SUBSCRIPTION_QUOTA_URLS:
+            raise SubscriptionQuotaError("unsupported")
+        try:
+            metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+        except (EngineStateError, OSError, ValueError):
+            raise SubscriptionQuotaError("unavailable") from None
+        if (
+            metadata.get("kind") != "oauth"
+            or metadata.get("source_id") not in {None, source_id}
+            or str(metadata.get("vendor") or "").strip().lower() != normalized_vendor
+            or metadata.get("activation_state") not in {None, "active"}
+        ):
+            raise SubscriptionQuotaError("unavailable")
+        # A presentation read never starts, repairs, or restarts the engine.
+        client = await asyncio.to_thread(self.supervisor.client_if_running)
+        if client is None:
+            raise SubscriptionQuotaError("unavailable")
+        try:
+            inventory = await run_owned_in_thread(_auth_inventory, client)
+        except (EngineClientError, OSError):
+            raise SubscriptionQuotaError("unavailable") from None
+        auth_name = str(metadata.get("auth_name") or "")
+        matches = [
+            auth
+            for auth in inventory.values()
+            if (auth.name == auth_name or auth.identity == auth_name)
+            and auth.provider == endpoint[2]
+            and auth.auth_index
+        ]
+        if len(matches) != 1:
+            raise SubscriptionQuotaError("unavailable")
+        try:
+            return await run_owned_in_thread(
+                _fetch_subscription_quota,
+                client=client,
+                auth=matches[0],
+                vendor=normalized_vendor,
+            )
+        except (EngineClientError, OSError):
+            raise SubscriptionQuotaError("unavailable") from None
+
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
@@ -2720,6 +2873,18 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
+        if flow.auth_provider == "claude":
+            try:
+                # CPA only migrates Claude names while saving a new login.
+                # Restore the existing ref before ownership or cleanup decisions.
+                await asyncio.to_thread(self.state_store.reconcile_claude_login, auth.name)
+                foreign = await asyncio.to_thread(
+                    self._foreign_bound_identities, provider_records, flow.source_id,
+                )
+            except (EngineStateError, OSError):
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+                self._fail_flow(flow, "models.oauth.binding_failed")
+                return
         foreign_accounts = {
             record.account_id for record in provider_records if record.identity in foreign and record.account_id
         }
@@ -2727,10 +2892,10 @@ class CLIProxyEngineAdapter:
             # The same account is already a Source. A new file for it is this
             # flow's own material and is removed; an existing one belongs to the
             # other Source and is never touched.
-            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
-                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
-            elif auth.identity in foreign:
+            if auth.identity in foreign:
                 self._set_retained_material(flow, RetainedMaterialDisposition.FOREIGN_SOURCE_REF)
+            elif auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(auth.name):
+                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
             else:
                 self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
             self._fail_flow(flow, "models.oauth.account_already_added")

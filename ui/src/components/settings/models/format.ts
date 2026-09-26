@@ -45,9 +45,46 @@ export function formatTokensCompact(value: number | null): string {
     .format(Math.floor(value));
 }
 
-/** A ratio in [0, 1] as a whole-percent string — 「65%」. */
-export function formatPercent(ratio: number, locale: string): string {
-  return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 0 }).format(ratio);
+/** A ratio in [0, 1] in the reader's notation, with the caller's display precision. */
+export function formatPercent(ratio: number, locale: string, fractionDigits = 0): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'percent',
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(ratio);
+}
+
+/**
+ * A US-dollar figure in the reader's own grouping — 「$1,234.56」.
+ *
+ * Two decimals because an API-price valuation is compared against a monthly fee
+ * quoted in dollars and cents; a sub-cent figure shows as 「<$0.01」 rather than
+ * as a zero that reads as "free".
+ */
+export function formatUsd(value: number, locale: string): string {
+  const format = (amount: number) => new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency: 'USD',
+    currencyDisplay: 'narrowSymbol',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+  if (value > 0 && value < 0.005) return `<${format(0.01)}`;
+  return format(Math.max(0, value));
+}
+
+/**
+ * A priced figure that may be only a floor. Every $ or multiple the value
+ * surfaces show goes through this with the server's `api_cost_lower_bound`, so a
+ * floor never reads as exact, a floor of zero included (「≥ $0.00」).
+ */
+export function atLeast(text: string, lowerBound: boolean | undefined): string {
+  return lowerBound === true ? `≥ ${text}` : text;
+}
+
+/** `formatUsd` for a figure that carries its lower-bound flag. */
+export function formatCost(value: number, lowerBound: boolean | undefined, locale: string): string {
+  return atLeast(formatUsd(value, locale), lowerBound);
 }
 
 /**

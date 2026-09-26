@@ -32,6 +32,7 @@ class _ResultMessage:
     subtype = "success"
     result = "done"
     duration_ms = 1
+    origin = {"kind": "human"}
 
 
 class _AssistantFailureMessage:
@@ -43,6 +44,15 @@ class _AssistantFailureMessage:
 class SystemMessage:
     subtype = "init"
     data = {"subtype": "init"}
+
+
+async def _query_text(query):
+    if hasattr(query, "__aiter__"):
+        frames = [frame async for frame in query]
+        assert len(frames) == 1
+        frame = frames[0]
+        return frame["message"]["content"], frame["origin"]
+    return query, None
 
 
 def _one_result_client():
@@ -337,7 +347,11 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         receipt = await steer_task
         await asyncio.sleep(0)
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
-        self.assertEqual(client.query_call, ("补充：`exact`", composite_key))
+        prompt, origin = await _query_text(client.query_call[0])
+        self.assertEqual(
+            (prompt, origin, client.query_call[1]),
+            ("补充：`exact`", {"kind": "human"}, composite_key),
+        )
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
         agent.emit_result_message.assert_not_awaited()
 
@@ -629,8 +643,9 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
+        client = _ConsumedClient()
         await agent._receive_messages(
-            _ConsumedClient(),
+            client,
             "session-ambiguous-consumed",
             "/tmp/work",
             context,
@@ -645,7 +660,11 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             output=ANY,
         )
         agent.emit_result_message.assert_not_awaited()
-        agent._handle_receiver_eof.assert_awaited_once_with(composite_key, context)
+        agent._handle_receiver_eof.assert_awaited_once_with(
+            composite_key, context,
+            expected_client=client,
+            expected_activation_identity=None,
+        )
         self.assertNotIn(composite_key, agent._ambiguous_primary_results)
 
     async def test_failed_ambiguous_half_close_preserves_work_until_later_result(self):
@@ -792,14 +811,14 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         await flush_task
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
-        agent._claim_activity_batch_for_turns.assert_called_once()
-        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        agent._claim_activity_batch_for_turns.assert_not_called()
+        registry.requeue_completed_outputs.assert_not_called()
         agent.emit_result_message.assert_not_awaited()
 
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
 
-    async def test_activity_settlement_clears_ambiguous_interrupt(self):
+    async def test_activity_flush_does_not_consume_pending_human_turn(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
         context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
@@ -828,10 +847,10 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             context,
         )
 
-        self.assertFalse(retry)
-        self.assertFalse(agent._has_pending_requests(composite_key))
-        self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
-        agent._emit_activity_result.assert_awaited_once()
+        self.assertTrue(retry)
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        self.assertIn(composite_key, agent._ambiguous_interrupt_keys())
+        agent._emit_activity_result.assert_not_awaited()
         self.assertFalse(receiver_task.done())
 
         receiver_task.cancel()
@@ -952,6 +971,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent._cleanup_runtime_session.assert_awaited_once_with(
             composite_key,
             current_receiver_task=receiver_task,
+            expected_client=client,
             preserve_pending_request_state=True,
             reason="receiver_eof_without_result",
         )

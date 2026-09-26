@@ -1045,6 +1045,9 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     assert [(model.id, model.display_name) for model in manual] == [(identity, "Long manual")]
     assert all(model.id not in invalid for model in source.models)
     assert source.state.status == "standby"
+    # Failed discovery admits the Source on protocol evidence alone; the first
+    # successful call must still prove it.
+    assert bool(source.verification_pending) is (discovery is ObservationDiscovery.FAILED)
     assert _tree_digest(native_home) != before
     config_payload = json.loads(
         (native_home / ".config" / "opencode" / "opencode.json").read_text(

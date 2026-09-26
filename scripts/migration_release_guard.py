@@ -89,6 +89,7 @@ from storage.migrations import (
     alembic_dir,
     background_tables_ready,
     run_migrations,
+    set_literal_main_option,
 )
 
 VERSIONS_PATH = "storage/alembic/versions"
@@ -686,14 +687,14 @@ def edited_released_bodies(baseline: str | None = None) -> list[str]:
 
 def _alembic_config(db_path: Path, versions: Path | None = None) -> Config:
     config = Config()
-    config.set_main_option("script_location", str(alembic_dir()))
+    set_literal_main_option(config, "script_location", str(alembic_dir()))
     if versions is not None:
         # Without this Alembic splits version_locations on spaces and commas, so a
         # temporary directory containing either would silently resolve to no location at
         # all -- and an empty graph upgrades to head without applying anything.
-        config.set_main_option("path_separator", "os")
-        config.set_main_option("version_locations", str(versions))
-    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+        set_literal_main_option(config, "path_separator", "os")
+        set_literal_main_option(config, "version_locations", str(versions))
+    set_literal_main_option(config, "sqlalchemy.url", f"sqlite:///{db_path}")
     return config
 
 

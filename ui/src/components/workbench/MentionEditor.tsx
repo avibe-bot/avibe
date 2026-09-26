@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
   type Ref,
@@ -80,8 +81,12 @@ export interface MentionEditorHandle {
    *  previews replace one another without persisting as draft edits. */
   showVoicePreview: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
   /** Replace the active preview, or the original captured range, with the final
-   *  cleaned transcript as one ordinary draft edit. */
-  commitVoicePreview: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
+   *  cleaned transcript as one ordinary draft edit. Returns the committed
+   *  insertion so callers can preserve the caret at its end. */
+  commitVoicePreview: (
+    snapshot: VoiceInsertionSnapshot,
+    text: string,
+  ) => VoiceInsertionSnapshot | null;
   /** Restore the rich editor state captured before the first voice preview.
    *  Refuses to restore if the user has changed the draft since that preview. */
   restoreVoicePreview: () => boolean;
@@ -288,6 +293,28 @@ function serializedOffsetForPoint(point: PointType): number | null {
 }
 
 function serializedPointAtOffset(target: number): SerializedPoint | null {
+  const pointAtEnd = (node: LexicalNode): SerializedPoint | null => {
+    if ($isTextNode(node)) {
+      return {
+        key: node.getKey(),
+        offset: node.getTextContentSize(),
+        type: 'text',
+      };
+    }
+    if ($isElementNode(node)) {
+      const last = node.getLastDescendant();
+      if ($isTextNode(last)) {
+        return {
+          key: last.getKey(),
+          offset: last.getTextContentSize(),
+          type: 'text',
+        };
+      }
+      return { key: node.getKey(), offset: node.getChildrenSize(), type: 'element' };
+    }
+    return null;
+  };
+
   const visit = (node: LexicalNode, base: number, rootLevel = false): SerializedPoint | null => {
     if ($isTextNode(node)) {
       const serialized = nodeToMarkerText(node, []);
@@ -321,13 +348,8 @@ function serializedPointAtOffset(target: number): SerializedPoint | null {
         return visit(children[index], offset);
       }
       if (target === childEnd) {
-        if (rootLevel) {
-          const child = children[index];
-          return $isElementNode(child)
-            ? { key: child.getKey(), offset: child.getChildrenSize(), type: 'element' }
-            : visit(child, offset);
-        }
-        return { key: node.getKey(), offset: index + 1, type: 'element' };
+        return pointAtEnd(children[index])
+          ?? { key: node.getKey(), offset: index + 1, type: 'element' };
       }
       offset = childEnd;
       if (rootLevel && index < children.length - 1) {
@@ -401,7 +423,10 @@ function EnterSubmitPlugin({
 
 function EditablePlugin({ disabled }: { disabled: boolean }) {
   const [editor] = useLexicalComposerContext();
-  useEffect(() => {
+  // Voice completion restores focus in a sibling effect as soon as the draft
+  // becomes editable again. A passive effect leaves the contenteditable
+  // disabled for that render, so the browser ignores the focus request.
+  useLayoutEffect(() => {
     editor.setEditable(!disabled);
   }, [editor, disabled]);
   return null;
@@ -491,6 +516,17 @@ function BootstrapPlugin({
           selection.focus.set(end.key, end.offset, end.type);
           $setSelection(selection);
           selection.insertText(result.insertion);
+          // Lexical normally collapses an inserted range to its end, but the
+          // editor may be blurred while voice transcription is finishing.
+          // Rebuild the caret from the serialized insertion boundary so the
+          // later focus return cannot restore the pre-voice selection.
+          const caret = serializedPointAtOffset(result.snapshot.end);
+          if (caret) {
+            const caretSelection = $createRangeSelection();
+            caretSelection.anchor.set(caret.key, caret.offset, caret.type);
+            caretSelection.focus.set(caret.key, caret.offset, caret.type);
+            $setSelection(caretSelection);
+          }
           inserted = result.snapshot;
         }, {
           tag,
@@ -504,7 +540,11 @@ function BootstrapPlugin({
       };
 
       return {
-        focus: () => editor.focus(),
+        focus: () => {
+          const root = editor.getRootElement();
+          root?.focus({ preventScroll: true });
+          editor.focus();
+        },
         clear: () => {
           voicePreviewRef.current = null;
           editor.update(() => {
@@ -575,7 +615,7 @@ function BootstrapPlugin({
             true,
           );
           if (inserted !== null) voicePreviewRef.current = null;
-          return inserted !== null;
+          return inserted;
         },
         restoreVoicePreview: () => {
           const active = voicePreviewRef.current;

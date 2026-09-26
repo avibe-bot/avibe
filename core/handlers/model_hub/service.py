@@ -42,7 +42,10 @@ from core.agent_auth_service import BackendLoginInProgressError
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
-from vibe.backend_model_catalog import bundled_catalog_reasoning_efforts_by_model
+from vibe.backend_model_catalog import (
+    PROTOCOL_REASONING_EFFORT_DEFAULTS,
+    bundled_catalog_reasoning_efforts_by_model,
+)
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
@@ -115,6 +118,8 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
+from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
@@ -144,7 +149,14 @@ from .resolver import (
 )
 from .revocations import CredentialRevocationJournal
 from .retry import RECOVERY_EXHAUSTED_CODE, RecoveryPolicy, RecoveryRequest, RETRY_DELAYS, source_identity
-from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
+from .usage import (
+    USAGE_DEFAULT_WINDOW_DAYS,
+    USAGE_WINDOW_KEYS,
+    BoundedUsageLedger,
+    SourceIdentity,
+    UsageWriter,
+    local_usage_day,
+)
 
 CONTRACT_VERSION = 10
 
@@ -180,6 +192,23 @@ def _storable_backend_model_metadata(
             if proposed is not None and proposed not in proposed_efforts:
                 proposed_efforts.append(proposed)
     return proposed_display_name, proposed_efforts
+
+
+def _cached_models_dev_catalog() -> Mapping[str, Any]:
+    from vibe.models_dev_catalog import load_models_dev_catalog_with_date
+
+    return load_models_dev_catalog_with_date()[0]
+
+
+_MODELS_DEV_CANDIDATE_FIELDS = (
+    "models_dev_id",
+    "context_window",
+    "max_output_tokens",
+    "input_modalities",
+    "output_modalities",
+    "supports_tools",
+    "supports_reasoning",
+)
 
 
 AGENT_CHAIN_CONTRACT_VERSION = 10
@@ -446,6 +475,9 @@ class UnavailableEngineAdapter:
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         return None
+
+    async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
+        raise SubscriptionQuotaError("unavailable")
 
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
@@ -888,6 +920,8 @@ class ModelHubService:
         ] = None,
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
+        price_table: Callable[[], PriceTable] | None = None,
+        models_dev_catalog: Callable[[], Mapping[str, Any]] | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -949,6 +983,15 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
+        self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
+        # Read per report: the override file is hand-edited and the catalog refreshes itself.
+        self.price_table: Callable[[], PriceTable] = price_table or (
+            lambda: load_price_table(paths.get_state_dir())
+        )
+        # A cached copy only: the picker read must not wait on the network.
+        self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
+            lambda: _cached_models_dev_catalog()
+        )
 
     @staticmethod
     @asynccontextmanager
@@ -1033,6 +1076,35 @@ class ModelHubService:
             None,
         )
 
+    async def _settle_pending_native_creates(self, vendor: str) -> None:
+        """Keep the native slot claimed until a finished create is committed.
+
+        The CLI login releases its credential lease as soon as it finishes, but
+        its Source is committed only by a later status read. In between, the
+        slot looks empty to both the singleton check and CLI custody, so another
+        start would be admitted and overwrite the credential that login just
+        wrote. Commit a finished create first, so the singleton check sees it,
+        and refuse while one is still in progress.
+        """
+
+        for flow_id, binding in self.oauth_flows.pending_creates(vendor, "native_cli"):
+            try:
+                flow = await self._oauth_status(flow_id, "native_cli")
+                self._raise_if_flow_expired(flow_id, flow)
+            except ModelHubError as error:
+                # Both reads forget a flow that can no longer finish.
+                if error.code in {"flow_not_found", "flow_expired"}:
+                    continue
+                raise
+            if flow.state == "success":
+                await self._materialize_completed_oauth(flow_id, binding, flow)
+            elif flow.state not in {"failed", "cancelled"}:
+                raise ModelHubError(
+                    "native_login_in_progress",
+                    status=409,
+                    detail="modelHub.errors.native_login_in_progress",
+                )
+
     async def _engine_call(self, awaitable):
         try:
             return await awaitable
@@ -1071,7 +1143,19 @@ class ModelHubService:
             raise ModelHubError("submission_rejected", status=422) from None
         except ModelHubError:
             raise
-        except Exception:
+        except Exception as error:
+            from core.backend_restart import NativeMigrationBlockedError
+
+            # A native writer refusal is an answered state, not an engine
+            # outage: reporting it as engine_down sends the user retrying a
+            # start that the same refusal will block again.
+            if isinstance(error, NativeMigrationBlockedError):
+                code = (
+                    error.reason
+                    if error.reason in {"config_recovery", "migration_recovery_pending"}
+                    else "migration_native_busy"
+                )
+                raise ModelHubError(code, status=409) from None
             raise ModelHubError("engine_down", status=503) from None
 
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:
@@ -1173,15 +1257,17 @@ class ModelHubService:
             return False
         return True
 
-    def _reserve_settlement_generation(self, source_id: str) -> int:
+    def _mint_settlement_generation(self) -> int:
         self._next_settlement_generation += 1
-        self._latest_source_attempt_generation[source_id] = (
-            self._next_settlement_generation
-        )
+        return self._next_settlement_generation
+
+    def _reserve_settlement_generation(self, source_id: str) -> int:
+        generation = self._mint_settlement_generation()
+        self._latest_source_attempt_generation[source_id] = generation
         source = next((item for item in self.store.load().sources if item.id == source_id), None)
         if source is not None:
             self._source_attempt_identities[source_id] = source_identity(source)
-        return self._next_settlement_generation
+        return generation
 
     def _settlement_current(self, source: ModelHubSourceConfig, generation: int | None) -> bool:
         return (
@@ -1999,6 +2085,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source_id)
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -2833,6 +2920,7 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
+                self.quota.forget(source.id)
                 self._record_reasoning_tier_overrides(source, overrides)
                 self._complete_reauth_flow(
                     flow_id,
@@ -2972,6 +3060,7 @@ class ModelHubService:
             config,
             rollback_on_sync_failure=False,
         )
+        self.quota.forget(source.id)
         return config
 
     async def _materialize_failed_hub_reauth(
@@ -4458,6 +4547,23 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
+    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
+        """Exact models.dev matches for provider candidates; empty when unknown.
+
+        The description is optional: an unreadable catalog leaves every
+        candidate as its suppliers describe it rather than failing the picker.
+        """
+
+        if not model_ids:
+            return {}
+        from vibe.models_dev_catalog import exact_models_dev_matches
+
+        try:
+            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
+        except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
+            logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
+            return {}
+
     def agent_model_candidates(self, backend: str) -> dict:
         agent_backend = cast(BackendName, backend)
         config = self.store.load()
@@ -4536,12 +4642,34 @@ class ModelHubService:
                 provider_ids.append(candidate_id)
 
         providers = []
+        described = self._models_dev_descriptions(provider_ids)
         for model_id in provider_ids:
             suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
                 config,
                 agent_backend,
                 model_id,
             )
+            # Suppliers speak first, models.dev fills what they left unsaid, and
+            # an unstated ladder falls back to the tiers the backend's request
+            # protocol accepts, unless models.dev says the model cannot reason.
+            match = described.get(model_id)
+            enrichment = (
+                {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
+                if match is not None
+                else {}
+            )
+            if reasoning_efforts and enrichment.get("supports_reasoning") is False:
+                # A supplier's ladder outranks the catalog's flag, and a false
+                # flag would suppress that ladder at launch.
+                enrichment["supports_reasoning"] = None
+            display_name = display_name or (match or {}).get("display_name")
+            if not reasoning_efforts and match is not None:
+                reasoning_efforts = list(match["reasoning_efforts"])
+            if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
+                request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
+                    agent_backend
+                ) or native_protocol_for_model_id(model_id)
+                reasoning_efforts = list(PROTOCOL_REASONING_EFFORT_DEFAULTS[request_protocol])
             admitted = admissible_backend_model(
                 agent_backend,
                 model_id,
@@ -4549,6 +4677,7 @@ class ModelHubService:
                     "origin": "provider",
                     "display_name": display_name,
                     "reasoning_efforts": reasoning_efforts,
+                    **enrichment,
                     **protocol_payload(model_id),
                 },
                 claude_builtin_ids=_builtin_model_ids("claude"),
@@ -4562,6 +4691,10 @@ class ModelHubService:
                     "reasoning_efforts": admitted.reasoning_efforts,
                     "suppliers": suppliers,
                     "origin": "provider",
+                    **{
+                        field: getattr(admitted, field)
+                        for field in enrichment
+                    },
                     **protocol_payload(admitted.id),
                 }
             )
@@ -5436,7 +5569,12 @@ class ModelHubService:
                 "interrupted": would_interrupt,
             }
 
-    def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+    def usage_summary(
+        self,
+        *,
+        days: Optional[int] = None,
+        window: Optional[str] = None,
+    ) -> dict:
         """Report metered token usage, labelled from current Source config.
 
         Config is what this method owns: which identities exist right now and what
@@ -5452,18 +5590,106 @@ class ModelHubService:
         Source an ID came from, and answers for one Source with another's models.
         """
 
+        if window is not None and days is not None:
+            raise ModelHubError("invalid_parameter", status=400)
+        if window is not None and window not in USAGE_WINDOW_KEYS:
+            raise ModelHubError("invalid_parameter", status=400)
+
         config = self.store.load()
+        identities = [
+            SourceIdentity(
+                source_id=source.id,
+                label=source.display_name,
+                model_ids=[model.id for model in source.models],
+            )
+            for source in config.sources
+        ]
+        now = self.now()
+        prices = self.price_table()
+        if window is not None:
+            return self.usage.report(window=window, now=now, identities=identities, prices=prices)
         return self.usage.summary(
-            days=days,
-            now=self.now(),
-            identities=[
-                SourceIdentity(
+            days=USAGE_DEFAULT_WINDOW_DAYS if days is None else days,
+            now=now,
+            identities=identities,
+            prices=prices,
+        )
+
+    async def _fetch_subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> Mapping[str, Any]:
+        reader = getattr(self.adapter, "subscription_quota", None)
+        if not callable(reader):
+            raise SubscriptionQuotaError("unavailable")
+        return await reader(source_id, vendor, credential_ref)
+
+    def _quota_sources(self) -> list[QuotaSourceRef]:
+        config = self.store.load()
+        refs = []
+        for source in config.sources:
+            if source.kind != "subscription" or source.supply_channel != "hub" or not source.credential_ref:
+                continue
+            payload = self._source_account_payload(
+                {
+                    "id": source.id,
+                    "kind": source.kind,
+                    "vendor": source.vendor,
+                    "supply_channel": source.supply_channel,
+                    "credential_ref": source.credential_ref,
+                    "account_label": source.account_label,
+                }
+            )
+            refs.append(
+                QuotaSourceRef(
                     source_id=source.id,
-                    label=source.display_name,
-                    model_ids=[model.id for model in source.models],
+                    vendor=source.vendor.strip().lower(),
+                    credential_ref=source.credential_ref,
+                    display_name=source.display_name,
+                    account_label=payload.get("account_label"),
                 )
-                for source in config.sources
-            ],
+            )
+        return refs
+
+    async def quota_summary(self, *, force: bool = False) -> dict:
+        """Report each hub-held subscription's rate-limit windows.
+
+        A report only, like usage metering: nothing in resolution reads it. The
+        cache re-reads a Source at most every five minutes, or every thirty
+        seconds when forced, and keeps the last good snapshot across failures.
+        """
+
+        sources = await asyncio.to_thread(self._quota_sources)
+        summary = await self.quota.summary(sources, force=force)
+        try:
+            summary["value"] = await asyncio.to_thread(self._quota_values, summary["sources"])
+        except Exception:  # noqa: BLE001 - the valuation is optional; the windows are not
+            logger.warning("Model Hub quota valuation failed", exc_info=True)
+            for source in summary["sources"]:
+                source.pop("value", None)
+        return summary
+
+    def _quota_values(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
+        config = self.store.load()
+        wanted = {source["source_id"] for source in sources}
+        identities = [
+            SourceIdentity(
+                source_id=source.id,
+                label=source.display_name,
+                model_ids=[model.id for model in source.models],
+            )
+            for source in config.sources
+            if source.id in wanted
+        ]
+        prices = self.price_table()
+        now = self.now()
+        return quota_values(
+            sources,
+            daily_costs=self.usage.daily_costs(
+                days=VALUE_WINDOW_DAYS,
+                now=now,
+                identities=identities,
+                prices=prices,
+            ),
+            prices=prices,
+            today=local_usage_day(now),
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
@@ -5690,9 +5916,10 @@ class ModelHubService:
         outcome = None
         source = None
         admitted_at = None
+        attempt_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
 
         async def invoke_selected() -> None:
-            nonlocal source, handle, outcome, admitted_at
+            nonlocal source, handle, outcome, admitted_at, attempt_generation
             # Bound local waiting too, but never call it a model failure before
             # the adapter has actually admitted this Source/model invocation.
             async with self._mutation_lock:
@@ -5709,8 +5936,12 @@ class ModelHubService:
                         self._mutation_lock.release()
 
                 def admitted() -> None:
-                    nonlocal admitted_at
+                    nonlocal admitted_at, attempt_generation
                     admitted_at = time.monotonic()
+                    # Ordered at admission but not reserved: a failed test must
+                    # not displace another attempt's verdict, while a successful
+                    # one supersedes attempts admitted before it.
+                    attempt_generation = self._mint_settlement_generation()
                     release_owner()
 
                 try:
@@ -5743,6 +5974,11 @@ class ModelHubService:
         async def settle_attempt() -> None:
             try:
                 if source is not None and outcome is not None:
+                    # The explicit test is the retry a cooldown waits for.
+                    if self._verified_recovery_outcome(outcome):
+                        await self._record_recovery_success(
+                            source.id, attempt_generation, backend="system", model_id=model_id,
+                        )
                     await self._verify_successful_source(
                         source.id, source.credential_ref, source.verification_pending, outcome,
                     )
@@ -5786,8 +6022,9 @@ class ModelHubService:
                 raise cancelled
         assert source is not None and outcome is not None
         succeeded = outcome.kind is RawOutcomeKind.SUCCESS
-        # Classify for display only. A selected model failure cannot block other
-        # models on this Source, refresh credentials, or modify route state.
+        # Classify failures for display only. A selected model failure cannot
+        # block other models on this Source, refresh credentials, or modify route
+        # state.
         decision = classify_outcome(outcome)
         if decision.action == "refresh":
             decision = ResolutionDecision("fallback", reason="credential_revoked")
@@ -5874,6 +6111,9 @@ class ModelHubService:
             detail_key=detail_key,
         )
         persisted = self._save_runtime_config(previous, config)
+        if persisted:
+            # A blocked grant must not keep reporting the windows it had while usable.
+            self.quota.forget(source.id)
         if persisted and emit_event:
             self._record_event(
                 agent=cast(EventAgent, backend),
@@ -6339,8 +6579,8 @@ class ModelHubService:
         # the native-slot read used to be one — strands the tuple until restart:
         # the retry finds a pending claim with no task and gets ``engine_down``,
         # and a cancelled owner never reaches the release at all.
-        # ``test_oauth_start_keeps_every_owner_await_inside_the_installed_task``
-        # holds the shape so the next pre-check cannot re-open the window.
+        # ``test_nonce_oauth_start_retry_arriving_at_the_claim_joins_the_owner``
+        # retries at the claim so the next pre-check cannot re-open the window.
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()
             flow: OAuthFlowState | None = None
@@ -6348,6 +6588,7 @@ class ModelHubService:
             flow_cleanup_attempted = False
             try:
                 if oauth_channel == "native_cli":
+                    await self._settle_pending_native_creates(vendor)
                     async with self._mutation_lock:
                         # The sanctioned CLI keeps one credential per vendor, so
                         # a second native Source would describe a credential the
@@ -6762,7 +7003,7 @@ class ModelHubService:
         self.recovery.annotations(self.store.load())
 
     async def _record_recovery_success(
-        self, source_id: str, generation: int | None, *, backend: BackendName, model_id: str,
+        self, source_id: str, generation: int | None, *, backend: EventAgent, model_id: str,
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
@@ -6773,6 +7014,8 @@ class ModelHubService:
                 or source.state.status in {"needs_action", "error"}
             ):
                 return
+            # A current success outranks every attempt admitted before it.
+            self._latest_source_attempt_generation[source_id] = generation
             recovered = self.recovery.succeeded(source)
             if recovered and source.state.status == "cooldown":
                 previous = self._clone_config(config)
@@ -6785,7 +7028,7 @@ class ModelHubService:
                     logger.warning("Could not persist Model Hub recovered state")
             if recovered:
                 self._record_event(
-                    agent=cast(EventAgent, backend), kind="recover", model_id=model_id,
+                    agent=backend, kind="recover", model_id=model_id,
                     reason="recovery", to_source=source.id, to_label=source.display_name, now=self.now(),
                 )
 

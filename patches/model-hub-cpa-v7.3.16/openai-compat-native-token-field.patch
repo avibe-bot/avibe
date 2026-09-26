@@ -1,0 +1,20 @@
+diff --git a/internal/runtime/executor/helps/openai_compat_max_tokens.go b/internal/runtime/executor/helps/openai_compat_max_tokens.go
+index bceddd20..5ba754b0 100644
+--- a/internal/runtime/executor/helps/openai_compat_max_tokens.go
++++ b/internal/runtime/executor/helps/openai_compat_max_tokens.go
+@@ -55,6 +55,13 @@ func NormalizeOpenAIMaxTokens(payload []byte, useMaxCompletionTokens bool) []byte
+ 	if !hasMaxTokens && !hasMaxCompletionTokens {
+ 		return payload
+ 	}
+ 
++	// Avibe leaves the option at its zero value so the caller's native field
++	// reaches the upstream unchanged. An explicit true still opts into the
++	// canonical max_completion_tokens spelling below.
++	if !useMaxCompletionTokens {
++		return payload
++	}
++
+ 	if useMaxCompletionTokens {
+ 		if hasMaxTokens && !hasMaxCompletionTokens {
+ 			val := gjson.GetBytes(payload, "max_tokens")
+ 			if val.Raw != "" {

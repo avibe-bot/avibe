@@ -364,8 +364,10 @@ class CodexEventHandler:
                         parts.append(c)
             text = "\n".join(parts)
             if text:
+                # Reasoning summaries are process log, never an interim bubble.
                 await self._narrate(
-                    request, turn_state, thread_id, "assistant", f"_🧠 {text}_"
+                    request, turn_state, thread_id, "assistant", f"_🧠 {text}_",
+                    level="process",
                 )
 
         # One predicate for both readings, so the live path and the recorded one
@@ -538,6 +540,7 @@ class CodexEventHandler:
         role: str,
         text: str,
         parse_mode: str | None = "markdown",
+        level: str = "normal",
     ) -> None:
         """Deliver one intermediate message, or hold it until it can be attributed.
 
@@ -550,10 +553,12 @@ class CodexEventHandler:
         """
         if turn_state is None:
             resolved, citations, _ = await self._prepare_citations(text, thread_id, request)
-            await self._emit_narration(request, role, resolved, parse_mode, citations)
+            await self._emit_narration(request, role, resolved, parse_mode, citations, level)
             return
         turn_state.pending_narration.append(
-            CodexHeldMessage(role=role, text=text, parse_mode=parse_mode, thread_id=thread_id)
+            CodexHeldMessage(
+                role=role, text=text, parse_mode=parse_mode, thread_id=thread_id, level=level
+            )
         )
         await self._drain_narration(turn_state)
 
@@ -564,12 +569,15 @@ class CodexEventHandler:
         text: str | None,
         parse_mode: str | None,
         citations: CitationBundle | None,
+        level: str = "normal",
     ) -> None:
         await self._agent.controller.emit_agent_message(
             request.context,
             role,
             text,
             parse_mode=parse_mode or "markdown",
+            # Forwarded only when non-default, like ``citations`` below.
+            **({"level": level} if level != "normal" else {}),
             # Forwarded only when there is a sidecar, so a message without
             # citations keeps the call it always had.
             **({"citations": citations} if citations else {}),
@@ -596,7 +604,9 @@ class CodexEventHandler:
             if missing and not force:
                 return
             held.pop(0)
-            await self._emit_narration(request, entry.role, resolved, entry.parse_mode, citations)
+            await self._emit_narration(
+                request, entry.role, resolved, entry.parse_mode, citations, entry.level
+            )
 
     def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:
         turn = params.get("turn")

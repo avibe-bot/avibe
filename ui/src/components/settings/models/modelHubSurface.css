@@ -208,6 +208,14 @@
   --model-hub-usage-column-radius: 2px;
   --model-hub-usage-note-ink: var(--model-hub-muted-b3);
 
+  /* Subscription quota tab. Reuses the usage tab's gutter and type scale. */
+  --model-hub-quota-bar-height: 6px;
+  --model-hub-quota-bar-radius: 4px;
+  --model-hub-quota-left-size: 17px;
+  --model-hub-quota-hint-size: 10px;
+  --model-hub-quota-row-gap: 14px;
+  --model-hub-quota-nested-indent: 12px;
+
   /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
    * Tailwind arbitrary value in the dialog's markup, which has no selector of
    * its own to declare it on. */
@@ -544,11 +552,14 @@
 .model-hub-route-origin:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
 .model-hub-model-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .model-hub-origin-help { width: 340px; max-width: calc(100vw - 32px); white-space: pre-line; font-size: 12px; line-height: 1.6; }
-.model-hub-route-origin-line { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; }
-.model-hub-route-origin-now { flex-shrink: 0; margin-right: -4px; font-weight: 600; color: var(--foreground); }
-.model-hub-route-preview { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 8px; background: var(--model-hub-mint-1a); color: var(--mint-ink); font-size: 12px; }
-.model-hub-route-preview[data-origin="passthrough"] { background: var(--model-hub-gold-1a); color: var(--gold-ink); }
-.model-hub-route-preview[data-origin="unconfigured"] { background: var(--model-hub-wash-08); color: var(--muted); }
+.model-hub-route-mode { gap: 6px; }
+.model-hub-route-mode-copy { font-size: 11.5px; line-height: 17px; }
+/* A switch that saving would apply, and the one way back from it. */
+.model-hub-route-pending { gap: 12px; padding: 8px 12px; border: 1px solid var(--model-hub-gold-4d); border-radius: 8px; background: var(--model-hub-gold-1a); color: var(--gold-ink); font-size: 11.5px; line-height: 17px; overflow-wrap: anywhere; }
+.model-hub-route-pending-undo { gap: 4px; color: inherit; }
+.model-hub-route-pending-undo:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 2px; }
+.model-hub-route-pending-undo:disabled { opacity: 0.6; }
+.model-hub-route-pending-undo > svg { width: 12px; height: 12px; }
 .model-hub-route-ordinal[data-origin="automatic"] { color: var(--mint-ink); background: var(--model-hub-mint-1a); }
 .model-hub-route-ordinal[data-origin="passthrough"] { color: var(--gold-ink); background: var(--model-hub-gold-1a); }
 .model-hub-route-custom { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: var(--model-hub-route-custom-gap, 8px); align-items: center; padding: 0 12px var(--model-hub-route-custom-pad-block-end, 12px); font-size: 12px; }
@@ -558,8 +569,13 @@
    depends on may not be a different height on the machine that renders it. */
 .model-hub-route-custom label { line-height: var(--model-hub-route-custom-label-height, 18px); }
 .model-hub-default-counts { margin-top: auto; padding: 20px; font-size: 12px; color: var(--muted); }
-.model-hub-recorded-turn { display: flex; flex-direction: column; gap: 6px; margin: 0 20px 16px; padding: 12px; border-left: 2px solid var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
+.model-hub-recorded-turn { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-left: 2px solid var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
 .model-hub-recorded-turn strong { color: var(--destructive-ink); }
+.model-hub-recorded-turn-badge { gap: 4px; height: 22px; padding: 0 7px; border-radius: 999px; background: var(--model-hub-danger-fill); color: var(--destructive-ink); font-size: 10.5px; }
+.model-hub-recorded-turn-badge:hover { background: var(--model-hub-danger-border); }
+.model-hub-recorded-turn-badge > svg { width: 11px; height: 11px; }
+.model-hub-recorded-turn-summary { gap: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.model-hub-recorded-turn-summary strong { color: var(--destructive-ink); }
 @media (max-width: 640px) {
   .model-hub-model-row { height: 72px; }
 }
@@ -1036,8 +1052,6 @@
   box-shadow: var(--model-hub-dialog-shadow);
 }
 .model-hub-route-head { min-height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
-.model-hub-route-head-action { height: 26px; padding: 0 10px; font-size: 11.5px; }
-.model-hub-route-head-action > svg { width: 13px; height: 13px; }
 .model-hub-route-close { width: 26px; height: 26px; margin: -5px -5px -5px 0; color: var(--model-hub-ink-59); }
 .model-hub-route-close > svg { width: 15px; height: 15px; }
 .model-hub-route-title {
@@ -1065,23 +1079,20 @@
   letter-spacing: 1.1px;
 }
 .model-hub-route-list {
-  --model-hub-route-list-gap: 6px;
-  --model-hub-route-list-padding: 8px;
-  --model-hub-route-list-radius: 10px;
-  padding: var(--model-hub-route-list-padding);
+  --model-hub-route-list-gap: 2px;
   gap: var(--model-hub-route-list-gap);
-  border-color: var(--model-hub-wash-14);
-  border-radius: var(--model-hub-route-list-radius);
 }
 .model-hub-route-hop {
   --model-hub-route-hop-gap: 10px;
   --model-hub-route-hop-height: 52px;
   min-height: var(--model-hub-route-hop-height);
   height: auto;
-  padding: 6px 10px;
+  padding: 6px 8px;
   gap: var(--model-hub-route-hop-gap);
   border-radius: var(--model-hub-route-hop-radius);
 }
+.model-hub-route-hop[data-editable]:hover,
+.model-hub-route-hop[data-editable]:focus-within { background: var(--model-hub-wash-08); }
 .model-hub-route-ordinal {
   --model-hub-route-ordinal-radius: 6px;
   --model-hub-route-ordinal-size: 22px;
@@ -1201,8 +1212,9 @@
    `size` is not gated (`@radix-ui/react-popper` applies it unconditionally), so
    the available-width report survives, and for a `bottom`/`end` placement
    floating-ui computes it as `width - overflow.left`: exactly the width whose
-   left edge lands on the padding line. Bounding by it contains the panel
-   without restoring the flip. Where the room is ampler than the design width —
+   left edge lands on the padding line; the Add trigger's `start` placement
+   reads `width - overflow.right` the same way. Bounding by it contains the
+   panel without restoring the flip. Where the room is ampler than the design width —
    every desktop placement — the min is the design width and nothing moves. */
 .model-hub-route-selector--width-route {
   --model-hub-route-selector-inline-max: 420px;
@@ -1343,31 +1355,18 @@
   border-radius: var(--model-hub-dialog-action-radius);
   font-size: var(--model-hub-route-selector-confirm-size);
 }
-.model-hub-route-actions { gap: 4px; }
-.model-hub-route-action { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
+.model-hub-route-actions { gap: 2px; }
+.model-hub-route-action { width: 26px; height: 26px; border-radius: 6px; }
+.model-hub-route-action:hover:not(:disabled) { background: var(--model-hub-wash-0f); color: var(--foreground); }
+.model-hub-route-remove:hover:not(:disabled) { color: var(--destructive-ink); }
 .model-hub-route-action > svg { width: 13px; height: 13px; }
-.model-hub-route-add {
-  --model-hub-route-add-size: 11.5px;
-  --model-hub-route-add-height: 38px;
-  height: var(--model-hub-route-add-height);
-  border-radius: var(--model-hub-route-hop-radius);
-  border-color: var(--model-hub-wash-14);
-  font-size: var(--model-hub-route-add-size);
-}
-.model-hub-route-add > svg { width: 13px; height: 13px; }
-.model-hub-route-reseed { font-size: 12px; }
-.model-hub-route-reseed > svg { width: 12px; height: 12px; }
-.model-hub-route-hint {
-  --model-hub-route-hint-gap: 7px;
-  --model-hub-route-hint-line: 17px;
-  --model-hub-route-hint-size: 11.5px;
-  gap: var(--model-hub-route-hint-gap);
-  color: var(--model-hub-ink-73);
-  font-size: var(--model-hub-route-hint-size);
-  line-height: var(--model-hub-route-hint-line);
-}
-.model-hub-route-hint > svg { width: 13px; height: 13px; }
-.model-hub-route-hint-copy { width: 420px; max-width: calc(100% - 20px); }
+.model-hub-route-tools { gap: 8px; }
+.model-hub-route-defaults { gap: 2px; font-size: 12px; }
+.model-hub-route-defaults:hover { color: var(--foreground); }
+.model-hub-route-defaults > svg { width: 12px; height: 12px; }
+.model-hub-route-menu-anchor { display: inline-flex; }
+.model-hub-route-menu-item { gap: 8px; padding: 10px; font-size: 13px; }
+.model-hub-route-menu-item > svg { width: 14px; height: 14px; }
 .model-hub-route-foot { height: var(--model-hub-dialog-foot-height); flex-shrink: 0; padding: 14px 20px; border-color: var(--model-hub-wash-14); }
 @media (max-width: 640px) {
   .model-hub-route-foot { flex-wrap: wrap; min-height: var(--model-hub-dialog-foot-height); height: auto; }
@@ -1599,12 +1598,11 @@
    dialog's own chrome — head, title, subtitle, close, foot, action — has one
    reader each, so each metric sits on the class that reads it. The evidence
    BODY below is a different kind of thing: `GuardImpact` and `GuardGapList` are
-   shared, and they mount inside four separate dialogs — this one, the catalog
-   dialog's in-row removal confirmation, the Add-key replace phase, and the
-   route chain's guard phase. A body token declared on this root reached exactly
-   one of them; in the other three `var()` named a property no ancestor
-   declares, which is invalid at computed-value time, so the declaration drew
-   nothing: the label lost its gap AND its size, and the count lost its padding
+   shared, and they also mount outside this dialog — in the catalog dialog's
+   focused removal confirmation, which is a plain ConfirmDialog. A body token
+   declared on this root would reach only this dialog; elsewhere `var()` would
+   name a property no ancestor declares, which is invalid at computed-value
+   time, so the declaration would draw nothing: the label lost its gap AND its size, and the count lost its padding
    AND its size, which is not a pill missing a margin but 「Hops that will be
    removed2 hops」 in one unbroken run at the inherited font.
 
@@ -2199,10 +2197,969 @@
   text-align: center;
 }
 
+/* Modern Model Hub usage analytics. The report is dense and interactive, so
+ * this surface owns its layout while reusing the shell's neutral and accent
+ * tokens. The tooltip is kept in one stable corner: changing the bucket must
+ * not move the pin target away from the pointer. */
+.model-hub-usage-analytics {
+  --model-hub-usage-unknown: var(--gold);
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.model-hub-usage-heading,
+.model-hub-usage-filter-bar,
+.model-hub-usage-card-header,
+.model-hub-usage-details-actions,
+.model-hub-usage-tooltip-head,
+.model-hub-usage-tooltip-actions,
+.model-hub-usage-chart-foot {
+  display: flex;
+  align-items: center;
+}
+
+.model-hub-usage-heading {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.model-hub-usage-heading h2 {
+  color: var(--foreground);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.model-hub-usage-heading p,
+.model-hub-usage-card-header p {
+  margin-top: 4px;
+  color: var(--model-hub-muted-b3);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 1.45;
+}
+
+.model-hub-usage-window {
+  flex: none;
+}
+
+.model-hub-usage-filter-bar {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--model-hub-wash-03);
+}
+
+.model-hub-usage-filter {
+  position: relative;
+}
+
+.model-hub-usage-filter-trigger {
+  max-width: min(230px, 42vw);
+}
+
+.model-hub-usage-filter-trigger.is-filtered {
+  border-color: var(--model-hub-mint-4d);
+  background: var(--model-hub-mint-14);
+}
+
+.model-hub-usage-filter-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  width: min(310px, calc(100vw - 36px));
+  max-height: 360px;
+  flex-direction: column;
+  gap: 3px;
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--model-hub-menu-shadow);
+}
+
+.model-hub-usage-filter-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border: 1px solid var(--input);
+  border-radius: 7px;
+  color: var(--muted);
+}
+
+.model-hub-usage-filter-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.model-hub-usage-filter-option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  color: var(--foreground);
+  font-size: 12px;
+  text-align: left;
+}
+
+.model-hub-usage-filter-option:hover,
+.model-hub-usage-filter-option[aria-selected="true"] {
+  background: var(--model-hub-wash-08);
+}
+
+.model-hub-usage-filter-divider {
+  height: 1px;
+  margin: 3px 0;
+  background: var(--border);
+}
+
+.model-hub-usage-filter-empty,
+.model-hub-usage-filter-foot {
+  margin: 5px 8px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-filter-context {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.model-hub-usage-select {
+  position: relative;
+  display: inline-flex;
+  min-width: 132px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 28px 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--foreground);
+  background: var(--surface);
+}
+
+.model-hub-usage-select select {
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+}
+
+.model-hub-usage-select > svg:last-child {
+  position: absolute;
+  right: 8px;
+  pointer-events: none;
+}
+
+.model-hub-usage-reset {
+  color: var(--destructive-ink);
+}
+
+.model-hub-usage-loading,
+.model-hub-usage-failure,
+.model-hub-usage-empty-state,
+.model-hub-usage-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  color: var(--model-hub-ink-73);
+  font-size: 12px;
+}
+
+.model-hub-usage-failure {
+  justify-content: space-between;
+  border-color: var(--model-hub-danger-border);
+  background: var(--model-hub-danger-fill);
+  color: var(--model-hub-danger-ink);
+}
+
+.model-hub-usage-failure button {
+  color: var(--destructive-ink);
+  font-weight: 600;
+}
+
+.model-hub-usage-empty-state {
+  min-height: 180px;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+.model-hub-usage-empty-state h3 {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.model-hub-usage-empty-state p {
+  max-width: 480px;
+  color: var(--model-hub-muted-b3);
+  font-size: 12px;
+}
+
+.model-hub-usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.model-hub-usage-stat-grid--priced { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.model-hub-usage-stat-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--model-hub-wash-03);
+}
+
+.model-hub-usage-analytics .model-hub-usage-stat-label {
+  color: var(--model-hub-ink-73);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-analytics .model-hub-usage-stat-value {
+  color: var(--foreground);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.model-hub-usage-analytics .model-hub-usage-stat-note {
+  min-height: 15px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.model-hub-usage-notice {
+  border-color: var(--model-hub-gold-4d);
+  background: var(--model-hub-gold-14);
+  color: var(--model-hub-gold-ink);
+}
+
+.model-hub-usage-card {
+  min-width: 0;
+  overflow: visible;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.model-hub-usage-card-header {
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-hub-usage-card-header h3 {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.model-hub-usage-card-header h3 span {
+  margin-left: 5px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.model-hub-usage-group-control {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-group-control > div,
+.model-hub-usage-table-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--model-hub-wash-03);
+}
+
+.model-hub-usage-group-control button,
+.model-hub-usage-table-group button {
+  padding: 4px 7px;
+  border-radius: 5px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-group-control button.is-selected,
+.model-hub-usage-table-group button.is-selected,
+.model-hub-usage-group-control button:hover,
+.model-hub-usage-table-group button:hover {
+  background: var(--model-hub-wash-14);
+  color: var(--foreground);
+}
+
+.model-hub-usage-group-control button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.model-hub-usage-chart-content {
+  min-width: 0;
+  padding: 12px 16px 13px;
+}
+
+/* UsageChart sets the left margin to the plot's axis gutter, so the first
+ * swatch sits over the plot's left edge. */
+.model-hub-usage-legend {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px 6px;
+  margin-bottom: 8px;
+}
+
+.model-hub-usage-legend-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--model-hub-ink-73);
+  font-size: 10.5px;
+  transition: background-color .12s ease, border-color .12s ease, opacity .12s ease;
+}
+
+.model-hub-usage-legend-item:hover {
+  border-color: var(--border);
+  background: var(--model-hub-wash-05);
+}
+
+.model-hub-usage-legend-item:focus-visible {
+  border-color: var(--model-hub-gold-4d);
+  outline: none;
+}
+
+.model-hub-usage-legend-item.is-hidden {
+  opacity: .5;
+}
+
+.model-hub-usage-legend-item.is-hidden > span:not(.model-hub-usage-legend-swatch),
+.model-hub-usage-legend-item.is-hidden strong {
+  text-decoration: line-through;
+}
+
+.model-hub-usage-legend-item.is-hidden .model-hub-usage-legend-swatch {
+  background: transparent !important;
+  box-shadow: inset 0 0 0 1.5px var(--model-hub-muted-b3);
+}
+
+.model-hub-usage-legend-swatch {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 999px;
+}
+
+.model-hub-usage-legend-item strong {
+  margin-left: 2px;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-chart-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 236px;
+}
+
+.model-hub-usage-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 236px;
+  overflow: visible;
+  touch-action: pan-y;
+}
+
+/* Every grid line, the baseline included, is the same quiet dash. */
+.model-hub-usage-grid {
+  stroke: var(--border);
+  stroke-dasharray: 2 5;
+  opacity: .7;
+}
+
+.model-hub-usage-tick {
+  fill: var(--model-hub-muted-b3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-tick--y {
+  opacity: .78;
+}
+
+.model-hub-usage-highlight {
+  fill: var(--model-hub-wash-05);
+}
+
+/* The non-active columns keep ~.6 of their ink (.88 × .68). */
+.model-hub-usage-series.is-dimmed {
+  opacity: .68;
+}
+
+.model-hub-usage-crosshair {
+  stroke: var(--model-hub-gold);
+  stroke-width: 1;
+  opacity: .6;
+}
+
+.model-hub-usage-hit-area {
+  cursor: crosshair;
+  fill: transparent;
+  outline: none;
+}
+
+.model-hub-usage-hit-area:focus-visible {
+  fill: var(--model-hub-mint-14);
+  stroke: var(--mint);
+  stroke-width: 1;
+}
+
+.model-hub-usage-unknown-point {
+  fill: var(--model-hub-usage-unknown);
+  stroke: var(--background);
+  stroke-width: 1.5;
+}
+
+/* Placed beside the crosshair by UsageChart through left:0 + translateX, so a
+ * bucket change moves it on the compositor. The transition is short enough to
+ * read as following, never as lagging. */
+.model-hub-usage-tooltip {
+  position: absolute;
+  z-index: 10;
+  top: 14px;
+  left: 0;
+  width: 264px;
+  pointer-events: auto;
+  padding: 9px 10px;
+  transition: transform 90ms ease-out;
+  border: 1px solid var(--model-hub-gold-4d);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 96%, var(--gold) 4%);
+  box-shadow: var(--model-hub-menu-shadow);
+  color: var(--foreground);
+}
+
+.model-hub-usage-tooltip.is-docked {
+  top: 5px;
+  right: 5px;
+  left: auto;
+  width: calc(100% - 10px);
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-hub-usage-tooltip { transition: none; }
+}
+
+.model-hub-usage-tooltip.is-pinned {
+  border-color: var(--model-hub-mint-4d);
+  background: color-mix(in srgb, var(--surface) 96%, var(--mint) 4%);
+}
+
+.model-hub-usage-tooltip-head {
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--model-hub-ink-73);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.model-hub-usage-tooltip-range {
+  min-width: 0;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-tooltip-range small {
+  margin-left: 6px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10px;
+}
+
+.model-hub-usage-tooltip-actions {
+  flex: none;
+  gap: 6px;
+  color: var(--model-hub-mint-ink);
+}
+
+.model-hub-usage-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--model-hub-wash-08);
+  color: var(--foreground);
+}
+
+.model-hub-usage-pin:hover,
+.model-hub-usage-pin:focus-visible {
+  border-color: var(--model-hub-mint-4d);
+  color: var(--mint-ink);
+}
+
+.model-hub-usage-tooltip-total {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.model-hub-usage-tooltip-total strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-tooltip-total span,
+.model-hub-usage-tooltip-foot {
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-tooltip-lines {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.model-hub-usage-tooltip-lines > div,
+.model-hub-usage-tooltip-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-hub-usage-tooltip-lines span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: var(--model-hub-ink-73);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-tooltip-lines i {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+}
+
+.model-hub-usage-tooltip-lines b {
+  flex: none;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-hub-usage-tooltip-foot {
+  margin-top: 8px;
+}
+
+.model-hub-usage-chart-foot {
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 5px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+}
+
+.model-hub-usage-details {
+  overflow: hidden;
+}
+
+.model-hub-usage-details-header {
+  flex-wrap: wrap;
+}
+
+.model-hub-usage-details-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.model-hub-usage-table-scroll {
+  overflow-x: auto;
+}
+
+.model-hub-usage-table-scroll table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.model-hub-usage-table-scroll th,
+.model-hub-usage-table-scroll td {
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.model-hub-usage-table-scroll th:first-child,
+.model-hub-usage-table-scroll td:first-child {
+  min-width: 190px;
+  text-align: left;
+}
+
+.model-hub-usage-table-scroll thead th {
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+  font-weight: 550;
+}
+
+.model-hub-usage-table-scroll thead button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: inherit;
+}
+
+.model-hub-usage-table-scroll tbody th {
+  color: var(--foreground);
+  font-weight: 550;
+}
+
+.model-hub-usage-table-scroll tbody tr:hover {
+  background: var(--model-hub-wash-03);
+}
+
+/* Usage that outlived its providers: kept in every total, set back from the live rows. */
+.model-hub-usage-table-scroll tbody tr.is-removed th {
+  color: var(--muted);
+}
+
+.model-hub-usage-row-name,
+.model-hub-usage-row-detail {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-hub-usage-row-detail {
+  margin-top: 3px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10px;
+  font-weight: 450;
+}
+
+.model-hub-usage-table-total {
+  color: var(--mint-ink);
+  font-weight: 650;
+}
+
+/* No price (or one still being fetched) is not an amount; only money takes the money colour. */
+.model-hub-usage-table-total.is-unpriced {
+  color: var(--muted);
+}
+
+.model-hub-usage-table-empty {
+  padding: 22px 12px !important;
+  color: var(--model-hub-muted-b3);
+  text-align: center !important;
+}
+
+.model-hub-usage-table-scroll tfoot th,
+.model-hub-usage-table-scroll tfoot td {
+  border-bottom: 0;
+  color: var(--foreground);
+  font-weight: 650;
+}
+
+.model-hub-usage-table-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 10px 14px;
+  color: var(--model-hub-muted-b3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+/* Subscription quota. A tone is one ink, read by every part of a window that
+ * speaks for it — bar, remaining figure, pace line, status pill — so a warning
+ * cannot be amber in one place and neutral in the next. */
+.model-hub-quota-tone--ok { --model-hub-quota-tone: var(--mint-ink); }
+.model-hub-quota-tone--warn { --model-hub-quota-tone: var(--gold-ink); }
+.model-hub-quota-tone--danger { --model-hub-quota-tone: var(--destructive-ink); }
+.model-hub-quota-tone--stale { --model-hub-quota-tone: var(--model-hub-ink-73); }
+.model-hub-quota-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.model-hub-quota-stats--valued { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 950px) {
+  .model-hub-quota-stats--valued { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* What the account's use would cost at API prices, against its monthly fee. */
+.model-hub-quota-value {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.model-hub-quota-value > div { min-width: 0; padding: 10px 12px; }
+.model-hub-quota-value > div + div { border-left: 1px solid var(--border); }
+.model-hub-quota-value span { display: block; color: var(--model-hub-ink-8c); font-size: var(--model-hub-usage-label-size); }
+.model-hub-quota-value b {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+  margin-top: 5px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-quota-value em {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-label-size);
+  font-style: normal;
+  font-weight: 400;
+}
+.model-hub-quota-value em.is-good { color: var(--mint-ink); }
+.model-hub-quota-value-note {
+  margin-top: 6px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-quota-stat--primary { border-color: var(--model-hub-mint-4d); }
+.model-hub-quota-stat-unit {
+  margin-left: 5px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-label-size);
+  font-weight: 400;
+}
+.model-hub-quota-timeline {
+  padding: 11px 14px;
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-timeline-title {
+  margin-right: 6px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-quota-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--background);
+  color: var(--model-hub-ink-8c);
+}
+.model-hub-quota-chip b {
+  color: var(--foreground);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-quota-chip.model-hub-quota-tone--danger {
+  border-color: color-mix(in srgb, var(--model-hub-quota-tone) 40%, transparent);
+}
+.model-hub-quota-chip.model-hub-quota-tone--danger b { color: var(--model-hub-quota-tone); }
+.model-hub-quota-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.model-hub-quota-card { padding: 16px var(--model-hub-usage-padding-x) 18px; }
+.model-hub-quota-account { font-size: var(--model-hub-usage-title-size); }
+.model-hub-quota-plan {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+  font-weight: 500;
+}
+.model-hub-quota-account-label {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-status {
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--model-hub-quota-tone) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--model-hub-quota-tone) 7%, transparent);
+  color: var(--model-hub-quota-tone);
+  font-size: var(--model-hub-usage-note-size);
+  white-space: nowrap;
+}
+.model-hub-quota-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--model-hub-quota-tone, currentColor);
+}
+.model-hub-quota-stale,
+.model-hub-quota-unread {
+  margin-top: 14px;
+  padding: 8px 10px;
+  border: 1px dashed var(--input);
+  border-radius: 8px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-rows {
+  gap: var(--model-hub-quota-row-gap);
+  margin-top: 18px;
+}
+.model-hub-quota-card--retained .model-hub-quota-rows { opacity: 0.55; }
+.model-hub-quota-row { min-width: 0; }
+.model-hub-quota-row--nested {
+  padding-left: var(--model-hub-quota-nested-indent);
+  border-left: 2px solid var(--border);
+}
+/* One line beside the remaining figure: a long name ellipsizes, never wraps under it. */
+.model-hub-quota-row-title {
+  font-size: var(--model-hub-usage-cell-size);
+  white-space: nowrap;
+}
+.model-hub-quota-row-title small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 4;
+  margin-left: 8px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-quota-hint-size);
+}
+.model-hub-quota-left b {
+  color: var(--foreground);
+  font-size: var(--model-hub-quota-left-size);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-quota-left.model-hub-quota-tone--warn b,
+.model-hub-quota-left.model-hub-quota-tone--danger b { color: var(--model-hub-quota-tone); }
+.model-hub-quota-left span {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-quota-hint-size);
+}
+.model-hub-quota-bar {
+  position: relative;
+  height: var(--model-hub-quota-bar-height);
+  margin-top: 7px;
+  border-radius: var(--model-hub-quota-bar-radius);
+  background: var(--model-hub-wash-14);
+}
+.model-hub-quota-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: var(--model-hub-quota-bar-radius);
+  background: color-mix(in srgb, var(--model-hub-quota-tone) 85%, transparent);
+}
+.model-hub-quota-time-mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--foreground);
+  opacity: 0.55;
+}
+.model-hub-quota-row-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-pace.model-hub-quota-tone--warn,
+.model-hub-quota-pace.model-hub-quota-tone--danger { color: var(--model-hub-quota-tone); }
+.model-hub-quota-reset { white-space: nowrap; }
+/* A countdown whose exact moment opens on hover, focus, or tap. */
+.model-hub-quota-time {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline dotted color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+.model-hub-quota-time:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.model-hub-quota-scoped {
+  margin: 2px 0 -4px;
+  color: var(--model-hub-ink-8c);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-quota-scoped span {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-quota-hint-size);
+}
+.model-hub-quota-foot {
+  padding: 0 2px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 1.6;
+}
+
 @media (min-width: 1024px) {
   .model-hub-direct-grid {
     grid-template-columns: minmax(0, 1fr) var(--model-hub-direct-benefits-width);
   }
+}
+
+/* Four cost-bearing cards need the full width; between tablet and desktop they pair up. */
+@media (max-width: 1100px) {
+  .model-hub-usage-stat-grid--priced { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 767px) {
@@ -2216,6 +3173,23 @@
   /* Stacked, each cell carries its own label, so the column gutter becomes a
    * line gap and 16px of it would read as four separate rows. */
   .model-hub-usage-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .model-hub-usage-heading { align-items: flex-start; flex-direction: column; }
+  .model-hub-usage-window { width: 100%; }
+  .model-hub-usage-filter-context { width: 100%; margin-left: 0; }
+  .model-hub-usage-stat-grid,
+  .model-hub-usage-stat-grid--priced { grid-template-columns: 1fr; }
+  .model-hub-usage-card-header { align-items: flex-start; flex-direction: column; }
+  .model-hub-usage-group-control { width: 100%; align-items: flex-start; flex-direction: column; }
+  .model-hub-usage-group-control > div { width: 100%; }
+  .model-hub-usage-group-control button { flex: 1; }
+  .model-hub-usage-details-actions { width: 100%; justify-content: flex-start; }
+  /* One account per line; the pace and reset lines stack so neither truncates. */
+  .model-hub-quota-grid { grid-template-columns: minmax(0, 1fr); }
+  .model-hub-quota-row-foot { flex-direction: column; gap: 4px; }
+  .model-hub-quota-reset { white-space: normal; }
+  .model-hub-quota-timeline-title { width: 100%; }
+  .model-hub-quota-value > div { padding: 9px 8px; }
+  .model-hub-quota-value b { font-size: 12px; }
 }
 
 @media (min-width: 1024px) {
@@ -2376,12 +3350,6 @@
   background: var(--model-hub-catalog-row-locked-fill);
 }
 .model-hub-catalog-row--static { min-height: 48px; }
-/* A row being asked about is the row the answer applies to, so the question
- * stays inside it and the stronger border says which one is waiting. */
-.model-hub-catalog-row.is-confirming { border-color: var(--border-strong); }
-.model-hub-catalog-row.is-confirming .model-hub-catalog-action--danger {
-  background: var(--model-hub-wash-14);
-}
 
 .model-hub-catalog-grip {
   display: inline-flex;
@@ -2443,25 +3411,9 @@
   font-weight: 600;
   color: var(--model-hub-danger-ink);
 }
-/* The removal question, drawn as the row's own lower half: full-bleed to the
- * row's border on three sides, which is why the negative margins are the row's
- * own padding tokens rather than numbers. */
-.model-hub-catalog-confirm {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin:
-    var(--model-hub-catalog-row-pad-y)
-    calc(-1 * var(--model-hub-catalog-row-pad-x))
-    calc(-1 * var(--model-hub-catalog-row-pad-y));
-  padding: 12px var(--model-hub-catalog-row-pad-x);
-  border-top: 1px solid var(--border);
-  background: var(--model-hub-wash-05);
-}
-/* The guard's evidence, at row scale. The body is the same one the Route dialog
- * shows and brings its own parts, so this only has to stack them and set the
- * scale — the dialog's own wrapper is sized for a dialog and would push the row
- * open. Same gap as the question it sits in. */
+/* The guard's evidence inside the focused removal's confirmation. The body is
+ * the same one the guard dialog shows and brings its own parts, so this only has
+ * to stack them and set the scale. */
 .model-hub-catalog-consequence {
   --model-hub-catalog-consequence-size: 12px;
   display: flex;
@@ -2469,12 +3421,6 @@
   gap: 10px;
   font-size: var(--model-hub-catalog-consequence-size);
   color: var(--foreground);
-}
-.model-hub-catalog-confirm-action {
-  --model-hub-catalog-confirm-pad-x: 14px;
-  --model-hub-catalog-confirm-height: 32px;
-  height: var(--model-hub-catalog-confirm-height);
-  padding: 0 var(--model-hub-catalog-confirm-pad-x);
 }
 
 .model-hub-catalog-legacy {

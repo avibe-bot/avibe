@@ -7,6 +7,5 @@ observations:
     affects:
       - MUC-001
       - MUC-004
-      - MUC-005
     previous_assumption: Explicit saves and a local opt-in E2E covered the official upgrade path.
     observed_behavior: Startup migration and official publication have distinct write and test gates.

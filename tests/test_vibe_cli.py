@@ -448,6 +448,29 @@ def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
     ]
 
 
+def test_doctor_lists_stored_cron_tasks_with_numeric_weekdays(monkeypatch):
+    """Tasks written before numeric weekdays were refused still fire a day off intent."""
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
+    assert cli._scheduled_task_weekday_items() == []
+
+    store = cli.ScheduledTaskStore()
+    for cron in ("0 7 * * 6", "0 9 * * mon-fri", "0 * * * *"):
+        store.add_task(
+            session_key="slack::channel::C123",
+            prompt="hello",
+            schedule_type="cron",
+            cron=cron,
+            timezone_name="UTC",
+        )
+
+    [item] = cli._scheduled_task_weekday_items()
+
+    assert item["status"] == "warn"
+    assert item["code"] == "runtime.cron_numeric_weekday"
+    assert [task["cron"] for task in item["tasks"]] == ["0 7 * * 6"]
+    assert "0 7 * * 6" in item["message"]
+
+
 def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")
@@ -2016,6 +2039,13 @@ def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypa
     """
 
     started = _ui_refuses_to_start(monkeypatch, reused=False, ui_outcome=5678)
+    from vibe import install_generations
+
+    collected = []
+    monkeypatch.setattr(
+        install_generations, "collect_install_generations",
+        lambda launcher: collected.append(launcher),
+    )
 
     assert cli.cmd_start() == 0
 
@@ -2026,6 +2056,7 @@ def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypa
         f"cmd_start stopped the UI of a start that had already succeeded: {started.calls}"
     )
     assert "@avibe-start-receipt:" in capsys.readouterr().out
+    assert len(collected) == 1
 
 
 def test_ui_pid_probe_accepts_only_a_verified_ui_process(monkeypatch, tmp_path):

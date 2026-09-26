@@ -13,7 +13,7 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
     await requireMockUpstream(mock);
   });
 
-  test('D: inherited routes are directly editable without pinning from inspection', async ({ api, hub, gateway, page }) => {
+  test('D: inherited routes open read only and are never pinned from inspection', async ({ api, hub, gateway, page }) => {
     const original = await captureAgentChain(api, gateway);
     try {
       expect(await api.deleteAgentChain(gateway.backend, gateway.model)).toBe(true);
@@ -21,8 +21,9 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await hub.openRoute(gateway.backend, gateway.model);
       const dialog = hub.routeDialog;
       await expect(dialog).toBeVisible();
-      await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toBeVisible();
-      await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true }).first()).toBeVisible();
+      await expect(dialog.getByRole('radio', { name: copy('routeDialog.mode.follow'), exact: true })).toHaveAttribute('aria-checked', 'true');
+      await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true })).toHaveCount(0);
       await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeDisabled();
       await labelledButton(dialog, copy('routing.close')).click();
       await expect(dialog).toHaveCount(0);
@@ -58,10 +59,10 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
         y: labelBox!.y + labelBox!.height / 2 - openerBox!.y,
       } });
       await expect(dialog).toBeVisible();
+      expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toBeNull();
+      await dialog.getByRole('radio', { name: copy('routeDialog.mode.custom'), exact: true }).click();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: copy('routeDialog.grip'), exact: true }).first()).toBeVisible();
-      expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toBeNull();
-      await labelledButton(dialog, copy('routing.pinRoute')).click();
       await expect(labelledButton(dialog, copy('routeDialog.save'))).toBeEnabled();
       await labelledButton(dialog, copy('routing.cancelChanges')).click();
       await expect(dialog).toBeVisible();

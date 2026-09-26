@@ -18,6 +18,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateIndex
 
@@ -6894,3 +6895,23 @@ def test_legacy_sessions_import_still_requires_platform_for_an_unresolvable_lega
 
     with pytest.raises(ValueError, match="primary_platform is required"):
         ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
+
+
+def test_state_under_any_directory_name_migrates_in_place(tmp_path: Path) -> None:
+    # One name that carries every character Alembic's ConfigParser treats specially
+    # or that SQLAlchemy 2.1 percent-encodes when it renders the URL: non-ASCII, a
+    # literal `%`, an interpolation-shaped `%(here)s`, and URL-escape-shaped
+    # `%20` / `%2F` that must stay literal rather than decode to a space or `/`.
+    state_dir = tmp_path / "麦 50%(here)s a%20b a%2Fb"
+    db_path = state_dir / "vibe.sqlite"
+
+    cfg = migrations.alembic_config(db_path)
+    assert make_url(cfg.get_main_option("sqlalchemy.url")).database == str(db_path.resolve())
+
+    run_migrations(db_path)
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [(HEAD_REVISION,)]
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*.sqlite")) == [
+        db_path.relative_to(tmp_path)
+    ]

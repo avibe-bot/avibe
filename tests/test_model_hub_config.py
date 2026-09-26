@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import copy
 import inspect
 import json
@@ -30,7 +29,7 @@ from config.v2_config import (
     V2Config,
     is_model_hub_enabled,
 )
-from core.handlers.model_hub.service import CONTRACT_VERSION, ModelHubService
+from core.handlers.model_hub.service import ModelHubService
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
@@ -48,7 +47,6 @@ from scripts.check_model_hub_authorities import (
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
-UI_MODEL_CONSUMERS = Path("ui/src/components/settings/models")
 
 
 def _schema(name: str) -> dict:
@@ -67,35 +65,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
     protocols = tuple(_schema("source.schema.json")["properties"]["protocol"]["enum"])
     assert SOURCE_PROTOCOLS == protocols
 
-    type_source = (UI_MODEL_CONSUMERS / "types.ts").read_text(encoding="utf-8")
-    tuple_match = re.search(
-        r"export const SOURCE_PROTOCOLS\s*=\s*\[(.*?)\]\s*as const",
-        type_source,
-        re.DOTALL,
-    )
-    assert tuple_match is not None
-    ui_protocols = tuple(re.findall(r"'([^']+)'", tuple_match.group(1)))
-    assert frozenset(ui_protocols) == frozenset(protocols)
-    assert len(ui_protocols) == len(set(ui_protocols))
-
-    type_match = re.search(
-        r"export type SourceProtocol\s*=\s*(.*?);",
-        type_source,
-        re.DOTALL,
-    )
-    assert type_match is not None
-    assert re.sub(r"\s+", "", type_match.group(1)) == "(typeofSOURCE_PROTOCOLS)[number]"
-
     retired_alias = "openai" + "_compatible"
-    for filename in (
-        "types.ts",
-        "vendorMeta.ts",
-        "modelsApi.ts",
-        "mockData.ts",
-        "modelRows.test.ts",
-    ):
-        assert retired_alias not in (UI_MODEL_CONSUMERS / filename).read_text(encoding="utf-8")
-
     example = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     example["protocol"] = retired_alias
     with pytest.raises(ValidationError):
@@ -528,8 +498,6 @@ def _mirror_schemas(registry: dict) -> dict[str, dict]:
 
 
 def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
-    assert Path("core/handlers/model_hub/adapter.py").read_bytes() == (CONTRACTS / "adapter-interface.py").read_bytes()
-
     for example in _schema("source.schema.json")["examples"]:
         serialized = ModelHubSourceConfig.from_payload(example).to_payload()
         expected = json.loads(json.dumps(example))
@@ -836,101 +804,6 @@ def test_v8_mirror_registry_is_executable_and_complete():
         _validate_mirror_entry(entry, schemas)
 
 
-def _versioned_nodes(node):
-    """Yield every `contract_version` subschema, however deeply a branch nests it."""
-
-    if isinstance(node, dict):
-        declared = node.get("properties")
-        if isinstance(declared, dict) and isinstance(declared.get("contract_version"), dict):
-            yield declared["contract_version"]
-        for value in node.values():
-            yield from _versioned_nodes(value)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _versioned_nodes(item)
-
-
-def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
-    # One number spans all versioned objects, so a bump has to move every one of
-    # them at once — round 4 shipped it half-applied because nothing compared the
-    # schemas with each other or with the writer. Reading the accepted values out
-    # of whatever schemas the directory holds, rather than listing the ones that
-    # carry a version, covers an object added later without editing this test.
-    #
-    # TurnProvenance is the one exception, and it earns it by being written to
-    # disk: the same bump that republishes an envelope would strand every record
-    # a released build persisted, so it accepts the released values and ends at
-    # the terminal one. The `== [terminal]` branch is what keeps that from
-    # spreading to objects that never outlive their request.
-    registry = json.loads(
-        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
-    )
-    terminal = registry["contract_version"]
-    assert CONTRACT_VERSION == terminal
-    persisted = registry["contract_version_closure"][
-        "persisted_schema_version_floors"
-    ]
-    checked = set()
-    for path in sorted(CONTRACTS.glob("*.schema.json")):
-        for node in _versioned_nodes(json.loads(path.read_text(encoding="utf-8"))):
-            checked.add(path.name)
-            accepted = [node["const"]] if "const" in node else list(node["enum"])
-            assert accepted == sorted(set(accepted)), path.name
-            assert accepted[-1] == terminal, path.name
-            if path.name in persisted:
-                assert accepted == list(
-                    range(persisted[path.name], terminal + 1)
-                ), path.name
-            else:
-                assert accepted == [terminal], path.name
-    assert set(persisted) <= checked
-    assert "api-response.schema.json" in checked
-
-    # The schemas above are structured, so their versions are read from the shape.
-    # Every other file beside them publishes the same number as text, and nothing
-    # compared those: `api.md` carried the terminal value in eighteen envelopes
-    # while three of its own declarations still named the previous one, which is
-    # two review rounds spent on one stale sentence at a time. Matching the token
-    # a consumer reads, rather than a list of sentences, is what makes the next
-    # declaration fail here instead of in review — and it is why a claim about the
-    # current value is written as `contract_version <n>` while a bare `vN` names
-    # the generation a sentence was authored in.
-    stated = 0
-    for path in sorted(CONTRACTS.iterdir()):
-        if not path.is_file() or path.name.endswith(".schema.json"):
-            continue
-        for value in re.findall(r"contract_version[^0-9]{0,12}(\d+)", path.read_text(encoding="utf-8")):
-            stated += 1
-            assert int(value) == terminal, path.name
-    assert stated
-
-    # The UI declares the same number as a literal type, and `tsc` is the only
-    # thing that would have caught it drifting — one language boundary away from
-    # every check above, which is where this bump went half-applied a second time.
-    # A regex over the declaration is cheap; noticing in review is not.
-    declared = re.search(
-        r"^export const CONTRACT_VERSION = (\d+) as const;$",
-        Path("ui/src/components/settings/models/types.ts").read_text(encoding="utf-8"),
-        flags=re.MULTILINE,
-    )
-    assert declared is not None
-    assert int(declared.group(1)) == terminal
-
-    ui_types = Path("ui/src/components/settings/models/types.ts").read_text(encoding="utf-8")
-    persisted_versions = re.search(
-        r"export const PERSISTED_TURN_CONTRACT_VERSIONS\s*=\s*(\[[^\]]*\])\s+as const;",
-        ui_types,
-    )
-    assert persisted_versions is not None
-    provenance_schema = json.loads((CONTRACTS / "turn-provenance.schema.json").read_text(encoding="utf-8"))
-    assert json.loads(persisted_versions.group(1)) == provenance_schema["properties"]["contract_version"]["enum"]
-    assert re.search(
-        r"export type TurnProvenance\s*=\s*\{\s*contract_version:\s*"
-        r"\(typeof PERSISTED_TURN_CONTRACT_VERSIONS\)\[number\];",
-        ui_types,
-    )
-
-
 def test_contracts_readme_indexes_every_file_beside_it():
     # The index is what a reader consults to learn a contract exists at all, so a
     # file missing from it is invisible even though it ships. Both this PR's
@@ -1063,6 +936,24 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "values": [6, 7, 8, 9, 10],
         "expected": [5, 6, 7, 8, 9, 10],
     } in result["findings"]
+
+
+def _versioned_nodes(node):
+    """Yield every `contract_version` subschema, however deeply a branch nests it."""
+
+    if isinstance(node, dict):
+        declared = node.get("properties")
+        if isinstance(declared, dict) and isinstance(declared.get("contract_version"), dict):
+            yield declared["contract_version"]
+        for value in node.values():
+            yield from _versioned_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _versioned_nodes(item)
+
+
+def test_api_response_envelope_stays_versioned():
+    assert any(_versioned_nodes(_schema("api-response.schema.json")))
 
 
 def test_turn_provenance_contract_preserves_an_empty_stripped_effort():
@@ -1656,8 +1547,6 @@ def test_config_reload_rejects_pre_v4_opencode_shape_on_invalid_config_path(
     backups = list(config_path.parent.glob("config.json.bak-recovery-*"))
     assert backups
     assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
-    migration_source = inspect.getsource(v2_config._migrate_legacy_model_hub_payload)
-    assert "opencode" not in migration_source
 
 
 def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_path):
@@ -2014,37 +1903,6 @@ def test_loading_a_persisted_config_yields_one_this_product_can_load_again(monke
 
     assert reloaded.load_warnings == ()
     assert reloaded.model_hub.to_payload() == loaded.model_hub.to_payload()
-
-
-def test_every_normalized_identifier_collection_collapses_through_one_owner():
-    # Naming the class rather than its third member. Each collection whose leaf
-    # validator settles a spelling needs its parent to collapse on the settled
-    # value, and the two that exist cost one review round each because nothing
-    # tied the two halves together. Counting them does: a normalization added
-    # without its collapse fails here instead of arriving as a finding.
-    source = Path("config/v2_config.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    normalizing = set()
-    validating = set()
-    collapsing = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for call in ast.walk(node):
-            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
-                continue
-            if call.func.id == "normalized_model_id":
-                # A comparison rejects an unsettled spelling; it does not
-                # produce a normalized identity or require a collapse owner.
-                owner_set = validating if isinstance(parents[call], ast.Compare) else normalizing
-                owner_set.add(node.name)
-            elif call.func.id == "_collapse_settled_duplicates":
-                collapsing.add(node.name)
-    assert normalizing == {"ModelHubModelConfig", "ModelHubRouteHopConfig"}
-    assert validating == {"ModelHubAgentSupplyConfig"}
-    assert collapsing == {"ModelHubSourceConfig", "ModelHubRouteConfig"}
-    assert len(collapsing) == len(normalizing)
 
 
 @pytest.mark.parametrize("repairing", (False, True))

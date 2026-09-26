@@ -22,6 +22,7 @@ class CodexHeldMessage:
     text: str
     parse_mode: Optional[str]
     thread_id: str
+    level: str = "normal"
 
 
 @dataclass

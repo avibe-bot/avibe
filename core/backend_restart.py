@@ -121,13 +121,17 @@ class NativeCredentialLease:
         if backend not in self.backends or len(self._handles) != len(self.backends):
             raise RuntimeError("Native credential operation has no ownership")
 
-    def assert_auth_custody(self, backend: str, *, source_id: str | None = None) -> None:
+    def assert_auth_custody(
+        self, backend: str, *, source_id: str | None = None, new_source: bool = False
+    ) -> None:
         """Authorize a native writer from durable routing, while holding its lease.
 
         Runtime enablement is not credential ownership. A Hub backend may
-        maintain only the explicitly bound, retained native subscription;
-        generic Settings/IM login and API-key writes must use Hub instead.
-        Read without load-time migration writes: this is an admission check.
+        maintain only the explicitly bound, retained native subscription, or
+        create that subscription under a new Source id while the vendor's single
+        native slot is empty; generic Settings/IM login and API-key writes must
+        use Hub instead. Read without load-time migration writes: this is an
+        admission check.
         """
         from config.v2_config import V2Config
 
@@ -144,14 +148,17 @@ class NativeCredentialLease:
         if hub.agents[backend].mode == "direct":
             return
         vendor = {"claude": "anthropic", "codex": "openai"}.get(backend)
-        if source_id is not None and vendor is not None and any(
-            source.id == source_id
-            and source.vendor == vendor
-            and source.kind == "subscription"
-            and source.supply_channel == "native_cli"
-            for source in hub.sources
-        ):
-            return
+        if source_id is not None and vendor is not None:
+            native = [
+                source for source in hub.sources
+                if source.vendor == vendor
+                and source.kind == "subscription"
+                and source.supply_channel == "native_cli"
+            ]
+            if any(source.id == source_id for source in native):
+                return
+            if new_source and not native and all(source.id != source_id for source in hub.sources):
+                return
         raise NativeMigrationBlockedError("native_auth_hub_owned", (backend,))
 
     def release(self) -> None:

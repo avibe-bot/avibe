@@ -4925,15 +4925,56 @@ async def model_hub_usage_get(starlette_request: FastAPIRequest):
     # `rpc.py`, which keeps the read off the event loop there.
     async def handler():
         from core.handlers.model_hub import ModelHubError
-        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
+        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS, USAGE_WINDOW_KEYS
 
         try:
-            days = int(starlette_request.query_params.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
-        except (TypeError, ValueError):
-            days = USAGE_DEFAULT_WINDOW_DAYS
-        try:
-            usage = await _model_hub_service().usage_summary(days=days)
+            query = starlette_request.query_params
+            has_days = "days" in query
+            has_window = "window" in query
+            if has_days and has_window:
+                raise ModelHubError("invalid_parameter", status=400)
+            if has_window:
+                windows = query.getlist("window")
+                window = windows[0]
+                if window not in USAGE_WINDOW_KEYS or any(value != window for value in windows):
+                    raise ModelHubError("invalid_parameter", status=400)
+                usage = await _model_hub_service().usage_summary(window=window)
+            else:
+                try:
+                    days = int(query.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
+                except (TypeError, ValueError):
+                    days = USAGE_DEFAULT_WINDOW_DAYS
+                usage = await _model_hub_service().usage_summary(days=days)
             return _model_hub_success(usage=usage)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/models/quota", include_in_schema=False)
+async def model_hub_quota_get(starlette_request: FastAPIRequest):
+    # Native and awaited: a read may wait (bounded) on vendor quota calls.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            quota = await _model_hub_service().quota_summary()
+            return _model_hub_success(quota=quota)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/quota/refresh", include_in_schema=False)
+async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            quota = await _model_hub_service().quota_summary(force=True)
+            return _model_hub_success(quota=quota)
         except ModelHubError as exc:
             return _model_hub_error(exc)
 
@@ -10377,24 +10418,29 @@ async def files_content(starlette_request: FastAPIRequest):
     async def handler():
         from core import file_browser_service
 
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "private, no-store",
+            "Accept-Ranges": "bytes",
+        }
         try:
             content = await asyncio.to_thread(
                 file_browser_service.file_content,
                 request.args.get("path") or "",
                 download=request.args.get("download") == "1",
+                range_header=starlette_request.headers.get("range"),
             )
+        except file_browser_service.RangeNotSatisfiableError as exc:
+            return FastAPIResponse(status_code=416, headers={**headers, "Content-Range": f"bytes */{exc.size}"})
         except Exception as exc:
             return _file_browser_error_response(exc)
-        return FastAPIResponse(
-            content=content.data,
-            media_type=content.mime,
-            headers={
-                "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer",
-                "Cache-Control": "private, no-store",
-                "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
-            },
-        )
+        headers["Content-Disposition"] = f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}"
+        if content.byte_range is None:
+            return FastAPIResponse(content=content.data, media_type=content.mime, headers=headers)
+        start, end = content.byte_range
+        headers["Content-Range"] = f"bytes {start}-{end}/{content.size}"
+        return FastAPIResponse(content=content.data, status_code=206, media_type=content.mime, headers=headers)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -10750,7 +10796,8 @@ async def files_search_undo(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-# Content types the media proxy is willing to serve ``inline``. Anything else —
+# Content types the media proxy is willing to serve ``inline``, plus every audio/* and
+# video/* type (``core.media_types.is_inline_safe_type``). Anything else —
 # text/html, image/svg+xml, xml, application/octet-stream, unknown — is forced to
 # ``attachment`` so a preview-open of agent-produced ACTIVE content can't execute
 # script on the UI origin (``nosniff`` doesn't help when the type IS active).
@@ -10767,18 +10814,6 @@ _INLINE_SAFE_MEDIA_TYPES = {
     "image/heif",
     "application/pdf",
     "text/plain",
-    "audio/mpeg",
-    "audio/mp4",
-    "audio/aac",
-    "audio/ogg",
-    "audio/wav",
-    "audio/webm",
-    "audio/flac",
-    "audio/x-m4a",
-    "video/mp4",
-    "video/webm",
-    "video/ogg",
-    "video/quicktime",
 }
 
 
@@ -10913,7 +10948,9 @@ def _registered_media_response(
     # file, refuse (closes the mint→click TOCTOU window).
     if str(candidate) != stored or not candidate.is_file():
         return jsonify({"error": "not_found"}), 404
-    mime_type = row.get("content_type") or mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+    from core.media_types import is_inline_safe_type, resolve_media_row_type
+
+    mime_type = resolve_media_row_type(row.get("content_type"), str(candidate))
     response = send_file(candidate, mimetype=mime_type)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -10924,8 +10961,9 @@ def _registered_media_response(
     filename = row.get("file_name") or candidate.name
     # Force download for non-allowlisted (active) types even without ?download=1,
     # so previewing an agent-produced HTML/SVG can't run script on this origin.
-    base_ct = mime_type.split(";", 1)[0].strip().lower()
-    force_download = request.args.get("download") == "1" or base_ct not in _INLINE_SAFE_MEDIA_TYPES
+    # The same ``mime_type`` is sent as Content-Type (with nosniff), so an inline response is always
+    # rendered as exactly the type it was judged by — even when an upload's declared type is wrong.
+    force_download = request.args.get("download") == "1" or not is_inline_safe_type(mime_type, _INLINE_SAFE_MEDIA_TYPES)
     disposition = "attachment" if force_download else "inline"
     response.headers["Content-Disposition"] = f"{disposition}; filename*=UTF-8''{quote(filename)}"
     return response
@@ -10936,6 +10974,7 @@ def media_meta(token: str):
     """Lightweight metadata for a media token so the UI file card can show the
     name / type / size without downloading the file. Same token gate as the
     file route."""
+    from core.media_types import resolve_media_row_type
     from storage import media_service
 
     engine = _projects_engine()
@@ -10949,7 +10988,7 @@ def media_meta(token: str):
         {
             "kind": row.get("kind"),
             "name": row.get("file_name"),
-            "content_type": row.get("content_type"),
+            "content_type": resolve_media_row_type(row.get("content_type"), row.get("file_name") or ""),
             "ext": row.get("file_ext"),
             "size": row.get("size_bytes"),
             "width": row.get("width_px"),

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +20,9 @@ import {
   type Source,
   type SupplyGap,
 } from './types';
+
+const showToast = vi.hoisted(() => vi.fn());
+vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
 
 const source: Source = {
   id: 'src_new',
@@ -172,6 +175,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  showToast.mockReset();
 });
 
 describe('AddApiKeyDialog · save reconciliation', () => {
@@ -345,7 +349,7 @@ describe('AddApiKeyDialog · replacement', () => {
     } }));
   });
 
-  it('uses the existing guard shape before force and reports the committed impact', async () => {
+  it('asks once in its own modal, echoes the plan, then closes on a toast', async () => {
     const hop: RouteHopRef = {
       backend: 'claude',
       menu_model: 'sonnet',
@@ -368,15 +372,17 @@ describe('AddApiKeyDialog · replacement', () => {
         removed_hops: [hop],
         interrupted: [gap],
       });
-    renderReplacement();
+    const { onClose } = renderReplacement();
     const user = userEvent.setup();
 
     await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-force');
     await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
 
-    expect(await screen.findByRole('dialog', { name: /Replace key for|更换.*Key/i })).toBeTruthy();
-    expect(screen.getByText(/pm-claude/)).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+    const guard = await screen.findByRole('dialog', { name: /Replace key for|更换.*Key/i });
+    expect(within(guard).getByText(/pm-claude/)).toBeTruthy();
+    // The key the user typed stays behind the question, in its own dialog.
+    expect((screen.getByLabelText(/^New API key$|^新的 API Key$/i) as HTMLInputElement).value).toBe('sk-force');
+    await user.click(within(guard).getByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
 
     await waitFor(() => expect(replace).toHaveBeenCalledTimes(2));
     expect(replace.mock.calls).toEqual([
@@ -388,11 +394,35 @@ describe('AddApiKeyDialog · replacement', () => {
         would_interrupt: [gap],
       }],
     ]);
-    expect(await screen.findByText(/^Removed hops$|^已移除的路由项$/i)).toBeTruthy();
-    expect(screen.getByText(/now have no usable source|现在没有可用供应商/i)).toBeTruthy();
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(showToast).toHaveBeenCalledWith(i18n.t('settings.models.repair.gaps'), 'warning');
+    expect(screen.queryByText(/^Removed hops$|^已移除的路由项$/i)).toBeNull();
   });
 
-  it('requires confirmation again when the server recomputes a different replacement plan', async () => {
+  it('ends a confirmed replacement whose plan never settles as a failure, not a second question', async () => {
+    const replace = vi.spyOn(modelsApi, 'replaceCredential').mockImplementation(async () => {
+      throw new ApiCallError('source_model_in_route_chain', undefined, true, [], [], [{
+        backend: 'claude',
+        menu_model: 'sonnet',
+        position: replace.mock.calls.length,
+        source_id: blockedSource.id,
+        model_id: 'claude-sonnet-4-5',
+      }]);
+    });
+    const { onClose } = renderReplacement();
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-never-settles');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+
+    expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Replace anyway$|^仍要更换$/i })).toBeNull();
+    expect(replace).toHaveBeenCalledTimes(4);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('resends a confirmed replacement with the recomputed plan instead of asking again', async () => {
     const firstHop: RouteHopRef = {
       backend: 'claude',
       menu_model: 'sonnet',
@@ -429,24 +459,22 @@ describe('AddApiKeyDialog · replacement', () => {
         removed_hops: [nextHop],
         interrupted: [],
       });
-    renderReplacement();
+    const { onClose } = renderReplacement();
     const user = userEvent.setup();
 
     await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-changing-plan');
     await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
     await user.click(await screen.findByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
 
-    expect(await screen.findByText(/^gpt-5\.4/)).toBeTruthy();
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(replace).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(/^gpt-5\.4/)).toBeNull();
     expect(replace.mock.calls[1][1]).toEqual({
       key: 'sk-changing-plan',
       force: true,
       would_remove_hops: [firstHop],
       would_interrupt: [],
     });
-
-    await user.click(screen.getByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
-
-    await waitFor(() => expect(replace).toHaveBeenCalledTimes(3));
     expect(replace.mock.calls[2][1]).toEqual({
       key: 'sk-changing-plan',
       force: true,
@@ -499,39 +527,34 @@ describe('AddApiKeyDialog · replacement', () => {
       const settled = neverResolvingSettlement({
         readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [current] }),
       });
-      const closeTimer = vi.spyOn(window, 'setTimeout');
-      renderReplacement(blockedSource, settled);
+      const { onClose } = renderReplacement(blockedSource, settled);
       const user = userEvent.setup();
 
       await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-terminal');
       await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
       if (outcome === 'impact') {
         await user.click(await screen.findByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
-      }
-
-      if (outcome === 'impact') {
-        expect(await screen.findByText(/^Removed hops$|^已移除的路由项$/i)).toBeTruthy();
-        expect(screen.getByText(/pm-claude/)).toBeTruthy();
         expect(replace.mock.calls.at(-1)?.[1]).toEqual({
           key: 'sk-terminal',
           force: true,
           would_remove_hops: [hop],
           would_interrupt: [gap],
         });
-      } else {
-        expect(await screen.findByText(i18n.t('settings.models.repair.repaired'))).toBeTruthy();
       }
 
-      const close = screen.getByRole('button', { name: /^Close$|^关闭$/i }) as HTMLButtonElement;
-      expect(close.disabled).toBe(false);
-      expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
+      // The outcome closes the dialog on the spot and says itself in one toast;
+      // nothing waits on the trailing collection reconciliation.
+      await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+      expect(showToast).toHaveBeenCalledOnce();
+      expect(showToast).toHaveBeenCalledWith(
+        ...(outcome === 'impact'
+          ? [i18n.t('settings.models.repair.gaps'), 'warning']
+          : [i18n.t('settings.models.repair.repaired'), 'success']),
+      );
       expect(settled.source).toHaveBeenCalledWith(current);
       expect(settled.unread).not.toHaveBeenCalled();
       if (path === 'inventory') expect(settled.readInventory).toHaveBeenCalledOnce();
       else expect(settled.readInventory).not.toHaveBeenCalled();
-      expect(closeTimer.mock.calls.filter(([, delay]) => delay === 1400)).toHaveLength(
-        outcome === 'repaired' ? 1 : 0,
-      );
     },
   );
 
@@ -542,8 +565,7 @@ describe('AddApiKeyDialog · replacement', () => {
     const settled = neverResolvingSettlement({
       readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [blockedSource] }),
     });
-    const closeTimer = vi.spyOn(window, 'setTimeout');
-    renderReplacement(blockedSource, settled);
+    const { onClose } = renderReplacement(blockedSource, settled);
     const user = userEvent.setup();
 
     await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-uncommitted');
@@ -551,12 +573,11 @@ describe('AddApiKeyDialog · replacement', () => {
 
     expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
-    expect(screen.queryByText(i18n.t('settings.models.repair.repaired'))).toBeNull();
-    expect(screen.queryByText(/^Removed hops$|^已移除的路由项$/i)).toBeNull();
     expect(settled.readInventory).toHaveBeenCalledOnce();
     expect(settled.source).not.toHaveBeenCalled();
     expect(settled.unread).not.toHaveBeenCalled();
-    expect(closeTimer.mock.calls.filter(([, delay]) => delay === 1400)).toHaveLength(0);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -588,7 +609,7 @@ describe('AddApiKeyDialog · replacement', () => {
       expect(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }))
         .toSatisfy((buttons: HTMLButtonElement[]) => buttons.every((button) => !button.disabled));
       expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i }) !== null).toBe(retries);
-      expect(screen.queryByText(i18n.t('settings.models.repair.repaired'))).toBeNull();
+      expect(showToast).not.toHaveBeenCalled();
       expect(settled.source).not.toHaveBeenCalled();
 
       if (path === 'response') {

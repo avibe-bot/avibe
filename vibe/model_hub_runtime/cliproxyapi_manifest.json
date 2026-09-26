@@ -1,45 +1,55 @@
 {
   "schema_version": 1,
   "name": "cliproxyapi",
-  "version": "v7.2.149",
+  "version": "v7.3.16",
   "source": "router-for-me/CLIProxyAPI",
-  "source_url": "https://github.com/router-for-me/CLIProxyAPI/tree/2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
-  "source_sha": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
-  "release_tag": "v7.2.149",
-  "asset_release_tag": "model-hub-engine-v7.2.149-1",
+  "source_url": "https://github.com/router-for-me/CLIProxyAPI/tree/c404af96ebacedf8168b3c2bdbf4449a21cd1c1e",
+  "source_sha": "c404af96ebacedf8168b3c2bdbf4449a21cd1c1e",
+  "release_tag": "v7.3.16",
+  "asset_release_tag": "model-hub-engine-v7.3.16-3",
   "license": "MIT",
   "assets": [
     {
       "platform": "darwin-arm64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_aarch64.tar.gz",
-      "size_bytes": 19723285,
-      "sha256": "90962c9194fe5470dc21f167b0cbf167a4f9ff2961a6bcc88f0b7eec32f1b49b",
-      "binary_sha256": "048c0089aa53948af91249bb97f172b2392cce5968473a5a3dbb06f3d742c2e7",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz",
+      "size_bytes": 39534924,
+      "sha256": "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754",
+      "binary_sha256": "bfd39d09fd0f5f922ba5cd1a6d86cb86b928e31bcf1746cb763f5632af13c068",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "darwin-x64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_darwin_amd64.tar.gz",
-      "size_bytes": 21334889,
-      "sha256": "382f800a4d82fe39ee7158ca4f735a1a71d635fe0f1d9a55a4c5d13993ccc04e",
-      "binary_sha256": "05388e65f58493325aff1e2dfa33e727e7fa732b2d9eb651ec13315689e418e5",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_darwin_amd64.tar.gz",
+      "size_bytes": 41928346,
+      "sha256": "6cdc647a2bb0ccc8d179f290cb1f90da28ef3d02e7c2d6aa96f5903760a78328",
+      "binary_sha256": "dc1339f5a5a50d7b8254c1b1662177beb9a597aab04ba647ee9b6f555de1b87d",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "linux-amd64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_amd64.tar.gz",
-      "size_bytes": 21385633,
-      "sha256": "95d865dd17986da7d08cb39ffafe07d050669c5264d4d00115758ab4de752a72",
-      "binary_sha256": "b0f163bfd94e8cd64895000662f26f255d2a72b5c3f5009a97e8dc91ed9b8107",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_linux_amd64.tar.gz",
+      "size_bytes": 39894112,
+      "sha256": "88e0843bb5eaecb2748ff7fc5c4d61d301927ccd0aec7b35b1e20efc551957e9",
+      "binary_sha256": "8c500c984e056a2b191c8a3a2780062ca447659244d7b62b9544c5a4af29b0de",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "linux-arm64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.2.149-1/CLIProxyAPI_7.2.149_linux_aarch64.tar.gz",
-      "size_bytes": 19287559,
-      "sha256": "2d290477295eba4e419bc231f1fb5d548edbdd4cd5654b34d26ed12f8dcd0ee7",
-      "binary_sha256": "24799863d478579ec3eef5ccc83769f79df749a30282ce1e2063708a03826e5b",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_linux_aarch64.tar.gz",
+      "size_bytes": 36618378,
+      "sha256": "a289bbc2d409e5a54a2f65c9d331f7e968b0f18fba2f3b56477a30a2a3c08c3a",
+      "binary_sha256": "9ddb102bbd6b80c2651e5eb2939840142efb8068e802521ae0c1eac3877a84b9",
       "bin_path": "cli-proxy-api"
     }
-  ]
+  ],
+  "build": {
+    "builder": "scripts/build_model_hub_engine.py",
+    "go_version": "go1.26.0",
+    "cgo_enabled": false,
+    "trimpath": true,
+    "buildvcs": false,
+    "patch": "patches/model-hub-cpa-v7.3.16/openai-compat-native-token-field.patch",
+    "patch_sha256": "5861e81791cf02adf67e249ddb92fa0119dff477e0ca54f5279ac817acc989e0",
+    "source_date_epoch": 0
+  }
 }

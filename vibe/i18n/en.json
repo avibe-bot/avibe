@@ -322,6 +322,11 @@
       "message": "This one-shot Task's schedule has already ended.",
       "hint": "Set a new future time with `vibe task update {id} --at <time>`, then resume it."
     },
+    "cronNumericWeekday": {
+      "message": "Cron weekday field uses numbers: {field}",
+      "readings": "Avibe (APScheduler) reads it as {avibe}; crontab(5) reads it as {crontab}.",
+      "hint": "Write weekday names (mon, tue, wed, thu, fri, sat, sun); they mean the same day everywhere."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
@@ -422,9 +427,11 @@
     "agentMemoryLimit": "The shared Agent cgroup recorded a memory limit event; concurrent Agent processes may be affected.",
     "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
     "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Restore the original session in its original working directory, then explicitly retry the pending input; or start a new conversation from the current directory.",
+    "claudeInputRuntimeChanged": "Your message was not sent because the Claude connection changed before the native write. Your conversation and background work are preserved; retry the pending message when ready.",
     "sessionGeneric": "An error occurred: {error}",
     "codexPromptRefreshUnavailable": "Codex could not confirm that it can safely refresh Avibe's instructions for this existing session. Check or update Codex, then retry this turn.",
     "codexForkBoundaryUnavailable": "Codex could not determine a safe history boundary for this fork. Wait for the source turn to finish, then retry. If the problem persists, check or update Codex.",
+    "codexRuntimeChangeBlocked": "Another Codex turn in this working directory is still running on a different model runtime, so the selected model cannot start yet. Retry this input after that turn finishes, or use a different working directory.",
     "codexResponseTooLarge": "Codex returned a response larger than {limitMiB} MiB, so this connection cannot continue. Check or update Codex before retrying.",
     "opencodeModelHubOverlayRequired": "OpenCode is still preparing for Gateway mode. Retry in a moment.",
     "opencodePolicyRefreshPending": "OpenCode is still finishing an existing turn and cannot restart with Avibe's current Skill policy yet. Retry after that turn finishes.",
@@ -1149,6 +1156,7 @@
       "noExtraServiceProcess": "No extra Avibe service process detected",
       "deepScanSkipped": "Deep service process scan skipped in fast diagnostics",
       "showGitUnavailable": "Show Page checkpointing is degraded because Git is unavailable",
+      "cronNumericWeekday": "{count} cron task(s) name weekdays by number, which Avibe reads as 0=Mon through 6=Sun (crontab(5) reads 0 as Sun), so they may run a day later than intended: {tasks}",
       "dependencyHttp404": "{label} release asset is missing (HTTP 404): {url}",
       "dependencyHttpError": "{label} request returned HTTP {status}: {url}",
       "dependencyHttpErrorRetried": "{label} request returned HTTP {status} after {attempts} attempts: {url}",
@@ -1305,6 +1313,7 @@
       "slackValidationFailed": "Check your Slack tokens in the setup wizard",
       "agentCliMissing": "Install {agent} or update CLI path",
       "workingDirectoryMissing": "Update default_cwd in settings",
+      "cronNumericWeekday": "Confirm each intended day, then rewrite the weekday with names, for example vibe task update <id> --cron '0 9 * * mon-fri'",
       "cliMissing": "Install Avibe with uv tool or add the intended vibe executable to PATH.",
       "cliPathPrecedence": "Put ~/.local/bin before system Python bin directories when using the uv tool installation.",
       "cliNotUvTool": "uv tool package-integrity checks are skipped for this executable.",
