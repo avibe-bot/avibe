@@ -17,22 +17,6 @@ export type UsageFilter = {
   modelKeys: readonly string[];
 };
 
-export type UsageIdentity = {
-  sourceId: string;
-  modelId: string;
-  sourceLabel: string;
-  modelLabel: string | null;
-  key: string;
-};
-
-export type UsageLabelContext = {
-  sourceCollisionLabels: ReadonlySet<string>;
-  sourceDisplayLabels: ReadonlyMap<string, string>;
-  identityCollisionLabels: ReadonlySet<string>;
-  identityModelCollisionKeys: ReadonlySet<string>;
-  identityDisplayLabels: ReadonlyMap<string, string>;
-};
-
 export type UsageSeries = {
   key: string;
   label: string;
@@ -42,6 +26,8 @@ export type UsageSeries = {
   floors: boolean[];
   /** Per bucket, whether nothing in the value is priced, so it reads as no price, never $0; cost only. */
   unpriced: boolean[];
+  /** The removed-Sources aggregate, drawn in a neutral colour rather than a palette one. */
+  removed?: boolean;
 };
 
 export const PAIR_SEPARATOR = '\u0000';
@@ -222,165 +208,212 @@ export function formatBucketHeading(bucket: UsageBucket, locale: string): { rang
   return { range, zone };
 }
 
-export function sourceLabel(report: UsageReport, sourceId: string): string {
-  const source = report.sources.find((candidate) => candidate.source_id === sourceId);
-  return source?.label?.trim() || sourceId;
-}
+/**
+ * Every Source config no longer holds, as one identity. It sorts before any
+ * Source ID or pair key, and neither can spell it: a pair key never starts with
+ * its separator.
+ */
+export const REMOVED_SOURCES_KEY = `${PAIR_SEPARATOR}removed`;
 
+/**
+ * The longest ledger key, in code points as the ledger counts them, that is
+ * still the identifier itself; a longer one is a head plus a digest.
+ */
+const LEDGER_VERBATIM_MAX_LENGTH = 200;
+
+export type UsageText = {
+  unknownModel: string;
+  removedSources: string;
+};
+
+export type UsageIdentity = {
+  key: string;
+  label: string;
+  /** Beside a model, the Source it was metered under; empty for a Source and for the removed aggregate. */
+  sourceLabel: string;
+  /** The aggregate of every Source config no longer holds. */
+  removed: boolean;
+  /** A model its live Source does not list, named by the ID it was metered under. */
+  unlisted: boolean;
+};
+
+export type UsageIdentities = {
+  keyOf: (row: UsageBucketRow) => string;
+  get: (key: string) => UsageIdentity;
+  /** These rows' identities in first-metered order, the removed aggregate last. */
+  of: (rows: readonly UsageBucketRow[]) => UsageIdentity[];
+};
+
+const allRows = (report: UsageReport): UsageBucketRow[] => report.buckets.flatMap((bucket) => bucket.rows);
+
+/**
+ * The Sources config still holds, by ID. A configured Source always carries its
+ * name, so the report leaves the label null exactly when config let it go.
+ */
+const liveSources = (report: UsageReport) => new Map(report.sources
+  .filter((source) => source.label != null)
+  .map((source) => [source.source_id, source.label!.trim()] as const));
+
+/** The model label config holds for this pair, or null when the Source does not list the model. */
 export function modelLabel(report: UsageReport, sourceId: string, modelId: string): string | null {
   const source = report.sources.find((candidate) => candidate.source_id === sourceId);
   const model = source?.models.find((candidate) => candidate.model_id === modelId);
   return model?.label?.trim() || null;
 }
 
-export function usageIdentities(report: UsageReport, rows: readonly UsageBucketRow[]): UsageIdentity[] {
-  const keys = new Set(rows.map((row) => pairKey(row.source_id, row.model_id)));
-  return [...keys].map((key) => {
-    const separator = key.indexOf(PAIR_SEPARATOR);
-    const sourceId = key.slice(0, separator);
-    const modelId = key.slice(separator + 1);
-    return {
-      key,
-      sourceId,
-      modelId,
-      sourceLabel: sourceLabel(report, sourceId),
-      modelLabel: modelLabel(report, sourceId, modelId),
-    };
-  });
+/**
+ * The name a model reads by: its configured label, else the model ID it was
+ * metered under, which the ledger key is. Only a folded key, a head plus a
+ * digest, has no name left to show.
+ */
+export function usageModelName(report: UsageReport, sourceId: string, modelId: string, unknownModel: string): string {
+  const label = modelLabel(report, sourceId, modelId);
+  if (label) return label;
+  return !modelId.trim() || [...modelId].length > LEDGER_VERBATIM_MAX_LENGTH ? unknownModel : modelId;
 }
 
-export function identityLabel(identity: UsageIdentity, unknownModelLabel: string): string {
-  const model = identity.modelLabel || unknownModelLabel;
-  return `${identity.sourceLabel} · ${model}`;
+const byKey = <T extends readonly [string, ...unknown[]]>([left]: T, [right]: T) => (left < right ? -1 : left > right ? 1 : 0);
+
+/**
+ * Keep labels that name different identities apart without printing an ID:
+ * the first holder of a label keeps it, and each later one, in the order
+ * given, reads 「label (2)」, 「label (3)」 …
+ */
+function distinctLabels(entries: ReadonlyArray<readonly [string, string]>): Map<string, string> {
+  const counts = new Map<string, number>();
+  for (const [, label] of entries) counts.set(label, (counts.get(label) ?? 0) + 1);
+  const used = new Set(entries.filter(([, label]) => counts.get(label) === 1).map(([, label]) => label));
+  const labels = new Map<string, string>();
+  for (const [key, label] of entries) {
+    if (counts.get(label) === 1) {
+      labels.set(key, label);
+      continue;
+    }
+    let candidate = label;
+    for (let ordinal = 2; used.has(candidate); ordinal += 1) candidate = `${label} (${ordinal})`;
+    used.add(candidate);
+    labels.set(key, candidate);
+  }
+  return labels;
 }
 
-export function usageLabelContext(
-  report: UsageReport,
-  rows: readonly UsageBucketRow[],
-  unknownModelLabel: string,
-): UsageLabelContext {
-  const sourceIds = [...new Set([
-    ...report.sources.map((source) => source.source_id),
-    ...rows.map((row) => row.source_id),
-  ])];
-  const sourceLabels = new Map(
-    sourceIds.map((sourceId) => [sourceId, sourceLabel(report, sourceId)] as const),
-  );
-  const sourceLabelCounts = new Map<string, number>();
-  for (const label of sourceLabels.values()) {
-    sourceLabelCounts.set(label, (sourceLabelCounts.get(label) ?? 0) + 1);
+/**
+ * The identities a report's rows are shown under. A live Source, or a model
+ * under one, keeps its own identity; every row of a Source config no longer
+ * holds folds into one removed aggregate, so its counters still add up while
+ * no Source ID reaches the screen. Labels come from the whole report, so a
+ * filter never renames what stays on screen.
+ */
+export function usageIdentities(report: UsageReport, group: 'model' | 'source', text: UsageText): UsageIdentities {
+  const live = liveSources(report);
+  const removed = (sourceId: string) => !live.has(sourceId);
+  const keyOf = (row: UsageBucketRow) => (removed(row.source_id)
+    ? REMOVED_SOURCES_KEY
+    : group === 'source' ? row.source_id : pairKey(row.source_id, row.model_id));
+  const rows = allRows(report);
+  const hasRemoved = report.sources.some((source) => removed(source.source_id))
+    || rows.some((row) => removed(row.source_id));
+  const removedEntry = hasRemoved ? [[REMOVED_SOURCES_KEY, text.removedSources] as const] : [];
+  // The aggregate keeps the product's own name; live Sources tie-break by ID.
+  const sourceLabels = distinctLabels([...removedEntry, ...[...live].sort(byKey)]);
+  const identities = new Map<string, UsageIdentity>();
+  if (hasRemoved) {
+    identities.set(REMOVED_SOURCES_KEY, {
+      key: REMOVED_SOURCES_KEY,
+      label: text.removedSources,
+      sourceLabel: '',
+      removed: true,
+      unlisted: false,
+    });
   }
-  const sourceCollisionLabels = new Set(
-    [...sourceLabelCounts.entries()]
-      .filter(([, count]) => count > 1)
-      .map(([label]) => label),
-  );
-  const sourceDisplayLabels = new Map(
-    [...sourceLabels.entries()].map(([sourceId, label]) => [
-      sourceId,
-      sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label,
-    ]),
-  );
-  for (;;) {
-    const displayCounts = new Map<string, number>();
-    for (const label of sourceDisplayLabels.values()) {
-      displayCounts.set(label, (displayCounts.get(label) ?? 0) + 1);
+  if (group === 'source') {
+    for (const sourceId of live.keys()) {
+      identities.set(sourceId, {
+        key: sourceId,
+        label: sourceLabels.get(sourceId) ?? '',
+        sourceLabel: '',
+        removed: false,
+        unlisted: false,
+      });
     }
-    const collisions = [...displayCounts.entries()]
-      .filter(([, count]) => count > 1)
-      .map(([label]) => label);
-    if (collisions.length === 0) break;
-    for (const [sourceId, label] of sourceDisplayLabels) {
-      if (collisions.includes(label)) {
-        sourceDisplayLabels.set(sourceId, `${label} · ${sourceId}`);
-      }
+  } else {
+    const pairs = new Map(rows
+      .filter((row) => !removed(row.source_id))
+      .map((row) => [pairKey(row.source_id, row.model_id), row] as const));
+    const models = new Map([...pairs].map(([key, row]) => [key, {
+      sourceLabel: sourceLabels.get(row.source_id) ?? '',
+      name: usageModelName(report, row.source_id, row.model_id, text.unknownModel),
+      unlisted: modelLabel(report, row.source_id, row.model_id) === null,
+    }] as const));
+    // A configured model keeps its name over one that only reads like it.
+    const labels = distinctLabels([
+      ...removedEntry,
+      ...[...models]
+        .sort((left, right) => Number(left[1].unlisted) - Number(right[1].unlisted) || byKey(left, right))
+        .map(([key, model]) => [key, `${model.sourceLabel} · ${model.name}`] as const),
+    ]);
+    for (const [key, model] of models) {
+      identities.set(key, {
+        key,
+        label: labels.get(key) ?? '',
+        sourceLabel: model.sourceLabel,
+        removed: false,
+        unlisted: model.unlisted,
+      });
     }
   }
-
-  const identityLabelCounts = new Map<string, number>();
-  const identities = usageIdentities(report, rows);
-  for (const identity of identities) {
-    const label = identityLabel(identity, unknownModelLabel);
-    identityLabelCounts.set(label, (identityLabelCounts.get(label) ?? 0) + 1);
-  }
-  const sourceQualifiedIdentityCounts = new Map<string, number>();
-  for (const identity of identities) {
-    const label = identityLabel(identity, unknownModelLabel);
-    if (identityLabelCounts.get(label) === 1) continue;
-    const qualifiedLabel = `${label} · ${identity.sourceId}`;
-    sourceQualifiedIdentityCounts.set(qualifiedLabel, (sourceQualifiedIdentityCounts.get(qualifiedLabel) ?? 0) + 1);
-  }
-
-  const identityCollisionLabels = new Set(
-    [...identityLabelCounts.entries()]
-      .filter(([, count]) => count > 1)
-      .map(([label]) => label),
-  );
-  const identityByKey = new Map(identities.map((identity) => [identity.key, identity] as const));
-  const identityCandidates = new Map(
-    identities.map((identity) => {
-      const label = identityLabel(identity, unknownModelLabel);
-      const modelSuffix = (
-        (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1
-      ) ? ` · ${identity.modelId}` : '';
-      const candidate = identityCollisionLabels.has(label)
-        ? `${label} · ${identity.sourceId}${modelSuffix}`
-        : label;
-      return [identity.key, candidate] as const;
-    }),
-  );
-  const identityDisplayLabels = new Map<string, string>();
-  const usedIdentityLabels = new Set<string>();
-  for (const [key, candidate] of identityCandidates) {
-    const identity = identityByKey.get(key)!;
-    let displayLabel = candidate;
-    let suffix = 0;
-    while (usedIdentityLabels.has(displayLabel)) {
-      suffix += 1;
-      const identitySuffix = ` · ${identity.sourceId} · ${identity.modelId}`;
-      displayLabel = `${candidate}${identitySuffix}${suffix > 1 ? ` (${suffix})` : ''}`;
-    }
-    usedIdentityLabels.add(displayLabel);
-    identityDisplayLabels.set(key, displayLabel);
-  }
+  const get = (key: string) => identities.get(key)!;
   return {
-    sourceCollisionLabels,
-    sourceDisplayLabels,
-    identityCollisionLabels,
-    identityModelCollisionKeys: new Set(
-      identities
-        .filter((identity) => {
-          const label = identityLabel(identity, unknownModelLabel);
-          return identityCollisionLabels.has(label)
-            && (sourceQualifiedIdentityCounts.get(`${label} · ${identity.sourceId}`) ?? 0) > 1;
-        })
-        .map((identity) => identity.key),
-    ),
-    identityDisplayLabels,
+    keyOf,
+    get,
+    of: (selected) => {
+      const keys = [...new Set(selected.map(keyOf))];
+      return [
+        ...keys.filter((key) => key !== REMOVED_SOURCES_KEY),
+        ...keys.filter((key) => key === REMOVED_SOURCES_KEY),
+      ].map(get);
+    },
   };
 }
 
-export function sourceIdentityLabel(
-  report: UsageReport,
-  sourceId: string,
-  context: UsageLabelContext,
-): string {
-  const label = sourceLabel(report, sourceId);
-  return context.sourceDisplayLabels.get(sourceId)
-    ?? (context.sourceCollisionLabels.has(label) ? `${label} · ${sourceId}` : label);
+/**
+ * A selection made while a Source was live still names its ID, or its pairs,
+ * after config lets it go. From then on it names the removed aggregate, the
+ * only identity the filters and the table still offer for that Source.
+ */
+export function foldUsageSelection(report: UsageReport, selection: UsageFilter): UsageFilter {
+  const live = liveSources(report);
+  const known = new Set([...report.sources.map((source) => source.source_id), ...allRows(report).map((row) => row.source_id)]);
+  const removed = (sourceId: string) => known.has(sourceId) && !live.has(sourceId);
+  const fold = (keys: readonly string[], sourceOf: (key: string) => string) => [...new Set(keys.map((key) => (
+    removed(sourceOf(key)) ? REMOVED_SOURCES_KEY : key
+  )))];
+  return {
+    sourceIds: fold(selection.sourceIds, (key) => key),
+    modelKeys: fold(selection.modelKeys, (key) => key.slice(0, Math.max(0, key.indexOf(PAIR_SEPARATOR)))),
+  };
 }
 
-export function identityDisplayLabel(
-  identity: UsageIdentity,
-  unknownModelLabel: string,
-  context?: UsageLabelContext,
-): string {
-  const displayLabel = context?.identityDisplayLabels.get(identity.key);
-  if (displayLabel) return displayLabel;
-  const label = identityLabel(identity, unknownModelLabel);
-  if (!context?.identityCollisionLabels.has(label)) return label;
-  const modelSuffix = context.identityModelCollisionKeys.has(identity.key) ? ` · ${identity.modelId}` : '';
-  return `${label} · ${identity.sourceId}${modelSuffix}`;
+/**
+ * A selection names identities; the rows it keeps are named by the IDs they
+ * were metered under. The removed aggregate therefore stands for every Source
+ * ID, and every pair, it folded. It stays in the list too, matching no row, so
+ * a selection whose rows are gone never widens to everything.
+ */
+export function resolveUsageFilter(report: UsageReport, picked: UsageFilter): UsageFilter {
+  const selection = foldUsageSelection(report, picked);
+  if (!selection.sourceIds.includes(REMOVED_SOURCES_KEY) && !selection.modelKeys.includes(REMOVED_SOURCES_KEY)) {
+    return selection;
+  }
+  const live = liveSources(report);
+  const removedRows = allRows(report).filter((row) => !live.has(row.source_id));
+  const expand = (keys: readonly string[], folded: string[]) => [...new Set(keys.flatMap((key) => (
+    key === REMOVED_SOURCES_KEY ? [key, ...folded] : [key]
+  )))];
+  return {
+    sourceIds: expand(selection.sourceIds, removedRows.map((row) => row.source_id)),
+    modelKeys: expand(selection.modelKeys, removedRows.map((row) => pairKey(row.source_id, row.model_id))),
+  };
 }
 
 export function filterBucketRows(bucket: UsageBucket, filter: UsageFilter): UsageBucketRow[] {
@@ -452,7 +485,7 @@ export function seriesFor(
   filter: UsageFilter,
   group: UsageGroup,
   metric: UsageMetric,
-  unknownModelLabel: string,
+  text: UsageText,
 ): UsageSeries[] {
   const rows = filteredRows(report, filter);
   if (group === 'type') {
@@ -496,53 +529,20 @@ export function seriesFor(
     }];
   }
 
-  if (group === 'source') {
-    const labelContext = usageLabelContext(report, rows, unknownModelLabel);
-    const sourceIds = [...new Set(rows.map((row) => row.source_id))];
-    return sourceIds.map((sourceId, index) => ({
-      key: sourceId,
-      label: sourceIdentityLabel(report, sourceId, labelContext),
+  const identities = usageIdentities(report, group, text);
+  return identities.of(rows).map((identity, index) => {
+    const rowsOf = (bucket: UsageBucket) => filterBucketRows(bucket, filter)
+      .filter((row) => identities.keyOf(row) === identity.key);
+    return {
+      key: identity.key,
+      label: identity.label,
       colorIndex: index,
-      values: report.buckets.map((bucket) => {
-        const rowsForSource = filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId);
-        return bucketMetricValue(bucket, rowsForSource, metric);
-      }),
-      floors: report.buckets.map((bucket) => costIsFloor(
-        filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId),
-        metric,
-      )),
-      unpriced: report.buckets.map((bucket) => costIsUnpriced(
-        filterBucketRows(bucket, filter).filter((row) => row.source_id === sourceId),
-        metric,
-      )),
-    }));
-  }
-
-  const identities = usageIdentities(report, rows);
-  const labelContext = usageLabelContext(report, rows, unknownModelLabel);
-  return identities.map((identity, index) => ({
-    key: identity.key,
-    label: identityDisplayLabel(identity, unknownModelLabel, labelContext),
-    colorIndex: index,
-    values: report.buckets.map((bucket) => {
-      const rowsForIdentity = filterBucketRows(bucket, filter).filter((row) => (
-        row.source_id === identity.sourceId && row.model_id === identity.modelId
-      ));
-      return bucketMetricValue(bucket, rowsForIdentity, metric);
-    }),
-    floors: report.buckets.map((bucket) => costIsFloor(
-      filterBucketRows(bucket, filter).filter((row) => (
-        row.source_id === identity.sourceId && row.model_id === identity.modelId
-      )),
-      metric,
-    )),
-    unpriced: report.buckets.map((bucket) => costIsUnpriced(
-      filterBucketRows(bucket, filter).filter((row) => (
-        row.source_id === identity.sourceId && row.model_id === identity.modelId
-      )),
-      metric,
-    )),
-  }));
+      removed: identity.removed,
+      values: report.buckets.map((bucket) => bucketMetricValue(bucket, rowsOf(bucket), metric)),
+      floors: report.buckets.map((bucket) => costIsFloor(rowsOf(bucket), metric)),
+      unpriced: report.buckets.map((bucket) => costIsUnpriced(rowsOf(bucket), metric)),
+    };
+  });
 }
 
 export function reportHasPartialHistory(report: UsageReport, filter: UsageFilter): boolean {

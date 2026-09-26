@@ -1567,6 +1567,9 @@
         "partialHistory": "Some buckets have incomplete history",
         "historicalHourly": "Includes historical usage without hourly time",
         "unknownModel": "Unknown model",
+        "removedSources": "Removed providers",
+        "removedSourcesHint": "Usage kept after these providers were deleted",
+        "removedModel": "Removed",
         "granularity": {
           "hour": "hourly",
           "day": "daily"

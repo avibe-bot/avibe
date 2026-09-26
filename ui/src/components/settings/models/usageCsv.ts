@@ -3,15 +3,10 @@ import {
   filterBucketRows,
   emptyCounters,
   modelLabel,
-  pairKey,
-  sourceIdentityLabel,
-  sourceLabel,
-  usageLabelContext,
   usageNonCachedInput,
   usageTokensAreKnown,
   usageTotalTokens,
   type UsageFilter,
-  type UsageIdentity,
 } from './usageProjection';
 
 export function csvCell(value: string | number): string {
@@ -47,7 +42,10 @@ export function buildUsageCsv(
   headers: UsageCsvHeaders,
   unknownModel: string,
 ): string {
-  const labelContext = usageLabelContext(report, report.buckets.flatMap((bucket) => bucket.rows), unknownModel);
+  // The export keeps every row under the IDs it was metered under; a label is
+  // what config names that ID, and a Source config let go reads as its ID.
+  const sourceLabel = (sourceId: string) => report.sources
+    .find((source) => source.source_id === sourceId)?.label?.trim() || sourceId;
   const buckets = pinnedKey === null
     ? report.buckets
     : report.buckets.filter((bucket) => bucket.key === pinnedKey);
@@ -57,23 +55,17 @@ export function buildUsageCsv(
     return exportRows.map((row) => {
       const counters = row ?? (bucket.history_complete ? emptyCounters() : null);
       const knownTokens = counters !== null && usageTokensAreKnown(counters);
-      const identity = row === null ? null : {
-        key: pairKey(row.source_id, row.model_id),
-        sourceId: row.source_id,
-        modelId: row.model_id,
-        sourceLabel: sourceLabel(report, row.source_id),
-        modelLabel: modelLabel(report, row.source_id, row.model_id),
-      } satisfies UsageIdentity;
+      const label = row === null ? null : modelLabel(report, row.source_id, row.model_id);
       return [
         bucket.key,
         bucket.start_at,
         bucket.end_at,
         String(bucket.history_complete),
         row?.source_id ?? '',
-        identity?.modelLabel ?? '',
+        label ?? '',
         row?.model_id ?? '',
-        row === null ? '' : sourceIdentityLabel(report, row.source_id, labelContext),
-        row === null ? '' : identity?.modelLabel || unknownModel,
+        row === null ? '' : sourceLabel(row.source_id),
+        row === null ? '' : label || unknownModel,
         row?.requests ?? (bucket.history_complete ? 0 : ''),
         row?.token_reports ?? (bucket.history_complete ? 0 : ''),
         knownTokens ? counters.input_tokens : '',

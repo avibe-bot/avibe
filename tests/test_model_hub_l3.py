@@ -11015,6 +11015,59 @@ def test_a_call_that_reached_no_model_is_never_metered(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_a_deleted_source_keeps_its_usage_and_reads_as_removed(tmp_path: Path) -> None:
+    """MH-USAGE-034: the Usage tab folds a Source by the null label this report gives it.
+
+    Deleting a Source lets config go, not the usage it metered: every row stays,
+    with its counts, under the ID it was metered under, and only the label goes,
+    because a configured Source always carries its name. A model its live Source
+    stops listing keeps that Source's label and loses only its own.
+    """
+
+    async def exercise() -> None:
+        gone = _source("src_usagegone01", "Deleted supplier")
+        live = _source("src_usagelive01", "Live supplier")
+        service = _service(tmp_path, sources=[gone, live])
+        _canonicalize_fixed_test_routes(service)
+        metered = [
+            (gone.id, "glm-5.3", 100),
+            (gone.id, "kimi-k2", 40),
+            (live.id, "shared-model", 7),
+            (live.id, "glm-4.6-air", 3),
+        ]
+        for source_id, model_id, input_tokens in metered:
+            service.usage.record(
+                source_id=source_id,
+                model_id=model_id,
+                usage=ProtocolUsageReport.of(input_tokens=input_tokens, cached_input_tokens=0, output_tokens=1),
+                at=NOW,
+            )
+        with pytest.raises(ModelHubError) as guard:
+            await service.delete_source(gone.id)
+        await service.delete_source(
+            gone.id,
+            force=True,
+            confirmed_remove_hops=guard.value.data["would_remove_hops"],
+            confirmed_interruptions=guard.value.data["would_interrupt"],
+        )
+
+        report = service.usage_summary(window="24h")
+        sources = {source["source_id"]: source for source in report["sources"]}
+        labels = {
+            source_id: (source["label"], {model["model_id"]: model["label"] for model in source["models"]})
+            for source_id, source in sources.items()
+        }
+        assert labels == {
+            gone.id: (None, {"glm-5.3": None, "kimi-k2": None}),
+            live.id: ("Live supplier", {"shared-model": "shared-model", "glm-4.6-air": None}),
+        }
+        assert sources[gone.id]["input_tokens"] == 140
+        assert report["totals"]["input_tokens"] == 150
+        assert sum(row["input_tokens"] for bucket in report["buckets"] for row in bucket["rows"]) == 150
+
+    asyncio.run(exercise())
+
+
 def test_a_downstream_disconnect_meters_the_terminal_frame_exactly_once(
     tmp_path: Path,
 ) -> None:

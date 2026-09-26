@@ -106,22 +106,85 @@ describe('UsageTab', () => {
     expect(heading?.textContent).not.toContain('Sep 24, 2026');
   });
 
-  it('MH-USAGE-017: keeps a vanished Source identifiable and a vanished model unnamed', () => {
+  it('MH-USAGE-017: folds a vanished Source into Removed providers and never shows its IDs', async () => {
     const vanishedModelId = 'model-opaque-digest-9f2c1d';
     const { container } = draw(report({
-      sources: [{
-        source_id: 'source-vanished',
-        label: null,
-        last_metered_at: null,
-        ...counters(),
-        models: [{ model_id: vanishedModelId, label: null, ...counters() }],
-      }],
-      buckets: [bucket('00', [row({ source_id: 'source-vanished', model_id: vanishedModelId })])],
+      sources: [
+        {
+          source_id: 'source-a',
+          label: 'Live supplier',
+          last_metered_at: null,
+          ...counters(),
+          models: [{ model_id: 'model-a', label: 'Live model', ...counters() }],
+        },
+        {
+          source_id: 'src_vanished01',
+          label: null,
+          last_metered_at: null,
+          ...counters({ requests: 4 }),
+          models: [
+            { model_id: vanishedModelId, label: null, ...counters() },
+            { model_id: 'glm-5.3', label: null, ...counters() },
+          ],
+        },
+      ],
+      buckets: [bucket('00', [
+        row({ source_id: 'src_vanished01', model_id: vanishedModelId, requests: 5 }),
+        row({ source_id: 'src_vanished01', model_id: 'glm-5.3', requests: 5 }),
+        row(),
+      ])],
     }));
+    const table = () => within(screen.getByRole('table'));
+    const names = () => [...container.querySelectorAll('tbody .model-hub-usage-row-name')].map((cell) => cell.textContent);
 
-    expect(container.textContent).toContain('source-vanished');
-    expect(container.textContent).toContain('Unknown model');
-    expect(container.textContent).not.toContain(vanishedModelId);
+    expect(names()).toEqual(['Live supplier · Live model', 'Removed providers']);
+    expect(table().getByText('Usage kept after these providers were deleted')).toBeTruthy();
+    expect(table().getByText('10')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'By source' }));
+    expect(names()).toEqual(['Live supplier', 'Removed providers']);
+    // The aggregate closes the table whichever way it is sorted.
+    await userEvent.click(screen.getByRole('button', { name: /sorted descending/i }));
+    expect(names()).toEqual(['Live supplier', 'Removed providers']);
+    await userEvent.click(screen.getByRole('button', { name: 'Model' }));
+    expect(container.querySelector('.model-hub-usage-legend')?.textContent).toContain('Removed providers');
+    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    expect(screen.getByRole('option', { name: /Removed providers/ })).toBeTruthy();
+    for (const hidden of ['src_vanished01', vanishedModelId, 'glm-5.3', 'Unknown model']) {
+      expect(container.textContent).not.toContain(hidden);
+    }
+  });
+
+  it('MH-USAGE-034: a picked Source deleted before the next report reads as the whole Removed providers aggregate', async () => {
+    const source = (source_id: string, label: string | null) => ({
+      source_id, label, last_metered_at: null, ...counters(), models: [],
+    });
+    const rows = [
+      row({ source_id: 'source-a', requests: 1 }),
+      row({ source_id: 'src_doomed01', model_id: 'model-d', requests: 2 }),
+      row({ source_id: 'src_gone01', model_id: 'model-g', requests: 4 }),
+    ];
+    const page = (value: UsageReport) => (
+      <I18nextProvider i18n={i18n}>
+        <UsageTab usage={readyRegion(value)} windowKey="24h" onWindowChange={vi.fn()} />
+      </I18nextProvider>
+    );
+    const before = report({
+      sources: [source('source-a', 'Live supplier'), source('src_doomed01', 'Doomed supplier'), source('src_gone01', null)],
+      buckets: [bucket('00', rows)],
+    });
+    const { container, rerender } = render(page(before));
+    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('option', { name: /Doomed supplier/ }));
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'By source' }));
+    const names = () => [...container.querySelectorAll('tbody .model-hub-usage-row-name')].map((cell) => cell.textContent);
+    expect(names()).toEqual(['Doomed supplier']);
+
+    rerender(page({ ...before, sources: [source('source-a', 'Live supplier'), source('src_doomed01', null), source('src_gone01', null)] }));
+    expect(screen.getByRole('button', { name: 'Removed providers' })).toBeTruthy();
+    expect(names()).toEqual(['Removed providers']);
+    expect(within(screen.getByRole('table')).getAllByText('6').length).toBeGreaterThan(0);
+    expect(container.textContent).not.toContain('src_');
   });
 
   it('MH-USAGE-018: reads a shortfall as reports that never arrived', () => {
@@ -142,43 +205,42 @@ describe('UsageTab', () => {
     expect(container.textContent).toContain('All tokens');
   });
 
-  it('uses the translated historical-model label for filters, chart, table, and collisions', async () => {
+  it('names an unlisted model by its model ID and keeps the translated unknown name for a folded key', async () => {
     const translated = createInstance();
     await translated.use(initReactI18next).init({
       lng: 'de',
       fallbackLng: 'en',
       resources: {
         en: { translation: en },
-        de: { translation: { settings: { models: { usage: { unknownModel: 'Historisches Modell' } } } } },
+        de: { translation: { settings: { models: { usage: { unknownModel: 'Historisches Modell', removedModel: 'Entfernt' } } } } },
       },
       interpolation: { escapeValue: false },
     });
+    const foldedKey = `${'m'.repeat(200)}~${'0'.repeat(64)}`;
     const value = report({
       sources: [{
         source_id: 'source-a',
         label: 'Supplier',
         last_metered_at: null,
         ...counters(),
-        models: [{ model_id: 'model-a', label: 'Historisches Modell', ...counters() }],
+        models: [{ model_id: 'model-a', label: 'Model', ...counters() }],
       }],
-      buckets: [bucket('00', [row({ model_id: 'removed-model' }), row()])],
+      buckets: [bucket('00', [row({ model_id: 'removed-model' }), row({ model_id: foldedKey }), row()])],
     });
     const { container } = render(
       <I18nextProvider i18n={translated}>
         <UsageTab usage={readyRegion(value)} windowKey="24h" onWindowChange={vi.fn()} />
       </I18nextProvider>,
     );
-    const labels = [
-      'Supplier · Historisches Modell · source-a · removed-model',
-      'Supplier · Historisches Modell · source-a · model-a',
-    ];
+    const labels = ['Supplier · removed-model', 'Supplier · Historisches Modell', 'Supplier · Model'];
     for (const label of labels) expect(within(screen.getByRole('table')).getByText(label)).toBeTruthy();
+    expect(within(screen.getByRole('table')).getAllByText('Supplier · Entfernt')).toHaveLength(2);
     await userEvent.click(screen.getByRole('button', { name: 'All Model' }));
     for (const label of labels) expect(screen.getByRole('option', { name: new RegExp(label) })).toBeTruthy();
     fireEvent.pointerDown(document.body);
     await userEvent.click(screen.getByRole('button', { name: 'Model' }));
     for (const label of labels) expect(container.querySelector('.model-hub-usage-legend')?.textContent).toContain(label);
-    expect(container.textContent).not.toContain('Unknown model');
+    expect(container.textContent).not.toContain(foldedKey);
   });
 
   it('formats every percentage in the active locale even when translations fall back', async () => {
@@ -529,8 +591,8 @@ describe('UsageTab', () => {
     });
     draw(value);
 
-    expect(screen.getByText('Same source label · Same model label · source-a')).toBeTruthy();
-    expect(screen.getByText('Same source label · Same model label · source-b')).toBeTruthy();
+    expect(screen.getByText('Same source label · Same model label')).toBeTruthy();
+    expect(screen.getByText('Same source label (2) · Same model label')).toBeTruthy();
     expect(screen.getByText('All tokens = input + output. Cache reads are included in input and shown separately.')).toBeTruthy();
     expect(screen.getAllByText('50.0%').length).toBeGreaterThan(0);
   });
