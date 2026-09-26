@@ -40,6 +40,7 @@ from core.message_dispatcher import (
     ConsolidatedMessageDispatcher,
 )
 from core.session_activities import SessionActivityRegistry, TERMINAL_SNAPSHOT_PHASE
+from core.run_settlement import SETTLED_BY_TURN_ONLY_RESULT
 from core.session_turns import SessionTurnManager
 from core.runtime_activation import RuntimeActivationRegistry
 from modules.im import MessageContext
@@ -876,6 +877,57 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         await agent._retire_synthetic_pending_owner(composite_key, context, owner=synthetic)
         self.assertFalse(agent._has_pending_requests(composite_key))
         self.assertFalse(service._get_turn_gate(composite_key).lock.locked())
+
+    async def test_interrupted_synthetic_turn_settle_still_releases_its_waiter(self):
+        # Retirement runs after the output record is gone, so nothing retries an
+        # interrupted settle; the waiter must be released on failure and on
+        # cancellation alike, and cancellation must still propagate.
+        for error, propagates in (
+            (RuntimeError("dispatcher unavailable"), False),
+            (asyncio.CancelledError(), True),
+        ):
+            with self.subTest(error=type(error).__name__):
+                agent, service = _build_agent()
+                composite_key = "session-synthetic-settle-interrupted:/tmp/work"
+                context = SimpleNamespace(
+                    user_id="U1",
+                    channel_id="C1",
+                    platform="avibe",
+                    platform_specific={
+                        "agent_runtime_turn_key": composite_key,
+                        "agent_session_id": "sess-synthetic-settle-interrupted",
+                    },
+                )
+                await agent._maybe_begin_agent_initiated_turn(
+                    context,
+                    composite_key,
+                    "sess-synthetic-settle-interrupted",
+                    "/tmp/work",
+                    "session-key",
+                    message_type="assistant",
+                )
+                synthetic = agent._synthetic_pending_owners[composite_key]
+                settled: list[str] = []
+                agent.controller.emit_agent_message = AsyncMock(side_effect=error)
+                agent.controller.mark_turn_complete = (
+                    lambda _ctx, *, settled_by: settled.append(settled_by)
+                )
+
+                if propagates:
+                    with self.assertRaises(type(error)):
+                        await agent._retire_synthetic_pending_owner(
+                            composite_key, context, owner=synthetic,
+                        )
+                else:
+                    self.assertTrue(
+                        await agent._retire_synthetic_pending_owner(
+                            composite_key, context, owner=synthetic,
+                        )
+                    )
+
+                self.assertEqual(settled, [SETTLED_BY_TURN_ONLY_RESULT])
+                self.assertFalse(agent._has_pending_requests(composite_key))
+                self.assertFalse(service.runtime_turn_active(composite_key))
 
     async def test_synthetic_owner_transfers_claimed_activity_batch_to_detached_result(self):
         agent, service = _build_agent()

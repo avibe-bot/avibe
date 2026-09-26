@@ -3796,15 +3796,19 @@ class ClaudeAgent(BaseAgent):
                 is_error=is_error,
                 output=MessageOutput(completes_turn=True, completes_run=False),
             )
-        except Exception:
-            # No backend result will ever arrive for this Turn again, so a failed
-            # settle must still release its waiter rather than wedge the Session.
-            logger.warning(
-                "Agent-initiated turn settle failed for %s", composite_key, exc_info=True,
-            )
+        except BaseException as exc:
+            # No backend result will ever arrive for this Turn again and its
+            # record is already gone, so a failed or cancelled settle must still
+            # release its waiter rather than wedge the Session.
+            if isinstance(exc, Exception):
+                logger.warning(
+                    "Agent-initiated turn settle failed for %s", composite_key, exc_info=True,
+                )
             mark = getattr(self.controller, "mark_turn_complete", None)
             if callable(mark):
                 mark(owner_context, settled_by=SETTLED_BY_TURN_ONLY_RESULT)
+            if not isinstance(exc, Exception):
+                raise
         finally:
             self._release_service_runtime_turn(owner_context)
         return True

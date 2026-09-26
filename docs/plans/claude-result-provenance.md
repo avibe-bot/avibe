@@ -264,8 +264,9 @@ human input queued behind the Turn indefinitely.
   agent-initiated Turn through the canonical empty terminal result
   (`completes_turn=True`, `completes_run=False`) before the gate is released,
   matching the forced-cancel settle path. The Run, if any, stays with the
-  detached output that already settled it. If that settle fails, the Turn
-  waiter is still released, so the Session cannot wedge.
+  detached output that already settled it. The output record is already gone,
+  so nothing retries this settle: if it fails or is cancelled, the Turn waiter
+  is still released (cancellation then propagates), so the Session cannot wedge.
 - A silent-only detached reply settles its Activity claim without creating a
   Message. A missing receipt for such a reply is success, not a delivery
   failure, so it no longer retries forever ahead of every later record.
