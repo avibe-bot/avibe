@@ -9,8 +9,10 @@ import pytest
 
 from config.v2_config import ModelHubBackendModelConfig, ModelHubSourceStateConfig
 from core.backend_failure import emit_backend_failure, emit_replayed_backend_failure
+from core.controller import Controller
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import (
+    ENGINE_DOWN_TURN_OUTCOME,
     render_turn_outcome_copy,
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -76,6 +78,34 @@ async def test_shared_failure_uses_exact_hub_copy_and_preserves_terminal_evidenc
     assert terminal.args[1:] == ("result", "")
     assert terminal.kwargs["terminal_error"] == diagnostic
     assert terminal.kwargs["level"] == "silent"
+
+
+@pytest.mark.parametrize("projection", [ENGINE_DOWN_TURN_OUTCOME, None])
+@pytest.mark.parametrize("language", ["en", "zh"])
+async def test_failure_after_shutdown_request_reports_the_restart(projection, language):
+    """Shutdown stops the Hub engine first; the in-flight Turn's notice names the restart."""
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(language=language)
+    controller.model_hub_turn_gateway = SimpleNamespace(
+        correlation=SimpleNamespace(terminal_projection=Mock(return_value=projection)),
+    )
+    controller.emit_agent_message = AsyncMock(return_value="msg-failed")
+    controller.request_shutdown("signal")
+    context = MessageContext(
+        user_id="user", channel_id="channel", platform="avibe",
+        platform_specific={"turn_token": "turn-restart"},
+    )
+    diagnostic = "Claude turn failed: 502 engine_down"
+    symptom = (
+        render_turn_outcome_copy(projection, language)
+        if projection is not None else "Claude process exited unexpectedly"
+    )
+
+    await emit_backend_failure(controller, context, "claude", diagnostic, display_text=symptom)
+
+    notify, terminal = controller.emit_agent_message.await_args_list
+    assert notify.args[2] == t("turn.interrupted.serviceRestart", language) != symptom
+    assert terminal.kwargs["terminal_error"] == diagnostic
 
 
 @pytest.mark.parametrize("identity", [None, "", 123, "different-turn"])

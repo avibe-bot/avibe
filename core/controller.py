@@ -1763,6 +1763,10 @@ class Controller:
     def service_lock_safe_to_release(self) -> bool:
         return bool(getattr(self, "_service_lock_safe_to_release", False))
 
+    @property
+    def shutdown_requested(self) -> bool:
+        return bool(getattr(self, "_shutdown_requested", False))
+
     def request_shutdown(self, reason: str = "requested") -> None:
         """Schedule shutdown on the controller loop without blocking its owner."""
 
