@@ -236,7 +236,7 @@ test.describe('hermetic UsageTab', () => {
 
   // The fixture's deleted Sources are real `src_…` IDs, as the ledger keeps them.
   for (const width of [1280, 390]) {
-    test(`MH-USAGE-033: removed providers fold into one muted, last identity at ${width}px, never an ID`, async ({ page }) => {
+    test(`MH-USAGE-034: removed providers fold into one muted, last identity at ${width}px, never an ID`, async ({ page }) => {
       await page.setViewportSize({ width, height: 844 });
       await openUsage(page, 'dark', '&removed=1');
       const body = page.locator('body');

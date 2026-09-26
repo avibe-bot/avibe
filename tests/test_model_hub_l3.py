@@ -11016,7 +11016,7 @@ def test_a_call_that_reached_no_model_is_never_metered(tmp_path: Path) -> None:
 
 
 def test_a_deleted_source_keeps_its_usage_and_reads_as_removed(tmp_path: Path) -> None:
-    """MH-USAGE-033: the Usage tab folds a Source by the null label this report gives it.
+    """MH-USAGE-034: the Usage tab folds a Source by the null label this report gives it.
 
     Deleting a Source lets config go, not the usage it metered: every row stays,
     with its counts, under the ID it was metered under, and only the label goes,

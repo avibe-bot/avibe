@@ -1067,7 +1067,7 @@ be a lie rather than a glitch, and each is a catalog row (MH-USAGE-016..020):
   identity, so totals stay exact without a `src_*` string on screen; a model its live
   Source no longer lists shows the model identifier it was metered under, marked
   removed, and only a digest-folded ledger key reads as "Unknown model"
-  (MH-USAGE-017, MH-USAGE-033). The CSV keeps the raw IDs for machines.
+  (MH-USAGE-017, MH-USAGE-034). The CSV keeps the raw IDs for machines.
 
 **The read is the tab's own.** It is deliberately not a member of
 `FIRST_PAINT_REGION_WHITELIST`: the landing decides routing, and a report nobody

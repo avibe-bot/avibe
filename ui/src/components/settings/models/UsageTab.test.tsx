@@ -154,7 +154,7 @@ describe('UsageTab', () => {
     }
   });
 
-  it('MH-USAGE-033: a picked Source deleted before the next report reads as the whole Removed providers aggregate', async () => {
+  it('MH-USAGE-034: a picked Source deleted before the next report reads as the whole Removed providers aggregate', async () => {
     const source = (source_id: string, label: string | null) => ({
       source_id, label, last_metered_at: null, ...counters(), models: [],
     });

@@ -138,7 +138,7 @@ describe('usageProjection', () => {
       return value;
     };
 
-    it('MH-USAGE-033: fold into one last, muted series in either grouping, keeping every count', () => {
+    it('MH-USAGE-034: fold into one last, muted series in either grouping, keeping every count', () => {
       const value = withRemoved();
       const total = seriesFor(value, NO_FILTER, 'total', 'requests', TEXT)[0]!.values;
       for (const group of ['model', 'source'] as const) {
