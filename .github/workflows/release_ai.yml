@@ -28,9 +28,10 @@ permissions:
 
 jobs:
   resolve-desktop-release:
-    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ubuntu-latest
     outputs:
+      enabled: ${{ steps.resolve.outputs.enabled }}
+      updater_enabled: ${{ steps.resolve.outputs.updater_enabled }}
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
@@ -47,16 +48,35 @@ jobs:
         id: resolve
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --output "$GITHUB_OUTPUT"
+          TEST_ENABLED: ${{ vars.DESKTOP_UPDATER_TEST }}
+          STABLE_ENABLED: ${{ vars.DESKTOP_UPDATER_STABLE }}
+        shell: bash
+        run: |
+          enabled=false
+          updater_enabled=false
+          if [[ "$RELEASE_TAG" == gh-v* ]]; then
+            enabled=true
+            if [ "$TEST_ENABLED" = true ]; then updater_enabled=true; fi
+          elif [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$STABLE_ENABLED" = true ]; then
+            enabled=true
+            updater_enabled=true
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+          echo "updater_enabled=$updater_enabled" >> "$GITHUB_OUTPUT"
+          if [ "$enabled" = true ]; then
+            python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --output "$GITHUB_OUTPUT"
+          fi
 
   desktop-packages:
     needs: resolve-desktop-release
+    if: needs.resolve-desktop-release.outputs.enabled == 'true'
     uses: ./.github/workflows/desktop-package.yml
     with:
       source_sha: ${{ needs.resolve-desktop-release.outputs.source_sha }}
       version: ${{ needs.resolve-desktop-release.outputs.version }}
       release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
-    # Deliberately no secrets: TEST signing is independent of repository identities.
+      updater_enabled: ${{ needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
+    # OS identities are not inherited. The callee uses its dedicated updater Environment.
 
   resolve-show-runtime-ref:
     needs: resolve-desktop-release
@@ -267,11 +287,12 @@ jobs:
       cancel-in-progress: false
     # Official assets belong to publish.yml; only previews require this build.
     if: >-
-      ${{ !cancelled() && (needs.build-assets.result == 'success' ||
+      ${{ !cancelled() && needs.resolve-desktop-release.result == 'success' && (needs.build-assets.result == 'success' ||
           (needs.build-assets.result == 'skipped' &&
            !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) &&
           (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
-           (needs.resolve-desktop-release.result == 'success' && needs.desktop-packages.result == 'success')) }}
+           (needs.resolve-desktop-release.result == 'success' && needs.desktop-packages.result == 'success')) &&
+          (needs.resolve-desktop-release.outputs.enabled != 'true' || needs.desktop-packages.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -624,7 +645,7 @@ jobs:
           path: dist/
 
       - name: Download desktop TEST artifacts
-        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        if: needs.resolve-desktop-release.outputs.enabled == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: avibe-desktop-${{ needs.resolve-desktop-release.outputs.version }}-*
@@ -632,27 +653,35 @@ jobs:
           merge-multiple: true
 
       - name: Validate desktop TEST assets and append installation guidance
-        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        if: needs.resolve-desktop-release.outputs.enabled == 'true'
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
           SOURCE_SHA: ${{ needs.resolve-desktop-release.outputs.source_sha }}
+          AVIBE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
+          UPDATER_ENABLED: ${{ needs.resolve-desktop-release.outputs.updater_enabled }}
         run: |
+          args=()
+          if [ "$UPDATER_ENABLED" = true ]; then args+=(--updater-enabled); fi
           test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_SHA"
           python scripts/desktop_release.py verify \
-            --directory desktop-dist --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
-          cat docs/desktop-test-installation.md >> release.md
+            --directory desktop-dist --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" ${args[@]+"${args[@]}"}
+          if [[ "$RELEASE_TAG" == gh-v* ]]; then cat docs/desktop-test-installation.md >> release.md; fi
 
       - name: Create GitHub-only Release
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.resolve-desktop-release.outputs.source_sha }}
+          AVIBE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
+          UPDATER_ENABLED: ${{ needs.resolve-desktop-release.outputs.updater_enabled }}
         shell: bash
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
+          args=()
+          if [ "${UPDATER_ENABLED:-false}" = true ]; then args+=(--updater-enabled); fi
           python scripts/desktop_release.py check-remote \
-            --directory desktop-dist --tag "$TAG" --source-sha "$SOURCE_SHA" --repo "$GITHUB_REPOSITORY"
+            --directory desktop-dist --tag "$TAG" --source-sha "$SOURCE_SHA" --repo "$GITHUB_REPOSITORY" ${args[@]+"${args[@]}"}
           python scripts/github_release.py update-notes \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
@@ -706,7 +735,7 @@ jobs:
 
           python scripts/desktop_release.py check-remote \
             --directory desktop-dist --tag "$TAG" --source-sha "$SOURCE_SHA" \
-            --repo "$GITHUB_REPOSITORY" --complete
+            --repo "$GITHUB_REPOSITORY" --complete ${args[@]+"${args[@]}"}
           python scripts/github_release.py finalize \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
@@ -725,3 +754,14 @@ jobs:
             --tag "$TAG" \
             --title "$TAG" \
             --notes-file release.md
+
+      - name: Stage signed stable desktop assets before official finalization
+        if: needs.resolve-desktop-release.outputs.enabled == 'true' && !startsWith(steps.tag.outputs.tag, 'gh-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          SOURCE_SHA: ${{ needs.resolve-desktop-release.outputs.source_sha }}
+          AVIBE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
+        run: |
+          python scripts/desktop_updater.py stage --enabled \
+            --directory desktop-dist --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --repo "$GITHUB_REPOSITORY"

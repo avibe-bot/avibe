@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "repository": "avibe-bot/avibe",
+  "tag": "gh-v3.1.2rc15",
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "channel": "test",
+  "version": "3.1.2-rc.15",
+  "target": "aarch64-apple-darwin",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/avibe-bot/avibe/releases/download/gh-v3.1.2rc15/Avibe_3.1.2-rc.15_aarch64-apple-darwin.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTakNhQ0NRM3RjR1VtdVlTWk5QZ011ZTNyMzZjRlhWZ3VTektGclRDa1U1T3Vyc1Y3akRKVDZodEJVT3A2TWlrY01uT3RvWUhnajNoWjhJZGFTRDVMMzBoOXVVYlROZ1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMjk4MzM5CWZpbGU6YXJ0aWZhY3QuYmluCkR4WWkrN0dkditkY1hQTXhaTi94ZDdBK2JmY25MUlhmbGxtV3RmbGNRcFhjcSt1dlNhR1JvSFExa2Q5ZjlmVHZ4ZHBBZUVYc0RoV0pPMWoxNHRXZENnPT0K",
+      "sha256": "bbeebd41b0401b2846d675a1c06907036580cdedb6d2a2555970ba06ff2a31bd",
+      "size": 38
+    }
+  }
+}

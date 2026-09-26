@@ -78,3 +78,5 @@ pub fn bundled_runtime_host(
         settings,
     ))
 }
+
+pub mod update;

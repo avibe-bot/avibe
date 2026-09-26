@@ -1,7 +1,7 @@
 name: desktop-self-contained-package
 
 # Manual artifacts retain optional Apple identity signing. Reusable TEST builds
-# receive no signing secrets and always use an ad-hoc app / unsigned installer.
+# use ad-hoc OS signatures. Updater keys come only from desktop-updater.
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +18,10 @@ on:
         description: Exact peeled commit of the validated TEST tag
         required: true
         type: string
+      updater_enabled:
+        description: Require cryptographically signed updater artifacts
+        type: boolean
+        default: false
       release_tag:
         description: Canonical gh-vX.Y.ZrcN TEST tag
         required: true
@@ -34,6 +38,7 @@ jobs:
   package:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    environment: desktop-updater
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +107,18 @@ jobs:
             --version "$AVIBE_DESKTOP_VERSION" --tag "$RELEASE_TAG" \
             --source-sha "$SOURCE_SHA" --config desktop/tauri.release.conf.json \
             --env-file "$GITHUB_ENV"
+
+      - name: Configure signed updater or explicitly disable it
+        shell: bash
+        env:
+          UPDATER_ENABLED: ${{ inputs.updater_enabled }}
+          AVIBE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          args=()
+          if [ "$UPDATER_ENABLED" = "true" ]; then args+=(--enabled); fi
+          python scripts/desktop_updater.py configure \
+            --config desktop/tauri.release.conf.json --env-file "$GITHUB_ENV" ${args[@]+"${args[@]}"}
 
       - name: Build verified private Runtime
         run: >
@@ -261,6 +278,20 @@ jobs:
             --source-sha "$(git rev-parse HEAD)" --installer "${installers[0]}" \
             --runtime desktop/src-tauri/resources/runtime --output desktop-package \
             --signing "$signing"
+
+      - name: Sign and verify final updater artifacts
+        if: inputs.updater_enabled
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TARGET: ${{ matrix.target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          python scripts/desktop_updater.py produce \
+            --directory desktop-package --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
+            --target "$TARGET" --app desktop/target/release/bundle/macos/Avibe.app
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:

@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=AVIBE_DESKTOP_UPDATER_PUBLIC_KEY");
     // Application commands are ungated by default in Tauri v2: any page loaded in
     // any window could invoke them. Declaring them here makes `tauri-build`
     // generate per-command permissions, so `capabilities/bootstrap.json`

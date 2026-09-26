@@ -21,9 +21,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 avibe-runtime-host = { path = "../runtime-host" }
+flate2 = "1"
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sys-locale.workspace = true
+tar = "0.4"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
@@ -31,7 +34,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "=2.12.0"
 tauri-plugin-window-state = "2"
+tempfile = "3"
 tokio.workspace = true
 url.workspace = true
 

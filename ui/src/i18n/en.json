@@ -77,6 +77,28 @@
       "successMessage": "The private Runtime and agent backends were removed. Avibe will now quit. You can delete the application or run the system uninstaller.",
       "failureTitle": "Uninstall Failed",
       "failureMessage": "Avibe could not remove all private Runtime and backend files. The desktop app remains installed and your user data was not changed."
+    },
+    "updater": {
+      "menu": "Check for Desktop Updates…",
+      "testChannel": "Use TEST Updates",
+      "title": "Avibe Desktop Updates",
+      "current": "Current version",
+      "latest": "Latest version",
+      "checking": "Checking for updates…",
+      "upToDate": "This app is up to date.",
+      "available": "Update available",
+      "downloading": "Downloading and verifying update…",
+      "installing": "Installing update…",
+      "installed": "Update installed. Restarting…",
+      "disabled": "Desktop updates disabled",
+      "checkFailed": "Could not verify an update. Check your connection and try again. This release may require manual installation.",
+      "installFailed": "The update could not be installed. The previous application has been retained. Please retry or reinstall the previous release.",
+      "install": "Download and Install",
+      "skip": "Skip This Version",
+      "cancel": "Later",
+      "confirm": "An update is available. Download and install it now? Avibe will restart. Your sessions and settings will be kept.",
+      "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",
+      "error": "Update failed — retry"
     }
   },
   "installHint": {

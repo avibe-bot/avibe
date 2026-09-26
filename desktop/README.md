@@ -115,8 +115,8 @@ acceptance builds. Windows ARM64 stays outside the current product gate.
 for canonical `gh-vX.Y.ZrcN` tags. For example, `gh-v3.1.2rc1` builds the tag's
 exact commit, stamps desktop version `3.1.2-rc.1`, and bundles Avibe `3.1.2rc1`.
 All three native builds must succeed before the existing release job publishes
-the GitHub prerelease. Official `v*` releases and PyPI publication keep their
-existing workflow; they do not acquire desktop assets from this TEST path.
+the GitHub prerelease. Official stable `vX.Y.Z` releases use the same desktop builder only when the G2
+stable signing gate below is enabled; PyPI publication retains its sole finalizer.
 
 TEST builds never receive Apple or Windows signing credentials, even when the
 repository has them configured. The macOS app is ad-hoc signed, its outer DMG
@@ -132,7 +132,7 @@ Already-published releases cannot be retrofitted with missing desktop assets.
 The manual workflow remains available for artifact-only builds: select a source
 ref and SemVer version in Actions. It retains optional Developer ID signing and
 notarization when its complete Apple secret set is configured. Actions artifacts
-are retained for 14 days; neither path enables a desktop auto-updater.
+are retained for 14 days; automatic update metadata is disabled unless the G2 signing gate below is configured.
 
 See [Desktop TEST installation](../docs/desktop-test-installation.md) for
 architecture selection, hash checks, app-specific Gatekeeper/SmartScreen
@@ -347,3 +347,83 @@ build unit for `.github/workflows/release_ai.yml`. The manual signing policy and
 the deterministic TEST policy are described above. Native packaging and a real
 installation on each supported architecture remain separate acceptance gates
 from unit/contract tests.
+
+## Signed desktop updates (G2)
+
+The native **Check for Desktop Updates…** entry is the sole update owner. The
+Workbench version badge in a desktop window opens that same entry and shows the
+build-injected desktop version. Startup only checks; a native **Download and
+Install** confirmation authorizes download and replacement. The tray/menu shows
+checking, current, available, downloading, installing, disabled, and error states.
+The **Use TEST Updates** toggle persists beside the private Runtime, defaults on
+for prerelease app versions and off for stable versions, and never downgrades.
+Browsers and Python installations retain their existing update behavior.
+
+The provider discovers published GitHub Releases in `avibe-bot/avibe`, using
+canonical `gh-vX.Y.ZrcN` for TEST and `vX.Y.Z` for stable. It selects the highest
+SemVer in the channel (up to 1,000 releases; overflow is an error). Releases
+without signed metadata cannot be installed automatically, including rc14. A
+signed per-target `desktop-update-<target>.json` binds the repository, tag, peeled
+source commit, desktop version, target, artifact URL, size, SHA-256, and Tauri
+artifact signature. Both metadata and payload signatures are verified locally
+with the build-pinned public key. `.SIGNATURE` is OS-signing status text only.
+The plugin response must equal the authenticated metadata before download.
+
+macOS installs a signed `.app.tar.gz`; the DMG remains the first/manual install
+format. The app is extracted on the installation filesystem, its bundle ID,
+version, CPU architecture, and code seal are checked, then the old app is moved
+aside and restored if replacement fails. A backup is retained if even restoration
+fails. Unwritable installation locations fail before moving the old app; there
+is no privileged destructive fallback. Windows downloads the signed NSIS EXE,
+prepares a backup before exiting, and starts a native PowerShell supervisor which
+waits for NSIS completion, checks the resulting version, and restores/relaunches
+the previous install on failure. The supervisor retains recovery diagnostics and
+backup bytes on failure. No update path deletes `~/.avibe`, private Runtime slots,
+or managed/external Agent backends. A later ordinary app launch follows the
+existing private Runtime lifecycle.
+
+### Release operator configuration
+
+No real signing key or public key is supplied by this change. Until configured,
+TEST remains manual-only and the shell explicitly disables automatic updates.
+The public key must come from the owner's separately generated Tauri signing key;
+never use the disposable test-fixture key for a release.
+
+1. Create the GitHub Environment **desktop-updater**, protect its signing access,
+   and add `TAURI_SIGNING_PRIVATE_KEY` and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (empty for an unencrypted key). These are
+   Tauri/Minisign updater credentials, independent of Apple/Windows OS signing.
+2. Set repository variable `DESKTOP_UPDATER_PUBLIC_KEY` to the single-line
+   base64 Tauri public key. It is compiled into the app and used again by the
+   publication verifier. It is public and must be readable by the finalizer.
+3. After native acceptance, set repository variables `DESKTOP_UPDATER_TEST`
+   and/or `DESKTOP_UPDATER_STABLE` to exactly `true`. Absent/false TEST builds
+   remain manual-only; absent/false stable does not add desktop artifacts to
+   Python releases. Enabling either channel requires the complete signing pair;
+   missing keys or any signature/source/asset mismatch aborts publication.
+4. Cut a new owner-authorized tag. Signing happens after the final macOS app seal
+   and Windows installer are produced. Every target signs its own manifest,
+   verifies both signatures with the same Rust contract used by the shell, then
+   uploads. The release job verifies all targets again and reads back uploaded
+   bytes. Stable assets are staged before the exact-source notes workflow can
+   succeed; the existing `publish.yml` finalizer waits for that workflow before
+   publishing. TEST retains its existing sole finalizer. Never retrofit rc14 or
+   overwrite a published asset, and never rotate the public key without a planned
+   bridge release signed by the currently trusted key.
+
+Dependencies: native updater `tauri-plugin-updater` 2.12.0 (locked), shared
+`minisign-verify` 0.2.5 / `base64` 0.22 / `semver` 1, HTTPS `reqwest`, and native
+archive/temporary-file support. The frontend needs no updater JS permission or
+plugin: it opens the native owner through a fixed navigation request.
+
+### Residual native acceptance
+
+Use disposable macOS arm64/x64 and Windows x64 installations with two newly
+signed releases. Confirm startup checks without downloading; approve an upgrade;
+verify the running app version, preserved sessions/settings/private Runtime,
+backend versions, and relaunch. Repeat with corrupt payload/signature, mismatched
+source/target/version, interrupted download, insufficient permissions/disk space,
+installer cancellation/failure, and channel switching. Test Windows paths with
+spaces and non-ASCII, and macOS app replacement in a writable Applications
+folder. Run with the actual release key and actual OS-signing policy. Local
+fixture tests and CI do not claim that this real installation acceptance ran.

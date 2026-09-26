@@ -12,13 +12,14 @@
     "build": "tsc --noEmit && vite build",
     "test:i18n": "node scripts/verify-i18n.mjs",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:updater": "cargo test -p avibe-runtime-host update && cargo test -p avibe-desktop update"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.0",
+    "@tauri-apps/cli": "2.11.4",
     "typescript": "~5.9.3",
     "vite": "^8.0.16"
   }

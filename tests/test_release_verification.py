@@ -587,10 +587,12 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
 @pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
 @pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
 @pytest.mark.parametrize("desktop_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("resolve_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("desktop_enabled", [False, True])
 @pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
 def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
-    tag, build_result, desktop_result, cancelled, event,
+    tag, build_result, desktop_result, resolve_result, desktop_enabled, cancelled, event,
 ):
     workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
     jobs = workflow["jobs"]
@@ -605,17 +607,19 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("needs.build-assets.result", "build_result")
     expression = expression.replace("needs.desktop-packages.result", "desktop_result")
-    expression = expression.replace("needs.resolve-desktop-release.result", "desktop_result")
+    expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
+    expression = expression.replace("needs.resolve-desktop-release.outputs.enabled", "desktop_enabled")
     expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
-    expression = expression.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+    expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
         "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
+        "resolve_result": resolve_result, "desktop_enabled": "true" if desktop_enabled else "false",
         "ref": "master" if event == "workflow_dispatch" else tag,
         "cancelled": lambda: cancelled,
         "startsWith": lambda value, prefix: value.startswith(prefix),
     })
-    expected = not cancelled and (
+    expected = not cancelled and resolve_result == "success" and (
         build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
-    ) and (not tag.startswith("gh-v") or desktop_result == "success")
+    ) and (not (tag.startswith("gh-v") or desktop_enabled) or desktop_result == "success")
     assert result == expected

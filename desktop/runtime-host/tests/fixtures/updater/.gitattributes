@@ -1,0 +1,2 @@
+# Signatures authenticate exact bytes, including line endings, on every host.
+* -text
