@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
   type Ref,
@@ -292,6 +293,28 @@ function serializedOffsetForPoint(point: PointType): number | null {
 }
 
 function serializedPointAtOffset(target: number): SerializedPoint | null {
+  const pointAtEnd = (node: LexicalNode): SerializedPoint | null => {
+    if ($isTextNode(node)) {
+      return {
+        key: node.getKey(),
+        offset: node.getTextContentSize(),
+        type: 'text',
+      };
+    }
+    if ($isElementNode(node)) {
+      const last = node.getLastDescendant();
+      if ($isTextNode(last)) {
+        return {
+          key: last.getKey(),
+          offset: last.getTextContentSize(),
+          type: 'text',
+        };
+      }
+      return { key: node.getKey(), offset: node.getChildrenSize(), type: 'element' };
+    }
+    return null;
+  };
+
   const visit = (node: LexicalNode, base: number, rootLevel = false): SerializedPoint | null => {
     if ($isTextNode(node)) {
       const serialized = nodeToMarkerText(node, []);
@@ -325,13 +348,8 @@ function serializedPointAtOffset(target: number): SerializedPoint | null {
         return visit(children[index], offset);
       }
       if (target === childEnd) {
-        if (rootLevel) {
-          const child = children[index];
-          return $isElementNode(child)
-            ? { key: child.getKey(), offset: child.getChildrenSize(), type: 'element' }
-            : visit(child, offset);
-        }
-        return { key: node.getKey(), offset: index + 1, type: 'element' };
+        return pointAtEnd(children[index])
+          ?? { key: node.getKey(), offset: index + 1, type: 'element' };
       }
       offset = childEnd;
       if (rootLevel && index < children.length - 1) {
@@ -405,7 +423,10 @@ function EnterSubmitPlugin({
 
 function EditablePlugin({ disabled }: { disabled: boolean }) {
   const [editor] = useLexicalComposerContext();
-  useEffect(() => {
+  // Voice completion restores focus in a sibling effect as soon as the draft
+  // becomes editable again. A passive effect leaves the contenteditable
+  // disabled for that render, so the browser ignores the focus request.
+  useLayoutEffect(() => {
     editor.setEditable(!disabled);
   }, [editor, disabled]);
   return null;
@@ -519,7 +540,11 @@ function BootstrapPlugin({
       };
 
       return {
-        focus: () => editor.focus(),
+        focus: () => {
+          const root = editor.getRootElement();
+          root?.focus({ preventScroll: true });
+          editor.focus();
+        },
         clear: () => {
           voicePreviewRef.current = null;
           editor.update(() => {

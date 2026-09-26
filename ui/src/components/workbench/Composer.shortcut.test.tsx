@@ -251,6 +251,13 @@ describe('Composer voice shortcut', () => {
     const expectedFocus = focus === 'moved' ? outside : focus === 'dialog' ? foreground : textbox;
     await waitFor(() => expect(document.activeElement).toBe(expectedFocus));
     if (expectedFocus !== textbox) return;
+    if (mentions) {
+      const selection = window.getSelection();
+      expect(selection?.anchorNode?.textContent).toBe('Send this transcript');
+      expect(selection?.focusNode?.textContent).toBe('Send this transcript');
+      expect(selection?.anchorOffset).toBe('Send this transcript'.length);
+      expect(selection?.focusOffset).toBe('Send this transcript'.length);
+    }
     await user.keyboard('{Enter}');
     await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
     expect(onSend.mock.calls[0][0]).toBe('Send this transcript');
