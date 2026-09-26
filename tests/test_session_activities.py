@@ -412,6 +412,74 @@ def test_activity_ack_replaces_undeletable_snapshot_with_terminal_evidence():
     assert store.upsert_activity.call_args.kwargs["phase"] == "terminal"
 
 
+def test_ack_recovered_terminal_does_not_delete_awaiting_output_receipt():
+    delete_activity = mock.Mock()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=delete_activity,
+    )
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+
+    registry.ack_recovered_terminal(claimed)
+
+    delete_activity.assert_not_called()
+    assert registry.has_claimed_output("claude", "runtime-1") is True
+
+
+def test_generation_end_finalizes_unresolved_terminal_snapshot_for_recovery():
+    delete_activity = mock.Mock()
+    store = SimpleNamespace(
+        upsert_activity=mock.Mock(),
+        delete_activity=delete_activity,
+    )
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-failed",
+        kind="background_task",
+        metadata={"provenance_pending": True, "provenance_phase_id": "phase-1"},
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-failed",
+        status="failed",
+        retain_terminal_snapshot=True,
+    )
+
+    ended = registry.end_runtime("claude", "runtime-1")
+
+    assert [(activity.id, activity.status) for activity in ended] == [
+        ("task-failed", "failed"),
+    ]
+    assert ended[0].metadata["provenance_generation_ended"] is True
+    assert ended[0].metadata["provenance_unresolved"] is True
+    assert "provenance_pending" not in ended[0].metadata
+    assert registry.has_backend_work("claude") is True
+
+    registry.ack_recovered_terminal(ended[0])
+    delete_activity.assert_called_once()
+    assert registry.has_backend_work("claude") is False
+
+
 def test_delivered_output_without_durable_evidence_stays_claimed_when_terminal_write_fails():
     callback = mock.Mock()
     store = SimpleNamespace(
@@ -984,6 +1052,83 @@ def test_requeued_bound_batch_does_not_absorb_later_same_turn_completion():
     assert later[0].metadata["output_batch_id"] != first_batch_id
 
 
+def test_provisional_classification_updates_memory_before_retryable_persistence():
+    class _Store:
+        def __init__(self):
+            self.records = {}
+            self.fail = True
+
+        def upsert_activity(self, activity, *, phase):
+            if self.fail and activity["metadata"].get("provenance_human"):
+                raise RuntimeError("provenance store unavailable")
+            self.records[activity["id"]] = {
+                "activity": dict(activity),
+                "phase": phase,
+            }
+
+    store = _Store()
+    registry = SessionActivityRegistry(store)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-provenance-retry",
+        session_id="ses-provenance-retry",
+        activity_id="task-provisional",
+        kind="background_task",
+        metadata={
+            "provenance_pending": True,
+            "provenance_phase_id": "phase-1",
+        },
+    )
+
+    classified = registry.classify_provisional_provenance(
+        "claude",
+        "runtime-provenance-retry",
+        activity_ids={"task-provisional"},
+        parent_activity_ids=set(),
+        turn_id="human-turn",
+        run_ids=["human-run"],
+        delivery_key_external="delivery-human",
+        phase_id="phase-1",
+        detached=False,
+    )
+
+    assert classified[0].turn_id == "human-turn"
+    assert classified[0].run_id == "human-run"
+    assert classified[0].metadata["provenance_human"] is True
+    assert registry.active_for_runtime("claude", "runtime-provenance-retry") == classified
+    assert registry.provenance_persistence_recovery(
+        "claude",
+        "runtime-provenance-retry",
+    ) == {"task-provisional": "active: RuntimeError: provenance store unavailable"}
+    assert store.records["task-provisional"]["activity"]["metadata"][
+        "provenance_pending"
+    ] is True
+
+    store.fail = False
+    assert registry.classify_provisional_provenance(
+        "claude",
+        "runtime-provenance-retry",
+        activity_ids={"task-provisional"},
+        parent_activity_ids=set(),
+        turn_id="human-turn",
+        run_ids=["human-run"],
+        delivery_key_external="delivery-human",
+        phase_id="phase-1",
+        detached=False,
+    ) == []
+
+    assert registry.provenance_persistence_recovery(
+        "claude",
+        "runtime-provenance-retry",
+    ) == {}
+    assert store.records["task-provisional"]["activity"]["metadata"][
+        "provenance_human"
+    ] is True
+    assert "provenance_pending" not in store.records["task-provisional"]["activity"][
+        "metadata"
+    ]
+
+
 def test_batch_callbacks_run_after_all_claims_release_and_outside_registry_lock():
     registry = SessionActivityRegistry()
     for activity_id in ("task-a", "task-b"):
@@ -1467,6 +1612,65 @@ def test_force_end_backend_retains_terminal_snapshot_until_ack(tmp_path: Path):
     engine.dispose()
 
 
+def test_force_ended_snapshots_ack_without_restart(tmp_path: Path):
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteSessionActivityStore(engine)
+    registry = SessionActivityRegistry(store)
+    for activity_id in ("active", "queued", "claimed"):
+        registry.start(
+            backend="claude", runtime_key=activity_id, session_id="ses-1",
+            activity_id=activity_id, kind="background_task",
+        )
+        if activity_id != "active":
+            registry.complete(
+                backend="claude", runtime_key=activity_id, activity_id=activity_id,
+                status="completed", expects_output=True,
+            )
+    registry.claim_completed_output_batch("claude", "claimed")
+    ended = registry.end_backend("claude", status="killed")
+    assert len(ended) == 3
+    for activity in ended:
+        registry.ack_recovered_terminal(activity)
+    assert store.list_activities() == []
+    assert SessionActivityRegistry(store).drain_recovered_terminals() == []
+    assert not registry.has_backend_work("claude")
+    engine.dispose()
+
+
+@pytest.mark.parametrize("ending_old", [False, True])
+def test_ending_generation_leaves_other_provisional_snapshot_classifiable(ending_old):
+    from core.runtime_activation import RuntimeActivationRegistry
+
+    activations = RuntimeActivationRegistry()
+    registry = SessionActivityRegistry(activation_registry=activations)
+    old = activations.attach("claude", "runtime")
+    new = activations.attach("claude", "runtime") if ending_old else None
+    owner = new or old
+    registry.start(
+        backend="claude", runtime_key="runtime", session_id="ses-1",
+        activity_id="old-task", kind="background_task",
+        metadata={"provenance_pending": True}, activation_identity=owner,
+    )
+    registry.complete(
+        backend="claude", runtime_key="runtime", activity_id="old-task",
+        status="failed", retain_terminal_snapshot=True, activation_identity=owner,
+    )
+    ending = old if ending_old else activations.attach("claude", "runtime")
+    assert registry.end_runtime(
+        "claude", "runtime", retain_terminal_snapshots=True, activation_identity=ending,
+    ) == []
+    classified = registry.classify_provisional_provenance(
+        "claude", "runtime", activity_ids={"old-task"}, parent_activity_ids=set(),
+        turn_id="old-turn", run_ids=["old-run"], delivery_key_external="old-delivery",
+        phase_id="old-phase", detached=False,
+    )
+    assert len(classified) == 1
+    assert classified[0].run_id == "old-run"
+    assert not classified[0].metadata.get("provenance_generation_ended")
+
+
 def test_force_end_backend_claimed_output_wins_late_delivery_race(tmp_path: Path):
     db_path = tmp_path / "state" / "vibe.sqlite"
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
@@ -1498,11 +1702,63 @@ def test_force_end_backend_claimed_output_wins_late_delivery_race(tmp_path: Path
     assert [(item.id, item.status) for item in completed] == [
         ("task-claimed", "killed"),
     ]
-    assert registry.has_backend_work("claude") is False
+    assert registry.has_backend_work("claude") is True
     assert registry.requeue_completed_output(claimed) is False
     assert registry.ack_completed_output(claimed) is False
     records = store.list_activities()
     assert len(records) == 1
     assert records[0]["phase"] == "terminal"
     assert records[0]["activity"]["status"] == "killed"
+    registry.ack_recovered_terminal(completed[0])
+    assert store.list_activities() == []
+    assert registry.has_backend_work("claude") is False
     engine.dispose()
+
+
+def test_metadata_retry_preserves_persisted_receipt_batch_boundary():
+    registry = SessionActivityRegistry()
+
+    def complete(activity_id: str) -> None:
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            metadata={
+                "provenance_pending": True,
+                "provenance_phase_id": "phase-1",
+            },
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+
+    complete("first")
+    first = registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        metadata_match={
+            "provenance_pending": True,
+            "provenance_phase_id": "phase-1",
+        },
+    )
+    receipt = first[0].metadata["output_batch_id"]
+    assert registry.requeue_completed_outputs(first) == 1
+
+    complete("later")
+    retry = registry.claim_completed_output_batch(
+        "claude",
+        "runtime-1",
+        metadata_match={
+            "provenance_pending": True,
+            "provenance_phase_id": "phase-1",
+        },
+    )
+
+    assert [item.id for item in retry] == ["first"]
+    assert retry[0].metadata["output_batch_id"] == receipt

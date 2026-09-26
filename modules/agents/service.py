@@ -209,14 +209,21 @@ class AgentService:
     def on_activity_terminal(self, activity: Any) -> bool:
         """Let the Run owner acknowledge one terminal Activity."""
 
+        if (getattr(activity, "metadata", None) or {}).get("provenance_pending"):
+            # The native task can finish before the Result classifies its Run.
+            # No Run IDs is not proof that the terminal has no owner.
+            return False
         service = getattr(self.controller, "scheduled_task_service", None)
         settle = getattr(service, "settle_activity_runs", None)
         if not callable(settle):
             return False
         try:
             settle(activity)
-            if str(getattr(activity, "status", "") or "") != "completed":
-                self.activities.ack_recovered_terminal(activity)
+            # ``ack_recovered_terminal`` is a no-op for ordinary active or
+            # output-queue entries.  Calling it for every classified terminal
+            # also retires a completed foreground Activity that had to remain a
+            # provenance snapshot until its Result arrived.
+            self.activities.ack_recovered_terminal(activity)
             return True
         except Exception:
             logger.warning(

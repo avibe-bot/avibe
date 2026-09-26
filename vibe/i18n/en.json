@@ -427,6 +427,7 @@
     "agentMemoryLimit": "The shared Agent cgroup recorded a memory limit event; concurrent Agent processes may be affected.",
     "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
     "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Restore the original session in its original working directory, then explicitly retry the pending input; or start a new conversation from the current directory.",
+    "claudeInputRuntimeChanged": "Your message was not sent because the Claude connection changed before the native write. Your conversation and background work are preserved; retry the pending message when ready.",
     "sessionGeneric": "An error occurred: {error}",
     "codexPromptRefreshUnavailable": "Codex could not confirm that it can safely refresh Avibe's instructions for this existing session. Check or update Codex, then retry this turn.",
     "codexForkBoundaryUnavailable": "Codex could not determine a safe history boundary for this fork. Wait for the source turn to finish, then retry. If the problem persists, check or update Codex.",
