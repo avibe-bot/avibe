@@ -31,6 +31,7 @@
     "test:onboarding-fidelity": "tsc -p e2e/onboarding-fidelity/tsconfig.json --noEmit && playwright test --config playwright.onboarding-fidelity.config.ts",
     "test:workbench-general": "tsc -p e2e/workbench-general/tsconfig.json --noEmit && playwright test --config playwright.workbench-general.config.ts",
     "test:workbench-general-build": "tsc -p e2e/workbench-general/tsconfig.json --noEmit && playwright test --config playwright.workbench-general-build.config.ts",
+    "test:voice-shortcut": "tsc -p e2e/voice-shortcut/tsconfig.json --noEmit && playwright test --config playwright.voice-shortcut.config.ts",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
   },
