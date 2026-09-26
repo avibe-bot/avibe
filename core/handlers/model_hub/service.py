@@ -5873,9 +5873,10 @@ class ModelHubService:
         outcome = None
         source = None
         admitted_at = None
+        attempt_floor = PRE_ATTEMPT_SETTLEMENT_GENERATION
 
         async def invoke_selected() -> None:
-            nonlocal source, handle, outcome, admitted_at
+            nonlocal source, handle, outcome, admitted_at, attempt_floor
             # Bound local waiting too, but never call it a model failure before
             # the adapter has actually admitted this Source/model invocation.
             async with self._mutation_lock:
@@ -5892,8 +5893,12 @@ class ModelHubService:
                         self._mutation_lock.release()
 
                 def admitted() -> None:
-                    nonlocal admitted_at
+                    nonlocal admitted_at, attempt_floor
                     admitted_at = time.monotonic()
+                    # A test reserves no generation: its failure must not displace
+                    # another attempt's verdict. Its success ranks as of admission,
+                    # so any attempt admitted afterwards keeps authority.
+                    attempt_floor = self._next_settlement_generation
                     release_owner()
 
                 try:
@@ -5926,6 +5931,11 @@ class ModelHubService:
         async def settle_attempt() -> None:
             try:
                 if source is not None and outcome is not None:
+                    # The explicit test is the retry a cooldown waits for.
+                    if self._verified_recovery_outcome(outcome):
+                        await self._record_recovery_success(
+                            source.id, attempt_floor, backend="system", model_id=model_id,
+                        )
                     await self._verify_successful_source(
                         source.id, source.credential_ref, source.verification_pending, outcome,
                     )
@@ -5969,8 +5979,9 @@ class ModelHubService:
                 raise cancelled
         assert source is not None and outcome is not None
         succeeded = outcome.kind is RawOutcomeKind.SUCCESS
-        # Classify for display only. A selected model failure cannot block other
-        # models on this Source, refresh credentials, or modify route state.
+        # Classify failures for display only. A selected model failure cannot
+        # block other models on this Source, refresh credentials, or modify route
+        # state.
         decision = classify_outcome(outcome)
         if decision.action == "refresh":
             decision = ResolutionDecision("fallback", reason="credential_revoked")
@@ -6948,7 +6959,7 @@ class ModelHubService:
         self.recovery.annotations(self.store.load())
 
     async def _record_recovery_success(
-        self, source_id: str, generation: int | None, *, backend: BackendName, model_id: str,
+        self, source_id: str, generation: int | None, *, backend: EventAgent, model_id: str,
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
@@ -6971,7 +6982,7 @@ class ModelHubService:
                     logger.warning("Could not persist Model Hub recovered state")
             if recovered:
                 self._record_event(
-                    agent=cast(EventAgent, backend), kind="recover", model_id=model_id,
+                    agent=backend, kind="recover", model_id=model_id,
                     reason="recovery", to_source=source.id, to_label=source.display_name, now=self.now(),
                 )
 

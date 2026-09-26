@@ -1045,6 +1045,26 @@ describe('SourceDetailPanel', () => {
     expect(explanation.textContent).not.toMatch(/test|测试/i);
   });
 
+  it.each([
+    { kind: 'api_key', status: 'cooldown', offered: true },
+    { kind: 'api_key', status: 'standby', offered: false },
+    { kind: 'subscription', status: 'cooldown', offered: false },
+  ] as const)('offers an immediate test beside a $kind $status state: $offered', async ({ kind, status, offered }) => {
+    const locale = i18n.cloneInstance({ lng: 'zh' });
+    render(<ToastProvider><I18nextProvider i18n={locale}>
+      <CommittedPanel source={{ ...source, kind, state: status === 'cooldown'
+        ? { status, retry_at: null, detail_key: 'models.source.cooldown.server_error' }
+        : { status, retry_at: null, detail_key: null } }} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider></ToastProvider>);
+    const testNow = screen.queryByRole('button', { name: locale.t('settings.models.sourceTest.testNow') });
+    expect(Boolean(testNow)).toBe(offered);
+    if (!testNow) return;
+    expect(testNow.closest('.model-hub-source-line')?.textContent).toContain(locale.t('settings.models.upstream.state.unavailableDue'));
+    await userEvent.click(testNow);
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain(locale.t('settings.models.sourceTest.cooldownHint'));
+  });
+
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockResolvedValueOnce(source);
     renderPanel();

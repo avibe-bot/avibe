@@ -88,7 +88,10 @@ export const SourceTestDialog: React.FC<{
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent closeLabel={t('common.close')}>
         <DialogTitle className="min-w-0 break-words pr-6">{t('settings.models.sourceTest.title', { source: source.display_name })}</DialogTitle>
-        <DialogDescription>{t('settings.models.sourceTest.hint')}</DialogDescription>
+        <DialogDescription>
+          {t('settings.models.sourceTest.hint')}
+          {source.state.status === 'cooldown' && ` ${t('settings.models.sourceTest.cooldownHint')}`}
+        </DialogDescription>
         <Field label={t('settings.models.sourceTest.model')}>
           {(id) => <Combobox id={id} ariaLabel={t('settings.models.sourceTest.model')} options={options}
             value={selected} disabled={busy || options.length === 0} allowCustomValue={false}

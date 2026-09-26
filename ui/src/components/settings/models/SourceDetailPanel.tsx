@@ -667,6 +667,7 @@ export const SourceDetailPanel: React.FC<{
   const lastFetched = source.last_discovered_at
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
+  const testable = source.kind === 'api_key' && source.supply_channel === 'hub';
   const usageSummary = adoptedBackends.length > 0
     ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
     : t('settings.models.gateway.modelCount', { count: source.models.length });
@@ -680,6 +681,8 @@ export const SourceDetailPanel: React.FC<{
           <div className="model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-[7px]">
             <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
             {state.key && <span className={cn('model-hub-source-state model-hub-pill flex items-center gap-1.5 border', state.textClass)}><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}{state.hint && <ModelHubInfoHint label={t(state.hint.labelKey) as string} content={t(state.hint.bodyKey)} className="size-[13px]" />}</span>}
+            {/* A cooldown waits for the next request; a passing test is that request. */}
+            {testable && source.state.status === 'cooldown' && <button type="button" disabled={busy} onClick={() => setTesting(true)} className="model-hub-source-state font-semibold text-foreground underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceTest.testNow')}</button>}
           </div>
           <p className="model-hub-source-summary truncate">{usageSummary}</p>
         </div>
@@ -711,7 +714,7 @@ export const SourceDetailPanel: React.FC<{
           {repairDestination === 'reauth_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {repairDestination === 'replace_key_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
           {source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
-          {source.kind === 'api_key' && source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" disabled={busy} onClick={() => setTesting(true)}><FlaskConical />{t('settings.models.sourceTest.open')}</Button>}
+          {testable && <Button variant="outline" size="xs" className="model-hub-source-action" disabled={busy} onClick={() => setTesting(true)}><FlaskConical />{t('settings.models.sourceTest.open')}</Button>}
           {source.kind === 'api_key' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
