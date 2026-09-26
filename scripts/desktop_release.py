@@ -249,8 +249,10 @@ def main() -> None:
     args = vars(parser.parse_args())
     command = args.pop("command")
     if command == "resolve":
-        args["output"].write_text("".join(f"{key}={value}\n" for key, value in resolve(args["tag"]).items()),
-                                  encoding="utf-8")
+        # $GITHUB_OUTPUT is shared by the whole step: append, never replace
+        # outputs the step already wrote (enabled/updater_enabled).
+        with args["output"].open("a", encoding="utf-8") as stream:
+            stream.write("".join(f"{key}={value}\n" for key, value in resolve(args["tag"]).items()))
     elif command == "prepare":
         prepare(**args)
     elif command == "record":
