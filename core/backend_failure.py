@@ -14,6 +14,7 @@ from core.delivery_evidence import (
 )
 from core.delivery_target import routed_delivery_context
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
+from vibe.i18n import t as i18n_t
 from vibe.message_types import spec_for
 
 BACKEND_FAILURE_EVENT = "backend_failure"
@@ -129,6 +130,10 @@ def _failure_texts(backend_name: str, diagnostic: Any, display_text: Any) -> tup
     return error, visible
 
 
+def _controller_language(controller: Any) -> str:
+    return str(getattr(getattr(controller, "config", None), "language", "en") or "en")
+
+
 def _model_hub_failure_text(
     controller: Any, context: Any, request: Any, backend: str
 ) -> str | None:
@@ -157,8 +162,7 @@ def _model_hub_failure_text(
         projection = project(turn_id.strip(), backend=backend)
         if not isinstance(projection, TurnOutcomeProjectionInput):
             continue
-        language = str(getattr(getattr(controller, "config", None), "language", "en") or "en")
-        return render_turn_outcome_copy(projection, language)
+        return render_turn_outcome_copy(projection, _controller_language(controller))
     return None
 
 
@@ -434,6 +438,12 @@ async def emit_backend_failure(
             raise
         if handled_auth:
             return True
+
+    # Shutdown stops the Model Hub engine and backend processes before in-flight
+    # Turns end, so a failure reported after it began names a symptom (gateway
+    # down, process exited) instead of the cause. Say the restart interrupted it.
+    if getattr(controller, "shutdown_requested", False) is True:
+        visible = i18n_t("turn.interrupted.serviceRestart", _controller_language(controller))
 
     # ``delivery`` is passed only when the emitter supports it. Durable Turn and
     # Harness contexts create the object automatically, but controller-like test
