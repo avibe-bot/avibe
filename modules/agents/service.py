@@ -964,7 +964,7 @@ class AgentService:
                     try:
                         register(context)
                     except Exception:
-                        logger.debug("register_agent_initiated_turn failed", exc_info=True)
+                        logger.warning("register_agent_initiated_turn failed", exc_info=True)
             self._record_runtime_turn_start(
                 gate,
                 runtime_key=runtime_key,

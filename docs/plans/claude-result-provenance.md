@@ -250,3 +250,22 @@ Web/IM end-to-end tests. The ledger remains process-local; restart coverage
 concerns the existing durable Activity receipt store, not a new unsolicited
 output outbox. Fresh automatic exact-head review and CI remain required after
 the single push; local tests do not establish acceptance.
+
+## Agent-initiated Turn settlement on retirement (2026-09-27)
+
+A task-notification Result is detached output, so its delivery never completes
+a Turn. When that output belonged to a synthetic agent-initiated owner, the
+retirement in transition 9 released only the runtime gate. The agent-initiated
+Turn's waiter was never signalled. The Session therefore stayed in flight
+("delivering"), Stop waited for a terminal that could not arrive, and later
+human input queued behind the Turn indefinitely.
+
+- Retiring a synthetic owner is that owner's terminal boundary. It ends the
+  agent-initiated Turn through the canonical empty terminal result
+  (`completes_turn=True`, `completes_run=False`) before the gate is released,
+  matching the forced-cancel settle path. The Run, if any, stays with the
+  detached output that already settled it. If that settle fails, the Turn
+  waiter is still released, so the Session cannot wedge.
+- A silent-only detached reply settles its Activity claim without creating a
+  Message. A missing receipt for such a reply is success, not a delivery
+  failure, so it no longer retries forever ahead of every later record.

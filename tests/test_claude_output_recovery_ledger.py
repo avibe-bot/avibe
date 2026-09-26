@@ -419,8 +419,12 @@ async def test_unowned_terminal_text_survives_claim_failure(
     payloads = []
 
     async def accepted(ctx, kind, text, **kwargs):
-        payloads.append((text, kwargs["output"]))
         output = kwargs["output"]
+        if output.completes_turn and not output.detached:
+            # The retired synthetic owner's Turn settle carries no Message.
+            service.release_runtime_turn(ctx)
+            return None
+        payloads.append((text, output))
         assert registry.settle_completed_output_batch(output, accepted_message_exists=True)
         if output.completes_turn:
             service.release_runtime_turn(ctx)

@@ -21,7 +21,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,12 +32,15 @@ from modules.claude_sdk_compat import (
     TextBlock,
     ToolUseBlock,
 )
+from core.controller import Controller
+from core.message_context import resolve_turn_sink_key
 from core.message_output import MessageOutput, terminal_output_for
 from core.message_dispatcher import (
     ActivityOutputDeliveryError,
     ConsolidatedMessageDispatcher,
 )
 from core.session_activities import SessionActivityRegistry, TERMINAL_SNAPSHOT_PHASE
+from core.session_turns import SessionTurnManager
 from core.runtime_activation import RuntimeActivationRegistry
 from modules.im import MessageContext
 
@@ -870,7 +873,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(agent.emit_result_message.await_count)
 
-        agent._retire_synthetic_pending_owner(composite_key, context, owner=synthetic)
+        await agent._retire_synthetic_pending_owner(composite_key, context, owner=synthetic)
         self.assertFalse(agent._has_pending_requests(composite_key))
         self.assertFalse(service._get_turn_gate(composite_key).lock.locked())
 
@@ -1856,6 +1859,98 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
         release_receiver.set()
         await asyncio.wait_for(receiver, timeout=1)
+
+    async def test_delivered_detached_reply_ends_its_agent_initiated_turn(self):
+        # A task-notification reply is detached output, so it cannot complete the
+        # synthetic agent-initiated Turn itself. Unless retiring its owner ends
+        # that Turn, the Session stays "delivering" and never admits the next one.
+        for reply, expected_sent in (
+            ("Background verification finished", ["Background verification finished"]),
+            ("<silent>nothing new</silent>", []),
+        ):
+            with self.subTest(reply=reply):
+                agent, service = _build_agent()
+                client = _ActivityDeliveryClient()
+                _install_activity_dispatcher(agent, client)
+                controller = agent.controller
+                controller.message_dispatcher = ConsolidatedMessageDispatcher(controller)
+                controller.emit_agent_message = MethodType(Controller.emit_agent_message, controller)
+                controller.mark_turn_complete = MethodType(Controller.mark_turn_complete, controller)
+                controller.get_turn_sink = MethodType(Controller.get_turn_sink, controller)
+                controller._session_id_from_context = lambda ctx: (
+                    (ctx.platform_specific or {}).get("agent_session_id")
+                )
+                controller.set_agent_status = lambda *_args: None
+                manager = SessionTurnManager(controller=controller)
+                manager.flush_queue = AsyncMock(return_value=False)
+                controller.session_turns = manager
+                composite_key = "session-detached-turn-end:/tmp/work"
+                context = MessageContext(
+                    user_id="U1",
+                    channel_id="C1",
+                    platform="avibe",
+                    platform_specific={
+                        "agent_runtime_turn_key": composite_key,
+                        "agent_session_id": "sess-detached-turn-end",
+                    },
+                )
+                release_receiver = asyncio.Event()
+
+                class _Client:
+                    def receive_messages(self):
+                        async def _iterate():
+                            assistant = AssistantMessage()
+                            assistant.content = [TextBlock(text=reply)]
+                            yield assistant
+                            detached_result = ResultMessage()
+                            detached_result.result = reply
+                            detached_result.origin = {"kind": "task-notification"}
+                            yield detached_result
+                            await release_receiver.wait()
+
+                        return _iterate()
+
+                events: list[tuple[str, str]] = []
+                with (
+                    patch(
+                        "core.inbox_events.bus.publish",
+                        side_effect=lambda topic, payload: events.append(
+                            (topic, (payload or {}).get("session_id"))
+                        ),
+                    ),
+                    patch(
+                        "core.message_dispatcher.persist_agent_message",
+                        return_value={"id": "message-row"},
+                    ),
+                    patch("core.message_dispatcher.agent_message_exists", return_value=False),
+                ):
+                    receiver = asyncio.create_task(
+                        agent._receive_messages(
+                            _Client(),
+                            "sess-detached-turn-end",
+                            "/tmp/work",
+                            context,
+                            composite_key=composite_key,
+                        )
+                    )
+                    await asyncio.wait_for(
+                        _wait_until(lambda: ("turn.end", "sess-detached-turn-end") in events),
+                        timeout=1,
+                    )
+
+                    self.assertFalse(receiver.done())
+                    self.assertIn(("turn.start", "sess-detached-turn-end"), events)
+                    self.assertNotIn("sess-detached-turn-end", manager.in_flight)
+                    self.assertEqual(client.sent, expected_sent)
+                    self.assertIsNone(
+                        manager.get_turn_sink(resolve_turn_sink_key(controller, context))
+                    )
+                    self.assertEqual(agent._output_records_for_runtime(composite_key), [])
+                    self.assertFalse(agent._has_pending_requests(composite_key))
+                    self.assertFalse(service.runtime_turn_active(composite_key))
+
+                    release_receiver.set()
+                    await asyncio.wait_for(receiver, timeout=1)
 
     async def test_detached_activity_retry_keeps_terminal_text_and_owner_while_stream_is_open(
         self,
