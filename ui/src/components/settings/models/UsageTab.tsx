@@ -970,7 +970,12 @@ export const UsageTab: React.FC<{
   const [tableGroup, setTableGroup] = React.useState<'model' | 'source'>('model');
   const [sortAscending, setSortAscending] = React.useState(false);
   const [pinnedKey, setPinnedKey] = React.useState<string | null>(null);
-  const scopeKey = JSON.stringify([windowKey, sourceIds, modelKeys, metric, group]);
+  // What the filters show selected: this report's own options, never a key it no longer offers.
+  const selection = React.useMemo(
+    () => (report === null ? { sourceIds, modelKeys } : foldUsageSelection(report, { sourceIds, modelKeys })),
+    [report, sourceIds, modelKeys],
+  );
+  const scopeKey = JSON.stringify([windowKey, selection.sourceIds, selection.modelKeys, metric, group]);
 
   React.useEffect(() => {
     setSourceIds([]);
@@ -991,6 +996,15 @@ export const UsageTab: React.FC<{
       setPinnedKey(null);
     }
   }, [report, pinnedKey]);
+
+  // The kept selection is the reconciled one, so a key this report dropped
+  // cannot come back unseen once a later report offers it again.
+  React.useEffect(() => {
+    const same = (left: readonly string[], right: readonly string[]) =>
+      left.length === right.length && left.every((key, index) => key === right[index]);
+    if (!same(selection.sourceIds, sourceIds)) setSourceIds([...selection.sourceIds]);
+    if (!same(selection.modelKeys, modelKeys)) setModelKeys([...selection.modelKeys]);
+  }, [selection, sourceIds, modelKeys]);
 
   if (report === null) {
     return (
@@ -1018,8 +1032,6 @@ export const UsageTab: React.FC<{
     label: identity.label,
     detail: identity.unlisted ? t('settings.models.usage.removedModel') : undefined,
   }));
-  // What the filters show selected: this report's own options, never a key it no longer offers.
-  const selection = foldUsageSelection(report, { sourceIds, modelKeys });
   const filter = resolveUsageFilter(report, selection);
   const scopedRows = filteredRows(report, filter);
   const totals = aggregateCounters(scopedRows);
