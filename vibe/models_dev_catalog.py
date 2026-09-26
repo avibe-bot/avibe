@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -332,12 +332,18 @@ def _modalities(model: dict[str, Any], direction: str) -> list[str]:
     )
 
 
-def search_models_dev(query: str) -> list[dict[str, Any]]:
-    tokens = _search_tokens(query)
-    catalog = load_models_dev_catalog()
-    vendor_map = load_model_vendor_map()
-    aggregators = vendor_map["aggregators"]
-    candidates: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+def _catalog_rows(
+    catalog: dict[str, Any],
+    vendor_map: dict[str, Any],
+    admit: Any,
+) -> dict[str, list[tuple[Any, str, dict[str, Any]]]]:
+    """Every admissible catalog copy, grouped by admitted model id.
+
+    ``admit(provider_id, model_id, display_name)`` returns a sort key for a copy
+    worth keeping, or ``None`` to skip it before any normalization work.
+    """
+
+    candidates: dict[str, list[tuple[Any, str, dict[str, Any]]]] = {}
     for provider_key, provider in catalog.items():
         if not isinstance(provider_key, str) or not isinstance(provider, dict):
             continue
@@ -374,7 +380,7 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
             reasoning_efforts = _reasoning_efforts(model)
             if display_name is None or reasoning_efforts is None:
                 continue
-            score = _match_score(tokens, provider_id, model_id, display_name)
+            score = admit(provider_id, model_id, display_name)
             if score is None:
                 continue
             limit = model.get("limit")
@@ -452,23 +458,44 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
                 }
             )
             candidates.setdefault(admitted.id, []).append((score, provider_id, row))
+    return candidates
+
+
+def _preferred_copy(
+    model_id: str,
+    copies: list[tuple[Any, str, dict[str, Any]]],
+    vendor_map: dict[str, Any],
+) -> dict[str, Any]:
+    first_party_vendor = _first_party_vendor(model_id, vendor_map)
+    _score, _vendor_id, row = min(
+        copies,
+        key=lambda item: _vendor_rank(
+            item[1],
+            first_party_vendor=first_party_vendor,
+            aggregators=vendor_map["aggregators"],
+        ),
+    )
+    return {**row, "first_party": row["provider_id"] == first_party_vendor}
+
+
+def search_models_dev(query: str) -> list[dict[str, Any]]:
+    tokens = _search_tokens(query)
+    catalog = load_models_dev_catalog()
+    vendor_map = load_model_vendor_map()
+    candidates = _catalog_rows(
+        catalog,
+        vendor_map,
+        lambda provider_id, model_id, display_name: _match_score(
+            tokens, provider_id, model_id, display_name
+        ),
+    )
 
     matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []
     for model_id, copies in candidates.items():
-        first_party_vendor = _first_party_vendor(model_id, vendor_map)
-        _score, _vendor_id, row = min(
-            copies,
-            key=lambda item: _vendor_rank(
-                item[1],
-                first_party_vendor=first_party_vendor,
-                aggregators=aggregators,
-            ),
-        )
-        first_party = row["provider_id"] == first_party_vendor
-        row["first_party"] = first_party
+        row = _preferred_copy(model_id, copies, vendor_map)
         matches.append(
             (
-                not first_party,
+                not row["first_party"],
                 min(item[0] for item in copies),
                 row["display_name"].lower(),
                 model_id,
@@ -477,3 +504,49 @@ def search_models_dev(query: str) -> list[dict[str, Any]]:
         )
     matches.sort(key=lambda item: item[:-1])
     return [row for *_, row in matches[:MODELS_DEV_MAX_MATCHES]]
+
+
+def exact_models_dev_matches(
+    model_ids: Iterable[str],
+    catalog: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """The preferred models.dev copy for each id that names one exactly.
+
+    Exact means the full ``provider/model`` identity or, failing that, the bare
+    model id — the id as given or a relay's last path segment — spelled
+    identically. No case, punctuation, or alias folding and no substring hits:
+    this answer is applied without the user choosing it, so any looser rule
+    lets a near neighbour silently describe a different model.
+    """
+
+    wanted: dict[str, list[str]] = {}
+    for model_id in dict.fromkeys(model_ids):
+        for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
+            wanted.setdefault(key, []).append(model_id)
+    if not wanted or not catalog:
+        return {}
+    vendor_map = load_model_vendor_map()
+    by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+
+    def admit(provider_id: str, model_id: str, _display_name: str):
+        hits = [(0, requested) for requested in wanted.get(f"{provider_id}/{model_id}", ())]
+        hits += [(1, requested) for requested in wanted.get(model_id, ())]
+        return hits or None
+
+    for copies in _catalog_rows(catalog, vendor_map, admit).values():
+        for hits, provider_id, row in copies:
+            for requested in dict.fromkeys(requested for _rank, requested in hits):
+                rank = min(rank for rank, other in hits if other == requested)
+                by_request.setdefault(requested, []).append((rank, provider_id, row))
+    matches: dict[str, dict[str, Any]] = {}
+    for requested, copies in by_request.items():
+        best = min(rank for rank, _provider, _row in copies)
+        closest = [copy for copy in copies if copy[0] == best]
+        # Every closest copy names one catalog model id, so the family that
+        # decides first-party ownership is read off the catalog row.
+        matches[requested] = _preferred_copy(
+            closest[0][2]["model_id"],
+            closest,
+            vendor_map,
+        )
+    return matches

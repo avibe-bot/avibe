@@ -362,8 +362,24 @@
         "reasoning_efforts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "uniqueItems": true},
         "suppliers": {"type": "array", "items": {"$ref": "#/definitions/CandidateSupplier"}, "uniqueItems": true},
         "origin": {"enum": ["builtin", "provider", "models_dev", "manual"]},
+        "models_dev_id": {"type": "string", "minLength": 3},
+        "context_window": {"type": ["integer", "null"], "minimum": 1},
+        "max_output_tokens": {"type": ["integer", "null"], "minimum": 1},
+        "input_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video", "pdf"]}, "uniqueItems": true},
+        "output_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video"]}, "uniqueItems": true},
+        "supports_tools": {"type": ["boolean", "null"]},
+        "supports_reasoning": {"type": ["boolean", "null"]},
         "native_protocol": {"enum": ["openai_responses", "anthropic"]},
         "group_if_removed": {"anyOf": [{"enum": ["builtin", "providers"]}, {"type": "null"}]}
+      },
+      "dependencies": {
+        "models_dev_id": ["context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning"],
+        "context_window": ["models_dev_id"],
+        "max_output_tokens": ["models_dev_id"],
+        "input_modalities": ["models_dev_id"],
+        "output_modalities": ["models_dev_id"],
+        "supports_tools": ["models_dev_id"],
+        "supports_reasoning": ["models_dev_id"]
       }
     },
     "AddableModelCandidate": {

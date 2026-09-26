@@ -272,6 +272,19 @@ export type ModelCandidate = {
    *  nowhere, reachable through `Add custom model…`. Never inferred from
    *  anything else on the row. */
   group_if_removed?: 'builtin' | 'providers' | null;
+} & Partial<ModelCandidateModelsDev>;
+
+/** What an exact models.dev match states about a provider candidate (C2).
+ *  All or none: the server sends these together, keyed by `models_dev_id`, and
+ *  only when the id names one models.dev model exactly. */
+export type ModelCandidateModelsDev = {
+  models_dev_id: string;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  input_modalities: BackendModelInputModality[];
+  output_modalities: BackendModelOutputModality[];
+  supports_tools: boolean | null;
+  supports_reasoning: boolean | null;
 };
 
 /** The picker's one read. Groups are rendered in this order and a candidate id

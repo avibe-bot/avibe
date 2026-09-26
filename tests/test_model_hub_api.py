@@ -413,6 +413,10 @@ _PRICE_TABLE = PriceTable(
 )
 
 
+# Hermetic: the default reads the machine's cached models.dev copy.
+_MODELS_DEV_CATALOG: dict = {}
+
+
 def _service(tmp_path, adapter=None):
     store = MemoryStore()
     adapter = adapter or FakeAdapter()
@@ -435,6 +439,7 @@ def _service(tmp_path, adapter=None):
         requested_model_override=lambda backend: store.requested_model(backend),
         migration_home=tmp_path / "native-home",
         price_table=lambda: _PRICE_TABLE,
+        models_dev_catalog=lambda: _MODELS_DEV_CATALOG,
     )
     return service, store, adapter
 
@@ -2594,6 +2599,137 @@ def test_candidate_protocol_projection_is_total_only_for_opencode(tmp_path):
                 assert row["native_protocol"] == native_protocol_for_model_id(
                     row["id"]
                 )
+
+
+def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_enrich001",
+        kind="api_key",
+        vendor="custom",
+        display_name="Relay",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            # Bare `/v1/models` discovery: nothing but the id.
+            ModelHubModelConfig(id="gpt-described", provenance="discovered"),
+            ModelHubModelConfig(
+                id="gpt-supplier-says",
+                provenance="discovered",
+                display_name="Relay label",
+                reasoning_efforts=["high"],
+            ),
+            ModelHubModelConfig(id="gpt-unknown", provenance="discovered"),
+            ModelHubModelConfig(id="gpt-no-reasoning", provenance="discovered"),
+            # A near neighbour of a catalog id, which must not borrow its row.
+            ModelHubModelConfig(id="gpt-described-mini", provenance="discovered"),
+            ModelHubModelConfig(id="claude-unknown", provenance="discovered"),
+            ModelHubModelConfig(
+                id="gpt-relay-reasons",
+                provenance="discovered",
+                reasoning_efforts=["low", "high"],
+            ),
+        ],
+        credential_ref="cred_enrich001",
+    )
+    store.config.sources = [source]
+    for agent in store.config.agents.values():
+        agent.sources.order = [source.id]
+    service.models_dev_catalog = lambda: {
+        "openai": {
+            "name": "OpenAI",
+            "models": {
+                "gpt-described": {
+                    "name": "GPT Described",
+                    "reasoning": True,
+                    "reasoning_options": [{"type": "effort", "values": ["low", "high"]}],
+                    "tool_call": True,
+                    "modalities": {"input": ["text", "image"], "output": ["text"]},
+                    "limit": {"context": 400_000, "output": 128_000},
+                },
+                "gpt-supplier-says": {
+                    "name": "Catalog label",
+                    "reasoning": True,
+                    "reasoning_options": [{"type": "effort", "values": ["low"]}],
+                },
+                "gpt-no-reasoning": {"name": "GPT No Reasoning", "reasoning": False},
+                "gpt-relay-reasons": {"name": "GPT Relay Reasons", "reasoning": False},
+            },
+        }
+    }
+
+    rows = {row["id"]: row for row in service.agent_model_candidates("codex")["providers"]}
+
+    assert rows["gpt-described"] == {
+        "id": "gpt-described",
+        "display_name": "GPT Described",
+        "reasoning_efforts": ["low", "high"],
+        "suppliers": rows["gpt-described"]["suppliers"],
+        "origin": "provider",
+        "models_dev_id": "openai/gpt-described",
+        "context_window": 400_000,
+        "max_output_tokens": 128_000,
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"],
+        "supports_tools": True,
+        "supports_reasoning": True,
+    }
+    # What the suppliers state wins; models.dev only fills what they left unsaid.
+    assert rows["gpt-supplier-says"]["display_name"] == "Relay label"
+    assert rows["gpt-supplier-says"]["reasoning_efforts"] == ["high"]
+    assert rows["gpt-supplier-says"]["models_dev_id"] == "openai/gpt-supplier-says"
+    # Nobody states a ladder: the tiers the backend's request protocol accepts —
+    # fixed for Codex and Claude, the model family's for OpenCode — and no
+    # description.
+    openai = ["minimal", "low", "medium", "high", "xhigh"]
+    anthropic = ["low", "medium", "high", "xhigh", "max"]
+    for model_id in ("gpt-unknown", "gpt-described-mini", "claude-unknown"):
+        assert rows[model_id]["reasoning_efforts"] == openai
+    assert "models_dev_id" not in rows["gpt-unknown"]
+    assert "models_dev_id" not in rows["gpt-described-mini"]
+    elsewhere = {
+        backend: {row["id"]: row for row in service.agent_model_candidates(backend)["providers"]}
+        for backend in ("claude", "opencode")
+    }
+    assert elsewhere["claude"]["gpt-unknown"]["reasoning_efforts"] == anthropic
+    assert elsewhere["opencode"]["gpt-unknown"]["reasoning_efforts"] == openai
+    assert elsewhere["opencode"]["claude-unknown"]["reasoning_efforts"] == anthropic
+    # A supplier's ladder is not switched off by the catalog's reasoning flag.
+    assert rows["gpt-relay-reasons"]["reasoning_efforts"] == ["low", "high"]
+    assert rows["gpt-relay-reasons"]["supports_reasoning"] is None
+    # A model stated not to reason gets no invented ladder.
+    assert rows["gpt-no-reasoning"]["reasoning_efforts"] == []
+    assert rows["gpt-no-reasoning"]["supports_reasoning"] is False
+
+
+def test_provider_candidates_survive_an_unreadable_models_dev_catalog(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_enrich002",
+        kind="api_key",
+        vendor="custom",
+        display_name="Relay",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="gpt-described", provenance="discovered")],
+        credential_ref="cred_enrich002",
+    )
+    store.config.sources = [source]
+    store.config.agents["codex"].sources.order = [source.id]
+
+    def unreadable():
+        raise RuntimeError("cache is corrupt")
+
+    service.models_dev_catalog = unreadable
+
+    [row] = service.agent_model_candidates("codex")["providers"]
+
+    assert row["id"] == "gpt-described"
+    assert "models_dev_id" not in row
 
 
 def test_candidates_exclude_only_noncanonical_ids(monkeypatch, tmp_path):

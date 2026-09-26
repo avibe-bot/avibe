@@ -126,12 +126,13 @@ export const blankBackendModel = (): BackendModel => ({
 /**
  * A picked candidate, poured into a draft row.
  *
- * Copies exactly the three values the server proposed (C2) and leaves every
- * other field unstated. That asymmetry is the contract: the proposal covers what
- * the product already knows about the model — its label and the efforts its
- * suppliers accept — and the rest stays empty until the user fills it, because
- * `PUT` stores the request literally and an invented context window would
- * persist as if the user had stated it.
+ * Copies exactly the values the server proposed (C2) and leaves every other
+ * field unstated. That asymmetry is the contract: the proposal covers what the
+ * product already knows about the model — its label, the efforts its suppliers
+ * accept, and the exact models.dev description when one names this id — and the
+ * rest stays empty until the user fills it, because `PUT` stores the request
+ * literally and an invented context window would persist as if the user had
+ * stated it.
  *
  * Unstated, NOT the blank floor. The blank floor's `text`/`text`/tools-on/
  * reasoning-off belong to a row the editor is about to show, where they are on
@@ -153,6 +154,17 @@ export const candidateBackendModel = (candidate: ModelCandidate): BackendModel =
   origin: candidate.origin,
   reasoning_efforts: [...candidate.reasoning_efforts],
   ...(candidate.native_protocol ? { native_protocol: candidate.native_protocol } : {}),
+  ...(candidate.models_dev_id
+    ? {
+        models_dev_id: candidate.models_dev_id,
+        context_window: candidate.context_window ?? null,
+        max_output_tokens: candidate.max_output_tokens ?? null,
+        input_modalities: [...(candidate.input_modalities ?? [])],
+        output_modalities: [...(candidate.output_modalities ?? [])],
+        supports_tools: candidate.supports_tools ?? null,
+        supports_reasoning: candidate.supports_reasoning ?? null,
+      }
+    : {}),
 });
 
 /**
