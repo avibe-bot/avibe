@@ -1728,28 +1728,33 @@ class CLIProxyEngineAdapter:
         if self._oauth_startup_reconciled:
             return
 
-        oauth_credentials = await asyncio.to_thread(
-            self.state_store._oauth_credentials,
-            isolate_errors=True,
-        )
-        if not any(
-            str(metadata.get("vendor") or "").strip().lower() == "anthropic"
-            for _credential_ref, metadata in oauth_credentials
-        ):
-            self._oauth_startup_reconciled = True
-            return
-
-        client_getter = getattr(self.supervisor, "client_if_running", None)
-        if not callable(client_getter):
-            raise EngineStateError("OAuth startup reconciliation is unavailable")
-        client = await asyncio.to_thread(client_getter)
-        if client is None:
-            raise EngineStateError("OAuth startup reconciliation is unavailable")
+        # Compatibility repair is not engine readiness. Keep its complete
+        # failure boundary here, including metadata and inventory acquisition;
+        # a deferred pass stays retryable on the next start. Engine startup
+        # above, cancellation, and targeted credential mutations remain strict.
         try:
+            oauth_credentials = await asyncio.to_thread(
+                self.state_store._oauth_credentials,
+                isolate_errors=True,
+            )
+            if not any(
+                str(metadata.get("vendor") or "").strip().lower() == "anthropic"
+                for _credential_ref, metadata in oauth_credentials
+            ):
+                self._oauth_startup_reconciled = True
+                return
+
+            client_getter = getattr(self.supervisor, "client_if_running", None)
+            if not callable(client_getter):
+                raise EngineStateError("OAuth startup reconciliation is unavailable")
+            client = await asyncio.to_thread(client_getter)
+            if client is None:
+                raise EngineStateError("OAuth startup reconciliation is unavailable")
             inventory = await run_owned_in_thread(_auth_inventory, client)
-        except EngineClientError as exc:
-            raise EngineStateError("OAuth startup reconciliation failed") from exc
-        await self._reconcile_oauth_inventory(inventory, isolate_errors=True)
+            await self._reconcile_oauth_inventory(inventory, isolate_errors=True)
+        except (EngineClientError, EngineStateError, OSError) as exc:
+            logger.warning("Model Hub OAuth startup reconciliation deferred: %s", type(exc).__name__)
+            return
         self._oauth_startup_reconciled = True
 
     async def stop_runtime(self) -> EngineStatus:

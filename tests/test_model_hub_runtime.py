@@ -1517,7 +1517,13 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
     asyncio.run(run())
 
 
-def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "initial_failure",
+    ["none", "inventory_error", "inventory_shape", "missing_client", "metadata", "engine"],
+)
+def test_adapter_start_reconciles_renamed_claude_grant_once(
+    tmp_path: Path, monkeypatch, caplog, initial_failure: str,
+) -> None:
     class Client:
         def __init__(self) -> None:
             self.inventory_calls = 0
@@ -1525,6 +1531,10 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             assert (method, path) == ("GET", "/auth-files")
             self.inventory_calls += 1
+            if initial_failure == "inventory_error":
+                raise EngineClientError("fixture inventory unavailable")
+            if initial_failure == "inventory_shape":
+                return {"files": None}
             return {
                 "files": [
                     {
@@ -1561,11 +1571,14 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
 
         def ensure_running(self) -> None:
             self.start_calls += 1
+            if initial_failure == "engine":
+                raise EngineStateError("fixture engine startup failed")
 
-        def client_if_running(self) -> Client:
-            return self.client
+        def client_if_running(self) -> Client | None:
+            return None if initial_failure == "missing_client" else self.client
 
     async def run() -> None:
+        nonlocal initial_failure
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
         old_name = "claude-user@example.com.json"
@@ -1609,15 +1622,34 @@ def test_adapter_start_reconciles_renamed_claude_grant_once(tmp_path: Path) -> N
         supervisor = Supervisor(store, client)
         adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
 
+        if initial_failure != "none":
+            before = store.credential_metadata(ref)
+            if initial_failure == "engine":
+                with pytest.raises(EngineStateError, match="fixture engine startup failed"):
+                    await adapter.start()
+                assert not client.inventory_calls
+            else:
+                with monkeypatch.context() as failures:
+                    if initial_failure == "metadata":
+                        def unavailable_metadata(**kwargs):
+                            raise OSError("fixture credential directory unavailable")
+
+                        failures.setattr(store, "_oauth_credentials", unavailable_metadata)
+                    assert (await adapter.start()).health is EngineHealth.OK
+                assert "OAuth startup reconciliation deferred" in caplog.text
+            assert store.credential_metadata(ref) == before
+            assert (store.auth_dir / new_name).is_file()
+            initial_failure = "none"
+
+        previous_inventory_calls = client.inventory_calls
         started = await adapter.start()
         assert started.health is EngineHealth.OK
-        assert supervisor.start_calls == 1
-        assert client.inventory_calls == 1
+        assert client.inventory_calls == previous_inventory_calls + 1
         assert store.credential_metadata(ref)["auth_name"] == new_name
         assert store.credential_metadata(damaged_ref)["auth_name"] == "claude-damaged.json"
 
         await adapter.start()
-        assert client.inventory_calls == 1
+        assert client.inventory_calls == previous_inventory_calls + 1
 
     asyncio.run(run())
 

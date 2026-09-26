@@ -35,6 +35,28 @@ prefix remain the owner, and ambiguous reconciliation fails closed.
 Coverage includes same-Source reauthentication, cross-Source duplicate login,
 renamed credentials, and binding or cleanup failures.
 
+#### Startup failure boundary
+
+Review through `2ea480163` repeatedly found the same class: optional
+compatibility reconciliation could escape into the runtime-start result.
+Per-file exception handling alone cannot cover enumeration, client acquisition,
+or inventory transport failures. The scope decision is to keep one boundary
+after successful engine startup around the entire compatibility pass:
+
+- Engine startup failures and cancellation still propagate.
+- Pass-level state, filesystem, and management-client failures are logged,
+  preserve credential material, and do not mark reconciliation complete.
+  A subsequent start retries the pass without a background retry loop.
+- Individual damaged metadata and ownership conflicts remain isolated so
+  healthy bindings can migrate; targeted operations still report those conflicts.
+- Targeted credential validation and revocation retain strict ownership checks;
+  this startup policy does not authorize guessing or deleting ambiguous grants.
+
+The consuming startup test covers unavailable inventory, invalid inventory
+shape, missing management client, unavailable metadata, recovery, and actual
+engine startup failure. Build tests use an independently declared archive
+fixture and platform set, not expectations learned from a prior build.
+
 ### Native Chat token fields
 
 Stock v7.3.16 normalizes `max_completion_tokens` to `max_tokens` when the
