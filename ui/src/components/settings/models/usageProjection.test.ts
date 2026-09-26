@@ -119,7 +119,7 @@ describe('usageProjection', () => {
   });
 
   // The report leaves a Source's label null exactly when config let it go.
-  describe('MH-USAGE-033: Sources config let go', () => {
+  describe('Sources config let go', () => {
     const withRemoved = () => {
       const value = reportWith([
         bucket('00', [
@@ -138,15 +138,17 @@ describe('usageProjection', () => {
       return value;
     };
 
-    it.each(['model', 'source'] as const)('fold into one last, muted series when grouped by %s, keeping every count', (group) => {
+    it('MH-USAGE-033: fold into one last, muted series in either grouping, keeping every count', () => {
       const value = withRemoved();
-      const series = seriesFor(value, NO_FILTER, group, 'requests', TEXT);
-      expect(series.map((item) => item.label)).toEqual([group === 'model' ? 'Supplier · Model' : 'Supplier', 'Removed providers']);
-      expect(series.at(-1)).toMatchObject({ key: REMOVED_SOURCES_KEY, removed: true, values: [3, 4] });
-      expect(series.flatMap((item) => item.label)).not.toContainEqual(expect.stringContaining('src_'));
       const total = seriesFor(value, NO_FILTER, 'total', 'requests', TEXT)[0]!.values;
-      expect(series.reduce((sum, item) => sum + (item.values[0] ?? 0) + (item.values[1] ?? 0), 0))
-        .toBe((total[0] ?? 0) + (total[1] ?? 0));
+      for (const group of ['model', 'source'] as const) {
+        const series = seriesFor(value, NO_FILTER, group, 'requests', TEXT);
+        expect(series.map((item) => item.label)).toEqual([group === 'model' ? 'Supplier · Model' : 'Supplier', 'Removed providers']);
+        expect(series.at(-1)).toMatchObject({ key: REMOVED_SOURCES_KEY, removed: true, values: [3, 4] });
+        expect(series.flatMap((item) => item.label)).not.toContainEqual(expect.stringContaining('src_'));
+        expect(series.reduce((sum, item) => sum + (item.values[0] ?? 0) + (item.values[1] ?? 0), 0))
+          .toBe((total[0] ?? 0) + (total[1] ?? 0));
+      }
     });
 
     it('select every folded row when the aggregate is picked in either filter', () => {

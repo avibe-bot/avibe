@@ -29,6 +29,7 @@ import {
   costIsUnpriced,
   filterBucketRows,
   filteredRows,
+  foldUsageSelection,
   formatBucketAxisLabel,
   formatBucketLabel,
   formatBucketHeading,
@@ -1017,7 +1018,9 @@ export const UsageTab: React.FC<{
     label: identity.label,
     detail: identity.unlisted ? t('settings.models.usage.removedModel') : undefined,
   }));
-  const filter = resolveUsageFilter(report, { sourceIds, modelKeys });
+  // What the filters show selected; a Source deleted since it was picked reads as the aggregate.
+  const selection = foldUsageSelection(report, { sourceIds, modelKeys });
+  const filter = resolveUsageFilter(report, selection);
   const scopedRows = filteredRows(report, filter);
   const totals = aggregateCounters(scopedRows);
   const partialHistory = reportHasPartialHistory(report, filter);
@@ -1084,14 +1087,14 @@ export const UsageTab: React.FC<{
           label={t('settings.models.usage.filters.source') as string}
           icon={<Network aria-hidden className="size-3.5" />}
           options={sourceOptions}
-          selected={sourceIds}
+          selected={selection.sourceIds}
           onChange={setSourceIds}
         />
         <MultiFilter
           label={t('settings.models.usage.filters.model') as string}
           icon={<Cpu aria-hidden className="size-3.5" />}
           options={modelOptions}
-          selected={modelKeys}
+          selected={selection.modelKeys}
           onChange={setModelKeys}
         />
         <div className="model-hub-usage-select">
@@ -1122,9 +1125,9 @@ export const UsageTab: React.FC<{
           </Button>
         )}
         <span className="model-hub-usage-filter-context">
-          {sourceIds.length > 0 ? t('settings.models.usage.filters.sourceCount', { count: sourceIds.length }) : t('settings.models.usage.filters.allSources')}
+          {selection.sourceIds.length > 0 ? t('settings.models.usage.filters.sourceCount', { count: selection.sourceIds.length }) : t('settings.models.usage.filters.allSources')}
           <span>·</span>
-          {modelKeys.length > 0 ? t('settings.models.usage.filters.modelCount', { count: modelKeys.length }) : t('settings.models.usage.filters.allModels')}
+          {selection.modelKeys.length > 0 ? t('settings.models.usage.filters.modelCount', { count: selection.modelKeys.length }) : t('settings.models.usage.filters.allModels')}
         </span>
       </div>
 

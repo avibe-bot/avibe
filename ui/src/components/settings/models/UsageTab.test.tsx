@@ -154,6 +154,39 @@ describe('UsageTab', () => {
     }
   });
 
+  it('MH-USAGE-033: a picked Source deleted before the next report reads as the whole Removed providers aggregate', async () => {
+    const source = (source_id: string, label: string | null) => ({
+      source_id, label, last_metered_at: null, ...counters(), models: [],
+    });
+    const rows = [
+      row({ source_id: 'source-a', requests: 1 }),
+      row({ source_id: 'src_doomed01', model_id: 'model-d', requests: 2 }),
+      row({ source_id: 'src_gone01', model_id: 'model-g', requests: 4 }),
+    ];
+    const page = (value: UsageReport) => (
+      <I18nextProvider i18n={i18n}>
+        <UsageTab usage={readyRegion(value)} windowKey="24h" onWindowChange={vi.fn()} />
+      </I18nextProvider>
+    );
+    const before = report({
+      sources: [source('source-a', 'Live supplier'), source('src_doomed01', 'Doomed supplier'), source('src_gone01', null)],
+      buckets: [bucket('00', rows)],
+    });
+    const { container, rerender } = render(page(before));
+    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('option', { name: /Doomed supplier/ }));
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'By source' }));
+    const names = () => [...container.querySelectorAll('tbody .model-hub-usage-row-name')].map((cell) => cell.textContent);
+    expect(names()).toEqual(['Doomed supplier']);
+
+    rerender(page({ ...before, sources: [source('source-a', 'Live supplier'), source('src_doomed01', null), source('src_gone01', null)] }));
+    expect(screen.getByRole('button', { name: 'Removed providers' })).toBeTruthy();
+    expect(names()).toEqual(['Removed providers']);
+    expect(within(screen.getByRole('table')).getAllByText('6').length).toBeGreaterThan(0);
+    expect(container.textContent).not.toContain('src_');
+  });
+
   it('MH-USAGE-018: reads a shortfall as reports that never arrived', () => {
     const shortfall = counters({
       requests: 4,

@@ -739,6 +739,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_l3.py::test_a_deleted_source_keeps_its_usage_and_reads_as_removed
       - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
+      - ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-033
       - ui/e2e/model-catalog/usage.spec.ts
   - id: MH-USAGE-BACKEND-001
     name: Modern usage reports keep dense hourly buckets and distinct Unicode Source/model identities

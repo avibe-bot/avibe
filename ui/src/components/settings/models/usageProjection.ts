@@ -377,12 +377,31 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
 }
 
 /**
+ * A selection made while a Source was live still names its ID, or its pairs,
+ * after config lets it go. From then on it names the removed aggregate, the
+ * only identity the filters and the table still offer for that Source.
+ */
+export function foldUsageSelection(report: UsageReport, selection: UsageFilter): UsageFilter {
+  const live = liveSources(report);
+  const known = new Set([...report.sources.map((source) => source.source_id), ...allRows(report).map((row) => row.source_id)]);
+  const removed = (sourceId: string) => known.has(sourceId) && !live.has(sourceId);
+  const fold = (keys: readonly string[], sourceOf: (key: string) => string) => [...new Set(keys.map((key) => (
+    removed(sourceOf(key)) ? REMOVED_SOURCES_KEY : key
+  )))];
+  return {
+    sourceIds: fold(selection.sourceIds, (key) => key),
+    modelKeys: fold(selection.modelKeys, (key) => key.slice(0, Math.max(0, key.indexOf(PAIR_SEPARATOR)))),
+  };
+}
+
+/**
  * A selection names identities; the rows it keeps are named by the IDs they
  * were metered under. The removed aggregate therefore stands for every Source
  * ID, and every pair, it folded. It stays in the list too, matching no row, so
  * a selection whose rows are gone never widens to everything.
  */
-export function resolveUsageFilter(report: UsageReport, selection: UsageFilter): UsageFilter {
+export function resolveUsageFilter(report: UsageReport, picked: UsageFilter): UsageFilter {
+  const selection = foldUsageSelection(report, picked);
   if (!selection.sourceIds.includes(REMOVED_SOURCES_KEY) && !selection.modelKeys.includes(REMOVED_SOURCES_KEY)) {
     return selection;
   }
