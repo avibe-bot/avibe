@@ -521,6 +521,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     target: HTMLElement;
     previousFocus: Element | null;
   } | null>(null);
+  const voiceTextareaCaretRef = useRef<{ start: number; end: number } | null>(null);
   const finishVoiceControlRef = useRef<HTMLButtonElement | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
@@ -811,6 +812,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setRealtimeAnnouncement('');
     onDraftChange?.(result.text);
     const caret = session.insertion.start + result.insertion.length;
+    voiceTextareaCaretRef.current = { start: caret, end: caret };
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
     return true;
   }, [onDraftChange, useMentions]);
@@ -823,6 +825,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     const preview = session.previewInsertion;
     session.previewInsertion = undefined;
+    voiceTextareaCaretRef.current = {
+      start: session.insertion.start,
+      end: session.insertion.end,
+    };
     if (preview === undefined || valueRef.current !== preview.text) return;
     valueRef.current = session.insertion.text;
     setValue(session.insertion.text);
@@ -1069,6 +1075,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     const insertion = capturedInsertion ?? captureVoiceInsertion();
+    if (!useMentions) {
+      voiceTextareaCaretRef.current = {
+        start: insertion.start,
+        end: insertion.end,
+      };
+    }
     const reply = readLatestAgentReply?.();
     recordingStartRef.current = true;
     setRecordingStarting(true);
@@ -1392,9 +1404,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         mentionRef.current?.focus();
       } else {
         target.focus({ preventScroll: true });
-        if (target instanceof HTMLTextAreaElement) {
-          const end = target.value.length;
-          target.setSelectionRange(end, end);
+        if (target instanceof HTMLTextAreaElement && voiceTextareaCaretRef.current !== null) {
+          const { start, end } = voiceTextareaCaretRef.current;
+          target.setSelectionRange(start, end);
         }
       }
     }

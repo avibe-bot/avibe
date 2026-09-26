@@ -89,6 +89,7 @@ jobs:
           npm run test:inbox-return
           npm run test:badge-triggers
           npm run test:workbench-general -- sidebar-floating.spec.ts
+          npm run test:voice-shortcut
 
   show-router-integration:
     runs-on: ubuntu-latest

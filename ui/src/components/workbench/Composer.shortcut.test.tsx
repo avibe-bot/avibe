@@ -263,6 +263,41 @@ describe('Composer voice shortcut', () => {
     expect(onSend.mock.calls[0][0]).toBe('Send this transcript');
   });
 
+  it('preserves a plain-text insertion caret inside an existing draft', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    voiceMocks.realtimeFinish.mockResolvedValue({
+      text: 'inserted text',
+      cleanup: 'success',
+    });
+    voiceMocks.finish.mockImplementation(() => {
+      voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 1000, final: true });
+      voiceMocks.onStopped?.('finish', { pendingSegmentCount: 0 });
+    });
+    renderComposer('textarea-caret-session', {
+      initialDraft: 'before after',
+      onSend,
+    });
+    const textbox = await screen.findByRole('textbox');
+    await waitFor(() => expect((textbox as HTMLTextAreaElement).value).toBe('before after'));
+    textbox.focus();
+    textbox.setSelectionRange('before '.length, 'before '.length);
+
+    await user.keyboard('{Alt>}z{/Alt}');
+    await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+    await user.keyboard('{Alt>}z{/Alt}');
+
+    await waitFor(() => expect((textbox as HTMLTextAreaElement).value).toBe('before inserted text after'));
+    await waitFor(() => expect(document.activeElement).toBe(textbox));
+    const caret = 'before inserted text '.length;
+    expect(textbox.selectionStart).toBe(caret);
+    expect(textbox.selectionEnd).toBe(caret);
+
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(onSend.mock.calls[0][0]).toBe('before inserted text after');
+  });
+
   it('does not start behind a foreground surface but always finishes an active recording', async () => {
     const view = renderComposer('gated-shortcut-session');
     const outside = screen.getByRole('button', { name: 'Outside composer' });
