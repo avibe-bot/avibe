@@ -793,9 +793,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const inserted = mentionRef.current?.commitVoicePreview(
         session.insertion,
         session.transcript ?? '',
-      ) ?? false;
-      if (inserted) setRealtimeAnnouncement('');
-      return inserted;
+      ) ?? null;
+      if (inserted !== null) setRealtimeAnnouncement('');
+      return inserted !== null;
     }
     const current = valueRef.current;
     const result = applyVoiceInsertionWithSnapshot(
