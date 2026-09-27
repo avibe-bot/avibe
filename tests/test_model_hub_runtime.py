@@ -7381,7 +7381,7 @@ def test_engine_client_projects_machine_errors_from_large_buffered_bodies(
     ("status", "expected_kind"),
     ((200, RawOutcomeKind.TIMEOUT), (503, RawOutcomeKind.HTTP_ERROR)),
 )
-def test_buffered_response_projection_uses_the_response_absolute_deadline(
+def test_buffered_response_projection_has_its_own_local_budget(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
     expected_kind: RawOutcomeKind,
@@ -7411,10 +7411,10 @@ def test_buffered_response_projection_uses_the_response_absolute_deadline(
             async def close(self) -> None:
                 return None
 
-        projection_deadlines: list[float] = []
+        projection_budgets: list[float] = []
 
         def project_before_deadline(_reader, _projector, *, deadline):
-            projection_deadlines.append(deadline)
+            projection_budgets.append(deadline - time.monotonic())
             raise asyncio.TimeoutError("buffered response exceeded its request deadline")
 
         monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
@@ -7433,15 +7433,79 @@ def test_buffered_response_projection_uses_the_response_absolute_deadline(
             model_ids=("model-a",),
             prefix="source-fixture123",
         )
-        started = time.monotonic()
 
         handle = await EngineClient(
             EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
-            timeout=1.0,
+            timeout=0.02,
         ).invoke(source, "model-a", {}, stream=False)
 
         assert (await handle.outcome()).kind is expected_kind
-        assert projection_deadlines == pytest.approx([started + 1.0], abs=0.1)
+        # A received body is projected under its own budget, not the connection budget.
+        assert projection_budgets == pytest.approx(
+            [client_module._LOCAL_PROJECTION_TIMEOUT_SECONDS], abs=0.1,
+        )
+
+    asyncio.run(run())
+
+
+def test_buffered_projection_outlasting_the_connection_budget_still_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b'{"output":[{"content":[{"type":"output_text","text":"ok"}]}]}'
+
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        real_read = client_module._DeadlineReader.read
+
+        def stalled_read(self, size: int = -1) -> bytes:
+            # A thread-scheduling or GC pause longer than the whole connection budget.
+            time.sleep(0.05)
+            return real_read(self, size)
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        monkeypatch.setattr(client_module._DeadlineReader, "read", stalled_read)
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+            timeout=0.02,
+        ).invoke(source, "model-a", {}, stream=False)
+        try:
+            assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
+            assert handle.stream is not None
+            assert b"".join([chunk async for chunk in handle.stream]) == payload
+        finally:
+            await handle.close_stream()
 
     asyncio.run(run())
 

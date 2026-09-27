@@ -244,3 +244,21 @@ xfail, including the previously failing config/authority closure test. The
 authority checker reports no findings; changed Python files pass Ruff and
 whitespace checks. The orchestrator inspected the parser/minimum diff and its
 probe-to-gateway consumer, and the admission diff and its HTTP Stop consumer.
+
+## Local projection budget follow-up (2026-09-27)
+
+The audit decision "give local parsing its own budget" was only half applied:
+the buffered success path started its parse deadline after the body arrived but
+sized it with the client's connection budget, and the failed-response path
+shared one deadline between the error-body read and its projection. The
+inference-wait regression uses a 20 ms connection budget, so any scheduling or
+GC pause of that length while parsing an already-received body became a
+`TIMEOUT`, a 1-second source cooldown, and a gateway 503. That is the recurring
+`gateway-complete-buffered_body-openai_responses` CI failure on master.
+
+Both projections now start their own `_LOCAL_PROJECTION_TIMEOUT_SECONDS` budget
+after the body has arrived. The connection bound and the bounded read of an
+already-failed response are unchanged, and production timing is unchanged
+because that budget equals the 60-second transport default. A regression drives
+a projection that outlasts the connection budget and asserts success; the
+projection-budget test asserts the budget is independent of the client timeout.

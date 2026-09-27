@@ -55,6 +55,9 @@ _UPSTREAM_DETAIL_CHARS = 400
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
 _ERROR_OBSERVATION_BYTES = 256 * 1024
+# Projecting a response body that has already arrived is local work. It has
+# its own budget so the client's connection budget never limits it.
+_LOCAL_PROJECTION_TIMEOUT_SECONDS = ENGINE_TRANSPORT_TIMEOUT_SECONDS
 _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
@@ -507,7 +510,6 @@ class EngineClient:
                 if retry_after is not None and (len(retry_after) > 128 or not retry_after.isascii()):
                     retry_after = None
                 error_body = _StreamPrelude()
-                response_deadline = time.monotonic() + self.timeout
                 try:
                     await asyncio.wait_for(
                         _read_response_into(response.content, error_body),
@@ -518,7 +520,7 @@ class EngineClient:
                         request_protocol,
                         error_body,
                         machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
-                        deadline=response_deadline,
+                        deadline=time.monotonic() + _LOCAL_PROJECTION_TIMEOUT_SECONDS,
                     )
                     payload = await error_body.prefix_async(_ERROR_OBSERVATION_BYTES)
                 except (asyncio.TimeoutError, aiohttp.ClientError):
@@ -583,7 +585,7 @@ class EngineClient:
                     request_protocol,
                     buffered_body,
                     machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
-                    deadline=time.monotonic() + self.timeout,
+                    deadline=time.monotonic() + _LOCAL_PROJECTION_TIMEOUT_SECONDS,
                 )
                 outcome = _reduce_protocol_observation(
                     observation,
