@@ -1181,6 +1181,28 @@ def test_install_script_activation_fallback_refuses_an_unowned_destination(tmp_p
     assert not (home_dir / ".avibe" / "runtime" / "install-generations").exists()
 
 
+@pytest.mark.parametrize("uid, chosen", [("0", "root-bin"), ("1000", "existing-bin")])
+def test_root_install_selects_one_stable_launcher_regardless_of_path(tmp_path, uid, chosen):
+    """#2081: a root shell's PATH order must not pick a second stable launcher."""
+    home_dir = tmp_path / "home"
+    existing_bin = tmp_path / "existing-bin"
+    root_bin = tmp_path / "root-bin"
+    existing_bin.mkdir(parents=True)
+    home_dir.mkdir()
+    _write_console_launcher(existing_bin / "vibe", "#!/bin/sh\necho old\n")
+    source = INSTALL_SCRIPT.read_text().rsplit('\nmain "$@"', 1)[0]
+    result = _run(
+        source + f"\nid() {{ echo {uid}; }}\nROOT_TOOL_BIN_DIR={str(root_bin)!r}\nchoose_tool_bin_dir\n",
+        cwd=tmp_path,
+        env={
+            **os.environ, "HOME": str(home_dir), "AVIBE_HOME": str(home_dir / ".avibe"),
+            "PATH": os.pathsep.join([str(existing_bin), "/usr/bin", "/bin"]),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines()[-1] == str(tmp_path / chosen)
+
+
 def test_powershell_publishes_complete_installer_marker_before_source_snapshot():
     source = INSTALL_POWERSHELL.read_text(encoding="utf-8")
     # PowerShell execution/convergence remains a native Windows CI gate.

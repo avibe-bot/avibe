@@ -547,12 +547,14 @@ vibe
 - starts the main service if it is not already running
 - opens the Web UI
 - preserves already-running service, Web UI, and OpenCode processes; use `vibe restart` for an explicit restart
+- only warns when it runs an install older than the last activated one, because it is also the systemd and launchd entry
 
 ### `vibe start`
 
 ```bash
 vibe start
 vibe start --no-open-browser
+vibe start --allow-downgrade
 ```
 
 - `--no-open-browser` keeps the same start/reuse semantics but suppresses the browser launch. This is the supported contract for desktop shells that own their own WebView.
@@ -560,6 +562,7 @@ vibe start --no-open-browser
 - starts the main service if it is not already running
 - opens the Web UI
 - preserves already-running service, Web UI, and OpenCode processes; use `vibe restart` for an explicit restart
+- refuses to run an install older than the last activated one, naming both versions and the launcher to run instead; `--allow-downgrade` runs the older build on purpose, and the desktop app only warns
 
 ### `vibe stop`
 
@@ -596,6 +599,7 @@ Recommended usage:
 
 - prefer `vibe restart --delay-seconds 60` when an agent triggers the restart from an active conversation
 - use plain `vibe restart` when the user explicitly wants the restart to happen immediately
+- like `vibe start`, refuses to restart onto an install older than the last activated one unless `--allow-downgrade` is passed
 
 ### `vibe status`
 
@@ -604,6 +608,7 @@ vibe status
 ```
 
 - prints runtime status JSON
+- includes `generation_downgrade` when the running service is older than the last activated install, naming both versions and the launcher that selects the newer one
 
 ### `vibe doctor`
 
@@ -616,6 +621,7 @@ vibe doctor
 - checks backend CLI availability
 - checks runtime home migration state
 - checks runtime process, install, and restart metadata state
+- fails when stable `vibe` launchers select different installed versions, naming each path and version, and warns when the running service is older than the last activated install
 - checks askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js through one dependency diagnostic group
 - `vibe doctor --deep` probes missing dependency endpoints without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
@@ -627,6 +633,7 @@ vibe doctor repair --dry-run
 vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stable-launchers --yes
 vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
@@ -698,6 +705,7 @@ vibe upgrade
 ```
 
 - upgrades Avibe using the selected upgrade plan
+- moves every stable `vibe` launcher that already selects an Avibe install to the new version together; launchers pointing elsewhere are never changed
 - schedules a managed restart after success when Avibe is already running
 - keeps Avibe stopped when it was not running before the upgrade
 

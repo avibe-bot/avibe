@@ -8,6 +8,7 @@ import re
 import signal
 import shlex
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ from vibe import runtime
 from vibe import cli
 from vibe import internal_client
 from vibe import remote_access
+from vibe import upgrade
 
 
 def _make_fake_uv_tool(
@@ -234,6 +236,152 @@ def test_local_cli_installation_items_fails_for_unknown_sqlite_revision(monkeypa
         item["status"] == "fail" and "SQLite schema revision is newer than or unknown to this CLI" in item["message"]
         for item in items
     )
+
+
+def _managed_generation(name: str, version: str) -> Path:
+    """Build one uv-shaped install generation that reports ``version``."""
+
+    generation = upgrade.atomic_uv_install_root() / name
+    environment = generation / "uv" / "tools" / "avibe-os"
+    target = environment / "bin" / "vibe"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    (environment / "pyvenv.cfg").write_text("include-system-site-packages = false\n", encoding="utf-8")
+    metadata = environment / "lib" / "python3.12" / "site-packages" / f"avibe_os-{version}.dist-info" / "METADATA"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(f"Metadata-Version: 2.1\nName: avibe-os\nVersion: {version}\n", encoding="utf-8")
+    exported = generation / "bin" / "vibe"
+    exported.parent.mkdir()
+    exported.symlink_to(target)
+    (environment / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "avibe-os" }]\n'
+        f'entrypoints = [{{ name = "vibe", install-path = {json.dumps(str(exported))} }}]\n',
+        encoding="utf-8",
+    )
+    return generation
+
+
+@pytest.fixture
+def split_launchers(monkeypatch, tmp_path):
+    """A PATH launcher left on 1.4.0 beside an installer launcher on 1.5.0."""
+
+    old = _managed_generation("old", "1.4.0")
+    new = _managed_generation("new", "1.5.0")
+    path_launcher = tmp_path / "usr-local-bin" / "vibe"
+    installer_launcher = tmp_path / "home" / ".local" / "bin" / "vibe"
+    for launcher, generation in ((path_launcher, old), (installer_launcher, new)):
+        launcher.parent.mkdir(parents=True)
+        launcher.symlink_to(generation / "bin" / "vibe")
+    monkeypatch.setenv("PATH", str(path_launcher.parent))
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    monkeypatch.delenv(upgrade.DESKTOP_MANAGED_RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(installer_launcher.parent),))
+    return SimpleNamespace(old=old, new=new, path_launcher=path_launcher, installer_launcher=installer_launcher)
+
+
+def test_doctor_names_split_stable_launchers_and_repair_moves_the_stale_one(split_launchers):
+    split = split_launchers
+
+    items = cli._stable_launcher_items()
+
+    assert [item["status"] for item in items] == ["fail"]
+    item = items[0]
+    assert f"{split.path_launcher} -> 1.4.0 ({split.old})" in item["message"]
+    assert f"{split.installer_launcher} -> 1.5.0 ({split.new})" in item["message"]
+    assert f"{split.installer_launcher} doctor repair stable-launchers" in item["action"]
+    assert item["repair"]["command"] == "vibe doctor repair stable-launchers"
+
+    result = cli._repair_stable_launchers()
+
+    assert result["status"] == "repaired"
+    assert result["launchers"] == [str(split.path_launcher)]
+    assert split.path_launcher.resolve() == (split.new / "bin" / "vibe").resolve()
+    assert split.installer_launcher.resolve() == (split.new / "bin" / "vibe").resolve()
+    assert [item["status"] for item in cli._stable_launcher_items()] == ["pass"]
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_an_older_install_refuses_start_and_restart_unless_downgrade_is_explicit(
+    split_launchers, monkeypatch, capsys, command,
+):
+    split = split_launchers
+    ran = []
+    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
+    monkeypatch.setattr(cli, "_cmd_restart_with_delay", lambda _delay: ran.append("restart") or 0)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as refused:
+        cli._dispatch_parsed_command(parser, parser.parse_args([command]))
+
+    assert refused.value.code == 1
+    assert ran == []
+    error = capsys.readouterr().err
+    for fragment in ("1.4.0", str(split.old), "1.5.0", str(split.new), f"{split.installer_launcher} {command}"):
+        assert fragment in error
+    assert "--allow-downgrade" in error
+
+    with pytest.raises(SystemExit) as allowed:
+        cli._dispatch_parsed_command(parser, parser.parse_args([command, "--allow-downgrade"]))
+
+    assert allowed.value.code == 0
+    assert ran == [command]
+    assert "1.5.0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv,desktop", [([], False), (["start"], True)])
+def test_a_supervisor_launch_of_an_older_install_is_warned_not_refused(
+    split_launchers, monkeypatch, capsys, argv, desktop,
+):
+    split = split_launchers
+    ran = []
+    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(cli, "cmd_vibe", lambda: ran.append("vibe") or 0)
+    monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
+    if desktop:
+        monkeypatch.setenv(upgrade.DESKTOP_MANAGED_RUNTIME_ENV, "1")
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._dispatch_parsed_command(parser, parser.parse_args(argv))
+
+    assert exc_info.value.code == 0
+    assert ran == [argv[0] if argv else "vibe"]
+    error = capsys.readouterr().err
+    assert "1.4.0" in error and "1.5.0" in error
+    assert f"{split.installer_launcher} doctor repair stable-launchers" in error
+
+
+def test_status_and_doctor_report_a_service_older_than_the_last_activation(split_launchers, monkeypatch):
+    split = split_launchers
+    # A real process whose argv names the old install, as a supervisor
+    # started from the stale launcher would look.
+    service = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", str(split.old / "uv" / "tools" / "avibe-os" / "bin" / "vibe")]
+    )
+    try:
+        monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, service.pid))
+        expected = {
+            "generation": str(split.old),
+            "version": "1.4.0",
+            "activated_generation": str(split.new),
+            "activated_version": "1.5.0",
+            "launcher": str(split.installer_launcher),
+        }
+
+        status = json.loads(runtime.render_status(detect_extra_processes=False))
+        items = cli._service_generation_items()
+    finally:
+        service.kill()
+        service.wait()
+
+    assert status["service_owner_pid"] == service.pid
+    assert status["generation_downgrade"] == expected
+    assert [item["status"] for item in items] == ["warn"]
+    assert "1.4.0" in items[0]["message"] and "1.5.0" in items[0]["message"]
+    assert f"{split.installer_launcher} restart" in items[0]["action"]
+    assert items[0]["generation_downgrade"] == expected
 
 
 def test_default_config_written(tmp_path, monkeypatch):

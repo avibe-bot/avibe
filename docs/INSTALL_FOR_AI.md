@@ -54,6 +54,8 @@ vibe doctor
 
 If the installer cannot use PyPI, it falls back to GitHub. If `vibe` is installed but not on `PATH`, inspect the installer's final output and help the user add the reported bin directory to their shell profile.
 
+When the installer runs as root, it installs the launcher at `/usr/local/bin/vibe`, the one supported location for root installs. Later upgrades move every stable `vibe` launcher that selects this install together; see [Upgrading](UPGRADING.md#stable-launchers).
+
 ## Step 3: Install at Least One Coding Agent
 
 Ask the user which backend they want first. Recommended default: OpenCode for low-friction setup, Claude Code for deeper coding work, Codex for OpenAI workflows.
@@ -171,6 +173,8 @@ does not need an IM chat to complete this smoke test.
 | Symptom | What to check |
 | --- | --- |
 | `vibe` command missing | Shell `PATH`, uv tool bin directory, installer output |
+| `vibe doctor` reports launchers on different versions | Run `vibe doctor repair stable-launchers` |
+| `vibe start` refuses an older install | Run the launcher named in the error; pass `--allow-downgrade` only to run the older build on purpose |
 | Agent not found | Install the selected agent CLI and verify it is on `PATH` |
 | Slack bot silent | App installed, Socket Mode token, bot token scopes, bot invited to channel |
 | Telegram group silent | Bot privacy mode, mention requirements, discovered chat list |

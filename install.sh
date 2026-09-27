@@ -19,6 +19,9 @@ PACKAGE_NAME="avibe-os"
 NODE_MINIMUM_REQUIREMENT="20.19+ or 22.12+"
 VIBE_BIN_PATH=""
 VIBE_TOOL_BIN_DIR=""
+# A root install has one supported stable launcher, whatever PATH order the
+# shell happens to have. Upgrades keep every other managed launcher in step.
+ROOT_TOOL_BIN_DIR="/usr/local/bin"
 VIBE_CANDIDATE_BIN_PATH=""
 LAUNCH_AFTER_INSTALL=""
 AVIBE_LAUNCHED=""
@@ -173,6 +176,12 @@ launcher_destination_is_available() {
 choose_tool_bin_dir() {
     local dir
     local fallback_sbin_dir=""
+
+    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && is_absolute_dir "$ROOT_TOOL_BIN_DIR" &&
+        launcher_destination_is_available "$ROOT_TOOL_BIN_DIR" && ensure_writable_dir "$ROOT_TOOL_BIN_DIR"; then
+        echo "$ROOT_TOOL_BIN_DIR"
+        return 0
+    fi
 
     local old_ifs="$IFS"
     IFS=":"

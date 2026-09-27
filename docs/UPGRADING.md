@@ -1,5 +1,31 @@
 # Upgrading
 
+## Stable launchers
+
+`vibe upgrade` and the installers activate a new version by repointing every
+stable `vibe` launcher that already selects an Avibe install on this machine:
+the one you ran, every `vibe` on `PATH`, uv's tool bin directory, and the
+installer locations `~/.local/bin`, `~/bin`, `/usr/local/bin` and
+`/opt/homebrew/bin`. A launcher that points anywhere else, such as a separate uv
+tool environment or a wrapper script, is never changed.
+
+A root install has one supported launcher: `/usr/local/bin/vibe`. The installer
+chooses it when run as root even if another directory on `PATH` already holds a
+`vibe`, and later upgrades keep that other launcher on the same version.
+
+If a launcher cannot be moved, for example because it is not writable,
+`vibe doctor` fails and lists each launcher with its version. Run
+`vibe doctor repair stable-launchers` to point all of them at the newest
+installed version.
+
+`vibe start` and `vibe restart` refuse to run an install older than the last
+activated one and name the launcher to run instead. Pass `--allow-downgrade` to
+run the older build on purpose. Bare `vibe`, which systemd and launchd use, and
+the desktop app only warn, so a supervised service still comes up. While the
+running service is older than the last activation, `vibe status` includes a
+`generation_downgrade` object and `vibe doctor` warns; restart through the named
+launcher to run the new version.
+
 ## Memory removal
 
 Avibe no longer includes the optional Memory product. Upgrading does not delete

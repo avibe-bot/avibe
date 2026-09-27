@@ -525,12 +525,14 @@ vibe
 - 如果主服务尚未运行，则启动主服务
 - 打开 Web UI
 - 保留已运行的服务、Web UI 与 OpenCode server；需要明确重启时使用 `vibe restart`
+- 从比最近一次激活更旧的安装运行时只给出警告，因为它也是 systemd 和 launchd 的启动入口
 
 ### `vibe start`
 
 ```bash
 vibe start
 vibe start --no-open-browser
+vibe start --allow-downgrade
 ```
 
 - `--no-open-browser` 会保留相同的启动/复用语义，但不会自动打开浏览器；桌面壳这类自带 WebView 的调用方应使用这个契约。
@@ -538,6 +540,7 @@ vibe start --no-open-browser
 - 如果主服务尚未运行，则启动主服务
 - 打开 Web UI
 - 保留已运行的服务、Web UI 与 OpenCode server；需要明确重启时使用 `vibe restart`
+- 拒绝运行比最近一次激活更旧的安装，并写明两个版本以及应改用的启动器；`--allow-downgrade` 表示有意运行旧版本，桌面应用只给出警告
 
 ### `vibe stop`
 
@@ -574,6 +577,7 @@ vibe restart --delay-seconds 60
 
 - 如果是 Agent 在活跃会话里触发重启，优先使用 `vibe restart --delay-seconds 60`
 - 只有用户明确要求立刻重启时，再使用普通 `vibe restart`
+- 与 `vibe start` 相同，除非传入 `--allow-downgrade`，否则拒绝重启到比最近一次激活更旧的安装
 
 ### `vibe status`
 
@@ -582,6 +586,7 @@ vibe status
 ```
 
 - 输出运行状态 JSON
+- 如果正在运行的服务比最近一次激活的安装更旧，会包含 `generation_downgrade`，写明两个版本以及选中较新安装的启动器
 
 ### `vibe doctor`
 
@@ -594,6 +599,7 @@ vibe doctor
 - 检查 backend CLI 是否可用
 - 检查 runtime home 迁移状态
 - 检查 runtime 进程、安装来源和重启元数据状态
+- 稳定 `vibe` 启动器选中了不同的已安装版本时报失败并列出每个路径和版本；正在运行的服务比最近一次激活的安装更旧时给出警告
 - 通过统一依赖诊断组检查 askill、avault、Git Runtime、Model Hub 引擎（CPA）、Show Runtime、tmux 和 Node.js
 - `vibe doctor --deep` 会在不下载正文的情况下探测缺失依赖的地址
 - 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
@@ -605,6 +611,7 @@ vibe doctor repair --dry-run
 vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stable-launchers --yes
 vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
@@ -676,6 +683,7 @@ vibe upgrade
 ```
 
 - 按升级计划升级 Avibe
+- 所有已经选中 Avibe 安装的稳定 `vibe` 启动器会一起切换到新版本；指向其他位置的启动器永远不会被修改
 - 如果 Avibe 已在运行，成功后安排一次受控重启
 - 如果 Avibe 原本未运行，则保持停止状态
 

@@ -54,6 +54,8 @@ vibe doctor
 
 如果安装器无法使用 PyPI，会自动回退到 GitHub。如果已经安装但找不到 `vibe` 命令，查看安装器最后输出的 bin 目录，并帮用户把它加入 shell `PATH`。
 
+以 root 身份运行安装器时，启动器会安装到 `/usr/local/bin/vibe`，这是 root 安装唯一支持的位置。之后的升级会让所有选中这份安装的稳定 `vibe` 启动器一起切换版本，参见 [Upgrading](UPGRADING.md#stable-launchers)。
+
 ## 第 3 步：至少安装一个编码 Agent
 
 先问用户想用哪个后端。默认建议：OpenCode 上手最轻，Claude Code 适合复杂编码任务，Codex 适合 OpenAI 工作流。
@@ -154,6 +156,8 @@ vibe doctor
 | 现象 | 检查点 |
 | --- | --- |
 | 找不到 `vibe` 命令 | shell `PATH`、uv tool bin 目录、安装器输出 |
+| `vibe doctor` 报告启动器版本不一致 | 运行 `vibe doctor repair stable-launchers` |
+| `vibe start` 拒绝运行旧安装 | 改用错误信息中给出的启动器；只有确实要运行旧版本时才加 `--allow-downgrade` |
 | 找不到 agent | 安装所选 agent CLI，并确认它在 `PATH` 里 |
 | Slack 没反应 | App 是否安装、Socket Mode token、bot token scopes、bot 是否被邀请进频道 |
 | Telegram 群里没反应 | Bot privacy mode、是否需要 @、聊天是否已被发现 |

@@ -50,6 +50,7 @@ vibe
 - Starts Avibe if needed
 - Reuses already-running processes
 - Opens the web UI in your browser
+- Only warns when it runs an install older than the last activated one: bare `vibe` is also the systemd and launchd entry, so it never refuses to start
 
 ### `vibe start`
 
@@ -58,6 +59,7 @@ Start Avibe if needed. Opens the web UI in your browser unless you suppress it.
 ```bash
 vibe start
 vibe start --no-open-browser
+vibe start --allow-downgrade
 ```
 
 **Behavior:**
@@ -65,6 +67,7 @@ vibe start --no-open-browser
 - Opens the setup wizard at `http://127.0.0.1:5123`
 - With `--no-open-browser`, keeps the service/UI lifecycle the same but does not launch a system browser window
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
+- Refuses to run an install older than the last activated one, for example an old `vibe` earlier on `PATH`. The error names both versions and the launcher to run instead; `--allow-downgrade` runs the older build on purpose. The desktop app only warns.
 
 ### `vibe stop`
 
@@ -86,12 +89,14 @@ Restart Avibe (main service + Web UI). The OpenCode server is terminated as part
 ```bash
 vibe restart
 vibe restart --delay-seconds 60
+vibe restart --allow-downgrade
 ```
 
 **Behavior:**
 - Stops the main service and Web UI, then re-starts them
 - Terminates the OpenCode server
 - With `--delay-seconds N`, schedules the restart `N` seconds in the future so an active conversation can receive its reply before the restart lands. Prefer this form when an agent is triggering the restart from inside Slack, Discord, Telegram, Lark/Feishu, or WeChat.
+- Refuses, like `vibe start`, to restart onto an install older than the last activated one unless you pass `--allow-downgrade`
 
 ### `vibe status`
 
@@ -109,6 +114,12 @@ vibe status
   "pid": 12345
 }
 ```
+
+When the running service is older than the last activated install, the output
+also contains a `generation_downgrade` object with the running `version` and
+`generation`, the `activated_version` and `activated_generation`, and the
+`launcher` that selects the newer install. Restart through that launcher to run
+the new version.
 
 ### `vibe skill`
 
@@ -235,6 +246,7 @@ vibe doctor repair --dry-run
 vibe doctor repair home-migration --yes
 vibe doctor repair duplicate-service-processes --yes
 vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stable-launchers --yes
 vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
@@ -250,6 +262,8 @@ vibe doctor repair tmux --yes
 - Agent CLI availability (Claude Code, OpenCode, Codex)
 - Runtime home migration state
 - Runtime process, install, and restart metadata state
+- Stable `vibe` launchers that select different installed versions (fails with both paths and versions; `stable-launchers` points them all at the newest one)
+- A running service older than the last activated install (warns)
 - askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js readiness through one dependency diagnostic group
 - `vibe doctor --deep` also probes missing dependencies without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
@@ -540,6 +554,11 @@ vibe upgrade
 If Avibe is already running, the command schedules a managed restart so the
 service and Web UI switch to the upgraded code. If Avibe is stopped, the command
 keeps it stopped and the new version is used on the next start.
+
+Activation moves every stable `vibe` launcher that already selects an Avibe
+install to the new version together, so no `PATH` lookup keeps an older build.
+Launchers that point anywhere else are never changed. See
+[Upgrading](UPGRADING.md#stable-launchers).
 
 ## Service Lifecycle
 

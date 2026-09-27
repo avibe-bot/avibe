@@ -371,12 +371,16 @@ def collect_install_generations(launcher: str | Path | None = None) -> list[Path
                 logger.info("Install generation collection deferred: unknown launcher target")
                 return []
             # Invoking an explicit alias is not permission to break the command
-            # selected by PATH. This is one ordinary command lookup, not an
-            # alias registry or filesystem scan. Only confirmed managed targets
-            # add protection; an unrelated command cannot veto retirement.
+            # selected by PATH, or a stable launcher activation could not move.
+            # These are the fixed launcher locations, not an alias registry or
+            # filesystem scan. Only confirmed managed targets add protection;
+            # an unrelated command or a dangling link cannot veto retirement.
             path_command = shutil.which("vibe")
-            if path_command and Path(path_command).absolute() != launcher_path:
-                kept.update(_launcher_targets(Path(path_command).absolute(), root, managed))
+            others = {Path(path_command).absolute()} if path_command else set()
+            others.update(peer for peer, _generation in upgrade.managed_stable_launchers())
+            for other in others - {launcher_path}:
+                if other.exists():
+                    kept.update(_launcher_targets(other, root, managed))
             references = _invocation_paths() | _runtime_paths()
             kept.update(
                 generation for path in references

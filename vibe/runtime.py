@@ -1607,6 +1607,15 @@ def render_status(*, detect_extra_processes: bool = True):
     status["service_owner_pid"] = owner_pid
     status["running"] = running
     status["pid"] = owner_pid or (extra_pids[0] if extra_pids else None)
+    # A supervisor may bring the service up from an older install than the
+    # last activation; it is not refused, so say so here.
+    from vibe.upgrade import generation_downgrade, process_generation
+
+    downgrade = generation_downgrade(process_generation(owner_pid)) if owner_pid else None
+    if downgrade is not None:
+        status["generation_downgrade"] = downgrade.as_dict()
+    else:
+        status.pop("generation_downgrade", None)
     restart_status = read_json(get_restart_status_path())
     if restart_status:
         status["restart"] = restart_status
