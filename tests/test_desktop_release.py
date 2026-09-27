@@ -215,7 +215,8 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     jobs = workflow("release_ai.yml")["jobs"]
     caller = jobs["desktop-packages"]
     assert caller["uses"] == "./.github/workflows/desktop-package.yml"
-    assert "secrets" not in caller
+    # Environment secrets resolve empty in a called job without inheritance (actions/runner#4453).
+    assert caller["secrets"] == "inherit"
     assert caller["with"]["source_sha"] == "${{ needs.resolve-desktop-release.outputs.source_sha }}"
     build = package["jobs"]["package"]
     steps = build["steps"]
@@ -227,6 +228,22 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert "codesign --force --deep --sign -" in step("Verify macOS app signature matches the signing path")["run"]
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
     assert steps[-1]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+
+
+def test_inherited_secrets_reach_test_builds_only_as_the_updater_pair():
+    package = workflow("desktop-package.yml")
+    assert package["on" if "on" in package else True]["workflow_call"]["inputs"]["release_tag"]["required"] is True
+    build = package["jobs"]["package"]
+    assert "secrets." not in json.dumps({key: value for key, value in build.items() if key != "steps"})
+    updater = {"TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"}
+    reachable = set()
+    for item in build["steps"]:
+        names = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", json.dumps(item)))
+        if names - updater:
+            assert item.get("if", "").endswith("inputs.release_tag == ''"), item.get("name")
+        else:
+            reachable |= names
+    assert reachable == updater
 
 
 @pytest.mark.parametrize("configured", [False, True])

@@ -76,7 +76,10 @@ jobs:
       version: ${{ needs.resolve-desktop-release.outputs.version }}
       release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
       updater_enabled: ${{ needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
-    # OS identities are not inherited. The callee uses its dedicated updater Environment.
+    # A called job's Environment secrets resolve empty unless the caller inherits
+    # (actions/runner#4453). On this path the callee reads only the updater pair from
+    # desktop-updater; Apple identities stay gated to manual dispatch.
+    secrets: inherit
 
   resolve-show-runtime-ref:
     needs: resolve-desktop-release
