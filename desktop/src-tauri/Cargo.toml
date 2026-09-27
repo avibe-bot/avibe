@@ -54,6 +54,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSError",
   "NSGeometry",
   "NSString",
+  "NSURL",
+  "NSURLRequest",
   "NSUserDefaults",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -64,4 +66,12 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSView",
   "NSWindow",
 ] }
-objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "objc2-app-kit",
+  "WKFrameInfo",
+  "WKNavigationAction",
+  "WKNavigationDelegate",
+  "WKWebView",
+] }

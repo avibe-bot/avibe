@@ -26,6 +26,8 @@ mod updater;
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
 #[cfg(target_os = "macos")]
+mod macos_new_context;
+#[cfg(target_os = "macos")]
 mod macos_title_bar;
 
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
@@ -1202,14 +1204,16 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
-        .initialization_script(NEW_CONTEXT_LINK_BRIDGE)
         .on_new_window(|url, _features| handle_new_window_request(url));
     // macOS draws the page under an overlay title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
     let builder = builder.initialization_script(macos_title_bar::inset_script());
     let window = builder.build().ok()?;
     #[cfg(target_os = "macos")]
-    macos_title_bar::install(&window);
+    {
+        macos_title_bar::install(&window);
+        macos_new_context::install(&window);
+    }
     Some(window)
 }
 
@@ -1219,27 +1223,6 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
 /// WebView2 runs initialization scripts in subframes too, hence the frame check.
 const DESKTOP_SHELL_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });";
-
-/// Sends every web link that asks for a new browsing context through
-/// `window.open`, the one route that reaches [`handle_new_window_request`] on
-/// every platform. WKWebView first offers a `target="_blank"` click to the
-/// navigation policy, and a cancel there ends the request before the UI
-/// delegate ever sees it; the policy must cancel any destination outside the
-/// shell and the proved Runtime, so without this bridge every external chat
-/// link was silently dropped on macOS. `window.open` skips that policy step.
-/// The listener runs after the page's own handlers (bubble phase on `window`),
-/// so a link the Workbench already handled stays handled, and `download`
-/// links keep their native behavior. Top-level document only, like the marker.
-const NEW_CONTEXT_LINK_BRIDGE: &str =
-    "if (window.self === window.top) window.addEventListener('click', function (event) { \
-     if (event.defaultPrevented || event.button !== 0) return; \
-     var link = event.target instanceof Element ? event.target.closest('a[href]') : null; \
-     if (!link || typeof link.href !== 'string' || link.hasAttribute('download')) return; \
-     var target = link.target.toLowerCase(); \
-     if (!target || target === '_self' || target === '_parent' || target === '_top') return; \
-     if (!/^https?:/i.test(link.href)) return; \
-     event.preventDefault(); \
-     window.open(link.href, '_blank', 'noopener,noreferrer'); });";
 
 /// What happens to a browsing context the page asks for.
 #[derive(Debug, PartialEq, Eq)]

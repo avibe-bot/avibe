@@ -612,29 +612,6 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
         "the main window must register the new-window handler"
     );
-    // WKWebView offers a `target="_blank"` click to the navigation policy
-    // first and never reaches the new-window handler once that policy cancels
-    // it, so every main window must reroute such clicks through `window.open`.
-    assert!(
-        builder.contains(".initialization_script(NEW_CONTEXT_LINK_BRIDGE)"),
-        "the main window must bridge new-context links to the new-window handler"
-    );
-    let bridge = source
-        .split("const NEW_CONTEXT_LINK_BRIDGE: &str =")
-        .nth(1)
-        .expect("link bridge script")
-        .split("\";\n")
-        .next()
-        .expect("link bridge literal");
-    for required in [
-        "if (window.self === window.top)",
-        "event.defaultPrevented",
-        "hasAttribute('download')",
-        "/^https?:/i.test(link.href)",
-        "window.open(link.href, '_blank', 'noopener,noreferrer')",
-    ] {
-        assert!(bridge.contains(required), "the link bridge is missing {required:?}");
-    }
     let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
     assert!(setup.contains("ensure_main_window(app.handle())"));
     let handler = source

@@ -214,14 +214,6 @@ are silently dropped. A link received during startup waits for readiness; a
 failed bootstrap discards it. Links never select a different Runtime origin or
 grant the Workbench native commands. IM/browser links remain HTTPS.
 
-A Workbench link that asks for a new browsing context (`target="_blank"`, such
-as every external link in a chat message) opens in the system browser. WKWebView
-offers such a click to the navigation policy first, which cancels any destination
-outside the shell and the proved Runtime, so the shell injects one top-level
-click listener that reroutes these links through `window.open`, the route that
-reaches the new-window handler on every platform. Links the page already
-handled and `download` links keep their native behavior.
-
 The main window remembers its native position, size, and maximized state in the
 window-state plugin's app configuration store. Restore happens before showing
 the window; bootstrap and Runtime navigation only change its content. Open from
@@ -249,6 +241,17 @@ main-window page load the shell natively asks whether the page declares
 files do). A page that does not, or cannot answer, gets the standard title bar
 with the window title, the strip hidden, and the inset reset to `0px`. Windows
 and Linux keep the native title bar and a zero inset.
+
+Links that ask for a new browsing context (`target="_blank"` or
+`window.open`) open in the system browser when they are `http(s)`; anything
+else is dropped, and the page never gets a second webview. WKWebView first
+offers a `target="_blank"` click to the navigation policy, which only lets the
+window itself stay on the shell and Runtime origins, so on macOS the shell
+answers that step natively (`src/macos_new_context.rs`): a request whose
+WebKit `targetFrame` is nil and whose destination is `http(s)` is allowed on to
+the `on_new_window` handler. The decision reads WebKit's own navigation action,
+so it holds for links in frames and under page handlers, injects nothing into
+the page, and leaves every in-window navigation to the unchanged policy.
 
 For manual acceptance, use a packaged test install with isolated app config and
 a fake loopback Runtime: set a non-default frame, quit/relaunch, hide/Open, and
