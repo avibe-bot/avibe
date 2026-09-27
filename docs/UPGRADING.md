@@ -24,7 +24,9 @@ the repair fails if the launchers still disagree afterwards. When two different
 installs tie as the last activation, the repair cannot choose between them: it
 changes nothing and asks you to run the installer again, whose new install moves
 every launcher. `vibe doctor` still lists the split, and the downgrade check
-below treats neither install as older.
+below treats neither install as older. On Windows, the launcher you run the repair
+from cannot be replaced while it runs, so the repair moves every other launcher
+and names the launcher to run it from again.
 
 `vibe start` and `vibe restart` refuse to run an install older than the last
 activated one and name the launcher to run instead. An earlier install of the

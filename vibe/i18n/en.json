@@ -510,9 +510,9 @@
     "availableMarkdown": "🚀 Avibe Update Available\n\nUpdate from `{current}` → {latestLink}",
     "availableText": "🚀 Avibe Update Available\n\nUpdate from {current} → {latestLink}",
     "actionUpdateNow": "Update Now",
-    "downgradeRefused": "Refusing to {command} from Avibe {version} ({generation}): the last activated install is {activatedVersion} ({activatedGeneration}). Run `{launcher} {command}` instead, or pass --allow-downgrade to run the older build on purpose.",
+    "downgradeRefused": "Refusing to {command} from Avibe {version} ({generation}): the last activated install is {activatedVersion} ({activatedGeneration}). Run `{rerunCommand}` instead, or pass --allow-downgrade to run the older build on purpose.",
     "downgradeAllowed": "Warning: running Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}), because --allow-downgrade was given.",
-    "downgradeWarning": "Warning: this vibe runs Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}). Use `{launcher}`, or run `{launcher} doctor repair stable-launchers` to move every launcher to it."
+    "downgradeWarning": "Warning: this vibe runs Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}). Use `{launcher}`, or run `{repairCommand}` to move every launcher to it."
   },
   "discord": {
     "settingsSubtitle": "Adjust message visibility, mention behavior, and language.",
@@ -1322,9 +1322,9 @@
       "cronNumericWeekday": "Confirm each intended day, then rewrite the weekday with names, for example vibe task update <id> --cron '0 9 * * mon-fri'",
       "cliMissing": "Install Avibe with uv tool or add the intended vibe executable to PATH.",
       "cliPathPrecedence": "Put ~/.local/bin before system Python bin directories when using the uv tool installation.",
-      "splitLaunchers": "Run `{launcher} doctor repair stable-launchers` to point every launcher at Avibe {version}.",
+      "splitLaunchers": "Run `{repairCommand}` to point every launcher at Avibe {version}.",
       "splitLaunchersTied": "These installs tie as the last activation, so the repair cannot choose one: {launchers}. Run the Avibe installer again; its new install moves every launcher.",
-      "serviceGenerationBehind": "Run `{launcher} restart` to run the last activated install.",
+      "serviceGenerationBehind": "Run `{restartCommand}` to run the last activated install.",
       "cliNotUvTool": "uv tool package-integrity checks are skipped for this executable.",
       "cliEditable": "Reinstall Avibe from a normal wheel. Do not use 'uv tool install --editable .' for the live local CLI.",
       "packageIntegrityFailed": "Rerun the Avibe installer to replace the active environment with a verified wheel.",
@@ -1361,6 +1361,7 @@
       "stableLaunchersRepaired": "Pointed {launchers} at Avibe {version} ({generation}).",
       "stableLaunchersFailed": "Could not point every stable vibe launcher at the newest install. Run `vibe doctor` to see where each launcher points.",
       "stableLauncherMoveFailed": "Could not point {launcher} at Avibe {version} ({generation}). Make sure you can write to it, then run `vibe doctor repair stable-launchers` again.",
+      "stableLauncherRunning": "Windows cannot replace {launcher} while this repair runs from it, so it still selects the older install. Run `{repairCommand}` to move it.",
       "stableLaunchersTied": "Stable vibe launchers select installs that tie as the last activation: {launchers}. No launcher was changed; run the Avibe installer again, and its new install moves every launcher.",
       "stableLaunchersBusy": "Another Avibe install, upgrade or repair is running. Run `vibe doctor repair stable-launchers` again when it finishes.",
       "stableLaunchersStillSplit": "Stable vibe launchers still select different installs after the repair: {launchers}. Another installer may have changed them; run `vibe doctor` again.",

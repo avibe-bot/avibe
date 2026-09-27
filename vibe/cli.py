@@ -135,6 +135,7 @@ _FALSY_ENV_VALUES = {"0", "false", "no", "off"}
 DOCTOR_RESTART_RESULT_RETENTION_SECONDS = 10 * 60
 DOCTOR_RESTART_SEED_GRACE_SECONDS = 60.0
 DOCTOR_LAUNCHER_REPAIR_LOCK_TIMEOUT_SECONDS = 10.0
+STABLE_LAUNCHER_REPAIR_ARGS = ("doctor", "repair", "stable-launchers")
 DOCTOR_REPAIR_TARGETS = (
     "home-migration",
     "stale-install-runtime",
@@ -1169,6 +1170,12 @@ def _current_cli_install_family() -> str | None:
     return None
 
 
+def _launcher_command(launcher: Path | str, *args: str) -> str:
+    """A pasteable command that runs ``launcher``, even from a path with spaces."""
+
+    return shlex.join([str(launcher), *args])
+
+
 def _service_generation_items() -> list[dict]:
     """Warn when the running service is older than the last activated install."""
 
@@ -1189,7 +1196,11 @@ def _service_generation_items() -> list[dict]:
             activatedVersion=downgrade.activated.version,
             activatedGeneration=downgrade.activated.generation,
         ),
-        i18n_t("doctor.action.serviceGenerationBehind", language, launcher=downgrade.activated.launcher),
+        i18n_t(
+            "doctor.action.serviceGenerationBehind",
+            language,
+            restartCommand=_launcher_command(downgrade.activated.launcher, "restart"),
+        ),
         code="runtime.service_generation_behind",
         generation_downgrade=downgrade.as_dict(),
     )
@@ -12731,7 +12742,7 @@ def _stable_launcher_items() -> list[dict]:
         else i18n_t(
             "doctor.action.splitLaunchers",
             language,
-            launcher=target.launcher,
+            repairCommand=_launcher_command(target.launcher, *STABLE_LAUNCHER_REPAIR_ARGS),
             version=target.version or unknown,
         ),
         code="installation.split_launchers",
@@ -13196,8 +13207,14 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                 )
             unknown = i18n_t("doctor.value.unknown", language)
             moved: list[Path] = []
+            running = None
             for selection in selections:
                 if selection.generation == target.generation:
+                    continue
+                # Windows cannot replace the image this repair runs from. The
+                # target launcher is not running, so it can move this one.
+                if launcher_is_current_process(selection.launcher):
+                    running = selection
                     continue
                 # A managed launcher has its export's name, so the target
                 # install exports the same name (see managed_stable_launchers).
@@ -13222,6 +13239,19 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                         error=str(exc),
                         launchers=[str(launcher) for launcher in moved],
                     )
+            if running is not None:
+                return _doctor_repair_result(
+                    target_name,
+                    "failed",
+                    i18n_t(
+                        "doctor.repair.stableLauncherRunning",
+                        language,
+                        launcher=running.launcher,
+                        repairCommand=_launcher_command(target.launcher, *STABLE_LAUNCHER_REPAIR_ARGS),
+                    ),
+                    reason="stable_launcher_running",
+                    launchers=[str(launcher) for launcher in moved],
+                )
             # Report what the launchers select now, not what was attempted: the
             # upgrade lock does not stop uv or another installer changing them.
             remaining = stable_launcher_selections()
@@ -16464,7 +16494,9 @@ def _generation_downgrade_blocks(command: str | None, *, allow_downgrade: bool =
             generation=downgrade.generation,
             activatedVersion=downgrade.activated.version,
             activatedGeneration=downgrade.activated.generation,
-            launcher=downgrade.activated.launcher,
+            launcher=_launcher_command(downgrade.activated.launcher),
+            rerunCommand=_launcher_command(downgrade.activated.launcher, *([command] if command else [])),
+            repairCommand=_launcher_command(downgrade.activated.launcher, *STABLE_LAUNCHER_REPAIR_ARGS),
         ),
         file=sys.stderr,
     )

@@ -425,6 +425,55 @@ def test_stable_launcher_repair_failures_are_localized(split_launchers, monkeypa
     assert split.path_launcher.resolve() == (split.old / "bin" / "vibe").resolve()
 
 
+def test_windows_repair_leaves_the_launcher_it_runs_from_and_names_the_target(split_launchers, monkeypatch):
+    """Windows cannot replace a running image, so the repair names a launcher that can."""
+
+    split = split_launchers
+    peer = split.path_launcher.parent.parent / "home-bin" / "vibe"
+    peer.parent.mkdir()
+    peer.symlink_to(split.old / "bin" / "vibe")
+    monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(split.installer_launcher.parent), str(peer.parent)))
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    # Stand-in for Windows holding the stale PATH launcher's image open.
+    monkeypatch.setattr(cli, "launcher_is_current_process", lambda launcher: Path(launcher) == split.path_launcher)
+
+    result = cli._repair_stable_launchers()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "stable_launcher_running"
+    assert result["launchers"] == [str(peer)]
+    assert str(split.path_launcher) in result["message"] and "Windows 无法" in result["message"]
+    commands = [shlex.split(command) for command in re.findall(r"`([^`]+)`", result["message"])]
+    assert [str(split.installer_launcher), "doctor", "repair", "stable-launchers"] in commands
+    assert peer.resolve() == (split.new / "bin" / "vibe").resolve()
+    assert split.path_launcher.resolve() == (split.old / "bin" / "vibe").resolve()
+
+
+def test_recovery_commands_stay_pasteable_from_a_launcher_path_with_spaces(split_launchers, monkeypatch, capsys):
+    split = split_launchers
+    spaced = split.installer_launcher.parent.parent / "Program Files" / "vibe"
+    spaced.parent.mkdir()
+    split.installer_launcher.rename(spaced)
+    monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(spaced.parent),))
+    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(cli, "cmd_vibe", lambda: 0)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 4242)
+    monkeypatch.setattr(cli, "process_generation", lambda pid: split.old if pid == 4242 else None)
+    parser = cli.build_parser()
+
+    def commands(text: str) -> list[list[str]]:
+        return [shlex.split(command) for command in re.findall(r"`([^`]+)`", text)]
+
+    repair = [str(spaced), "doctor", "repair", "stable-launchers"]
+    assert repair in commands(cli._stable_launcher_items()[0]["action"])
+    assert [str(spaced), "restart"] in commands(cli._service_generation_items()[0]["action"])
+    for argv, expected in ((["start"], [[str(spaced), "start"]]), ([], [[str(spaced)], repair])):
+        with pytest.raises(SystemExit):
+            cli._dispatch_parsed_command(parser, parser.parse_args(argv))
+        error_commands = commands(capsys.readouterr().err)
+        assert all(command in error_commands for command in expected), (argv, error_commands)
+
+
 def test_stable_launcher_repair_fails_unless_the_launchers_converge(split_launchers, monkeypatch):
     """The upgrade lock does not stop another installer moving a launcher mid-repair."""
 

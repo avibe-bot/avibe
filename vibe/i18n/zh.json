@@ -510,9 +510,9 @@
     "availableMarkdown": "🚀 Avibe 有可用更新\n\n从 `{current}` 更新到 {latestLink}",
     "availableText": "🚀 Avibe 有可用更新\n\n从 {current} 更新到 {latestLink}",
     "actionUpdateNow": "立即更新",
-    "downgradeRefused": "拒绝从 Avibe {version}（{generation}）执行 {command}：最近激活的安装是 {activatedVersion}（{activatedGeneration}）。请改为运行 `{launcher} {command}`；如确需运行旧版本，请加 --allow-downgrade。",
+    "downgradeRefused": "拒绝从 Avibe {version}（{generation}）执行 {command}：最近激活的安装是 {activatedVersion}（{activatedGeneration}）。请改为运行 `{rerunCommand}`；如确需运行旧版本，请加 --allow-downgrade。",
     "downgradeAllowed": "警告：由于指定了 --allow-downgrade，正在运行 Avibe {version}（{generation}），它比最近激活的安装 {activatedVersion}（{activatedGeneration}）旧。",
-    "downgradeWarning": "警告：这个 vibe 运行的是 Avibe {version}（{generation}），比最近激活的安装 {activatedVersion}（{activatedGeneration}）旧。请使用 `{launcher}`，或运行 `{launcher} doctor repair stable-launchers` 让所有启动器都指向它。"
+    "downgradeWarning": "警告：这个 vibe 运行的是 Avibe {version}（{generation}），比最近激活的安装 {activatedVersion}（{activatedGeneration}）旧。请使用 `{launcher}`，或运行 `{repairCommand}` 让所有启动器都指向它。"
   },
   "discord": {
     "settingsSubtitle": "调整消息可见性、@提及策略与语言。",
@@ -1322,9 +1322,9 @@
       "cronNumericWeekday": "确认每个任务原本想要的日期后，改用星期英文名，例如 vibe task update <id> --cron '0 9 * * mon-fri'",
       "cliMissing": "使用 uv tool 安装 Avibe，或将预期的 vibe 可执行文件加入 PATH。",
       "cliPathPrecedence": "使用 uv tool 安装时，将 ~/.local/bin 放在系统 Python bin 目录之前。",
-      "splitLaunchers": "运行 `{launcher} doctor repair stable-launchers`，让所有启动器都指向 Avibe {version}。",
+      "splitLaunchers": "运行 `{repairCommand}`，让所有启动器都指向 Avibe {version}。",
       "splitLaunchersTied": "这些安装同为最后激活，修复无法从中选择：{launchers}。请重新运行 Avibe 安装程序，它的新安装会让所有启动器一起切换过去。",
-      "serviceGenerationBehind": "运行 `{launcher} restart`，改为运行最近激活的安装。",
+      "serviceGenerationBehind": "运行 `{restartCommand}`，改为运行最近激活的安装。",
       "cliNotUvTool": "此可执行文件将跳过 uv tool 包完整性检查。",
       "cliEditable": "从普通 wheel 重新安装 Avibe。运行中的本地 CLI 不要使用 'uv tool install --editable .'。",
       "packageIntegrityFailed": "重新运行 Avibe 安装器，以经过验证的 wheel 替换当前环境。",
@@ -1361,6 +1361,7 @@
       "stableLaunchersRepaired": "已让 {launchers} 指向 Avibe {version}（{generation}）。",
       "stableLaunchersFailed": "无法让所有稳定 vibe 启动器都指向最新的安装。运行 `vibe doctor` 查看每个启动器当前指向哪里。",
       "stableLauncherMoveFailed": "无法让 {launcher} 指向 Avibe {version}（{generation}）。请确认你有权限写入它，然后重新运行 `vibe doctor repair stable-launchers`。",
+      "stableLauncherRunning": "Windows 无法在这次修复从 {launcher} 运行时替换它，所以它仍指向较旧的安装。请运行 `{repairCommand}` 来切换它。",
       "stableLaunchersTied": "稳定 vibe 启动器指向的安装同为最后激活，无法区分：{launchers}。没有改动任何启动器；请重新运行 Avibe 安装程序，它的新安装会让所有启动器一起切换过去。",
       "stableLaunchersBusy": "另一个 Avibe 安装、升级或修复正在进行。请在它完成后重新运行 `vibe doctor repair stable-launchers`。",
       "stableLaunchersStillSplit": "修复后稳定 vibe 启动器仍指向不同的安装：{launchers}。可能有其他安装程序改动了它们，请重新运行 `vibe doctor`。",

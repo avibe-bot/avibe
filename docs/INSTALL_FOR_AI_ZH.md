@@ -166,27 +166,14 @@ vibe doctor
 
 ## 卸载
 
-只有用户明确要删除 Avibe 时才运行。删除这些安装之前，循环会移除 `PATH` 上或安装程序目录中所有指向其中某个安装的稳定 `vibe` 启动器，连同它的 generation 标记；指向其他位置的启动器会保留。如果 `rm` 提示无法删除 `/usr/local/bin` 这类目录里的启动器，请用 `sudo` 重新运行那条 `rm`。
+只有用户明确要删除 Avibe 时才运行：
 
 ```bash
 vibe stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
 uv tool uninstall vibe-remote
-generations="$(cd "$avibe_home/runtime/install-generations" 2>/dev/null && pwd -P)"
-[ -n "$generations" ] && { printf '%s\n' "$PATH" | tr ':' '\n'; printf '%s\n' "$UV_TOOL_BIN_DIR" ~/.local/bin ~/bin /usr/local/bin /opt/homebrew/bin; } |
-while IFS= read -r dir; do
-  [ -n "$dir" ] || continue
-  launcher="$dir/vibe"
-  marker="$dir/.vibe.avibe-generation"
-  if [ -L "$launcher" ]; then
-    selected="$(cd "$dir" 2>/dev/null && cd "$(dirname "$(readlink "$launcher")")" 2>/dev/null && pwd -P)"
-  else
-    selected="$(cat "$marker" 2>/dev/null)"
-    cmp -s "$launcher" "$selected/bin/vibe" 2>/dev/null || selected=
-  fi
-  case "$selected" in "$generations"/*) rm -f "$launcher" "$marker" ;; esac
-done
+vibe_bin="$(command -v vibe)" && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```
