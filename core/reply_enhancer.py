@@ -454,14 +454,21 @@ class _FileLinkMatch:
 # quick-reply label in a link — the label stays the payload, the URL is dropped.
 # Tolerated link forms: plain Markdown ``[label](https://…)``, Slack-escaped
 # ``[label](<https://…>)``, and Slack autolink ``<https://…|label>``. Only
-# ``http(s)`` targets count (a bare ``[label](foo)`` is left alone).
+# ``http(s)`` targets count as real links (a bare ``[label](foo)`` is left alone).
+# Placeholder targets — ``[label](#)``, ``[label](#anchor)``, ``[label]()`` —
+# point nowhere in a chat message, so they are read exactly like a bare
+# ``[label]`` token; the link-only guards below apply to real links only.
 #
 # ``_PLAIN_URL`` allows one level of balanced parentheses (e.g. Wikipedia
 # ``…/A_(B)``) like ``_FILE_LINK_RE`` does, so such a URL doesn't truncate at the
 # first ``)`` and drop the rest of the button group.
 _PLAIN_URL = r"https?://(?:[^()\s]|\([^()]*\))+"
-# Optional link wrapper after a ``[label]`` token: ``(<https://…>)`` or ``(https://…)``.
-_LINK_SUFFIX = r"(?:\((?:<https?://[^>\n]+>|" + _PLAIN_URL + r")\))?"
+_PLACEHOLDER_TARGET = r"(?:#[^()\s]*)?"
+# Optional link wrapper after a ``[label]`` token: ``(<https://…>)``,
+# ``(https://…)``, or a placeholder ``(#…)`` / ``()``.
+_LINK_SUFFIX = (
+    r"(?:\((?:<https?://[^>\n]+>|" + _PLAIN_URL + r"|" + _PLACEHOLDER_TARGET + r")\))?"
+)
 
 _BUTTON_BLOCK_RE = re.compile(
     r"\n-{3,}\s*\n"  # --- separator line

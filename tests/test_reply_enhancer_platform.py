@@ -1481,6 +1481,45 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, "Done.")
         self.assertEqual([button.text for button in reply.buttons], ["Wiki", "Done"])
 
+    def test_process_reply_accepts_placeholder_link_buttons(self):
+        # Agents sometimes write every button as a ``[label](#)`` link. A
+        # placeholder target points nowhere in a chat message, so the row must
+        # render as buttons instead of a line of dead links.
+        reply = process_reply(
+            "你定一下先做哪个。\n\n---\n"
+            "[✅ 三个都做](#) | [📝 先改提示词](#) | [🔁 先做重启续跑](#) | [⏳ 等2230合并再说](#)"
+        )
+
+        self.assertEqual(reply.text, "你定一下先做哪个。")
+        self.assertEqual(
+            [button.text for button in reply.buttons],
+            ["✅ 三个都做", "📝 先改提示词", "🔁 先做重启续跑", "⏳ 等2230合并再说"],
+        )
+
+    def test_process_reply_reads_placeholder_link_like_bare_button(self):
+        cases = {
+            "Done.\n\n---\n[A](#)": ["A"],
+            "Done.\n\n---\n[A]() | [B](#next) | [C]": ["A", "B", "C"],
+            "Done.\n[A](#) | [B](#b)": ["A", "B"],
+        }
+        for text, labels in cases.items():
+            with self.subTest(text=text):
+                reply = process_reply(text)
+
+                self.assertEqual(reply.text, "Done.")
+                self.assertEqual([button.text for button in reply.buttons], labels)
+
+    def test_process_reply_preserves_relative_link_row(self):
+        for text in (
+            "Done.\n\n---\n[Guide](docs/guide.md) | [Notes](notes.md)",
+            "Done.\n[Guide](docs/guide.md) | [Notes](notes.md)",
+        ):
+            with self.subTest(text=text):
+                reply = process_reply(text)
+
+                self.assertEqual(reply.text, text)
+                self.assertEqual(reply.buttons, [])
+
     def test_prompt_keeps_harness_routing_and_moves_operational_detail_to_skill(self):
         context = MessageContext(
             user_id="U1",
