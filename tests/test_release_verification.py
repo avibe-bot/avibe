@@ -394,7 +394,7 @@ def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_p
     ):
         assert contract in commands
     assert "dist/avibe_memory-*-py3-none-any.whl" in upload["run"]
-    assert "cd release-automation && pytest tests/e2e/test_retired_updater_bridge.py -v" in commands
+    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v" in commands
     assert "TARGET_VERSION=\"$(python release-automation/scripts/release_package_version.py \"$RELEASE_TAG\")\"" in commands
     assert 'realpath "$VIBE_INSTALL_TEST_WHEEL"' in commands
     assert "realpath old-release/avibe_memory-3.1.0-py3-none-any.whl" in commands
@@ -414,38 +414,40 @@ def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_p
 )
 def test_muc_004_retirement_gate_replays_from_workflow_checkout(tmp_path, tag, forward):
     """MUC-004: old tag has no gate; forward tag executes the complete workflow checkout."""
-    step = _step(_job("publish.yml", "build"), "Run release install and upgrade regressions")
+    job = _job("publish.yml", "build")
+    step = _step(job, "Run release install and upgrade regressions")
     gate = "TARGET_VERSION=" + step["run"].split("TARGET_VERSION=", 1)[1]
     automation = tmp_path / "release-automation"
-    script = automation / "scripts/release_package_version.py"
-    script.parent.mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts/release_package_version.py", script)
-    test = automation / "tests/e2e/test_retired_updater_bridge.py"
-    test.parent.mkdir(parents=True)
-    shutil.copy2(ROOT / "tests/e2e/test_retired_updater_bridge.py", test)
+    for name in _step(job, "Checkout release automation")["with"]["sparse-checkout"].splitlines():
+        target = automation / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
     binaries = tmp_path / "bin"
     binaries.mkdir()
     (binaries / "python").write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
     (binaries / "python").chmod(0o755)
-    mock_pytest = binaries / "pytest"
-    mock_pytest.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, pathlib, sys\n"
-        "assert pathlib.Path(sys.argv[1]).is_file()\n"
-        "pathlib.Path(os.environ['GATE_LOG']).write_text(str(pathlib.Path.cwd()))\n"
+    # The runner's installed console script: sys.path[0] is the launcher's own
+    # directory, never the working directory the gate changed into.
+    (binaries / "pytest_console.py").write_text(
+        "import sys\nfrom pytest import console_main\nsys.exit(console_main())\n"
     )
-    mock_pytest.chmod(0o755)
-    log = tmp_path / "gate.log"
+    (binaries / "pytest").write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(binaries / 'pytest_console.py'))} \"$@\"\n"
+    )
+    (binaries / "pytest").chmod(0o755)
+    # Without the pinned artifacts and the release-gate flag the collected test skips.
+    env = {name: value for name, value in os.environ.items() if not name.startswith("AVIBE_")}
     result = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", gate], cwd=tmp_path,
-        env={**os.environ, "RELEASE_TAG": tag, "GATE_LOG": str(log),
+        env={**env, "RELEASE_TAG": tag, "PYTHONPATH": "",
              "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}"},
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert log.exists() is forward
+    collected = "tests/e2e/test_retired_updater_bridge.py::" in result.stdout
+    assert collected is forward
     if forward:
-        assert log.read_text() == str(automation)
+        assert "1 skipped" in result.stdout
     else:
         assert "No forward Memory retirement upgrade" in result.stdout
 

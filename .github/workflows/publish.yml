@@ -360,7 +360,7 @@ jobs:
           PY
           )"
           if [ "$UPGRADE_DIRECTION" = forward ]; then
-            (cd release-automation && pytest tests/e2e/test_retired_updater_bridge.py -v)
+            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v)
           else
             echo "No forward Memory retirement upgrade from v3.1.0 to $RELEASE_TAG"
           fi
