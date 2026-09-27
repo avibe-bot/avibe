@@ -42,6 +42,7 @@ _HISTORY_AS_MEMORY_GUIDANCE = (
     "and channel, and it is the clearest, most direct, and rawest source of memory. "
     "Do not rely on vague impressions or ask the user to repeat themselves."
 )
+_CONTINUE_WHILE_UNMET = "Continue while the goal remains unmet and a viable path exists. "
 _CODEX_SKILL_REUSE_GUIDANCE = (
     "Choose skills by task relevance, but load a skill only if it has not already been read "
     "in this conversation; reuse already-loaded instructions across turns, callbacks, "
@@ -515,12 +516,15 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         text = "".join(block["text"] for block in blocks if block["id"] not in changed)
         assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
         assert text.count(_HISTORY_AS_MEMORY_GUIDANCE) == 1
+        assert text.count(_CONTINUE_WHILE_UNMET) == 1
         text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
+        text = text.replace(_CONTINUE_WHILE_UNMET, "")
         outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
     # omitting only the approved Skill-loading guidance blocks (including the
     # Codex-only reuse sentence) and restoring the previous verification principle
-    # and conversation-history guidance.
+    # and conversation-history guidance, and removing the restored Follow-through
+    # continuation sentence.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"
