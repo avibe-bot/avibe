@@ -7,7 +7,7 @@ import {
   settingsOverlayHistoryDelta,
   settingsOverlayNavigationState,
   settingsOverlayOriginFromState,
-  settingsOverlayPreservesCurrentLocation,
+  settingsOverlayKeepsRetainedRoute,
   type SettingsOverlayOrigin,
 } from './settingsOverlay';
 
@@ -174,7 +174,7 @@ describe('Settings overlay navigation ownership', () => {
     expect(settingsOverlayOriginFromState(state)).toBeNull();
   });
 
-  it('identifies only an ingress that preserves the current route', () => {
+  it('exempts exactly the transitions that keep the route behind Settings mounted', () => {
     const current = origin().location;
     const overlayState = settingsOverlayNavigationState({
       destinationPathname: '/settings/replies',
@@ -183,18 +183,26 @@ describe('Settings overlay navigation ownership', () => {
       source: current,
       targetState: undefined,
     });
+    const replies = location('/settings/replies', overlayState);
+    const nextSection = location('/settings/diagnostics', settingsOverlayNavigationState({
+      destinationPathname: '/settings/diagnostics',
+      desktop: true,
+      source: replies,
+      targetState: undefined,
+    }));
 
-    expect(settingsOverlayPreservesCurrentLocation(
-      current,
-      location('/settings/replies', overlayState),
-    )).toBe(true);
-    expect(settingsOverlayPreservesCurrentLocation(
-      location('/chat/another'),
-      location('/settings/replies', overlayState),
-    )).toBe(false);
-    expect(settingsOverlayPreservesCurrentLocation(
-      current,
-      location('/settings/replies'),
-    )).toBe(false);
+    // Opening over the current entry, and only that entry.
+    expect(settingsOverlayKeepsRetainedRoute(current, replies)).toBe(true);
+    expect(settingsOverlayKeepsRetainedRoute(location('/chat/another'), replies)).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(current, location('/settings/replies'))).toBe(false);
+    // Moving between sections over the same origin.
+    expect(settingsOverlayKeepsRetainedRoute(replies, nextSection)).toBe(true);
+    // Closing onto the origin, by history pop (same key) or by replace (new key).
+    expect(settingsOverlayKeepsRetainedRoute(replies, current)).toBe(true);
+    expect(settingsOverlayKeepsRetainedRoute(replies, { ...current, key: 'replaced' })).toBe(true);
+    // Any other navigation made while Settings is open leaves the retained route.
+    expect(settingsOverlayKeepsRetainedRoute(replies, location('/chat/another'))).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(replies, { ...current, hash: '' })).toBe(false);
+    expect(settingsOverlayKeepsRetainedRoute(replies, location('/settings/general'))).toBe(false);
   });
 });

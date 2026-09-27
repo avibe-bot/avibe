@@ -169,14 +169,36 @@ export const settingsOverlayNavigationState = ({
 export const locationPath = (location: Pick<Location, 'pathname' | 'search' | 'hash'>): string =>
   `${location.pathname}${location.search}${location.hash}`;
 
-export const settingsOverlayPreservesCurrentLocation = (
+const overlayOrigin = (location: Location): SettingsOverlayOrigin | null =>
+  isSettingsEntryPath(location.pathname) ? settingsOverlayOriginFromState(location.state) : null;
+
+/**
+ * Whether a navigation keeps the route behind Settings mounted, so a discard
+ * prompt for that route would be false in both of its branches. Three
+ * transitions do: opening Settings over the current route, moving between
+ * Settings sections over the same origin, and closing back onto that origin.
+ * Every other navigation leaves the route it came from, whether or not
+ * Settings is open when it is made.
+ */
+export const settingsOverlayKeepsRetainedRoute = (
   currentLocation: Location,
   nextLocation: Location,
 ): boolean => {
-  const origin = settingsOverlayOriginFromState(nextLocation.state);
-  return origin !== null
-    && origin.location.key === currentLocation.key
-    && locationPath(origin.location) === locationPath(currentLocation);
+  // Opening: the next location records this very entry as its origin.
+  const openedOrigin = settingsOverlayOriginFromState(nextLocation.state);
+  if (
+    openedOrigin !== null
+    && openedOrigin.location.key === currentLocation.key
+    && locationPath(openedOrigin.location) === locationPath(currentLocation)
+  ) return true;
+  // Moving within Settings or closing it: the next location renders the same
+  // route behind (or instead of) the overlay. Matched by path, not key —
+  // `closeSettingsOverlay` falls back to a replace that lands on the origin
+  // under a new key.
+  const origin = overlayOrigin(currentLocation);
+  if (origin === null) return false;
+  const nextRoute = overlayOrigin(nextLocation)?.location ?? nextLocation;
+  return locationPath(nextRoute) === locationPath(origin.location);
 };
 
 export const settingsOverlayHistoryDelta = (
@@ -208,7 +230,5 @@ export const closeSettingsOverlay = (
   });
 };
 
-export const useSettingsOverlayOrigin = (location: Location): SettingsOverlayOrigin | null => {
-  if (!isSettingsEntryPath(location.pathname)) return null;
-  return settingsOverlayOriginFromState(location.state);
-};
+export const useSettingsOverlayOrigin = (location: Location): SettingsOverlayOrigin | null =>
+  overlayOrigin(location);

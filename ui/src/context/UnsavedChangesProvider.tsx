@@ -15,7 +15,7 @@ import {
   type UnsavedChangesRegistrationId,
   type UnsavedChangesRegistry,
 } from '../lib/unsavedChangesRegistry';
-import { settingsOverlayPreservesCurrentLocation } from '../lib/settingsOverlay';
+import { settingsOverlayKeepsRetainedRoute } from '../lib/settingsOverlay';
 
 export const UnsavedChangesProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const registryRef = useRef<UnsavedChangesRegistry>(new Map());
@@ -40,7 +40,7 @@ export const UnsavedChangesProvider: React.FC<{ children: ReactNode }> = ({ chil
     currentLocation: Location;
     nextLocation: Location;
   }) => {
-    if (settingsOverlayPreservesCurrentLocation(currentLocation, nextLocation)) return false;
+    if (settingsOverlayKeepsRetainedRoute(currentLocation, nextLocation)) return false;
     const hasUnsavedChanges = getUnsavedChangesMessage(registryRef.current) !== null;
     return navigationGateRef.current.shouldBlock(hasUnsavedChanges);
   }, []);
