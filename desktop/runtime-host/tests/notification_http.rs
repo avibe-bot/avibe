@@ -146,7 +146,7 @@ async fn stream_and_detail_redirects_never_delegate_trust_to_another_origin() {
     let server = FakeServer::start([redirect.clone(), redirect]);
     let transport = server.transport();
     assert!(transport.connect().await.is_err());
-    assert!(transport.run_timestamps("run").await.is_none());
+    assert!(transport.run_detail("run").await.is_none());
     assert!(target.requests.lock().unwrap().is_empty());
     assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
@@ -167,6 +167,7 @@ async fn stream_requires_a_successful_sse_response_not_an_arbitrary_live_http_en
 async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies() {
     let valid = json!({"ok": true, "run": {
         "id": "run", "started_at": "2026-09-10T12:00:00Z", "updated_at": "2026-09-10T12:00:30Z",
+        "session_project_name": "avibe-app", "session_label": "桌面版检查更新", "definition_name": null,
     }});
     let server = FakeServer::start([
         response("200 OK", "application/json", valid.to_string().as_bytes()),
@@ -182,11 +183,12 @@ async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies()
             .to_vec(),
     ]);
     let transport = server.transport();
-    let detail = transport.run_timestamps("run").await.unwrap();
-    assert_eq!(detail.started_at, Some("2026-09-10T12:00:00Z".into()));
-    assert_eq!(detail.updated_at, Some("2026-09-10T12:00:30Z".into()));
+    let detail = transport.run_detail("run").await.unwrap();
+    assert_eq!(detail.stamps.started_at, Some("2026-09-10T12:00:00Z".into()));
+    assert_eq!(detail.stamps.updated_at, Some("2026-09-10T12:00:30Z".into()));
+    assert_eq!(detail.source(), Some("avibe-app · 桌面版检查更新".into()));
     for _ in 0..5 {
-        assert!(transport.run_timestamps("run").await.is_none());
+        assert!(transport.run_detail("run").await.is_none());
     }
     for request in server.requests.lock().unwrap().iter() {
         assert!(request.starts_with("GET /api/harness/runs/run HTTP/1.1\r\n"));
@@ -198,13 +200,10 @@ async fn identifiers_are_encoded_as_one_path_segment_not_runtime_selected_routes
     let server = FakeServer::start([response("404 Not Found", "application/json", b"{}")]);
     let transport = server.transport();
     for key in ["", ".", ".."] {
-        assert!(transport.run_timestamps(key).await.is_none());
+        assert!(transport.run_detail(key).await.is_none());
     }
     assert!(server.requests.lock().unwrap().is_empty());
-    assert!(transport
-        .run_timestamps("../settings?token=secret#片段")
-        .await
-        .is_none());
+    assert!(transport.run_detail("../settings?token=secret#片段").await.is_none());
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(

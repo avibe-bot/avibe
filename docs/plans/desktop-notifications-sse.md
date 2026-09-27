@@ -184,10 +184,30 @@ v1 keys (names frozen; wording is i18n content, not contract):
 - `desktopBootstrap.notifications.runCanceled.body`
 - `desktopBootstrap.notifications.toggle` (tray menu label)
 
-Bodies may include the `session_id` / `run_id` as a short suffix when
-present; they must not interpolate unsanitized Runtime strings into
-the OS notification (the payload is untrusted process output on its
-way to a privileged surface, same rule as refused origins).
+### Run notifications name their source
+
+A run banner says where the work happened, the way a mail notification
+names the sender: the **title** is the source and the **body** is the
+outcome (the catalog's run `title`, e.g. "Run completed"). The source
+comes from the run detail the shell already reads
+(`GET /api/harness/runs/<id>`), in precedence order:
+
+1. `session_project_name · session_label` — a Workbench session in a
+   Project (`session_project_name` is the Project display name, projected
+   by the same session summary that produces `session_label`);
+2. `session_label` alone — an IM session reads as its channel name;
+3. `definition_name` — the task or watch, when no session resolved.
+
+A terminal run that qualifies as background work is read back once for
+its label; an unreadable or label-less detail keeps the generic catalog
+title and body rather than withholding the notification. Approval
+banners keep generic copy.
+
+These labels are Runtime strings on their way to a privileged OS
+surface, so they leave only through one sanitizer
+(`RunDetail::source`): control characters removed, whitespace
+collapsed, each part bounded to 48 characters. The SSE payload itself
+is still never interpolated.
 
 ### Plugin and permission
 
@@ -269,7 +289,9 @@ threshold is exercised in microseconds.
 
 ## Explicit non-goals (v1)
 
-- A new HTTP route or a Python "please notify" flag.
+- A new HTTP route or a Python "please notify" flag. (The run detail
+  gained one additive projected field, `session_project_name`, on the
+  existing route.)
 - Deep-link click targets (G5).
 - Notifying on every chat message, every `session.activity`, or
   foreground turns that finish quickly.

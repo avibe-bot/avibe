@@ -41,6 +41,20 @@ impl NativeNotificationCatalog {
         }
         .clone()
     }
+
+    /// With a known source the banner reads like a mail notification: where it
+    /// happened as the title, the outcome as the body. Without one it keeps the
+    /// generic sentence, which is all the shell can honestly say.
+    fn render(&self, intent: NotificationIntent, source: Option<String>) -> NotificationCopy {
+        let copy = self.copy(intent);
+        match source {
+            Some(source) => NotificationCopy {
+                title: source,
+                body: copy.title,
+            },
+            None => copy,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -172,7 +186,7 @@ impl NotificationSink for NativeSink {
         }
     }
 
-    fn deliver(&self, intent: NotificationIntent) {
+    fn deliver(&self, intent: NotificationIntent, source: Option<String>) {
         let sink = self.clone();
         let _ = self.app.run_on_main_thread(move || {
             if !sink.gate().allows() {
@@ -180,7 +194,7 @@ impl NotificationSink for NativeSink {
             }
             let copy = native_catalog_for_locales(sys_locale::get_locales())
                 .notifications
-                .copy(intent);
+                .render(intent, source);
             if sink
                 .app
                 .notification()
@@ -271,6 +285,11 @@ mod tests {
                 let copy = catalog.copy(intent);
                 assert!(!copy.title.is_empty() && !copy.body.is_empty());
                 assert!(!copy.body.contains("{{"));
+                let sourced = catalog.render(intent, Some("avibe-app · 发布检查".into()));
+                assert_eq!(sourced.title, "avibe-app · 发布检查");
+                assert_eq!(sourced.body, copy.title);
+                let generic = catalog.render(intent, None);
+                assert_eq!((generic.title, generic.body), (copy.title, copy.body));
             }
         }
     }

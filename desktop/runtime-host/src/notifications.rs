@@ -127,7 +127,9 @@ impl NotificationGate {
 
 pub trait NotificationSink: Send + Sync {
     fn gate(&self) -> NotificationGate;
-    fn deliver(&self, intent: NotificationIntent);
+    /// `source` names where a run happened ("Project · Session"), already
+    /// sanitized by [`RunDetail::source`]; `None` keeps the generic copy.
+    fn deliver(&self, intent: NotificationIntent, source: Option<String>);
 }
 
 #[derive(Default)]
@@ -212,6 +214,53 @@ impl RunTimestamps {
     }
 }
 
+/// The run detail the shell reads back after a terminal event: the stamps
+/// that decide whether it is background work, plus the labels that say where
+/// it ran. Every label is Runtime text on its way to an OS surface, so it only
+/// leaves through [`RunDetail::source`].
+#[derive(Clone, Default, Deserialize)]
+pub struct RunDetail {
+    #[serde(flatten)]
+    pub stamps: RunTimestamps,
+    pub session_project_name: Option<String>,
+    pub session_label: Option<String>,
+    pub definition_name: Option<String>,
+}
+
+const SOURCE_PART_CHARS: usize = 48;
+
+fn clean_label(value: Option<&str>) -> Option<String> {
+    let words = value?
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect::<String>();
+    let collapsed = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= SOURCE_PART_CHARS {
+        return Some(collapsed);
+    }
+    let mut truncated = collapsed.chars().take(SOURCE_PART_CHARS - 1).collect::<String>();
+    truncated.truncate(truncated.trim_end().len());
+    truncated.push('…');
+    Some(truncated)
+}
+
+impl RunDetail {
+    /// "Project · Session" for a Workbench session, the channel for an IM
+    /// session, and the task or watch name when no session resolved. Control
+    /// characters are removed, whitespace collapsed, and each part bounded.
+    pub fn source(&self) -> Option<String> {
+        let project = clean_label(self.session_project_name.as_deref());
+        let place = clean_label(self.session_label.as_deref()).or_else(|| clean_label(self.definition_name.as_deref()));
+        match (project, place) {
+            (Some(project), Some(place)) if project != place => Some(format!("{project} · {place}")),
+            (project, place) => place.or(project),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RunEvent {
     run_id: String,
@@ -222,11 +271,14 @@ struct RunEvent {
 }
 
 enum Candidate {
-    Ready(NotificationIntent),
-    Refetch {
+    Approval,
+    Run {
         run_id: String,
         stamps: RunTimestamps,
         intent: NotificationIntent,
+        /// Already background work by type or by the event's own stamps; the
+        /// detail read only supplies the source label.
+        background: bool,
     },
 }
 
@@ -251,7 +303,7 @@ impl NotificationFilter {
             return self
                 .approvals
                 .insert(&approval.request_id, now)
-                .then_some(Candidate::Ready(NotificationIntent::ApprovalRequested));
+                .then_some(Candidate::Approval);
         }
         let run: RunEvent = serde_json::from_value(envelope.data).ok()?;
         if run.run_id.is_empty() {
@@ -266,13 +318,12 @@ impl NotificationFilter {
         if !self.runs.insert(&run.run_id, now) {
             return None;
         }
-        if matches!(run.run_type.as_deref(), Some("scheduled" | "watch")) || run.stamps.is_long_running() {
-            return Some(Candidate::Ready(intent));
-        }
-        run.stamps.missing().then_some(Candidate::Refetch {
+        let background = matches!(run.run_type.as_deref(), Some("scheduled" | "watch")) || run.stamps.is_long_running();
+        (background || run.stamps.missing()).then_some(Candidate::Run {
             run_id: run.run_id,
             stamps: run.stamps,
             intent,
+            background,
         })
     }
 }
@@ -288,7 +339,7 @@ pub struct StreamError;
 #[async_trait]
 pub trait NotificationTransport: Send + Sync {
     async fn connect(&self) -> Result<Box<dyn EventStream>, StreamError>;
-    async fn run_timestamps(&self, run_id: &str) -> Option<RunTimestamps>;
+    async fn run_detail(&self, run_id: &str) -> Option<RunDetail>;
 }
 
 pub struct HttpNotificationTransport {
@@ -356,7 +407,7 @@ impl NotificationTransport for HttpNotificationTransport {
         Ok(Box::new(HttpEventStream(response)))
     }
 
-    async fn run_timestamps(&self, run_id: &str) -> Option<RunTimestamps> {
+    async fn run_detail(&self, run_id: &str) -> Option<RunDetail> {
         if matches!(run_id, "" | "." | "..") {
             return None;
         }
@@ -435,26 +486,33 @@ pub async fn run_notifications(
                     })
                     .collect::<Vec<_>>();
                 for candidate in candidates.into_iter().filter(|_| allowed_at_receipt) {
-                    let intent = match candidate {
-                        Candidate::Ready(intent) => Some(intent),
-                        Candidate::Refetch {
+                    let (intent, source) = match candidate {
+                        Candidate::Approval => (Some(NotificationIntent::ApprovalRequested), None),
+                        Candidate::Run {
                             run_id,
                             mut stamps,
                             intent,
+                            background,
                         } => {
                             if !sink.gate().allows() {
                                 continue;
                             }
-                            if let Ok(Some(detail)) =
-                                tokio::time::timeout(REQUEST_TIMEOUT, transport.run_timestamps(&run_id)).await
-                            {
-                                stamps.fill_missing(detail);
+                            // One bounded read per terminal run: it names the
+                            // source and, when the event lacked stamps, decides
+                            // whether the run was background work at all.
+                            let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.run_detail(&run_id))
+                                .await
+                                .ok()
+                                .flatten();
+                            let source = detail.as_ref().and_then(RunDetail::source);
+                            if let Some(detail) = detail {
+                                stamps.fill_missing(detail.stamps);
                             }
-                            stamps.is_long_running().then_some(intent)
+                            ((background || stamps.is_long_running()).then_some(intent), source)
                         }
                     };
                     if let Some(intent) = intent.filter(|_| sink.gate().allows()) {
-                        sink.deliver(intent);
+                        sink.deliver(intent, source);
                     }
                 }
             }

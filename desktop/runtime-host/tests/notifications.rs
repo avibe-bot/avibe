@@ -6,7 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use avibe_runtime_host::notifications::{
     run_notifications, EventStream, NotificationFilter, NotificationGate, NotificationIntent, NotificationSink,
-    NotificationTransport, ReconnectBackoff, RunTimestamps, SseDecoder, StreamError, RETAINED_KEYS, RETENTION,
+    NotificationTransport, ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError, RETAINED_KEYS,
+    RETENTION,
 };
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -34,7 +35,7 @@ impl EventStream for FakeStream {
 struct FakeTransport {
     streams: Mutex<VecDeque<FakeStream>>,
     connected_at: Mutex<Vec<Instant>>,
-    details: Mutex<HashMap<String, RunTimestamps>>,
+    details: Mutex<HashMap<String, RunDetail>>,
     refetched: Mutex<Vec<String>>,
     detail_delay: Duration,
 }
@@ -51,7 +52,7 @@ impl NotificationTransport for FakeTransport {
             .ok_or(StreamError)
     }
 
-    async fn run_timestamps(&self, run_id: &str) -> Option<RunTimestamps> {
+    async fn run_detail(&self, run_id: &str) -> Option<RunDetail> {
         self.refetched.lock().unwrap().push(run_id.to_owned());
         tokio::time::sleep(self.detail_delay).await;
         self.details.lock().unwrap().get(run_id).cloned()
@@ -72,6 +73,7 @@ struct FakeSink {
     focused: AtomicBool,
     visible: AtomicBool,
     delivered: Mutex<Vec<NotificationIntent>>,
+    sources: Mutex<Vec<Option<String>>>,
 }
 
 impl Default for FakeSink {
@@ -81,6 +83,7 @@ impl Default for FakeSink {
             focused: AtomicBool::new(false),
             visible: AtomicBool::new(true),
             delivered: Mutex::new(Vec::new()),
+            sources: Mutex::new(Vec::new()),
         }
     }
 }
@@ -94,8 +97,16 @@ impl NotificationSink for FakeSink {
         }
     }
 
-    fn deliver(&self, intent: NotificationIntent) {
+    fn deliver(&self, intent: NotificationIntent, source: Option<String>) {
         self.delivered.lock().unwrap().push(intent);
+        self.sources.lock().unwrap().push(source);
+    }
+}
+
+fn stamps_only(stamps: RunTimestamps) -> RunDetail {
+    RunDetail {
+        stamps,
+        ..RunDetail::default()
     }
 }
 
@@ -292,7 +303,9 @@ async fn durable_duration_not_arrival_or_attach_time_controls_all_other_run_kind
         *sink.delivered.lock().unwrap(),
         vec![NotificationIntent::RunSucceeded; expected]
     );
-    assert!(transport.refetched.lock().unwrap().is_empty());
+    // Only runs that notify are read back, once each, for their source label;
+    // an unavailable detail never withholds one the event already qualified.
+    assert_eq!(transport.refetched.lock().unwrap().len(), expected);
     task.abort();
 }
 
@@ -332,7 +345,7 @@ async fn terminal_stamps_cover_offsets_updated_at_precision_and_fail_closed_valu
         *sink.delivered.lock().unwrap(),
         vec![NotificationIntent::RunFailed; expected]
     );
-    assert!(transport.refetched.lock().unwrap().is_empty());
+    assert_eq!(transport.refetched.lock().unwrap().len(), expected);
     task.abort();
 }
 
@@ -362,7 +375,11 @@ async fn missing_stamps_refetch_once_per_retained_terminal_and_then_fail_closed(
     .enumerate()
     {
         let key = index.to_string();
-        transport.details.lock().unwrap().insert(key.clone(), stamps);
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert(key.clone(), stamps_only(stamps));
         let event = frame(
             "runs.updated",
             json!({"run_id": key, "status": "canceled", "run_type": "agent_run"}),
@@ -375,7 +392,11 @@ async fn missing_stamps_refetch_once_per_retained_terminal_and_then_fail_closed(
         ("fill-start", json!({"completed_at": "2026-09-10T12:00:30Z"})),
         ("fill-end", json!({"started_at": "2026-09-10T12:00:00Z"})),
     ] {
-        transport.details.lock().unwrap().insert(key.into(), complete.clone());
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert(key.into(), stamps_only(complete.clone()));
         let mut data = data;
         data["run_id"] = json!(key);
         data["status"] = json!("canceled");
@@ -474,11 +495,11 @@ async fn focus_is_rechecked_after_refetch_without_deferring_the_notification() {
     let sink = Arc::new(FakeSink::default());
     transport.details.lock().unwrap().insert(
         "run".into(),
-        RunTimestamps {
+        stamps_only(RunTimestamps {
             started_at: Some("2026-09-10T12:00:00Z".into()),
             completed_at: Some("2026-09-10T12:01:00Z".into()),
             ..RunTimestamps::default()
-        },
+        }),
     );
     transport.stream(
         [frame("runs.updated", json!({"run_id": "run", "status": "succeeded"}))],
@@ -577,4 +598,52 @@ fn reconnect_backoff_is_positive_capped_and_resettable() {
     }
     backoff.reset();
     assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_notifications_name_their_source_from_sanitized_detail_labels() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    let label = |project: Option<&str>, session: Option<&str>, definition: Option<&str>| RunDetail {
+        session_project_name: project.map(Into::into),
+        session_label: session.map(Into::into),
+        definition_name: definition.map(Into::into),
+        ..RunDetail::default()
+    };
+    let long = "长".repeat(80);
+    let cases = [
+        (
+            label(Some("avibe-app"), Some("桌面版检查更新"), Some("rc21 release run")),
+            Some("avibe-app · 桌面版检查更新".to_owned()),
+        ),
+        (label(None, Some("#dev-ops"), None), Some("#dev-ops".to_owned())),
+        (
+            label(None, None, Some("nightly audit")),
+            Some("nightly audit".to_owned()),
+        ),
+        (label(Some("solo"), Some("solo"), None), Some("solo".to_owned())),
+        (
+            label(Some(" \u{1b}[31mproj\n"), Some("line\r\nbreak\u{7}\t here"), None),
+            Some("[31mproj · line break here".to_owned()),
+        ),
+        (label(Some(&long), None, None), Some(format!("{}…", "长".repeat(47)))),
+        (label(Some("  "), Some("\n"), None), None),
+        (RunDetail::default(), None),
+    ];
+    let mut chunks = Vec::new();
+    let mut expected = Vec::new();
+    for (index, (detail, source)) in cases.into_iter().enumerate() {
+        transport.details.lock().unwrap().insert(index.to_string(), detail);
+        chunks.push(run(index, "watch", 0));
+        expected.push(source);
+    }
+    // A detail that cannot be read keeps the generic copy rather than the run.
+    chunks.push(run("unreadable", "scheduled", 0));
+    expected.push(None);
+    transport.stream(chunks, false);
+    let task = spawn(transport, sink.clone());
+    settle().await;
+    assert_eq!(*sink.sources.lock().unwrap(), expected);
+    assert_eq!(sink.delivered.lock().unwrap().len(), expected.len());
+    task.abort();
 }

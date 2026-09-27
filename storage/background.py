@@ -9320,6 +9320,7 @@ class SQLiteBackgroundTaskStore:
             "session_platform": None,
             "session_scope_kind": None,
             "session_label": None,
+            "session_project_name": None,
             "session_is_workbench": False,
             "session_openable": False,
         }
@@ -9410,6 +9411,9 @@ class SQLiteBackgroundTaskStore:
             "session_platform": platform or None,
             "session_scope_kind": scope_type or None,
             "session_label": row["title"] if is_workbench else (row["display_name"] or row["native_id"]),
+            # The Project a workbench session lives in, so a surface without the
+            # Workbench around it (a desktop notification) can say where it was.
+            "session_project_name": (row["display_name"] or None) if scope_type == "project" else None,
             "session_is_workbench": is_workbench,
             "session_openable": session_openable_in_chat(
                 session_id=row["id"], scope_native_type=row["native_type"]
@@ -9502,6 +9506,7 @@ class SQLiteBackgroundTaskStore:
             "session_platform": platform,
             "session_scope_kind": scope_type,
             "session_label": display_name or native_id,
+            "session_project_name": None,
             "session_is_workbench": False,
             # A delivery key names a channel, not a session; there is no id to
             # open even though the label reads like one.

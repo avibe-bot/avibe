@@ -36,8 +36,12 @@ def _build_schema(db_path: Path) -> None:
     SQLiteSessionsService(db_path).close()
 
 
-def _make_workbench_session(conn, tmp_path: Path, native_id: str, title: str) -> str:
-    scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id=native_id, now=NOW)
+def _make_workbench_session(
+    conn, tmp_path: Path, native_id: str, title: str, project_name: str | None = None
+) -> str:
+    scope_id = upsert_scope(
+        conn, platform="avibe", scope_type="project", native_id=native_id, now=NOW, display_name=project_name
+    )
     conn.execute(
         scope_settings.insert().values(
             scope_id=scope_id,
@@ -99,7 +103,7 @@ def test_run_payload_resolves_every_session_state(tmp_path: Path) -> None:
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
-            workbench_id = _make_workbench_session(conn, tmp_path, "proj_runs", "重构鉴权模块")
+            workbench_id = _make_workbench_session(conn, tmp_path, "proj_runs", "重构鉴权模块", "鉴权服务")
             upsert_scope(
                 conn, platform="slack", scope_type="channel", native_id="C0123", now=NOW, display_name="#dev-ops"
             )
@@ -122,6 +126,7 @@ def test_run_payload_resolves_every_session_state(tmp_path: Path) -> None:
     assert workbench["session_label"] == "重构鉴权模块"
     assert workbench["session_platform"] == "avibe"
     assert workbench["session_scope_kind"] == "project"
+    assert workbench["session_project_name"] == "鉴权服务"
 
     im = runs["run_im"]
     assert im["session_is_workbench"] is False  # reads as a channel, not as a session title
@@ -132,6 +137,7 @@ def test_run_payload_resolves_every_session_state(tmp_path: Path) -> None:
     assert im["session_openable"] is False
     assert im["session_platform"] == "slack"
     assert im["session_label"] == "#dev-ops"  # display name, not the raw channel id
+    assert im["session_project_name"] is None  # a channel is not a Project
 
     # A run outlives its session. The summary stays all-null so the UI can say
     # "session deleted" instead of printing an id that opens nothing.
@@ -438,7 +444,7 @@ def test_every_projected_label_is_searchable(tmp_path: Path) -> None:
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
-            bound = _make_workbench_session(conn, tmp_path, "proj_probe", "重构鉴权模块")
+            bound = _make_workbench_session(conn, tmp_path, "proj_probe", "重构鉴权模块", "鉴权服务")
             reporter = _make_workbench_session(conn, tmp_path, "proj_reporter", "编排调度会话")
             upsert_scope(
                 conn, platform="slack", scope_type="channel", native_id="C0123", now=NOW, display_name="#dev-ops"
@@ -484,7 +490,7 @@ def test_every_projected_label_is_searchable(tmp_path: Path) -> None:
     # The walk is not vacuous: it reached every site, including the nested one.
     # Asserted against the fixture's values, not against field names, so this
     # keeps holding when a site is renamed or a new one appears.
-    planted = {"重构鉴权模块", "编排调度会话", "磁盘水位巡检", "#dev-ops"}
+    planted = {"重构鉴权模块", "鉴权服务", "编排调度会话", "磁盘水位巡检", "#dev-ops"}
     seen = {value for fields in projected.values() for value in fields.values()}
     assert planted <= seen, f"projection walk missed {planted - seen}"
 
