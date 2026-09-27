@@ -1,5 +1,6 @@
 import asyncio
 import builtins
+import contextlib
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from vibe import cli
 from vibe import internal_client
 from vibe import remote_access
 from vibe import upgrade
+from storage.lock import MigrationLockTimeout
 
 
 def _make_fake_uv_tool(
@@ -320,18 +322,107 @@ def test_doctor_names_split_stable_launchers_and_repair_moves_the_stale_one(spli
     assert [item["status"] for item in cli._stable_launcher_items()] == ["pass"]
 
 
-def test_stable_launcher_repair_targets_the_exported_launcher(split_launchers):
-    """Windows discovery accepts an extensionless vibe beside uv's vibe.exe export."""
+def test_a_launcher_is_managed_only_under_a_name_its_install_exports(split_launchers, monkeypatch):
+    """Copy-marker validation and every move use ``generation/bin/<launcher name>``."""
+
+    from vibe.install_generations import _uv_installation
 
     split = split_launchers
     exe = _managed_generation("exe", "1.6.0", export="vibe.exe")
-    split.installer_launcher.unlink()
-    split.installer_launcher.symlink_to(exe / "bin" / "vibe.exe")
+    exe_launcher = split.installer_launcher.with_name("vibe.exe")
+    exe_launcher.symlink_to(exe / "bin" / "vibe.exe")
+    # An alias whose name the install it selects does not export.
+    alias = split.path_launcher.parent.parent / "alias" / "vibe.exe"
+    alias.parent.mkdir()
+    alias.symlink_to(split.old / "bin" / "vibe")
+    monkeypatch.setenv(upgrade.CURRENT_VIBE_EXECUTABLE_ENV, str(alias))
+
+    managed = upgrade.managed_stable_launchers(exe_launcher)
+
+    assert [launcher for launcher, _generation in managed] == [
+        exe_launcher, split.path_launcher, split.installer_launcher,
+    ]
+    for launcher, generation in managed:
+        assert launcher.name in {export.name for export in _uv_installation(generation)[1]}
 
     result = cli._repair_stable_launchers()
 
     assert result["status"] == "repaired"
-    assert split.path_launcher.resolve() == (exe / "bin" / "vibe.exe").resolve()
+    assert alias.resolve() == (split.old / "bin" / "vibe").resolve()
+
+
+def test_tied_installs_are_never_ranked_by_discovery_order(split_launchers, monkeypatch):
+    """Two installs of one version with identical receipt times tie as the last activation."""
+
+    split = split_launchers
+    _reinstall_same_version(split)
+    for generation in (split.old, split.new):
+        os.utime(generation / "uv" / "tools" / "avibe-os" / "uv-receipt.toml", (1_500_000, 1_500_000))
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    item, = cli._stable_launcher_items()
+
+    assert item["status"] == "fail"
+    for launcher, generation in ((split.path_launcher, split.old), (split.installer_launcher, split.new)):
+        assert f"{launcher} -> 1.5.0 ({generation})" in item["message"]
+        assert f"{launcher} -> 1.5.0 ({generation})" in item["action"]
+    assert "repair" not in item
+    assert "Avibe 安装程序" in item["action"]
+
+    result = cli._repair_stable_launchers()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "stable_launchers_tied"
+    assert "没有改动任何启动器" in result["message"]
+    assert split.path_launcher.resolve() == (split.old / "bin" / "vibe").resolve()
+    assert split.installer_launcher.resolve() == (split.new / "bin" / "vibe").resolve()
+
+    ran = []
+    monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
+    parser = cli.build_parser()
+    for generation in (split.old, split.new):
+        monkeypatch.setattr(cli, "current_generation", lambda generation=generation: generation)
+        with pytest.raises(SystemExit) as exc_info:
+            cli._dispatch_parsed_command(parser, parser.parse_args(["start"]))
+        assert exc_info.value.code == 0
+    assert ran == ["start", "start"]
+
+
+@pytest.mark.parametrize("failure", ["unwritable-launcher", "missing-export", "lock-busy"])
+def test_stable_launcher_repair_failures_are_localized(split_launchers, monkeypatch, failure):
+    """No exception text reaches the localized repair message."""
+
+    split = split_launchers
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    reason, fragment = {
+        "unwritable-launcher": ("stable_launcher_move_failed", "请确认你有权限写入它"),
+        "missing-export": ("stable_launcher_move_failed", "请确认你有权限写入它"),
+        "lock-busy": ("upgrade_lock_busy", "另一个 Avibe 安装、升级或修复正在进行"),
+    }[failure]
+    if failure == "unwritable-launcher":
+        if os.name != "posix" or os.geteuid() == 0:
+            pytest.skip("requires POSIX non-root permissions")
+        split.path_launcher.parent.chmod(0o555)
+    elif failure == "missing-export":
+        (split.new / "bin" / "vibe").unlink()
+    else:
+        @contextlib.contextmanager
+        def busy(**_kwargs):
+            raise MigrationLockTimeout("Timed out waiting for migration lock")
+            yield
+
+        monkeypatch.setattr(cli, "atomic_upgrade_lock", busy)
+
+    try:
+        result = cli._repair_stable_launchers()
+    finally:
+        split.path_launcher.parent.chmod(0o755)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == reason
+    assert fragment in result["message"]
+    assert not any(text in result["message"] for text in ("Permission", "not executable", "Timed out"))
+    assert split.path_launcher.resolve() == (split.old / "bin" / "vibe").resolve()
 
 
 def test_stable_launcher_repair_fails_unless_the_launchers_converge(split_launchers, monkeypatch):

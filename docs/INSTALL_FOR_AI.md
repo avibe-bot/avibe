@@ -183,14 +183,27 @@ does not need an IM chat to complete this smoke test.
 
 ## Uninstall
 
-Only run this if the user asks to remove Avibe:
+Only run this if the user asks to remove Avibe. Before the installs are deleted, the loop removes every stable `vibe` launcher on `PATH` or in the installer's directories that selects one of them, with its generation marker; launchers that point anywhere else stay. If `rm` reports that it cannot remove a launcher in a directory such as `/usr/local/bin`, rerun that `rm` with `sudo`.
 
 ```bash
 vibe stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
 uv tool uninstall vibe-remote
-vibe_bin="$(command -v vibe)" && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+generations="$(cd "$avibe_home/runtime/install-generations" 2>/dev/null && pwd -P)"
+[ -n "$generations" ] && { printf '%s\n' "$PATH" | tr ':' '\n'; printf '%s\n' "$UV_TOOL_BIN_DIR" ~/.local/bin ~/bin /usr/local/bin /opt/homebrew/bin; } |
+while IFS= read -r dir; do
+  [ -n "$dir" ] || continue
+  launcher="$dir/vibe"
+  marker="$dir/.vibe.avibe-generation"
+  if [ -L "$launcher" ]; then
+    selected="$(cd "$dir" 2>/dev/null && cd "$(dirname "$(readlink "$launcher")")" 2>/dev/null && pwd -P)"
+  else
+    selected="$(cat "$marker" 2>/dev/null)"
+    cmp -s "$launcher" "$selected/bin/vibe" 2>/dev/null || selected=
+  fi
+  case "$selected" in "$generations"/*) rm -f "$launcher" "$marker" ;; esac
+done
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```

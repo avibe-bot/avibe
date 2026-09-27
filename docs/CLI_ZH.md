@@ -224,7 +224,7 @@ vibe doctor repair tmux --yes
 - Agent CLI 可用性（Claude Code、OpenCode、Codex）
 - runtime home 迁移状态
 - runtime 进程、安装来源和重启元数据状态
-- 稳定 `vibe` 启动器是否选中了不同的已安装版本（失败时列出两边的路径和版本；`stable-launchers` 会把它们都指向最新版本）
+- 稳定 `vibe` 启动器是否选中了不同的已安装版本（失败时列出两边的路径和版本；`stable-launchers` 会把它们都指向最新版本；两个安装同为最后激活时不做任何改动）
 - 正在运行的服务是否比最近一次激活的安装更旧（警告）
 - 通过统一依赖诊断组检查 askill、avault、Git Runtime、Model Hub 引擎（CPA）、Show Runtime、tmux 和 Node.js
 - `vibe doctor --deep` 还会在不下载正文的情况下探测缺失依赖的精确地址

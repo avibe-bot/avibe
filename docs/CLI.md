@@ -262,7 +262,7 @@ vibe doctor repair tmux --yes
 - Agent CLI availability (Claude Code, OpenCode, Codex)
 - Runtime home migration state
 - Runtime process, install, and restart metadata state
-- Stable `vibe` launchers that select different installed versions (fails with both paths and versions; `stable-launchers` points them all at the newest one)
+- Stable `vibe` launchers that select different installed versions (fails with both paths and versions; `stable-launchers` points them all at the newest one, and changes nothing when two installs tie as the last activation)
 - A running service older than the last activated install (warns)
 - askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js readiness through one dependency diagnostic group
 - `vibe doctor --deep` also probes missing dependencies without downloading their bodies

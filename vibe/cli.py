@@ -92,7 +92,6 @@ from vibe.upgrade import (
     is_desktop_managed_runtime,
     _launcher_generation,
     _candidate_python,
-    generation_launcher,
     launcher_is_current_process,
     move_managed_launcher_locked,
     newest_launcher_selection,
@@ -102,10 +101,12 @@ from vibe.upgrade import (
     discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
     stable_launcher_selections,
+    top_ranked_selections,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
     verify_upgrade_candidate,
 )
 from storage.db import create_sqlite_engine
+from storage.lock import MigrationLockTimeout
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
@@ -12722,13 +12723,20 @@ def _stable_launcher_items() -> list[dict]:
             launchers=_describe_launcher_selections(selections, language),
         ),
         i18n_t(
+            "doctor.action.splitLaunchersTied",
+            language,
+            launchers=_describe_launcher_selections(top_ranked_selections(selections), language),
+        )
+        if target is None
+        else i18n_t(
             "doctor.action.splitLaunchers",
             language,
             launcher=target.launcher,
             version=target.version or unknown,
         ),
         code="installation.split_launchers",
-        repair_target="stable-launchers",
+        # Tied installs leave the repair nothing to choose, so doctor does not offer it.
+        repair_target=None if target is None else "stable-launchers",
         repair_risk="low",
         launchers=[
             {
@@ -13174,16 +13182,46 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
             if (skipped := in_step(selections)) is not None:
                 return skipped
             target = newest_launcher_selection(selections)
+            if target is None:
+                # Discovery order must never pick between tied installs.
+                return _doctor_repair_result(
+                    target_name,
+                    "failed",
+                    i18n_t(
+                        "doctor.repair.stableLaunchersTied",
+                        language,
+                        launchers=_describe_launcher_selections(top_ranked_selections(selections), language),
+                    ),
+                    reason="stable_launchers_tied",
+                )
+            unknown = i18n_t("doctor.value.unknown", language)
             moved: list[Path] = []
             for selection in selections:
                 if selection.generation == target.generation:
                     continue
-                exported = generation_launcher(target.generation, selection.launcher.name)
-                if exported is None:
-                    raise RuntimeError(f"{target.generation} no longer exports a vibe launcher")
-                # A launcher another installer replaced since discovery is left alone.
-                if move_managed_launcher_locked(selection.launcher, selection.generation, exported):
-                    moved.append(selection.launcher)
+                # A managed launcher has its export's name, so the target
+                # install exports the same name (see managed_stable_launchers).
+                exported = target.generation / "bin" / selection.launcher.name
+                try:
+                    # A launcher another installer replaced since discovery is left alone.
+                    if move_managed_launcher_locked(selection.launcher, selection.generation, exported):
+                        moved.append(selection.launcher)
+                except (OSError, RuntimeError) as exc:
+                    logger.warning("failed to repoint stable launcher %s", selection.launcher, exc_info=True)
+                    return _doctor_repair_result(
+                        target_name,
+                        "failed",
+                        i18n_t(
+                            "doctor.repair.stableLauncherMoveFailed",
+                            language,
+                            launcher=selection.launcher,
+                            version=target.version or unknown,
+                            generation=target.generation,
+                        ),
+                        reason="stable_launcher_move_failed",
+                        error=str(exc),
+                        launchers=[str(launcher) for launcher in moved],
+                    )
             # Report what the launchers select now, not what was attempted: the
             # upgrade lock does not stop uv or another installer changing them.
             remaining = stable_launcher_selections()
@@ -13196,11 +13234,24 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                         language,
                         launchers=_describe_launcher_selections(remaining, language),
                     ),
+                    reason="stable_launchers_still_split",
                     launchers=[str(launcher) for launcher in moved],
                 )
-    except Exception as exc:
+    except MigrationLockTimeout:
         return _doctor_repair_result(
-            target_name, "failed", i18n_t("doctor.repair.stableLaunchersFailed", language, error=exc)
+            target_name,
+            "failed",
+            i18n_t("doctor.repair.stableLaunchersBusy", language),
+            reason="upgrade_lock_busy",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stable launcher repair failed", exc_info=True)
+        return _doctor_repair_result(
+            target_name,
+            "failed",
+            i18n_t("doctor.repair.stableLaunchersFailed", language),
+            reason="stable_launcher_repair_exception",
+            error=str(exc),
         )
     return _doctor_repair_result(
         target_name,

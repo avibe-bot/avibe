@@ -499,6 +499,7 @@ def _launcher_generation(launcher: Path, root: Path) -> Path | None:
         return None
     # A marker is necessary only for the cross-volume copy fallback. Treat it
     # as a hint and prove that it still describes the live launcher before use.
+    # A managed launcher has its export's name (see ``managed_stable_launchers``).
     candidate = generation / "bin" / launcher.name
     try:
         # Read both files on every check. Marker validation is a safety
@@ -587,8 +588,8 @@ def managed_stable_launchers(*launchers: str | os.PathLike[str] | None) -> list[
     from vibe.install_generations import _uv_installation
 
     root = atomic_uv_install_root().expanduser().resolve()
-    recognized: dict[Path, bool] = {}
-    names = ("vibe.exe", "vibe") if os.name == "nt" else ("vibe",)
+    exported: dict[Path, frozenset[str]] = {}
+    names = ("vibe.exe",) if os.name == "nt" else ("vibe",)
     directories = [*os.get_exec_path(), os.environ.get("UV_TOOL_BIN_DIR", ""), *INSTALLER_LAUNCHER_DIRS]
     # An activation through an off-PATH launcher moves that launcher, so later
     # discovery must still see it beside any peer that could not move.
@@ -612,12 +613,19 @@ def managed_stable_launchers(*launchers: str | os.PathLike[str] | None) -> list[
         generation = _launcher_generation(launcher, root)
         if generation is None:
             continue
-        if generation not in recognized:
+        if generation not in exported:
             try:
-                recognized[generation] = _uv_installation(generation) is not None
+                installation = _uv_installation(generation)
             except OSError:
-                recognized[generation] = False
-        if recognized[generation]:
+                installation = None
+            exported[generation] = frozenset(
+                os.path.normcase(export.name) for export in (installation[1] if installation else ())
+            )
+        # Invariant: a managed launcher has the name of a launcher its install
+        # exports, so ``generation/bin/<launcher name>`` is that export. The
+        # copy-marker check and every move rely on it; any other name, such as
+        # an extensionless alias of Windows' ``vibe.exe``, is not Avibe's.
+        if os.path.normcase(launcher.name) in exported[generation]:
             result.append((launcher.absolute(), generation))
     return result
 
@@ -659,34 +667,33 @@ def _activation_rank(generation: Path, version: str | None) -> tuple:
     return (0, installed_at) if parsed is None else (1, parsed, installed_at)
 
 
-def newest_launcher_selection(selections: list[LauncherSelection]) -> LauncherSelection | None:
-    """Return the launcher selecting the last activated install, by ``_activation_rank``."""
+def top_ranked_selections(selections: list[LauncherSelection]) -> list[LauncherSelection]:
+    """Return every launcher selecting an install at the highest ``_activation_rank``.
 
-    ranks: dict[Path, tuple] = {}
-
-    def rank(selection: LauncherSelection) -> tuple:
-        if selection.generation not in ranks:
-            ranks[selection.generation] = _activation_rank(selection.generation, selection.version)
-        return ranks[selection.generation]
-
-    return max(selections, key=rank, default=None)
-
-
-def generation_launcher(generation: Path, name: str) -> Path | None:
-    """Return the launcher a managed generation exports for a stable launcher named ``name``.
-
-    Windows accepts an extensionless ``vibe`` beside uv's ``vibe.exe`` export,
-    so a stable launcher's own name does not always name the export.
+    More than one generation here is a tie: the evidence cannot say which
+    install was activated last.
     """
 
-    from vibe.install_generations import _uv_installation
+    ranks: dict[Path, tuple] = {}
+    for selection in selections:
+        if selection.generation not in ranks:
+            ranks[selection.generation] = _activation_rank(selection.generation, selection.version)
+    if not ranks:
+        return []
+    top = max(ranks.values())
+    return [selection for selection in selections if ranks[selection.generation] == top]
 
-    installation = _uv_installation(generation)
-    if installation is None:
-        return None
-    names = sorted(export.name for export in installation[1])
-    same = [export for export in names if export.lower() == name.lower()]
-    return generation / "bin" / (same or names)[0]
+
+def newest_launcher_selection(selections: list[LauncherSelection]) -> LauncherSelection | None:
+    """Return a launcher selecting the last activated install, or ``None`` when that is unknown.
+
+    A tie between different generations is ambiguous, never settled by
+    discovery order: the repair then has no target, and the fence and the
+    service warning have no last activation to compare against.
+    """
+
+    top = top_ranked_selections(selections)
+    return top[0] if len({selection.generation for selection in top}) == 1 else None
 
 
 def current_generation() -> Path | None:
@@ -746,7 +753,8 @@ def generation_downgrade(generation: Path | None) -> GenerationDowngrade | None:
     Activation keeps every stable launcher on the generation it installs, so
     the highest ``_activation_rank`` any launcher selects is the last
     activation; an older install of the same version counts as well. A
-    generation whose own version is unknown never counts as a downgrade.
+    generation whose own version is unknown never counts as a downgrade, and
+    neither does anything while the top rank is tied between installs.
     """
 
     if generation is None:
