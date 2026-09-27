@@ -138,7 +138,7 @@ fn run(run_id: impl ToString, run_type: &str, seconds: u64) -> Vec<u8> {
 
 fn spawn(transport: Arc<FakeTransport>, sink: Arc<FakeSink>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run_notifications(&*transport, Arc::new(Mutex::new(NotificationFilter::default())), &*sink).await;
+        run_notifications(transport, Arc::new(Mutex::new(NotificationFilter::default())), sink).await;
     })
 }
 
@@ -303,9 +303,10 @@ async fn durable_duration_not_arrival_or_attach_time_controls_all_other_run_kind
         *sink.delivered.lock().unwrap(),
         vec![NotificationIntent::RunSucceeded; expected]
     );
-    // Only runs that notify are read back, once each, for their source label;
-    // an unavailable detail never withholds one the event already qualified.
-    assert_eq!(transport.refetched.lock().unwrap().len(), expected);
+    // Only runs that notify are read back, at most once each and at most 16
+    // at a time, for their source label; an unavailable or skipped detail
+    // never withholds one the event already qualified.
+    assert_eq!(transport.refetched.lock().unwrap().len(), expected.min(16));
     task.abort();
 }
 
@@ -450,7 +451,7 @@ async fn both_key_classes_expire_after_24_hours_despite_missing_transitions() {
         transport.stream([approval("same", "pending"), run("same", "watch", 0)], false);
         let retained = filter.clone();
         let output = sink.clone();
-        let task = tokio::spawn(async move { run_notifications(&*transport, retained, &*output).await });
+        let task = tokio::spawn(async move { run_notifications(transport, retained, output).await });
         settle().await;
         assert_eq!(sink.delivered.lock().unwrap().len(), expected);
         task.abort();
@@ -665,23 +666,52 @@ async fn run_notifications_name_their_source_from_sanitized_detail_labels() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_burst_of_runs_shares_one_detail_deadline_and_never_delays_approvals() {
+async fn slow_detail_reads_never_hold_back_the_stream_or_its_approvals() {
+    // Same chunk, and one event per chunk (the Runtime's usual shape).
+    let chunked = |separate: bool| {
+        let mut frames = (0..5).map(|index| run(index, "watch", 0)).collect::<Vec<_>>();
+        frames.push(approval("request", "pending"));
+        if separate {
+            frames
+        } else {
+            vec![frames.concat()]
+        }
+    };
+    for separate in [false, true] {
+        let transport = Arc::new(FakeTransport {
+            detail_delay: Duration::from_secs(60),
+            ..FakeTransport::default()
+        });
+        let sink = Arc::new(FakeSink::default());
+        transport.stream(chunked(separate), false);
+        let task = spawn(transport.clone(), sink.clone());
+        settle().await;
+        assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::ApprovalRequested]);
+        assert_eq!(transport.refetched.lock().unwrap().len(), 5);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+        let mut expected = vec![NotificationIntent::ApprovalRequested];
+        expected.extend([NotificationIntent::RunSucceeded; 5]);
+        assert_eq!(*sink.delivered.lock().unwrap(), expected);
+        assert_eq!(*sink.sources.lock().unwrap(), vec![None; 6]);
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_the_loop_cancels_detail_reads_in_flight() {
     let transport = Arc::new(FakeTransport {
-        detail_delay: Duration::from_secs(60),
+        detail_delay: Duration::from_secs(1),
         ..FakeTransport::default()
     });
     let sink = Arc::new(FakeSink::default());
-    let mut burst = (0..5).flat_map(|index| run(index, "watch", 0)).collect::<Vec<u8>>();
-    burst.extend(approval("request", "pending"));
-    transport.stream([burst], false);
-    let task = spawn(transport, sink.clone());
+    transport.stream([run("slow", "watch", 0)], false);
+    let task = spawn(transport.clone(), sink.clone());
     settle().await;
-    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::ApprovalRequested]);
+    assert_eq!(*transport.refetched.lock().unwrap(), ["slow"]);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
     tokio::time::advance(Duration::from_secs(5)).await;
     settle().await;
-    let mut expected = vec![NotificationIntent::ApprovalRequested];
-    expected.extend([NotificationIntent::RunSucceeded; 5]);
-    assert_eq!(*sink.delivered.lock().unwrap(), expected);
-    assert_eq!(*sink.sources.lock().unwrap(), vec![None; 6]);
-    task.abort();
+    assert!(sink.delivered.lock().unwrap().is_empty());
 }

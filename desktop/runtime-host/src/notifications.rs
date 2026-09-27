@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::DateTime;
 use serde::Deserialize;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 use url::Url;
 
@@ -16,6 +17,7 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_DETAIL_BYTES: usize = 256 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_DETAIL_LOOKUPS: usize = 16;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SseFrame {
@@ -489,11 +491,15 @@ impl ReconnectBackoff {
 }
 
 pub async fn run_notifications(
-    transport: &dyn NotificationTransport,
+    transport: Arc<dyn NotificationTransport>,
     filter: Arc<Mutex<NotificationFilter>>,
-    sink: &dyn NotificationSink,
+    sink: Arc<dyn NotificationSink>,
 ) {
     let mut backoff = ReconnectBackoff::default();
+    // Detail reads run beside the stream, never inside it: a slow read must
+    // not hold back the next chunk (and the approval it may carry). Dropping
+    // the set with this future aborts whatever is still in flight.
+    let mut lookups = JoinSet::new();
     loop {
         let connected_at = Instant::now();
         if let Ok(mut stream) = transport.connect().await {
@@ -502,55 +508,68 @@ pub async fn run_notifications(
                 if Instant::now().duration_since(connected_at) >= STREAM_IDLE_TIMEOUT {
                     backoff.reset();
                 }
+                while lookups.try_join_next().is_some() {}
+                // Suppression is not a queue: frames still reach the filter so
+                // its de-duplication stays current, then are dropped.
                 let allowed_at_receipt = sink.gate().allows();
-                let mut candidates = decoder
-                    .push(&chunk)
-                    .into_iter()
-                    .filter_map(|frame| {
-                        filter
-                            .lock()
-                            .ok()
-                            .and_then(|mut filter| filter.consider(frame, Instant::now()))
-                    })
-                    .collect::<Vec<_>>();
-                // Approvals need no read, so they go first; the detail reads
-                // share one deadline, so a burst of terminal runs costs at most
-                // one REQUEST_TIMEOUT rather than one per run.
-                candidates.sort_by_key(|candidate| !matches!(candidate, Candidate::Approval));
-                let details_deadline = Instant::now() + REQUEST_TIMEOUT;
-                for candidate in candidates.into_iter().filter(|_| allowed_at_receipt) {
-                    let (intent, source) = match candidate {
-                        Candidate::Approval => (Some(NotificationIntent::ApprovalRequested), None),
-                        Candidate::Run {
+                for frame in decoder.push(&chunk) {
+                    let candidate = filter
+                        .lock()
+                        .ok()
+                        .and_then(|mut filter| filter.consider(frame, Instant::now()))
+                        .filter(|_| allowed_at_receipt);
+                    match candidate {
+                        None => {}
+                        Some(Candidate::Approval) => {
+                            if sink.gate().allows() {
+                                sink.deliver(NotificationIntent::ApprovalRequested, None);
+                            }
+                        }
+                        Some(Candidate::Run {
                             run_id,
-                            mut stamps,
+                            stamps,
                             intent,
                             background,
-                        } => {
-                            if !sink.gate().allows() {
+                        }) => {
+                            if lookups.len() >= MAX_DETAIL_LOOKUPS {
+                                // Saturated: known background work still
+                                // notifies, only without its source label.
+                                if background && sink.gate().allows() {
+                                    sink.deliver(intent, None);
+                                }
                                 continue;
                             }
-                            // One bounded read per terminal run: it names the
-                            // source and, when the event lacked stamps, decides
-                            // whether the run was background work at all.
-                            let detail = tokio::time::timeout_at(details_deadline, transport.run_detail(&run_id))
-                                .await
-                                .ok()
-                                .flatten();
-                            let source = detail.as_ref().and_then(RunDetail::source);
-                            if let Some(detail) = detail {
-                                stamps.fill_missing(detail.stamps);
-                            }
-                            ((background || stamps.is_long_running()).then_some(intent), source)
+                            let (transport, sink) = (transport.clone(), sink.clone());
+                            lookups.spawn(notify_run(transport, sink, run_id, stamps, intent, background));
                         }
-                    };
-                    if let Some(intent) = intent.filter(|_| sink.gate().allows()) {
-                        sink.deliver(intent, source);
                     }
                 }
             }
         }
         tokio::time::sleep(backoff.next_delay()).await;
+    }
+}
+
+/// One bounded read per terminal run: it names the source and, when the event
+/// lacked stamps, decides whether the run was background work at all.
+async fn notify_run(
+    transport: Arc<dyn NotificationTransport>,
+    sink: Arc<dyn NotificationSink>,
+    run_id: String,
+    mut stamps: RunTimestamps,
+    intent: NotificationIntent,
+    background: bool,
+) {
+    let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.run_detail(&run_id))
+        .await
+        .ok()
+        .flatten();
+    let source = detail.as_ref().and_then(RunDetail::source);
+    if let Some(detail) = detail {
+        stamps.fill_missing(detail.stamps);
+    }
+    if (background || stamps.is_long_running()) && sink.gate().allows() {
+        sink.deliver(intent, source);
     }
 }
 

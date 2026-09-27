@@ -149,7 +149,7 @@ impl Notifications {
         *connection = Some(Connection {
             origin,
             task: tauri::async_runtime::spawn(async move {
-                run_notifications(&transport, filter, &sink).await;
+                run_notifications(Arc::new(transport), filter, Arc::new(sink)).await;
             }),
         });
     }
