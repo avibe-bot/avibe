@@ -303,10 +303,9 @@ async fn durable_duration_not_arrival_or_attach_time_controls_all_other_run_kind
         *sink.delivered.lock().unwrap(),
         vec![NotificationIntent::RunSucceeded; expected]
     );
-    // Only runs that notify are read back, at most once each and at most 16
-    // at a time, for their source label; an unavailable or skipped detail
-    // never withholds one the event already qualified.
-    assert_eq!(transport.refetched.lock().unwrap().len(), expected.min(16));
+    // Only runs that notify are read back, once each, for their source label;
+    // an unavailable detail never withholds one the event already qualified.
+    assert_eq!(transport.refetched.lock().unwrap().len(), expected);
     task.abort();
 }
 
@@ -696,6 +695,48 @@ async fn slow_detail_reads_never_hold_back_the_stream_or_its_approvals() {
         assert_eq!(*sink.sources.lock().unwrap(), vec![None; 6]);
         task.abort();
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn runs_beyond_the_lookup_limit_queue_instead_of_being_dropped() {
+    let transport = Arc::new(FakeTransport {
+        detail_delay: Duration::from_secs(1),
+        ..FakeTransport::default()
+    });
+    // Foreground runs without stamps: only their detail can qualify them.
+    for index in 0..40 {
+        transport.details.lock().unwrap().insert(
+            format!("run-{index}"),
+            stamps_only(RunTimestamps {
+                started_at: Some("2026-09-10T12:00:00Z".into()),
+                completed_at: Some("2026-09-10T12:00:45Z".into()),
+                ..RunTimestamps::default()
+            }),
+        );
+    }
+    let sink = Arc::new(FakeSink::default());
+    transport.stream(
+        (0..40).map(|index| {
+            frame(
+                "runs.updated",
+                json!({"run_id": format!("run-{index}"), "status": "succeeded"}),
+            )
+        }),
+        false,
+    );
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    assert_eq!(transport.refetched.lock().unwrap().len(), 16);
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+    }
+    assert_eq!(transport.refetched.lock().unwrap().len(), 40);
+    assert_eq!(
+        *sink.delivered.lock().unwrap(),
+        vec![NotificationIntent::RunSucceeded; 40]
+    );
+    task.abort();
 }
 
 #[tokio::test(start_paused = true)]

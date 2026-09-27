@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::DateTime;
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use url::Url;
@@ -500,6 +501,7 @@ pub async fn run_notifications(
     // not hold back the next chunk (and the approval it may carry). Dropping
     // the set with this future aborts whatever is still in flight.
     let mut lookups = JoinSet::new();
+    let slots = Arc::new(Semaphore::new(MAX_DETAIL_LOOKUPS));
     loop {
         let connected_at = Instant::now();
         if let Ok(mut stream) = transport.connect().await {
@@ -531,16 +533,15 @@ pub async fn run_notifications(
                             intent,
                             background,
                         }) => {
-                            if lookups.len() >= MAX_DETAIL_LOOKUPS {
-                                // Saturated: known background work still
-                                // notifies, only without its source label.
-                                if background && sink.gate().allows() {
-                                    sink.deliver(intent, None);
-                                }
-                                continue;
-                            }
-                            let (transport, sink) = (transport.clone(), sink.clone());
-                            lookups.spawn(notify_run(transport, sink, run_id, stamps, intent, background));
+                            let (transport, sink, slots) = (transport.clone(), sink.clone(), slots.clone());
+                            lookups.spawn(async move {
+                                // Queue behind the limit rather than drop: a
+                                // run without stamps is only decided by its read.
+                                let Ok(_slot) = slots.acquire_owned().await else {
+                                    return;
+                                };
+                                notify_run(transport, sink, run_id, stamps, intent, background).await;
+                            });
                         }
                     }
                 }
