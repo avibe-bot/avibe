@@ -16,7 +16,8 @@ chooses it when run as root even if another directory on `PATH` already holds a
 If a launcher cannot be moved, for example because it is not writable,
 `vibe doctor` fails and lists each launcher with its version. Run
 `vibe doctor repair stable-launchers` to point all of them at the newest
-installed version.
+installed version, or at the most recent install when two share a version. A
+launcher that another installer replaced in the meantime is left as it is.
 
 `vibe start` and `vibe restart` refuse to run an install older than the last
 activated one and name the launcher to run instead. Pass `--allow-downgrade` to

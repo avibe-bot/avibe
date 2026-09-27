@@ -280,14 +280,27 @@ def split_launchers(monkeypatch, tmp_path):
     return SimpleNamespace(old=old, new=new, path_launcher=path_launcher, installer_launcher=installer_launcher)
 
 
-def test_doctor_names_split_stable_launchers_and_repair_moves_the_stale_one(split_launchers):
+@pytest.mark.parametrize("newer", ["installer-location", "invoking-launcher", "same-version-reinstall"])
+def test_doctor_names_split_stable_launchers_and_repair_moves_the_stale_one(split_launchers, monkeypatch, newer):
     split = split_launchers
+    old_version = "1.4.0"
+    if newer == "invoking-launcher":
+        # Activated through a launcher outside PATH and every fixed location.
+        monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", ())
+        monkeypatch.setenv(upgrade.CURRENT_VIBE_EXECUTABLE_ENV, str(split.installer_launcher))
+    if newer == "same-version-reinstall":
+        # A reinstall of the same version whose PATH peer, found first, stayed behind.
+        old_version = "1.5.0"
+        metadata = next(split.old.glob("uv/tools/avibe-os/lib/*/site-packages/*.dist-info/METADATA"))
+        metadata.write_text("Metadata-Version: 2.1\nName: avibe-os\nVersion: 1.5.0\n", encoding="utf-8")
+        for generation, installed_at in ((split.old, 1_000_000), (split.new, 2_000_000)):
+            os.utime(generation / "uv" / "tools" / "avibe-os" / "uv-receipt.toml", (installed_at, installed_at))
 
     items = cli._stable_launcher_items()
 
     assert [item["status"] for item in items] == ["fail"]
     item = items[0]
-    assert f"{split.path_launcher} -> 1.4.0 ({split.old})" in item["message"]
+    assert f"{split.path_launcher} -> {old_version} ({split.old})" in item["message"]
     assert f"{split.installer_launcher} -> 1.5.0 ({split.new})" in item["message"]
     assert f"{split.installer_launcher} doctor repair stable-launchers" in item["action"]
     assert item["repair"]["command"] == "vibe doctor repair stable-launchers"

@@ -215,6 +215,7 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
         "AVIBE_CALLER_REMOTE",
         "AVIBE_CALLER_RESOURCE_CONTEXT",
         "VIBE_INTERNAL_DISPATCH_SOCKET",
+        "VIBE_CURRENT_EXECUTABLE",
         "AVIBE_SKILL_WORKING_DIR",
         "AVIBE_SKILL_PROJECT_BASE",
         "AVIBE_SKILL_HOME",

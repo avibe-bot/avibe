@@ -79,7 +79,6 @@ from vibe.upgrade import (
     activate_installer_candidate,
     activate_upgrade_candidate,
     activation_block_reason,
-    _activate_launcher_target_locked,
     atomic_uv_install_root,
     atomic_upgrade_lock,
     build_upgrade_plan,
@@ -94,6 +93,7 @@ from vibe.upgrade import (
     _launcher_generation,
     _candidate_python,
     launcher_is_current_process,
+    move_managed_launcher_locked,
     newest_launcher_selection,
     process_generation,
     restart_is_pending,
@@ -12710,7 +12710,7 @@ def _stable_launcher_items() -> list[dict]:
             code="installation.stable_launchers",
         )
         return items
-    target = newest_launcher_selection(selections) or selections[0]
+    target = newest_launcher_selection(selections)
     _add_doctor_item(
         items,
         "fail",
@@ -13171,10 +13171,16 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
             selections = stable_launcher_selections()
             if (skipped := in_step(selections)) is not None:
                 return skipped
-            target = newest_launcher_selection(selections) or selections[0]
-            stale = [selection.launcher for selection in selections if selection.generation != target.generation]
-            for launcher in stale:
-                _activate_launcher_target_locked(launcher, target.generation / "bin" / launcher.name)
+            target = newest_launcher_selection(selections)
+            moved: list[Path] = []
+            for selection in selections:
+                if selection.generation == target.generation:
+                    continue
+                # A launcher another installer replaced since discovery is left alone.
+                if move_managed_launcher_locked(
+                    selection.launcher, selection.generation, target.generation / "bin" / selection.launcher.name,
+                ):
+                    moved.append(selection.launcher)
     except Exception as exc:
         return _doctor_repair_result(
             target_name, "failed", i18n_t("doctor.repair.stableLaunchersFailed", language, error=exc)
@@ -13185,11 +13191,11 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
         i18n_t(
             "doctor.repair.stableLaunchersRepaired",
             language,
-            launchers=", ".join(map(str, stale)),
+            launchers=", ".join(map(str, moved)),
             version=target.version or i18n_t("doctor.value.unknown", language),
             generation=target.generation,
         ),
-        launchers=[str(launcher) for launcher in stale],
+        launchers=[str(launcher) for launcher in moved],
         generation=str(target.generation),
     )
 

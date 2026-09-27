@@ -773,6 +773,35 @@ def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypa
     assert subprocess.run([str(peer)], check=False).returncode == 0
 
 
+def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch, tmp_path):
+    """The upgrade lock serializes Avibe, not uv, another installer or an administrator."""
+    root, launcher = installation
+    peer = tmp_path / "root-home" / ".local" / "bin" / "vibe"
+    foreign_target = tmp_path / "foreign-target"
+    peer.parent.mkdir(parents=True)
+    foreign_target.write_text("#!/bin/sh\nexit 0\n")
+    foreign_target.chmod(0o755)
+    monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(peer.parent),))
+    old = activate(root, launcher, "old")
+    peer.symlink_to(old)
+    discover = upgrade.managed_stable_launchers
+    replaced = []
+
+    def replaced_after_discovery(*launchers):
+        found = discover(*launchers)
+        if not replaced:
+            peer.unlink()
+            peer.symlink_to(foreign_target)
+            replaced.append(peer)
+        return found
+
+    monkeypatch.setattr(upgrade, "managed_stable_launchers", replaced_after_discovery)
+    current = activate(root, launcher, "current")
+
+    assert launcher.resolve() == current.resolve()
+    assert os.readlink(peer) == str(foreign_target)
+
+
 def test_partial_removal_retains_uv_evidence_and_next_pass_finishes(installation, monkeypatch):
     root, launcher = installation
     old = candidate(root, "old")
