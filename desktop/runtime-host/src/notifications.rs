@@ -229,10 +229,37 @@ pub struct RunDetail {
 
 const SOURCE_PART_CHARS: usize = 48;
 
+/// Invisible formatting a single-line title has no use for: bidi marks,
+/// embeddings, overrides and isolates (which let a label render its own text
+/// backwards), zero-width space, word joiner, BOM, and the private-use area.
+/// ZWNJ, ZWJ and variation selectors stay: they spell real words and emoji and
+/// cannot reorder text. Same set as `core/citations.py::_CONTROL_RE`.
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200b}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+            | '\u{e000}'..='\u{f8ff}'
+    )
+}
+
 fn clean_label(value: Option<&str>) -> Option<String> {
     let words = value?
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .filter(|character| !is_invisible_format(*character))
+        .map(|character| {
+            if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect::<String>();
     let collapsed = words.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -250,7 +277,8 @@ fn clean_label(value: Option<&str>) -> Option<String> {
 impl RunDetail {
     /// "Project · Session" for a Workbench session, the channel for an IM
     /// session, and the task or watch name when no session resolved. Control
-    /// characters are removed, whitespace collapsed, and each part bounded.
+    /// characters and invisible bidi/zero-width formatting are removed,
+    /// whitespace collapsed, and each part bounded.
     pub fn source(&self) -> Option<String> {
         let project = clean_label(self.session_project_name.as_deref());
         let place = clean_label(self.session_label.as_deref()).or_else(|| clean_label(self.definition_name.as_deref()));

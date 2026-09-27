@@ -205,8 +205,10 @@ banners keep generic copy.
 
 These labels are Runtime strings on their way to a privileged OS
 surface, so they leave only through one sanitizer
-(`RunDetail::source`): control characters removed, whitespace
-collapsed, each part bounded to 48 characters. The SSE payload itself
+(`RunDetail::source`): control characters and invisible bidi /
+zero-width formatting removed (the same set as `core/citations.py`;
+ZWJ, ZWNJ and variation selectors kept), whitespace collapsed, each
+part bounded to 48 characters. The SSE payload itself
 is still never interpolated.
 
 ### Plugin and permission

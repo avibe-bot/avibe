@@ -628,6 +628,22 @@ async fn run_notifications_name_their_source_from_sanitized_detail_labels() {
         ),
         (label(Some(&long), None, None), Some(format!("{}…", "长".repeat(47)))),
         (label(Some("  "), Some("\n"), None), None),
+        (
+            label(
+                Some("inv\u{202e}oice\u{2066}\u{200b}"),
+                Some("a\u{2028}b\u{feff}\u{e001}"),
+                None,
+            ),
+            Some("invoice · a b".to_owned()),
+        ),
+        (
+            label(None, Some("👨\u{200d}👩 नम\u{200c}स्ते"), None),
+            Some("👨\u{200d}👩 नम\u{200c}स्ते".to_owned()),
+        ),
+        (
+            label(Some("\u{202e}\u{2069}"), None, Some("audit")),
+            Some("audit".to_owned()),
+        ),
         (RunDetail::default(), None),
     ];
     let mut chunks = Vec::new();
