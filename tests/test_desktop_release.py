@@ -29,24 +29,21 @@ def step(name, job="package", file="desktop-package.yml"):
     return next(item for item in workflow(file)["jobs"][job]["steps"] if item.get("name") == name)
 
 
-def secret_references(value, key=None):
-    """Every secrets-context reference in a workflow value; None marks a whole-context or dynamic use."""
+def secret_references(value):
+    """Names from canonical `${{ secrets.NAME }}` references; None marks any other `secrets` mention.
+
+    Any access to the secrets context must spell the token, so counting every mention fails closed
+    without parsing the expression language (index syntax, format strings, toJSON, prose).
+    """
     if isinstance(value, dict):
-        return set().union(*(secret_references(item, name) for name, item in value.items()))
+        return set().union(*(secret_references(item) for pair in value.items() for item in pair))
     if isinstance(value, list):
         return set().union(*(secret_references(item) for item in value))
     if not isinstance(value, str):
         return set()
-    expressions = re.findall(r"\$\{\{(.*?)\}\}", value, re.DOTALL)
-    if key == "if" and "${{" not in value:
-        expressions = [value]
-    names = set()
-    for expression in expressions:
-        for match in re.finditer(r"(?<![.\w])secrets\b", expression, re.IGNORECASE):
-            named = re.match(r"\s*(?:\.\s*([A-Za-z_]\w*)|\[\s*(['\"])([A-Za-z_]\w*)\2\s*\])",
-                             expression[match.end():])
-            names.add((named.group(1) or named.group(3)).upper() if named else None)
-    return names
+    canonical = re.findall(r"\$\{\{\s*secrets\.([A-Za-z_]\w*)\s*\}\}", value, re.IGNORECASE)
+    other = len(re.findall(r"\bsecrets\b", value, re.IGNORECASE)) > len(canonical)
+    return {name.upper() for name in canonical} | ({None} if other else set())
 
 
 def assemble_assets(root, source=SOURCE):
@@ -252,16 +249,17 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
 
 @pytest.mark.parametrize(("value", "names"), [
     ("${{ secrets.tauri_signing_private_key }}", {"TAURI_SIGNING_PRIVATE_KEY"}),
-    ("${{ secrets['APPLE_CERTIFICATE'] }}", {"APPLE_CERTIFICATE"}),
-    ('a ${{ secrets [ "APPLE_API_KEY" ] }} b ${{ Secrets.APPLE_API_ISSUER }}', {"APPLE_API_KEY", "APPLE_API_ISSUER"}),
-    ("${{ toJSON(secrets) }}", {None}),
+    ("a ${{secrets.APPLE_API_KEY}} b ${{ Secrets.APPLE_API_ISSUER }}", {"APPLE_API_KEY", "APPLE_API_ISSUER"}),
+    ("${{ secrets['APPLE_CERTIFICATE'] }}", {None}),
+    ("${{ format('{{Hello {0}!}}', secrets.APPLE_CERTIFICATE) }}", {None}),
+    ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY }} ${{ toJSON(secrets) }}", {"TAURI_SIGNING_PRIVATE_KEY", None}),
     ("${{ secrets[matrix.name] }}", {None}),
-    ("${{ secrets.* }}", {None}),
-    ("${{ inputs.secrets }} echo secrets", set()),
+    ("secrets.APPLE_CERTIFICATE != ''", {None}),
+    ("echo ${{ inputs.secrets }}", {None}),
+    ("echo ${{ inputs.release_tag }}", set()),
 ])
-def test_secret_scanner_recognizes_every_expression_form(value, names):
+def test_secret_scanner_fails_closed_on_every_noncanonical_form(value, names):
     assert secret_references({"env": {"VALUE": value}}) == names
-    assert secret_references({"if": "secrets.APPLE_CERTIFICATE != ''"}) == {"APPLE_CERTIFICATE"}
 
 
 def test_inherited_secrets_reach_test_builds_only_as_the_updater_pair():
