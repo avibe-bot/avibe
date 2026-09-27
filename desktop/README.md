@@ -214,6 +214,14 @@ are silently dropped. A link received during startup waits for readiness; a
 failed bootstrap discards it. Links never select a different Runtime origin or
 grant the Workbench native commands. IM/browser links remain HTTPS.
 
+A Workbench link that asks for a new browsing context (`target="_blank"`, such
+as every external link in a chat message) opens in the system browser. WKWebView
+offers such a click to the navigation policy first, which cancels any destination
+outside the shell and the proved Runtime, so the shell injects one top-level
+click listener that reroutes these links through `window.open`, the route that
+reaches the new-window handler on every platform. Links the page already
+handled and `download` links keep their native behavior.
+
 The main window remembers its native position, size, and maximized state in the
 window-state plugin's app configuration store. Restore happens before showing
 the window; bootstrap and Runtime navigation only change its content. Open from
