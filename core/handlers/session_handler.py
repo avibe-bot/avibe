@@ -1528,7 +1528,6 @@ class SessionHandler(BaseHandler):
         effective_model = explicit_model or agent_model
         from modules.agents.model_hub import (
             build_claude_hub_env,
-            claude_setting_sources_for_launch,
             claude_settings_for_launch,
             launch_for_context,
         )
@@ -1578,6 +1577,7 @@ class SessionHandler(BaseHandler):
         # away from this site's auth_mode handling.
         from vibe.claude_config import (
             CLAUDE_MEMORY_DISABLED_SETTINGS,
+            CLAUDE_SETTING_SOURCES,
             build_claude_subprocess_env,
         )
         from core.git_runtime import prepend_vendored_git_to_path
@@ -1614,7 +1614,7 @@ class SessionHandler(BaseHandler):
             "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
             "settings": claude_settings_for_launch(CLAUDE_MEMORY_DISABLED_SETTINGS, model_hub_launch),
-            "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
+            "setting_sources": CLAUDE_SETTING_SOURCES,
             "skills": [],
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions

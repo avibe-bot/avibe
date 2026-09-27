@@ -21,17 +21,18 @@ from modules.agents.model_hub import (
     ModelHubLaunch,
     build_claude_hub_env,
     build_codex_hub_launch,
-    claude_setting_sources_for_launch,
     claude_settings_for_launch,
 )
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
+from tests.e2e.test_model_hub_routing import _request_credential
 from vibe.backend_model_catalog import (
     CodexHubCatalog,
     _codex_hub_catalog_bytes,
     _codex_hub_catalog_path,
     _publish_codex_hub_catalog,
 )
+from vibe.claude_config import CLAUDE_SETTING_SOURCES
 
 
 pytestmark = pytest.mark.e2e_model_hub
@@ -424,7 +425,7 @@ def test_claude_consumer_preserves_explicit_limit_settings(tmp_path, rejected_ex
             [
                 str(binary), "-p", "Reply with hello 中文.", "--output-format", "json",
                 "--model", launch.runtime_model, "--tools", "", "--max-turns", "1",
-                "--setting-sources", ",".join(claude_setting_sources_for_launch(launch)),
+                "--setting-sources", ",".join(CLAUDE_SETTING_SOURCES),
                 "--settings", claude_settings_for_launch("{}", launch),
             ],
             cwd=project,
@@ -444,3 +445,68 @@ def test_claude_consumer_preserves_explicit_limit_settings(tmp_path, rejected_ex
     # SessionHandler coverage separately checks delivery of that planning value.
     if fixture_settings is not None:
         assert json.loads(fixture_settings.read_text()) == {"env": selected_limits}
+
+
+def test_claude_hub_launch_applies_user_settings_but_not_their_connection(tmp_path, rejected_external_proxy):
+    """MH-CLAUDE-LAUNCH-002: a Hub turn keeps the user's Claude preferences, not their transport."""
+    import claude_agent_sdk
+
+    binary = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+    if not binary.is_file():
+        pytest.skip("The installed Claude SDK has no bundled CLI")
+    runtime = _isolated_runtime(tmp_path, rejected_external_proxy)
+    binary = _loopback_cli(binary, runtime)
+    project = runtime.home / "project"
+    project.mkdir(parents=True)
+    runtime.env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    runtime.env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-py"
+    native_key = "native-user-settings-fixture"
+    # Commit/PR attribution is the preference users see in their history. Custom
+    # text makes its arrival observable in the prompt the CLI sends.
+    attribution = {"commit": "User commit trailer 中文", "pr": "User PR footer 中文"}
+    with MockLLMUpstream() as gateway, MockLLMUpstream() as native:
+        gateway.configure(protocol="anthropic")
+        native.configure(protocol="anthropic")
+        user_settings = Path(runtime.env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+        user_settings.parent.mkdir()
+        user_payload = json.dumps({
+            "attribution": attribution,
+            "env": {
+                "ANTHROPIC_BASE_URL": native.url,
+                "ANTHROPIC_AUTH_TOKEN": native_key,
+                "ANTHROPIC_API_KEY": native_key,
+            },
+        }, ensure_ascii=False)
+        user_settings.write_text(user_payload)
+        launch = ModelHubLaunch(
+            backend="claude",
+            channel="hub",
+            requested_model="hub-model",
+            target_model="hub-model",
+            runtime_model="hub-model",
+            gateway_base_url=gateway.url,
+            gateway_token="hub-user-settings-fixture",
+        )
+        result = subprocess.run(
+            [
+                str(binary), "-p", "Reply with hello.", "--output-format", "json",
+                "--model", launch.runtime_model, "--max-turns", "1",
+                "--setting-sources", ",".join(CLAUDE_SETTING_SOURCES),
+                "--settings", claude_settings_for_launch("{}", launch),
+            ],
+            cwd=project,
+            env=build_claude_hub_env(runtime.env, launch),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
+        native_calls = [request for request in native.requests() if request["path"] == "/v1/messages"]
+        captured = [request for request in gateway.requests() if request["path"] == "/v1/messages"]
+    assert native_calls == [], "Claude bypassed Model Hub using user settings"
+    assert captured
+    assert {_request_credential(request) for request in captured} == {launch.gateway_token}
+    prompt = json.dumps([request["body"] for request in captured], ensure_ascii=False)
+    assert attribution["commit"] in prompt
+    assert attribution["pr"] in prompt
+    assert user_settings.read_text() == user_payload

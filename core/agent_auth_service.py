@@ -1557,6 +1557,7 @@ class AgentAuthService:
         # still get the key into the control-channel SDK client.
         from vibe.claude_config import (
             CLAUDE_MEMORY_DISABLED_SETTINGS,
+            CLAUDE_SETTING_SOURCES,
             build_claude_subprocess_env,
         )
 
@@ -1581,7 +1582,7 @@ class AgentAuthService:
             "cwd": working_path,
             "env": claude_env,
             "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
-            "setting_sources": ["user", "project", "local"],
+            "setting_sources": CLAUDE_SETTING_SOURCES,
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
         }
         permission_mode = getattr(self._resolve_backend_config("claude"), "permission_mode", None)
@@ -2945,9 +2946,9 @@ class AgentAuthService:
         on_diagnostic: Callable[[str], None] | None = None,
     ) -> str:
         """Run an isolated turn through the same Claude Agent SDK transport."""
-        from modules.agents.model_hub import claude_setting_sources_for_launch
         from vibe.claude_config import (
             CLAUDE_MEMORY_DISABLED_SETTINGS,
+            CLAUDE_SETTING_SOURCES,
             build_claude_subprocess_env,
         )
 
@@ -2966,7 +2967,7 @@ class AgentAuthService:
         option_kwargs: dict[str, Any] = {
             "permission_mode": "bypassPermissions",
             "cwd": cwd,
-            "setting_sources": claude_setting_sources_for_launch(None),
+            "setting_sources": CLAUDE_SETTING_SOURCES,
             "sandbox": {"enabled": False},
             "tools": [],
             "max_turns": 1,

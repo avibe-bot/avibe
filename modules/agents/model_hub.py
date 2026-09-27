@@ -208,23 +208,19 @@ def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | Non
     return launch
 
 
-def claude_setting_sources_for_launch(launch: ModelHubLaunch | None) -> list[str]:
-    if launch is not None and launch.channel == "hub":
-        # Project/local settings remain available. Connection settings are
-        # pinned separately because HOME can also be the project directory.
-        return ["project", "local"]
-    return ["user", "project", "local"]
-
-
 def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None) -> str:
-    """Pin Hub connection settings above every native settings source."""
+    """Pin Hub connection settings above every native settings source.
+
+    Launch settings outrank user, project, and local settings, so a Hub turn
+    keeps the user's own Claude preferences while the Hub owns the connection.
+    """
 
     if launch is None or launch.channel != "hub":
         return base_settings
     settings = json.loads(base_settings)
     connection_env = build_claude_hub_env({}, launch)
     # Catalog limits assist planning through the subprocess environment. They
-    # must not become launch-settings overrides of native project/local choices.
+    # must not become launch-settings overrides of native user/project/local choices.
     connection_env.pop("CLAUDE_CODE_MAX_CONTEXT_TOKENS", None)
     connection_env.pop("CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
     # Timeout defaults likewise yield to an explicit native choice.

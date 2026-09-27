@@ -21,7 +21,6 @@ from modules.agents.model_hub import (
     build_codex_hub_launch,
     bind_launch,
     bind_persisted_launch,
-    claude_setting_sources_for_launch,
     claude_settings_for_launch,
     launch_for_context,
     opencode_model_for_overlay,
@@ -118,7 +117,6 @@ def test_direct_launch_does_not_inject_provider_credentials():
     base_env = {"ANTHROPIC_AUTH_TOKEN": "user-token", "PATH": "/bin"}
     assert build_claude_hub_env(base_env, launch) == base_env
     assert build_codex_hub_launch(["--flag"], {"OPENAI_API_KEY": "user-key"}, launch) == (["--flag"], None)
-    assert claude_setting_sources_for_launch(launch) == ["user", "project", "local"]
 
 
 def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
@@ -142,7 +140,6 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
-    assert claude_setting_sources_for_launch(launch) == ["project", "local"]
 
 
 def test_claude_hub_settings_own_connection_after_native_and_sdk_env_merges():

@@ -608,7 +608,7 @@ def test_session_handler_preserves_explicit_limits_and_passes_alias_planning_met
         expected = explicit if explicit is not None else fallback if has_metadata else None
         assert options.env.get(key) == expected
         assert key not in json.loads(options.settings).get("env", {})
-    assert options.setting_sources == (["project", "local"] if channel == "hub" else ["user", "project", "local"])
+    assert options.setting_sources == ["user", "project", "local"]
 
 
 def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp_path: Path) -> None:
@@ -646,7 +646,7 @@ def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp
     assert settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "hub-settings-fixture-token"
     assert settings["env"]["ANTHROPIC_API_KEY"] == ""
     assert settings["autoMemoryEnabled"] is False
-    assert options.setting_sources == ["project", "local"]
+    assert options.setting_sources == ["user", "project", "local"]
     assert options.extra_args["model"] == "claude-opus-5"
 
 

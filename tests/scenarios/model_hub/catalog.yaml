@@ -456,6 +456,14 @@ scenarios:
     test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
     related_tests:
       - tests/e2e/test_model_hub_catalog_consumer.py::test_claude_consumer_preserves_explicit_limit_settings
+  - id: MH-CLAUDE-LAUNCH-002
+    name: Claude Hub turns apply the user's own Claude settings without letting them change Hub transport
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_catalog_consumer.py::test_claude_hub_launch_applies_user_settings_but_not_their_connection
+    related_tests:
+      - tests/test_claude_cli_path.py::test_session_handler_pins_hub_connection_in_launch_settings
   - id: MH-CODEX-LAUNCH-001
     name: Native Codex provider settings preserve the configured Hub Source and upstream model
     status: covered

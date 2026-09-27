@@ -43,6 +43,12 @@ MANAGED_ENV_VALUES = {
 # the user's Claude Code settings.
 CLAUDE_MEMORY_DISABLED_SETTINGS = '{"autoMemoryEnabled":false}'
 
+# Every Avibe launch reads all native settings sources, so the user's own Claude
+# preferences (commit attribution, hooks, permissions) apply as they do in a
+# terminal. Anything Avibe must own is pinned in the process-local ``--settings``
+# override, which outranks each of these sources.
+CLAUDE_SETTING_SOURCES = ["user", "project", "local"]
+
 # Keys we recognise inside ``~/.claude/settings.json``'s ``env`` block.
 # Claude Code assigns header semantics from the selected variable, independently
 # from ``ANTHROPIC_BASE_URL``. Avibe preserves that native distinction instead
