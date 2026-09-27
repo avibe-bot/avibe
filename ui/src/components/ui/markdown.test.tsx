@@ -38,7 +38,6 @@ describe('Markdown literal autolinks next to CJK text', () => {
     // An ASCII comma stays inside the URL, as GFM parses it before whitespace.
     ['https://a.example/1,https://b.example/2。', ['https://a.example/1,https://b.example/2']],
     ['http://localhost:3000/setup中文', ['http://localhost:3000/setup']],
-    ['https://中文.example.com', []],
   ])('links %j as %j', (content, hrefs) => {
     const { container } = render(<Markdown content={content} />);
     const anchors = [...container.querySelectorAll('a')];
@@ -53,6 +52,8 @@ describe('Markdown literal autolinks next to CJK text', () => {
     ['[文档](https://example.com/中文)', 'https://example.com/%E4%B8%AD%E6%96%87'],
     ['<https://example.com/中文>', 'https://example.com/%E4%B8%AD%E6%96%87'],
     ['https://example.com/a. 然后', 'https://example.com/a'],
+    // A CJK host leaves no valid literal before the boundary, so GFM's link stays.
+    ['https://中文.example.com', 'https://%E4%B8%AD%E6%96%87.example.com'],
   ])('leaves %j as GFM parses it', (content, href) => {
     const { container } = render(<Markdown content={content} />);
     expect([...container.querySelectorAll('a')].map((a) => a.getAttribute('href'))).toEqual([href]);

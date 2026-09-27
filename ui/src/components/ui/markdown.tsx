@@ -272,7 +272,7 @@ function isAutolinkLiteral(literal: string): boolean {
 }
 
 // Re-split the run GFM linked as one literal into the links and text it spells
-// once a boundary ends each URL, or null when the run holds no boundary.
+// once a boundary ends each URL, or null to keep GFM's link as it is.
 function splitAutolinkRun(run: string): AutolinkNode[] | null {
   if (!AUTOLINK_BOUNDARY.test(run)) return null;
   const nodes: AutolinkNode[] = [];
@@ -288,6 +288,10 @@ function splitAutolinkRun(run: string): AutolinkNode[] | null {
       const url = (/^www\./i.test(literal) ? 'http://' : '') + literal;
       nodes.push({ type: 'link', url, title: null, children: [{ type: 'text', value: literal }] });
       textStart = resume = linkStart + literal.length;
+    } else if (linkStart === 0) {
+      // The cut left GFM's own literal invalid (a CJK host): keep GFM's link, as
+      // this pass only moves where a literal ends and never removes one.
+      return null;
     }
     AUTOLINK_START.lastIndex = resume;
     const next = AUTOLINK_START.exec(run);
