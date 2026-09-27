@@ -89,6 +89,7 @@ class _ClaudeOutputRecoveryRecord:
     request: AgentRequest | None = None
     context: MessageContext | None = None
     subtype: str = "success"
+    is_error: bool = False
     duration_ms: int = 0
     delivering: bool = False
     provenance: str | None = None
@@ -319,6 +320,10 @@ class ClaudeAgent(BaseAgent):
         record.context = self._snapshot_output_context(context)
         record.provenance = self._result_origin_kind(message)
         record.subtype = str(getattr(message, "subtype", "success") or "")
+        record.is_error = (
+            self._terminal_backend_failure(message, getattr(message, "result", None))
+            is not None
+        )
         record.duration_ms = getattr(message, "duration_ms", 0)
         if record.output is None:
             record.output = self._unsolicited_message_output(message, phase_id=record.phase_id)
@@ -5305,7 +5310,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 context,
                 owner=record.request,
-                is_error=(record.subtype or "").startswith("error"),
+                is_error=record.is_error,
             )
         self._mark_session_idle_if_runtime_free(composite_key)
         self._signal_activity_output_settled(composite_key)

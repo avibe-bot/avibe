@@ -270,6 +270,11 @@ human input queued behind the Turn indefinitely.
   That fallback first latches an error outcome through the same
   `on_terminal_result` chokepoint. Otherwise a failed error settle would
   terminalize the Turn as completed.
+- The settle carries the outcome frozen on the record when it is classified.
+  That outcome uses `_terminal_backend_failure`, the predicate that already
+  selects detached result text. A Result that fails only through `is_error`,
+  `error`, `errors`, `api_error_status`, or a `failed` subtype therefore ends
+  its Turn as failed, not completed.
 - The settle awaits delivery while the owner is already retired but the gate
   is still held. Output reaching the receiver in that window belongs to the
   next Turn. It waits for the settlement, then opens that Turn normally.

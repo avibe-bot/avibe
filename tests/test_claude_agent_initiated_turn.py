@@ -1978,9 +1978,22 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         # A task-notification reply is detached output, so it cannot complete the
         # synthetic agent-initiated Turn itself. Unless retiring its owner ends
         # that Turn, the Session stays "delivering" and never admits the next one.
-        for reply, expected_sent in (
-            ("Background verification finished", ["Background verification finished"]),
-            ("<silent>nothing new</silent>", []),
+        # The Turn ends with the reply's own outcome, including a failure the
+        # Result reports only through its structured error flag.
+        for reply, result_is_error, expected_sent, expected_status in (
+            (
+                "Background verification finished",
+                False,
+                ["Background verification finished"],
+                "idle",
+            ),
+            ("<silent>nothing new</silent>", False, [], "idle"),
+            (
+                "Background verification crashed",
+                True,
+                ["Background verification crashed"],
+                "failed",
+            ),
         ):
             with self.subTest(reply=reply):
                 agent, service = _build_agent()
@@ -1994,7 +2007,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 controller._session_id_from_context = lambda ctx: (
                     (ctx.platform_specific or {}).get("agent_session_id")
                 )
-                controller.set_agent_status = lambda *_args: None
+                statuses: list[str] = []
+                controller.set_agent_status = lambda _session_id, status: statuses.append(status)
                 manager = SessionTurnManager(controller=controller)
                 manager.flush_queue = AsyncMock(return_value=False)
                 controller.session_turns = manager
@@ -2018,6 +2032,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                             yield assistant
                             detached_result = ResultMessage()
                             detached_result.result = reply
+                            detached_result.is_error = result_is_error
                             detached_result.origin = {"kind": "task-notification"}
                             yield detached_result
                             await release_receiver.wait()
@@ -2056,6 +2071,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(("turn.start", "sess-detached-turn-end"), events)
                     self.assertNotIn("sess-detached-turn-end", manager.in_flight)
                     self.assertEqual(client.sent, expected_sent)
+                    self.assertEqual(statuses[-1:], [expected_status])
                     self.assertIsNone(
                         manager.get_turn_sink(resolve_turn_sink_key(controller, context))
                     )
