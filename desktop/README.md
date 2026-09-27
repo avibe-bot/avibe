@@ -328,9 +328,13 @@ The native tray's Notifications toggle is on by default and persists across
 app restarts. While the main window is unfocused or hidden, the shell consumes
 the existing Workbench SSE stream for pending Vault approvals and qualifying
 terminal background runs. The connection belongs to the shell, not the WebView;
-SSE reconnection is independent of the readiness monitor. Copy comes only from
-the native locale catalog, and no notification capability is granted to web
-content. OS notification permissions and Do Not Disturb remain OS-managed.
+SSE reconnection is independent of the readiness monitor. Outcome text comes
+only from the native locale catalog. A run banner's title names its source
+(`Project · Session`, the IM channel, or the task/watch name) from the run
+detail; those Runtime labels pass one sanitizer (`RunDetail::source`) that
+strips control, bidi, and zero-width formatting characters and bounds length,
+and the SSE payload itself is never shown. No notification capability is
+granted to web content. OS notification permissions and Do Not Disturb remain OS-managed.
 v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.

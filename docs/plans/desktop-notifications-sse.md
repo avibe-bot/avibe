@@ -167,7 +167,8 @@ System DND / Focus is the OS's problem.
 ### Copy lives in the shell, keyed by class + locale
 
 Existing SSE payloads are refetch hints (`run_id` / `request_id`), not
-finished user copy. The shell therefore owns notification title/body,
+finished user copy. The shell therefore owns the notification outcome
+text (and, for run banners, sanitizes the source label described below),
 using the same locale catalog pattern as the tray (`sys-locale` →
 `desktopBootstrap` keys in `ui/src/i18n/{en,zh}.json`, verified by
 `npm run test:i18n`).
