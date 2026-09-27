@@ -34,6 +34,10 @@ describe('Markdown literal autolinks next to CJK text', () => {
       'https://a.example.com/1，https://b.example.com/2。',
       ['https://a.example.com/1', 'https://b.example.com/2'],
     ],
+    ['https://a.example.com/1，看https://b.example.com/2', ['https://a.example.com/1', 'https://b.example.com/2']],
+    // An ASCII comma stays inside the URL, as GFM parses it before whitespace.
+    ['https://a.example/1,https://b.example/2。', ['https://a.example/1,https://b.example/2']],
+    ['http://localhost:3000/setup中文', ['http://localhost:3000/setup']],
     ['https://中文.example.com', []],
   ])('links %j as %j', (content, hrefs) => {
     const { container } = render(<Markdown content={content} />);

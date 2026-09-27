@@ -228,11 +228,10 @@ function remarkLiteralAuthority() {
 // so a URL that really contains CJK can still be written either way.
 const AUTOLINK_BOUNDARY =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]|(?!\p{ASCII})[\p{P}\p{S}\p{Z}]/u;
-// A literal GFM would accept: a scheme or `www.`, then a dotted domain.
-const AUTOLINK_LITERAL = /^(?:https?:\/\/|www\.)[-\w]+(?:\.[-\w]+)+/i;
-// Where another literal may start inside a swallowed run: GFM starts one only
-// after whitespace, punctuation, or a symbol, and a run holds no whitespace.
-const AUTOLINK_START = /(?<=[\p{P}\p{S}])(?:https?:\/\/|www\.)/giu;
+// Where another literal may start inside a swallowed run, by GFM's rule on the
+// character before it: `http(s)://` after anything but an ASCII letter, `www.`
+// only after punctuation or a symbol (a run holds no whitespace).
+const AUTOLINK_START = /(?<![a-z])https?:\/\/|(?<=[\p{P}\p{S}])www\./giu;
 
 type AutolinkNode = {
   type: string;
@@ -262,6 +261,16 @@ function trimAutolinkTrail(url: string): string {
   return kept;
 }
 
+// GFM links a literal whose domain's last two labels each hold a letter or digit
+// and no underscore, so `http://localhost:3000` links and a bare `https://` does not.
+function isAutolinkLiteral(literal: string): boolean {
+  const domain = /^[-.\w]*/.exec(literal.replace(/^https?:\/\//i, ''))?.[0] ?? '';
+  return domain
+    .split('.')
+    .slice(-2)
+    .every((label) => /[a-z\d]/i.test(label) && !label.includes('_'));
+}
+
 // Re-split the run GFM linked as one literal into the links and text it spells
 // once a boundary ends each URL, or null when the run holds no boundary.
 function splitAutolinkRun(run: string): AutolinkNode[] | null {
@@ -274,7 +283,7 @@ function splitAutolinkRun(run: string): AutolinkNode[] | null {
     const boundary = tail.search(AUTOLINK_BOUNDARY);
     const literal = trimAutolinkTrail(boundary < 0 ? tail : tail.slice(0, boundary));
     let resume = linkStart + 1;
-    if (AUTOLINK_LITERAL.test(literal)) {
+    if (isAutolinkLiteral(literal)) {
       if (linkStart > textStart) nodes.push({ type: 'text', value: run.slice(textStart, linkStart) });
       const url = (/^www\./i.test(literal) ? 'http://' : '') + literal;
       nodes.push({ type: 'link', url, title: null, children: [{ type: 'text', value: literal }] });
