@@ -29,6 +29,26 @@ def step(name, job="package", file="desktop-package.yml"):
     return next(item for item in workflow(file)["jobs"][job]["steps"] if item.get("name") == name)
 
 
+def secret_references(value, key=None):
+    """Every secrets-context reference in a workflow value; None marks a whole-context or dynamic use."""
+    if isinstance(value, dict):
+        return set().union(*(secret_references(item, name) for name, item in value.items()))
+    if isinstance(value, list):
+        return set().union(*(secret_references(item) for item in value))
+    if not isinstance(value, str):
+        return set()
+    expressions = re.findall(r"\$\{\{(.*?)\}\}", value, re.DOTALL)
+    if key == "if" and "${{" not in value:
+        expressions = [value]
+    names = set()
+    for expression in expressions:
+        for match in re.finditer(r"(?<![.\w])secrets\b", expression, re.IGNORECASE):
+            named = re.match(r"\s*(?:\.\s*([A-Za-z_]\w*)|\[\s*(['\"])([A-Za-z_]\w*)\2\s*\])",
+                             expression[match.end():])
+            names.add((named.group(1) or named.group(3)).upper() if named else None)
+    return names
+
+
 def assemble_assets(root, source=SOURCE):
     """Use the real Runtime archive writer and desktop producer, then merge downloads."""
     directory = root / "desktop-dist"
@@ -230,21 +250,37 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert steps[-1]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 
 
+@pytest.mark.parametrize(("value", "names"), [
+    ("${{ secrets.tauri_signing_private_key }}", {"TAURI_SIGNING_PRIVATE_KEY"}),
+    ("${{ secrets['APPLE_CERTIFICATE'] }}", {"APPLE_CERTIFICATE"}),
+    ('a ${{ secrets [ "APPLE_API_KEY" ] }} b ${{ Secrets.APPLE_API_ISSUER }}', {"APPLE_API_KEY", "APPLE_API_ISSUER"}),
+    ("${{ toJSON(secrets) }}", {None}),
+    ("${{ secrets[matrix.name] }}", {None}),
+    ("${{ secrets.* }}", {None}),
+    ("${{ inputs.secrets }} echo secrets", set()),
+])
+def test_secret_scanner_recognizes_every_expression_form(value, names):
+    assert secret_references({"env": {"VALUE": value}}) == names
+    assert secret_references({"if": "secrets.APPLE_CERTIFICATE != ''"}) == {"APPLE_CERTIFICATE"}
+
+
 def test_inherited_secrets_reach_test_builds_only_as_the_updater_pair():
     package = workflow("desktop-package.yml")
     assert package["on" if "on" in package else True]["workflow_call"]["inputs"]["release_tag"]["required"] is True
-    build = package["jobs"]["package"]
-    assert "secrets." not in json.dumps({key: value for key, value in build.items() if key != "steps"})
+    assert secret_references({key: value for key, value in package.items() if key != "jobs"}) == set()
     updater = {"TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"}
     reachable = set()
-    for item in build["steps"]:
-        names = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", json.dumps(item)))
-        if names - updater:
-            condition = item.get("if", "")
-            assert "||" not in condition, item.get("name")
-            assert re.fullmatch(r"(.+ && )?inputs\.release_tag == ''", condition), item.get("name")
-        else:
-            reachable |= names
+    for job in package["jobs"].values():
+        assert secret_references({key: value for key, value in job.items() if key != "steps"}) == set()
+        for item in job["steps"]:
+            names = secret_references(item)
+            assert None not in names, item.get("name")
+            if names - updater:
+                condition = item.get("if", "")
+                assert "||" not in condition, item.get("name")
+                assert re.fullmatch(r"(.+ && )?inputs\.release_tag == ''", condition), item.get("name")
+            else:
+                reachable |= names
     assert reachable == updater
 
 
