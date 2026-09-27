@@ -240,7 +240,9 @@ def test_inherited_secrets_reach_test_builds_only_as_the_updater_pair():
     for item in build["steps"]:
         names = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", json.dumps(item)))
         if names - updater:
-            assert item.get("if", "").endswith("inputs.release_tag == ''"), item.get("name")
+            condition = item.get("if", "")
+            assert "||" not in condition, item.get("name")
+            assert re.fullmatch(r"(.+ && )?inputs\.release_tag == ''", condition), item.get("name")
         else:
             reachable |= names
     assert reachable == updater
