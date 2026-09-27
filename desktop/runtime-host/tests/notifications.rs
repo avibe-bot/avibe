@@ -740,6 +740,38 @@ async fn runs_beyond_the_lookup_limit_queue_instead_of_being_dropped() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_overloaded_backlog_is_bounded_and_falls_back_to_generic_copy() {
+    let transport = Arc::new(FakeTransport {
+        detail_delay: Duration::from_secs(60),
+        ..FakeTransport::default()
+    });
+    let sink = Arc::new(FakeSink::default());
+    let mut frames = (0..100).map(|index| run(index, "watch", 0)).collect::<Vec<_>>();
+    frames.push(frame(
+        "runs.updated",
+        json!({"run_id": "unstamped", "status": "succeeded"}),
+    ));
+    transport.stream(frames, false);
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    // 64 are pending (16 reading); the other 36 known-background runs notify
+    // at once without a source, and the unstamped overflow fails closed.
+    assert_eq!(transport.refetched.lock().unwrap().len(), 16);
+    assert_eq!(sink.delivered.lock().unwrap().len(), 36);
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+    }
+    assert_eq!(transport.refetched.lock().unwrap().len(), 64);
+    assert_eq!(
+        *sink.delivered.lock().unwrap(),
+        vec![NotificationIntent::RunSucceeded; 100]
+    );
+    assert!(!transport.refetched.lock().unwrap().contains(&"unstamped".to_owned()));
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
 async fn stopping_the_loop_cancels_detail_reads_in_flight() {
     let transport = Arc::new(FakeTransport {
         detail_delay: Duration::from_secs(1),

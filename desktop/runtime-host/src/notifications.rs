@@ -19,6 +19,7 @@ const MAX_DETAIL_BYTES: usize = 256 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_DETAIL_LOOKUPS: usize = 16;
+const MAX_PENDING_LOOKUPS: usize = 64;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SseFrame {
@@ -533,10 +534,22 @@ pub async fn run_notifications(
                             intent,
                             background,
                         }) => {
+                            while lookups.try_join_next().is_some() {}
+                            if lookups.len() >= MAX_PENDING_LOOKUPS {
+                                // Overloaded: the backlog is bounded. Work the
+                                // event already qualifies notifies now with
+                                // generic copy; a run only its read could
+                                // qualify fails closed.
+                                if background && sink.gate().allows() {
+                                    sink.deliver(intent, None);
+                                }
+                                continue;
+                            }
                             let (transport, sink, slots) = (transport.clone(), sink.clone(), slots.clone());
                             lookups.spawn(async move {
-                                // Queue behind the limit rather than drop: a
-                                // run without stamps is only decided by its read.
+                                // Queue behind the request limit rather than
+                                // drop: a run without stamps is only decided
+                                // by its read.
                                 let Ok(_slot) = slots.acquire_owned().await else {
                                     return;
                                 };

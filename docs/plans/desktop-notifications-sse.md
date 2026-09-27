@@ -204,8 +204,11 @@ its label; an unreadable or label-less detail keeps the generic catalog
 title and body rather than withholding the notification. Approval
 banners keep generic copy. Detail reads run beside the SSE reader, never
 inside it: each is bounded by the request timeout, at most 16 are in
-flight (later runs queue for a slot rather than being dropped, since a
-run without stamps is only qualified by its read), and stopping the
+flight, and at most 64 are pending (later runs queue for a slot, since
+a run without stamps is only qualified by its read). Past that backlog
+the shell is overloaded: runs the event already qualifies notify at once
+with generic copy, and a run only its read could qualify fails closed.
+Stopping the
 loop cancels them, so a slow Runtime never delays the next event.
 
 These labels are Runtime strings on their way to a privileged OS
