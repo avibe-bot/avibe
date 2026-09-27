@@ -559,7 +559,9 @@ def generation_version(generation: Path) -> str | None:
             for distribution in metadata.distributions(name=package, path=[str(path) for path in site_packages]):
                 if distribution.version:
                     return distribution.version
-    except OSError:
+    except (OSError, ValueError):
+        # Unreadable or undecodable metadata is an unknown version, which never
+        # fences start and never stops status or doctor from reporting it.
         pass
     return None
 
@@ -642,24 +644,49 @@ def _generation_installed_at(generation: Path) -> float:
     return max(times, default=float("-inf"))
 
 
-def newest_launcher_selection(selections: list[LauncherSelection]) -> LauncherSelection | None:
-    """Return the launcher selecting the last activated installation.
+def _activation_rank(generation: Path, version: str | None) -> tuple:
+    """Order installs so the last activated one ranks highest.
 
-    A known version outranks an unknown one. Generations of the same version,
-    such as a reinstall whose peer launcher could not move, rank by when uv
-    installed them, never by discovery order: activation always installs a
-    fresh generation, so the most recent install is the one it activated.
+    The newest version wins, and a known version outranks an unknown one.
+    Generations of the same version, such as a reinstall or integrity repair,
+    rank by when uv installed them: activation always installs a fresh
+    generation, so the most recent install of a version is the one activated.
+    This is the only ordering behind both the repair target and the fence.
     """
 
-    installed: dict[Path, float] = {}
+    parsed = _parse_version(version) if version else None
+    installed_at = _generation_installed_at(generation)
+    return (0, installed_at) if parsed is None else (1, parsed, installed_at)
+
+
+def newest_launcher_selection(selections: list[LauncherSelection]) -> LauncherSelection | None:
+    """Return the launcher selecting the last activated install, by ``_activation_rank``."""
+
+    ranks: dict[Path, tuple] = {}
 
     def rank(selection: LauncherSelection) -> tuple:
-        if selection.generation not in installed:
-            installed[selection.generation] = _generation_installed_at(selection.generation)
-        version = _parse_version(selection.version) if selection.version else None
-        return (0, installed[selection.generation]) if version is None else (1, version, installed[selection.generation])
+        if selection.generation not in ranks:
+            ranks[selection.generation] = _activation_rank(selection.generation, selection.version)
+        return ranks[selection.generation]
 
     return max(selections, key=rank, default=None)
+
+
+def generation_launcher(generation: Path, name: str) -> Path | None:
+    """Return the launcher a managed generation exports for a stable launcher named ``name``.
+
+    Windows accepts an extensionless ``vibe`` beside uv's ``vibe.exe`` export,
+    so a stable launcher's own name does not always name the export.
+    """
+
+    from vibe.install_generations import _uv_installation
+
+    installation = _uv_installation(generation)
+    if installation is None:
+        return None
+    names = sorted(export.name for export in installation[1])
+    same = [export for export in names if export.lower() == name.lower()]
+    return generation / "bin" / (same or names)[0]
 
 
 def current_generation() -> Path | None:
@@ -717,21 +744,20 @@ def generation_downgrade(generation: Path | None) -> GenerationDowngrade | None:
     """Report whether a generation is older than the last activated one.
 
     Activation keeps every stable launcher on the generation it installs, so
-    the newest version any launcher selects is the last activation. Unknown
-    versions never count as a downgrade.
+    the highest ``_activation_rank`` any launcher selects is the last
+    activation; an older install of the same version counts as well. A
+    generation whose own version is unknown never counts as a downgrade.
     """
 
     if generation is None:
         return None
     version = generation_version(generation)
-    version_key = _parse_version(version) if version else None
-    if version is None or version_key is None:
+    if version is None or _parse_version(version) is None:
         return None
     newest = newest_launcher_selection(stable_launcher_selections())
     if newest is None or newest.generation == generation:
         return None
-    newest_key = _parse_version(newest.version) if newest.version else None
-    if newest_key is None or newest_key <= version_key:
+    if _activation_rank(newest.generation, newest.version) <= _activation_rank(generation, version):
         return None
     return GenerationDowngrade(generation, version, newest)
 

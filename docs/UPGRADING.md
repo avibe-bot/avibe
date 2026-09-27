@@ -17,10 +17,13 @@ If a launcher cannot be moved, for example because it is not writable,
 `vibe doctor` fails and lists each launcher with its version. Run
 `vibe doctor repair stable-launchers` to point all of them at the newest
 installed version, or at the most recent install when two share a version. A
-launcher that another installer replaced in the meantime is left as it is.
+launcher that another installer replaced in the meantime is left as it is, and
+the repair fails if the launchers still disagree afterwards.
 
 `vibe start` and `vibe restart` refuse to run an install older than the last
-activated one and name the launcher to run instead. Pass `--allow-downgrade` to
+activated one and name the launcher to run instead. An earlier install of the
+same version, such as one a reinstall left behind, counts as older; an install
+whose version cannot be read never does. Pass `--allow-downgrade` to
 run the older build on purpose. Bare `vibe`, which systemd and launchd use, and
 the desktop app only warn, so a supervised service still comes up. While the
 running service is older than the last activation, `vibe status` includes a

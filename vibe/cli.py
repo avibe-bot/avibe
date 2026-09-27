@@ -92,6 +92,7 @@ from vibe.upgrade import (
     is_desktop_managed_runtime,
     _launcher_generation,
     _candidate_python,
+    generation_launcher,
     launcher_is_current_process,
     move_managed_launcher_locked,
     newest_launcher_selection,
@@ -1185,6 +1186,7 @@ def _service_generation_items() -> list[dict]:
             version=downgrade.version,
             generation=downgrade.generation,
             activatedVersion=downgrade.activated.version,
+            activatedGeneration=downgrade.activated.generation,
         ),
         i18n_t("doctor.action.serviceGenerationBehind", language, launcher=downgrade.activated.launcher),
         code="runtime.service_generation_behind",
@@ -13176,11 +13178,26 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
             for selection in selections:
                 if selection.generation == target.generation:
                     continue
+                exported = generation_launcher(target.generation, selection.launcher.name)
+                if exported is None:
+                    raise RuntimeError(f"{target.generation} no longer exports a vibe launcher")
                 # A launcher another installer replaced since discovery is left alone.
-                if move_managed_launcher_locked(
-                    selection.launcher, selection.generation, target.generation / "bin" / selection.launcher.name,
-                ):
+                if move_managed_launcher_locked(selection.launcher, selection.generation, exported):
                     moved.append(selection.launcher)
+            # Report what the launchers select now, not what was attempted: the
+            # upgrade lock does not stop uv or another installer changing them.
+            remaining = stable_launcher_selections()
+            if len({selection.generation for selection in remaining}) > 1:
+                return _doctor_repair_result(
+                    target_name,
+                    "failed",
+                    i18n_t(
+                        "doctor.repair.stableLaunchersStillSplit",
+                        language,
+                        launchers=_describe_launcher_selections(remaining, language),
+                    ),
+                    launchers=[str(launcher) for launcher in moved],
+                )
     except Exception as exc:
         return _doctor_repair_result(
             target_name, "failed", i18n_t("doctor.repair.stableLaunchersFailed", language, error=exc)
