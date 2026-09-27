@@ -475,7 +475,7 @@ pub async fn run_notifications(
                     backoff.reset();
                 }
                 let allowed_at_receipt = sink.gate().allows();
-                let candidates = decoder
+                let mut candidates = decoder
                     .push(&chunk)
                     .into_iter()
                     .filter_map(|frame| {
@@ -485,6 +485,11 @@ pub async fn run_notifications(
                             .and_then(|mut filter| filter.consider(frame, Instant::now()))
                     })
                     .collect::<Vec<_>>();
+                // Approvals need no read, so they go first; the detail reads
+                // share one deadline, so a burst of terminal runs costs at most
+                // one REQUEST_TIMEOUT rather than one per run.
+                candidates.sort_by_key(|candidate| !matches!(candidate, Candidate::Approval));
+                let details_deadline = Instant::now() + REQUEST_TIMEOUT;
                 for candidate in candidates.into_iter().filter(|_| allowed_at_receipt) {
                     let (intent, source) = match candidate {
                         Candidate::Approval => (Some(NotificationIntent::ApprovalRequested), None),
@@ -500,7 +505,7 @@ pub async fn run_notifications(
                             // One bounded read per terminal run: it names the
                             // source and, when the event lacked stamps, decides
                             // whether the run was background work at all.
-                            let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.run_detail(&run_id))
+                            let detail = tokio::time::timeout_at(details_deadline, transport.run_detail(&run_id))
                                 .await
                                 .ok()
                                 .flatten();

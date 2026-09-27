@@ -647,3 +647,25 @@ async fn run_notifications_name_their_source_from_sanitized_detail_labels() {
     assert_eq!(sink.delivered.lock().unwrap().len(), expected.len());
     task.abort();
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_burst_of_runs_shares_one_detail_deadline_and_never_delays_approvals() {
+    let transport = Arc::new(FakeTransport {
+        detail_delay: Duration::from_secs(60),
+        ..FakeTransport::default()
+    });
+    let sink = Arc::new(FakeSink::default());
+    let mut burst = (0..5).flat_map(|index| run(index, "watch", 0)).collect::<Vec<u8>>();
+    burst.extend(approval("request", "pending"));
+    transport.stream([burst], false);
+    let task = spawn(transport, sink.clone());
+    settle().await;
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::ApprovalRequested]);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+    let mut expected = vec![NotificationIntent::ApprovalRequested];
+    expected.extend([NotificationIntent::RunSucceeded; 5]);
+    assert_eq!(*sink.delivered.lock().unwrap(), expected);
+    assert_eq!(*sink.sources.lock().unwrap(), vec![None; 6]);
+    task.abort();
+}
