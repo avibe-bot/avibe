@@ -218,6 +218,107 @@ function remarkLiteralAuthority() {
   };
 }
 
+// GFM ends a literal autolink (a bare `https://…` / `www.…`) only at whitespace
+// and trims only ASCII trailing punctuation, matching GitHub (remarkjs/remark-gfm#83,
+// github/cmark-gfm#377). CJK text puts no space after a URL, so
+// `（https://x/pull/1），在等` linked everything up to the next space. CJK script
+// and any non-ASCII punctuation, symbol, or space end the URL here, and GFM's
+// trailing-punctuation trim runs again on what is left. Only where a literal
+// ends changes: explicit `[text](url)` and `<url>` links keep their destination,
+// so a URL that really contains CJK can still be written either way.
+const AUTOLINK_BOUNDARY =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]|(?!\p{ASCII})[\p{P}\p{S}\p{Z}]/u;
+// A literal GFM would accept: a scheme or `www.`, then a dotted domain.
+const AUTOLINK_LITERAL = /^(?:https?:\/\/|www\.)[-\w]+(?:\.[-\w]+)+/i;
+// Where another literal may start inside a swallowed run: GFM starts one only
+// after whitespace, punctuation, or a symbol, and a run holds no whitespace.
+const AUTOLINK_START = /(?<=[\p{P}\p{S}])(?:https?:\/\/|www\.)/giu;
+
+type AutolinkNode = {
+  type: string;
+  value?: string;
+  url?: string;
+  title?: null;
+  children?: AutolinkNode[];
+  position?: { start?: { offset?: number } };
+};
+
+// GFM's trailing-punctuation rule (mdast-util-gfm-autolink-literal `splitUrl`):
+// drop trailing ASCII punctuation, keeping a `)` that closes an open `(`.
+function trimAutolinkTrail(url: string): string {
+  const trail = /[!"&'),.:;<>?\]}]+$/.exec(url);
+  if (!trail) return url;
+  let kept = url.slice(0, trail.index);
+  let rest = trail[0];
+  const opening = kept.split('(').length - 1;
+  let closing = kept.split(')').length - 1;
+  let close = rest.indexOf(')');
+  while (close !== -1 && opening > closing) {
+    kept += rest.slice(0, close + 1);
+    rest = rest.slice(close + 1);
+    close = rest.indexOf(')');
+    closing++;
+  }
+  return kept;
+}
+
+// Re-split the run GFM linked as one literal into the links and text it spells
+// once a boundary ends each URL, or null when the run holds no boundary.
+function splitAutolinkRun(run: string): AutolinkNode[] | null {
+  if (!AUTOLINK_BOUNDARY.test(run)) return null;
+  const nodes: AutolinkNode[] = [];
+  let textStart = 0;
+  let linkStart = 0;
+  for (;;) {
+    const tail = run.slice(linkStart);
+    const boundary = tail.search(AUTOLINK_BOUNDARY);
+    const literal = trimAutolinkTrail(boundary < 0 ? tail : tail.slice(0, boundary));
+    let resume = linkStart + 1;
+    if (AUTOLINK_LITERAL.test(literal)) {
+      if (linkStart > textStart) nodes.push({ type: 'text', value: run.slice(textStart, linkStart) });
+      const url = (/^www\./i.test(literal) ? 'http://' : '') + literal;
+      nodes.push({ type: 'link', url, title: null, children: [{ type: 'text', value: literal }] });
+      textStart = resume = linkStart + literal.length;
+    }
+    AUTOLINK_START.lastIndex = resume;
+    const next = AUTOLINK_START.exec(run);
+    if (!next) break;
+    linkStart = next.index;
+  }
+  if (textStart < run.length) nodes.push({ type: 'text', value: run.slice(textStart) });
+  return nodes;
+}
+
+function remarkCjkAutolinkBoundary() {
+  return (tree: unknown, file: { value?: unknown }) => {
+    const source = typeof file.value === 'string' ? file.value : '';
+    const visit = (parent: AutolinkNode) => {
+      const children = parent.children;
+      if (!children) return;
+      for (let index = 0; index < children.length; index++) {
+        const node = children[index];
+        const label = node.children?.length === 1 ? node.children[0] : undefined;
+        const run = label?.type === 'text' ? label.value : undefined;
+        const offset = node.position?.start?.offset;
+        // A literal autolink: its label is its url (GFM prepends `http://` to
+        // `www.`), and it was not written as `[text](url)` or `<url>`.
+        const isLiteral = node.type === 'link'
+          && run !== undefined
+          && (node.url === run || node.url === `http://${run}`)
+          && (offset === undefined || (source[offset] !== '[' && source[offset] !== '<'));
+        const pieces = isLiteral ? splitAutolinkRun(run) : null;
+        if (pieces) {
+          children.splice(index, 1, ...pieces);
+          index += pieces.length - 1;
+        } else {
+          visit(node);
+        }
+      }
+    };
+    visit(tree as AutolinkNode);
+  };
+}
+
 // Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
 // only http/https/mailto/tel/relative by default).
 function mentionUrlTransform(
@@ -410,6 +511,7 @@ export const Markdown: React.FC<{
     () => [
       remarkGfm,
       remarkCjkFriendly,
+      remarkCjkAutolinkBoundary,
       // Unconditional: which destinations were written with a bracketed host is
       // a fact about this text, not about whether it carries citations.
       remarkLiteralAuthority,

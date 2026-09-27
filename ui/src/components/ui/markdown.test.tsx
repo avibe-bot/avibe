@@ -15,6 +15,46 @@ import { Markdown } from './markdown';
 
 afterEach(cleanup);
 
+// GFM ends a bare URL only at whitespace, and CJK text puts none after it.
+// A literal autolink must stop where CJK text or non-ASCII punctuation begins,
+// with every character still rendered exactly once.
+describe('Markdown literal autolinks next to CJK text', () => {
+  it.each([
+    [
+      'PR #2232（https://github.com/avibe-bot/avibe/pull/2232），在等 Codex',
+      ['https://github.com/avibe-bot/avibe/pull/2232'],
+    ],
+    ['打开 https://example.com/a这个页面', ['https://example.com/a']],
+    ['(https://example.com/a)，然后', ['https://example.com/a']],
+    ['见 https://example.com/a.。', ['https://example.com/a']],
+    ['“https://example.com/x”', ['https://example.com/x']],
+    ['看 https://example.com/x✅', ['https://example.com/x']],
+    ['见 www.example.com。', ['http://www.example.com']],
+    [
+      'https://a.example.com/1，https://b.example.com/2。',
+      ['https://a.example.com/1', 'https://b.example.com/2'],
+    ],
+    ['https://中文.example.com', []],
+  ])('links %j as %j', (content, hrefs) => {
+    const { container } = render(<Markdown content={content} />);
+    const anchors = [...container.querySelectorAll('a')];
+    expect(anchors.map((a) => a.getAttribute('href'))).toEqual(hrefs);
+    expect(anchors.map((a) => a.textContent)).toEqual(
+      hrefs.map((href) => href.replace(/^http:\/\/(?=www\.)/, '')),
+    );
+    expect(container.textContent).toBe(content);
+  });
+
+  it.each([
+    ['[文档](https://example.com/中文)', 'https://example.com/%E4%B8%AD%E6%96%87'],
+    ['<https://example.com/中文>', 'https://example.com/%E4%B8%AD%E6%96%87'],
+    ['https://example.com/a. 然后', 'https://example.com/a'],
+  ])('leaves %j as GFM parses it', (content, href) => {
+    const { container } = render(<Markdown content={content} />);
+    expect([...container.querySelectorAll('a')].map((a) => a.getAttribute('href'))).toEqual([href]);
+  });
+});
+
 // A character reference is the other way Markdown writes a character the
 // reader must see, and every surface has to agree on which spellings are
 // references and what each one stands for. This renderer is the reference
