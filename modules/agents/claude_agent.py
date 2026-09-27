@@ -163,6 +163,7 @@ class ClaudeAgent(BaseAgent):
         self._detached_foreground_tool_use_ids: dict[str, set[str]] = {}
         self._detached_foreground_task_ids: dict[str, set[str]] = {}
         self._synthetic_pending_owners: dict[str, AgentRequest] = {}
+        self._synthetic_owner_settlements: dict[str, asyncio.Event] = {}
         self._provenance_recovery_evidence: dict[str, dict[str, object]] = {}
 
         # Question handler for AskUserQuestion support (disabled)
@@ -3788,6 +3789,11 @@ class ClaudeAgent(BaseAgent):
         self._clear_request_activities(synthetic)
         self._mark_session_idle_if_no_pending_requests(composite_key)
         owner_context = getattr(synthetic, "context", None) or context
+        # Output arriving while this Turn settles belongs to the next Turn. The
+        # receiver waits here rather than classifying it against a gate that
+        # this settling Turn still holds.
+        settled = asyncio.Event()
+        self._synthetic_owner_settlements[composite_key] = settled
         try:
             await self.controller.emit_agent_message(
                 owner_context,
@@ -3799,11 +3805,17 @@ class ClaudeAgent(BaseAgent):
         except BaseException as exc:
             # No backend result will ever arrive for this Turn again and its
             # record is already gone, so a failed or cancelled settle must still
-            # release its waiter rather than wedge the Session.
+            # latch its outcome and release its waiter rather than wedge the
+            # Session.
             if isinstance(exc, Exception):
                 logger.warning(
                     "Agent-initiated turn settle failed for %s", composite_key, exc_info=True,
                 )
+            latch = getattr(
+                getattr(self.controller, "session_turns", None), "on_terminal_result", None,
+            )
+            if is_error and callable(latch):
+                latch(owner_context, is_error=True, settled_by=SETTLED_BY_TURN_ONLY_RESULT)
             mark = getattr(self.controller, "mark_turn_complete", None)
             if callable(mark):
                 mark(owner_context, settled_by=SETTLED_BY_TURN_ONLY_RESULT)
@@ -3811,6 +3823,9 @@ class ClaudeAgent(BaseAgent):
                 raise
         finally:
             self._release_service_runtime_turn(owner_context)
+            if self._synthetic_owner_settlements.get(composite_key) is settled:
+                self._synthetic_owner_settlements.pop(composite_key, None)
+            settled.set()
         return True
 
     def _has_synthetic_delivery_pending(self, composite_key: str) -> bool:
@@ -5638,6 +5653,9 @@ class ClaudeAgent(BaseAgent):
         agent-initiated Turn and synthesize a pending ``AgentRequest`` so the
         existing result path retains its normal lifecycle behavior.
         """
+        settling = self._synthetic_owner_settlements.get(composite_key)
+        if settling is not None:
+            await settling.wait()
         registry = self._activity_registry()
         pending = self._pending_requests.get(composite_key) or []
         defer_activity_claim = message_type == "result" and (

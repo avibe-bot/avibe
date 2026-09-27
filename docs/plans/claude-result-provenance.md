@@ -267,6 +267,14 @@ human input queued behind the Turn indefinitely.
   detached output that already settled it. The output record is already gone,
   so nothing retries this settle: if it fails or is cancelled, the Turn waiter
   is still released (cancellation then propagates), so the Session cannot wedge.
+  That fallback first latches an error outcome through the same
+  `on_terminal_result` chokepoint. Otherwise a failed error settle would
+  terminalize the Turn as completed.
+- The settle awaits delivery while the owner is already retired but the gate
+  is still held. Output reaching the receiver in that window belongs to the
+  next Turn. It waits for the settlement, then opens that Turn normally.
+  Classifying the output against the held gate would instead make it a
+  detached record that is delivered outside any Turn.
 - A silent-only detached reply settles its Activity claim without creating a
   Message. A missing receipt for such a reply is success, not a delivery
   failure, so it no longer retries forever ahead of every later record.
