@@ -39,7 +39,7 @@ from jwt import PyJWKClient
 
 from config import paths
 from config.atomic_io import write_atomic
-from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock
+from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock, config_recovery_refusal
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
@@ -4877,13 +4877,15 @@ def _pairing_local_write_preflight() -> str | None:
     """Return a reason when the local config cannot durably accept a pairing.
 
     Runs BEFORE the one-time redeem so a predictable local failure never
-    consumes the pairing key (#2080). ``V2Config.load()`` recovery warnings are
-    the same condition ``api.save_config`` refuses on, so they fail here too.
+    consumes the pairing key (#2080). The pairing save writes only
+    ``remote_access``; ``api.save_config`` refuses it on the same recovery
+    condition checked here (#2079).
     """
     try:
         loaded = V2Config.load()
-        if loaded.load_warnings:
-            return "config was loaded with recovery warnings; repair the backed-up config before pairing"
+        recovery_refusal = config_recovery_refusal(loaded, "remote_access")
+        if recovery_refusal is not None:
+            return recovery_refusal
     except FileNotFoundError:
         pass  # fresh install: save_config seeds defaults
     except Exception as exc:

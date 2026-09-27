@@ -32,6 +32,8 @@ from config.v2_config import (
     CONFIG_LOCK,
     V2Config,
     config_file_lock,
+    AGENT_CREDENTIAL_SECTIONS,
+    config_recovery_refusal,
 )
 from config.v2_settings import (
     SettingsStore,
@@ -636,13 +638,19 @@ def config_recovery_notice(config: V2Config) -> Optional[str]:
 
 
 def _config_recovery_message() -> Optional[str]:
-    """Return a localized guard message before mutating backend-owned auth files."""
+    """Return a localized guard message before mutating backend-owned auth files.
+
+    Credential custody is decided by ``model_hub`` and the Agent backend
+    settings; recovery of any other section leaves both readable.
+    """
 
     with CONFIG_LOCK:
         try:
             config = load_config()
         except FileNotFoundError:
             return None
+    if config_recovery_refusal(config, *AGENT_CREDENTIAL_SECTIONS) is None:
+        return None
     return config_recovery_notice(config)
 
 
@@ -1014,11 +1022,6 @@ def save_config(
         base_config: Optional[V2Config] = None
         try:
             base_config = load_config()
-            if base_config.load_warnings:
-                raise ValueError(
-                    "Config was loaded with recovery warnings; repair the backed-up "
-                    "config before saving changes"
-                )
             base_payload = config_to_payload(base_config, include_secrets=True, include_internal=True)
         except FileNotFoundError:
             # Fresh install: seed the same workbench-only default served by the read side.
@@ -1053,6 +1056,13 @@ def save_config(
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        if base_config is not None:
+            # A recovered base section must reach the file as stored, never as
+            # the defaults merged in above. Refuse before any side effect below.
+            config.inherit_load_diagnostics(base_config)
+            recovery_refusal = config.pending_write_refusal()
+            if recovery_refusal is not None:
+                raise ValueError(recovery_refusal)
         if not context.can_manage_access_members:
             from core.services.settings import default_config
 

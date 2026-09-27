@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config import paths
 from config.v2_config import (
     _FIELD_SCOPED_RECOVERY_SECTIONS,
     AudioAsrConfig,
@@ -1462,6 +1463,155 @@ def test_malformed_cloud_section_is_refused_on_writes_and_recovered_on_disk(tmp_
     config = _load_from_disk({"enabled": True, **{name: 12345 for name in string_fields}})
     assert config.load_warnings
     _assert_degrades(config)
+
+
+def _seed_recovered_config(tmp_path, monkeypatch, sqlite_schema_db_factory, corrupt) -> tuple[Path, dict]:
+    """Store a valid config through the real save, then corrupt it on disk."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    api.save_config(_full_config_payload())
+    config_path = paths.get_config_path()
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    corrupt(stored)
+    config_path.write_text(json.dumps(stored), encoding="utf-8")
+    return config_path, stored
+
+
+def _refuse_model_hub_change(config_path: Path) -> None:
+    # ``/api/config`` drops ``model_hub``; Hub writes reach the file through
+    # ``V2Config.save``.
+    config = V2Config.load(config_path)
+    config.model_hub.enabled = not config.model_hub.enabled
+    config.save(config_path)
+
+
+@pytest.mark.parametrize(
+    ("region", "corrupt", "change"),
+    [
+        pytest.param(
+            ("model_hub",),
+            # A newer release's field this build does not know (#2081).
+            lambda stored: stored["model_hub"].update({"routing_v3": {"enabled": True}}),
+            _refuse_model_hub_change,
+            id="model_hub-newer-release",
+        ),
+        pytest.param(
+            ("slack",),
+            lambda stored: stored["slack"].update({"bot_token": 123}),
+            lambda _path: api.save_config({"slack": {"require_mention": True}}),
+            id="slack",
+        ),
+        pytest.param(
+            ("audio_asr",),
+            lambda stored: stored["audio_asr"].update({"enabled": "maybe"}),
+            lambda _path: api.save_config({"audio_asr": {"enabled": True}}),
+            id="audio_asr-field",
+        ),
+        pytest.param(
+            ("agents", "codex"),
+            lambda stored: stored["agents"].update({"codex": "broken"}),
+            lambda _path: api.save_config({"agents": {"codex": {"cli_path": "codex-next"}}}),
+            id="agents-codex",
+        ),
+    ],
+)
+def test_recovered_section_is_saved_as_stored_and_only_its_changes_are_refused(
+    tmp_path, monkeypatch, sqlite_schema_db_factory, region, corrupt, change,
+):
+    """#2079: one recovered section must not lock out every config write.
+
+    Load still recovers the section in memory behind a warning and a backup.
+    A save that leaves it alone succeeds and writes the section back exactly
+    as stored, never as the recovery defaults held in memory. A save that
+    changes it is refused, names the section and the backup, and writes
+    nothing.
+    """
+    config_path, stored = _seed_recovered_config(tmp_path, monkeypatch, sqlite_schema_db_factory, corrupt)
+    loaded = V2Config.load(config_path)
+    assert loaded.recovered_sections
+    recovered = api.config_to_payload(loaded, include_secrets=True, include_internal=True)
+    # Otherwise "defaults never written" below would hold trivially.
+    assert _walk(recovered, region, attr=False) != _walk(stored, region, attr=False)
+
+    # An unrelated settings save and a direct save both succeed.
+    api.save_config({"show_duration": True})
+    loaded = V2Config.load(config_path)
+    loaded.ui.open_browser = not loaded.ui.open_browser
+    loaded.save(config_path)
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert persisted["ui"]["open_browser"] is loaded.ui.open_browser
+    assert _walk(persisted, region, attr=False) == _walk(stored, region, attr=False)
+    reloaded = V2Config.load(config_path)
+    assert reloaded.recovered_sections == loaded.recovered_sections
+    assert reloaded.load_warnings
+
+    before = config_path.read_bytes()
+    with pytest.raises(ValueError, match="recovery warnings for ") as refused:
+        change(config_path)
+    assert config_path.read_bytes() == before
+    for section in reloaded.recovered_sections:
+        assert section in str(refused.value)
+    assert ".bak-recovery-" in str(refused.value)
+
+
+def test_recovered_section_save_keeps_the_current_disk_value_not_the_loaded_copy(
+    tmp_path, monkeypatch, sqlite_schema_db_factory,
+):
+    """#2079: a recovered section is spliced from the file at write time.
+
+    Another writer may replace the section between this process's load and
+    its save. Writing back the copy seen at load time would undo that write.
+    """
+    config_path, _stored = _seed_recovered_config(
+        tmp_path,
+        monkeypatch,
+        sqlite_schema_db_factory,
+        lambda stored: stored["model_hub"].update({"routing_v3": {"enabled": True}}),
+    )
+    loaded = V2Config.load(config_path)
+    assert "model_hub" in loaded.recovered_sections
+
+    concurrent = json.loads(config_path.read_text(encoding="utf-8"))
+    concurrent["model_hub"]["routing_v3"] = {"enabled": False, "hops": 2}
+    config_path.write_text(json.dumps(concurrent), encoding="utf-8")
+
+    loaded.show_duration = True
+    loaded.save(config_path)
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert persisted["model_hub"] == concurrent["model_hub"]
+
+
+def test_unrelated_save_under_recovery_does_not_acknowledge_the_model_hub_upgrade(
+    tmp_path, monkeypatch, sqlite_schema_db_factory,
+):
+    """A save allowed during recovery must not complete a pending Hub upgrade.
+
+    A clean load of a file without the runtime-default marker still owes the
+    upgrade. Recovering an unrelated section skips it, and the save that
+    recovery now permits must not persist the marker as done.
+    """
+
+    def _corrupt(stored: dict) -> None:
+        stored["slack"]["bot_token"] = 123
+        stored["model_hub"].pop("runtime_default_applied")
+        stored["model_hub"]["enabled"] = False
+
+    config_path, _stored = _seed_recovered_config(tmp_path, monkeypatch, sqlite_schema_db_factory, _corrupt)
+    api.save_config({"show_duration": True})
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["model_hub"].get("runtime_default_applied") is not True
+
+    persisted["slack"]["bot_token"] = ""
+    config_path.write_text(json.dumps(persisted), encoding="utf-8")
+    repaired = V2Config.load(config_path, persist_migrations=True)
+    assert repaired.load_warnings == ()
+    assert repaired.model_hub.enabled is True
+    assert repaired.model_hub.runtime_default_applied is True
 
 
 def _settings_write_paths() -> list[tuple[str, ...]]:

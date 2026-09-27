@@ -32,6 +32,8 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
+    AGENT_CREDENTIAL_SECTIONS,
+    config_recovery_refusal,
     normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
@@ -385,7 +387,8 @@ class V2ModelHubConfigStore:
             config = V2Config.load()
         except FileNotFoundError:
             return
-        if config.load_warnings:
+        # Hub writes also move Agent backend settings (native migration).
+        if config_recovery_refusal(config, *AGENT_CREDENTIAL_SECTIONS) is not None:
             raise ModelHubError("config_recovery", status=409)
 
     def save(self, model_hub: ModelHubConfig) -> None:

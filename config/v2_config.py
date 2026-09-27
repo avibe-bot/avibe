@@ -1200,6 +1200,213 @@ def _reset_recoverable_config_section(
     return False
 
 
+# A config path is a tuple of object keys from the document root. Recovery
+# regions are tracked at most two keys deep: deep enough to keep one recovered
+# Agent backend or one field-scoped setting apart from its siblings, shallow
+# enough that a replaced section is compared and preserved as one value.
+_RECOVERY_REGION_DEPTH = 2
+_MISSING = object()
+_RECOVERY_SAVE_REFUSAL = (
+    "Config was loaded with recovery warnings; repair the backed-up "
+    "config before saving changes"
+)
+
+
+def _config_json_text(value: object) -> Optional[str]:
+    """Order-independent JSON identity of a stored value; ``None`` when absent."""
+
+    if value is _MISSING:
+        return None
+    return json.dumps(value, sort_keys=True, default=repr)
+
+
+def _config_value_at(document: object, path: tuple[str, ...]) -> object:
+    value = document
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return _MISSING
+        value = value[key]
+    return value
+
+
+def _changed_config_paths(
+    before: object, after: object, prefix: tuple[str, ...] = ()
+) -> set[tuple[str, ...]]:
+    """Where one recovery step rewrote the stored document."""
+
+    if _config_json_text(before) == _config_json_text(after):
+        return set()
+    if (
+        len(prefix) >= _RECOVERY_REGION_DEPTH
+        or not isinstance(before, dict)
+        or not isinstance(after, dict)
+    ):
+        return {prefix}
+    changed: set[tuple[str, ...]] = set()
+    for key in dict.fromkeys((*before, *after)):
+        changed |= _changed_config_paths(
+            before.get(key, _MISSING), after.get(key, _MISSING), (*prefix, key)
+        )
+    return changed
+
+
+def _recovered_write_regions(
+    regions: dict[tuple[str, ...], set[str]], candidate: dict
+) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    """Close recovery's rewritten paths over the values ``from_payload`` derives.
+
+    A save writes derived values from memory, so when recovery rewrote their
+    source the derived value would describe the recovered defaults instead of
+    the preserved file: the legacy ``platform`` mirrors ``platforms.primary``,
+    a forced-off ``audio_asr.enabled`` marks the switch as configured, and an
+    absent ``setup_completed`` is inferred from the configured platforms.
+    """
+
+    regions = {path: set(causes) for path, causes in regions.items()}
+
+    def follow(target: tuple[str, ...], is_source: Callable[[tuple[str, ...]], bool]) -> None:
+        causes = set().union(*(owners for path, owners in regions.items() if is_source(path)))
+        if causes:
+            regions.setdefault(target, set()).update(causes)
+
+    follow(("platform",), lambda path: path[0] == "platforms")
+    follow(
+        ("audio_asr", "enabled_configured"),
+        lambda path: path == ("audio_asr", "enabled")[: len(path)],
+    )
+    if "setup_completed" not in candidate:
+        setup_sources = {"mode", "platforms", "platform"} | {
+            descriptor.config_key for descriptor in platform_descriptors()
+        }
+        follow(("setup_completed",), lambda path: path[0] in setup_sources)
+
+    # A path inside another region is already preserved with it.
+    merged: dict[tuple[str, ...], set[str]] = {}
+    for path in sorted(regions, key=len):
+        owner = next((region for region in merged if path[: len(region)] == region), None)
+        merged.setdefault(owner or path, set()).update(regions[path])
+    return tuple((path, tuple(sorted(causes))) for path, causes in sorted(merged.items()))
+
+
+@dataclass(frozen=True)
+class _RecoveredSectionGuard:
+    """Write fence for a config whose sections were recovered at load (#2079).
+
+    Recovery keeps strict parsing and substitutes safe defaults in memory. Those
+    defaults must never become the file: a save that leaves every recovered
+    region as loaded writes each region back from the file on disk, and a save
+    that changes one is refused before anything is written.
+    """
+
+    warnings: tuple[str, ...]
+    regions: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]
+    loaded: tuple[Optional[str], ...]
+    backup: Optional[str]
+
+    @classmethod
+    def capture(
+        cls,
+        config: "V2Config",
+        warnings: tuple[str, ...],
+        regions: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...],
+        backup: Optional[Path],
+    ) -> "_RecoveredSectionGuard":
+        document = config._persisted_document()
+        return cls(
+            warnings=warnings,
+            regions=regions,
+            loaded=tuple(_config_json_text(_config_value_at(document, path)) for path, _ in regions),
+            backup=str(backup) if backup is not None else None,
+        )
+
+    def refusal(self, touched: list[tuple[tuple[str, ...], tuple[str, ...]]]) -> str:
+        sections = sorted({section for _, causes in touched for section in causes})
+        changed = ", ".join(".".join(path) for path, _ in touched)
+        return (
+            f"Config was loaded with recovery warnings for {', '.join(sections)}; "
+            f"repair the backed-up config ({self.backup or 'backup unavailable'}) "
+            f"before changing {changed}"
+        )
+
+    def change_refusal(self, document: dict) -> Optional[str]:
+        touched = [
+            region
+            for region, loaded in zip(self.regions, self.loaded)
+            if _config_json_text(_config_value_at(document, region[0])) != loaded
+        ]
+        return self.refusal(touched) if touched else None
+
+    def scope_refusal(self, sections: tuple[str, ...]) -> Optional[str]:
+        touched = [region for region in self.regions if region[0][0] in sections]
+        return self.refusal(touched) if touched else None
+
+    def preserve_stored_regions(self, path: Path, document: dict) -> dict:
+        """Replace each recovered region with what the file holds now.
+
+        The current file, not the bytes read at load: a region repaired or
+        rewritten by another writer since then is kept as it now stands.
+        """
+
+        try:
+            stored = json.loads(path.read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Config was loaded with recovery warnings and its recovered sections "
+                f"could not be re-read before saving: {exc}"
+            ) from exc
+        if not isinstance(stored, dict):
+            raise ValueError(
+                "Config was loaded with recovery warnings and the file on disk is no "
+                "longer an object; repair it before saving changes"
+            )
+        for region, _ in self.regions:
+            stored_parent = _config_value_at(stored, region[:-1])
+            written_parent = _config_value_at(document, region[:-1])
+            if not isinstance(written_parent, dict) or (
+                stored_parent is not _MISSING and not isinstance(stored_parent, dict)
+            ):
+                raise ValueError(
+                    "Config was loaded with recovery warnings and "
+                    f"'{'.'.join(region)}' can no longer be preserved; repair the "
+                    "config before saving changes"
+                )
+            value = stored_parent.get(region[-1], _MISSING) if isinstance(stored_parent, dict) else _MISSING
+            if value is _MISSING:
+                written_parent.pop(region[-1], None)
+            else:
+                written_parent[region[-1]] = value
+        return document
+
+
+def _active_recovery_guard(config: object) -> Optional[_RecoveredSectionGuard]:
+    guard = getattr(config, "_recovery_guard", None)
+    warnings = tuple(getattr(config, "load_warnings", ()) or ())
+    if not isinstance(guard, _RecoveredSectionGuard) or not warnings or guard.warnings != warnings:
+        return None
+    return guard
+
+
+# Model Hub writes and native Agent credential writes move both sections: the
+# native takeover migrates Agent backend settings into the Hub.
+AGENT_CREDENTIAL_SECTIONS = ("model_hub", "agents")
+
+
+def config_recovery_refusal(config: object, *sections: str) -> Optional[str]:
+    """Why a writer owning ``sections`` must wait for the config to be repaired.
+
+    Section recovery blocks only the writers of the recovered sections; every
+    other warning (migration, persistence, whole-document recovery) still blocks
+    every writer. ``V2Config.save`` enforces the same regions on the final write.
+    """
+
+    if not getattr(config, "load_warnings", ()):
+        return None
+    guard = _active_recovery_guard(config)
+    if guard is None:
+        return _RECOVERY_SAVE_REFUSAL
+    return guard.scope_refusal(sections)
+
+
 def _backup_config_file(
     path: Path,
     label: str,
@@ -3148,6 +3355,10 @@ class V2Config:
     load_warnings: ClassVar[tuple[str, ...]] = ()
     recovered_sections: ClassVar[tuple[str, ...]] = ()
     whole_config_recovery: ClassVar[bool] = False
+    # Where section recovery rewrote the stored document, and the write fence
+    # built from it by ``load``. Both are non-persisted, like the diagnostics.
+    _recovered_regions: ClassVar[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]] = ()
+    _recovery_guard: ClassVar[Optional[_RecoveredSectionGuard]] = None
 
     @classmethod
     def default(cls) -> "V2Config":
@@ -3258,6 +3469,18 @@ class V2Config:
             # unrelated malformed section. Preserve an already enabled Hub
             # only when its own config could be parsed safely.
             config.model_hub.enabled = config.model_hub.enabled and previous_runtime_enabled
+            if (
+                "model_hub" not in recovered_sections
+                and not whole_config_recovery
+                and not (
+                    isinstance(migrated_payload.get("model_hub"), dict)
+                    and migrated_payload["model_hub"].get("runtime_default_applied") is True
+                )
+            ):
+                # Section recovery permits unrelated saves, and like a clean
+                # read-only load they must not acknowledge an upgrade no one
+                # performed.
+                config.model_hub.runtime_default_applied = False
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
         if (
             persist_migrations
@@ -3304,6 +3527,10 @@ class V2Config:
                 "Started with a recovered config; original file preserved at %s",
                 backup,
             )
+            if config._recovered_regions and not migration_warnings:
+                config._recovery_guard = _RecoveredSectionGuard.capture(
+                    config, all_warnings, config._recovered_regions, backup
+                )
         config.load_warnings = all_warnings
         config.recovered_sections = tuple(sorted(recovered_sections))
         config.whole_config_recovery = whole_config_recovery
@@ -3314,6 +3541,7 @@ class V2Config:
         """Parse stored data with recovery defaults, without file IO or locks."""
         recovery_warnings: list[str] = []
         recovered_sections: set[str] = set()
+        rewritten: dict[tuple[str, ...], set[str]] = {}
         whole_config_recovery = False
         while True:
             try:
@@ -3334,6 +3562,7 @@ class V2Config:
                     recovery_warnings.append(warning)
                     whole_config_recovery = True
                     break
+                before_reset = copy.deepcopy(candidate)
                 if not _reset_recoverable_config_section(candidate, section, field_name):
                     warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
                     logger.error("%s", warning)
@@ -3341,12 +3570,21 @@ class V2Config:
                     recovery_warnings.append(warning)
                     whole_config_recovery = True
                     break
+                # Diff each reset on its own: ``from_payload`` normalizes a few
+                # stored values in place, and those are not recovery's rewrites.
+                for path in {
+                    tuple(recovered.split(".", 1)),
+                    *_changed_config_paths(before_reset, candidate),
+                }:
+                    rewritten.setdefault(path, set()).add(recovered)
                 recovered_sections.add(recovered)
                 recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
 
         config.load_warnings = tuple(recovery_warnings)
         config.recovered_sections = tuple(sorted(recovered_sections))
         config.whole_config_recovery = whole_config_recovery
+        if rewritten and not whole_config_recovery:
+            config._recovered_regions = _recovered_write_regions(rewritten, candidate)
         return config
 
     @classmethod
@@ -3706,23 +3944,58 @@ class V2Config:
         which loads fresh inside the cross-process file lock and only
         applies the caller's fields. Direct load → mutate → ``save()``
         cycles are only acceptable in single-writer contexts.
+
+        A config loaded with section recovery saves only while every recovered
+        region still holds what was loaded; those regions are written from the
+        file as it stands, never from the recovery defaults in memory. Any other
+        load warning refuses the save.
         """
 
-        if self.load_warnings:
-            raise ValueError(
-                "Config was loaded with recovery warnings; repair the backed-up "
-                "config before saving changes"
-            )
+        refusal = self.pending_write_refusal()
+        if refusal is not None:
+            raise ValueError(refusal)
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         with config_file_lock(path):
             self._write_locked(path)
+
+    def pending_write_refusal(self) -> Optional[str]:
+        """Why saving this snapshot would be refused, before anything runs."""
+
+        if not self.load_warnings:
+            return None
+        guard = _active_recovery_guard(self)
+        if guard is None:
+            return _RECOVERY_SAVE_REFUSAL
+        return guard.change_refusal(self._persisted_document())
+
+    def inherit_load_diagnostics(self, loaded: "V2Config") -> None:
+        """Hold a snapshot derived from ``loaded`` to that load's recovery state."""
+
+        self.load_warnings = loaded.load_warnings
+        self.recovered_sections = loaded.recovered_sections
+        self.whole_config_recovery = loaded.whole_config_recovery
+        self._recovery_guard = loaded._recovery_guard
 
     def _write_locked(self, path: Path) -> None:
         """Write an exact snapshot while the config transaction is held."""
 
         self.platforms.validate()
         self.platform = self.platforms.primary
+        guard = _active_recovery_guard(self)
+        if guard is None:
+            _write_config_payload(path, self._persisted_payload())
+            return
+        _write_config_payload(
+            path, guard.preserve_stored_regions(path, self._persisted_document())
+        )
+
+    def _persisted_document(self) -> dict:
+        """The saved form as plain JSON values, detached from this object."""
+
+        return json.loads(json.dumps(self._persisted_payload()))
+
+    def _persisted_payload(self) -> dict:
         platform_payload = {}
         for descriptor in platform_descriptors():
             descriptor_config = descriptor.get_config(self)
@@ -3733,7 +4006,7 @@ class V2Config:
                     config_payload.pop("guild_denylist", None)
             platform_payload[descriptor.config_key] = config_payload
         payload = {
-            "platform": self.platform,
+            "platform": self.platforms.primary,
             "platforms": {
                 "enabled": self.platforms.enabled,
                 "primary": self.platforms.primary,
@@ -3781,7 +4054,7 @@ class V2Config:
             "agent_status_no_output_ms": self.agent_status_no_output_ms,
             "setup_completed": self.setup_completed,
         }
-        _write_config_payload(path, payload)
+        return payload
 
     def enabled_platforms(self) -> list[str]:
         return list(self.platforms.enabled)

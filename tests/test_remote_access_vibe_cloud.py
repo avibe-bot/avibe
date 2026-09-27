@@ -3562,6 +3562,58 @@ def test_pair_preflight_failure_never_reaches_the_redeem(monkeypatch, tmp_path) 
     assert not sealed_dir.exists() or not any(sealed_dir.glob("*.json"))
 
 
+def test_pair_saves_past_a_recovered_model_hub_and_keeps_it_as_stored(monkeypatch, tmp_path) -> None:
+    """#2079: a newer release's ``model_hub`` field must not block pairing.
+
+    Pairing writes only ``remote_access``. The recovered ``model_hub`` is
+    written back exactly as stored, never as the defaults held in memory, and
+    the next load still reports it.
+    """
+    _prepare_pairing_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: dict(_PAIRING_RESPONSE))
+    config_path = paths.get_config_path()
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    stored["model_hub"]["routing_v3"] = {"enabled": True}
+    config_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is True, result
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["model_hub"] == stored["model_hub"]
+    reloaded = V2Config.load(config_path)
+    assert reloaded.recovered_sections == ("model_hub",)
+    assert reloaded.remote_access.vibe_cloud.instance_id == "inst_123"
+    assert reloaded.remote_access.vibe_cloud.tunnel_token == "tunnel-token"
+
+
+@pytest.mark.parametrize(
+    ("section", "corrupt", "refused"),
+    [
+        ("model_hub", lambda stored: stored["model_hub"].update({"routing_v3": {"enabled": True}}), False),
+        ("remote_access", lambda stored: stored["remote_access"]["vibe_cloud"].update({"instance_id": 12345}), True),
+    ],
+)
+def test_pair_preflight_refuses_only_a_recovered_remote_access(
+    monkeypatch, tmp_path, section, corrupt, refused
+) -> None:
+    """#2079: pairing changes ``remote_access``, so only that recovery blocks it."""
+    _prepare_pairing_environment(monkeypatch, tmp_path)
+    config_path = paths.get_config_path()
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    corrupt(stored)
+    config_path.write_text(json.dumps(stored), encoding="utf-8")
+    assert V2Config.load(config_path).recovered_sections == (section,)
+
+    refusal = remote_access._pairing_local_write_preflight()
+
+    if refused:
+        assert "recovery warnings for remote_access" in refusal
+        assert ".bak-recovery-" in refusal
+    else:
+        assert refusal is None
+
+
 def test_pair_save_failure_after_redeem_reports_the_orphaned_binding(monkeypatch, tmp_path) -> None:
     """#2080: a post-redeem save failure names the orphaned binding, not a traceback."""
     _prepare_pairing_environment(monkeypatch, tmp_path)

@@ -29,7 +29,7 @@ from config.v2_config import (
     V2Config,
     is_model_hub_enabled,
 )
-from core.handlers.model_hub.service import ModelHubService
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, V2ModelHubConfigStore
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
@@ -2350,11 +2350,43 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
     V2Config.load(config_path=config_path)
     assert len(list(config_path.parent.glob("config.json.bak-recovery-*"))) == 1
 
-    monkeypatch.setattr(api, "load_config", lambda: loaded)
-    with pytest.raises(ValueError, match="recovery warnings"):
-        api.save_config({"show_duration": True})
-    with pytest.raises(ValueError, match="recovery warnings"):
+    # #2079: the recovered defaults never reach the file. A save that leaves
+    # model_hub alone writes it back as stored; changing it is refused.
+    loaded.show_duration = True
+    loaded.save(config_path)
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert persisted["model_hub"] == payload["model_hub"]
+    before = config_path.read_bytes()
+    loaded.model_hub.enabled = not loaded.model_hub.enabled
+    with pytest.raises(ValueError, match="recovery warnings for model_hub"):
         loaded.save(config_path)
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "blocked"),
+    [
+        pytest.param(lambda stored: stored["model_hub"].update({"routing_v3": {}}), True, id="model_hub"),
+        pytest.param(lambda stored: stored["agents"].update({"codex": "broken"}), True, id="agents-codex"),
+        pytest.param(lambda stored: stored["slack"].update({"bot_token": 123}), False, id="slack"),
+    ],
+)
+def test_hub_writes_wait_only_for_recovered_credential_sections(monkeypatch, tmp_path, corrupt, blocked):
+    """#2079: Hub writes read ``model_hub`` and move Agent settings, nothing else."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    corrupt(payload)
+    config_path = tmp_path / "config" / "config.json"
+    config_path.parent.mkdir()
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert V2Config.load().recovered_sections
+
+    if blocked:
+        with pytest.raises(ModelHubError, match="config_recovery"):
+            V2ModelHubConfigStore().ensure_writable()
+    else:
+        V2ModelHubConfigStore().ensure_writable()
 
 
 @pytest.mark.parametrize(
@@ -3099,8 +3131,14 @@ def test_invalid_empty_route_key_keeps_v2_recovery_fence(tmp_path, backend, bad_
     assert loaded.model_hub.sources == []
     assert all(agent.mode == "direct" for agent in loaded.model_hub.agents.values())
     assert path.read_bytes() == before
-    with pytest.raises(ValueError, match="recovery warnings"):
+    # #2079: the fence is on the recovered section, not on every save.
+    loaded.save(config_path=path)
+    assert json.loads(path.read_text())["model_hub"] == payload["model_hub"]
+    before = path.read_bytes()
+    loaded.model_hub.enabled = not loaded.model_hub.enabled
+    with pytest.raises(ValueError, match="recovery warnings for model_hub"):
         loaded.save(config_path=path)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize(

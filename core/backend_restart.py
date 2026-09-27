@@ -133,7 +133,7 @@ class NativeCredentialLease:
         use Hub instead. Read without load-time migration writes: this is an
         admission check.
         """
-        from config.v2_config import V2Config
+        from config.v2_config import AGENT_CREDENTIAL_SECTIONS, V2Config, config_recovery_refusal
 
         self.assert_owned(backend)
         try:
@@ -142,7 +142,9 @@ class NativeCredentialLease:
             config = V2Config.default()
         except (OSError, TypeError, ValueError):
             raise NativeMigrationBlockedError("config_recovery", (backend,)) from None
-        if config.load_warnings:
+        # Custody reads ``model_hub``; native writers also act on the backend's
+        # Agent settings. Recovery elsewhere leaves both trustworthy.
+        if config_recovery_refusal(config, *AGENT_CREDENTIAL_SECTIONS) is not None:
             raise NativeMigrationBlockedError("config_recovery", (backend,))
         hub = config.model_hub
         if hub.agents[backend].mode == "direct":
