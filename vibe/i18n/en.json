@@ -842,7 +842,10 @@
     "checkUpdate": "Updates are delivered with the Avibe desktop app.",
     "upgrade": "This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.",
     "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
-    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately."
+    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately.",
+    "handoverRefused": "Refused to stop the superseded desktop-managed Avibe Runtime: {reason}",
+    "handoverFailed": "Failed to stop the superseded desktop-managed Avibe Runtime: {part}",
+    "handoverForeignUi": "A UI server that is not the superseded desktop-managed Avibe Runtime's is still running."
   },
   "agentInstall": {
     "installFailed": "Could not install {backend}.",

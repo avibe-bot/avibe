@@ -75,15 +75,15 @@ The desktop host mirrors these as Mine, Absent, Foreign and Unknown.
 | No role process carries the id, and the service lock is held | 3 | `{"reason":"service_runtime_id_mismatch"}` | none |
 | No role process carries the id, and the lock cannot be probed | 3 | `{"reason":"service_identity_unavailable"}` | none |
 | Nothing carries the id, and the lock is free | 0 | none | status `stopped` |
-| Every role process carrying the id stopped | 0 | `{"left_running":[{"pid":…,"name":…}]}` when other programs carry the id | status `stopped` |
-| A role process carrying the id is left | 2 | localized error, then `{"failed":"<part>","remaining":[{"pid":…,"role":…}]}` | status `error` |
+| Every role process carrying the id stopped | 0 | `{"left_running":[{"pid":…,"name":…}]}` when other programs carry the id | status `stopped` while the lock is free |
+| A role process carrying the id is left | 2 | localized error, then `{"failed":"<part>","remaining":[{"pid":…,"role":…}]}` | status `error` while the lock is free |
 
 The status file belongs to the service holding the service lock. The stop
-writes it only when a service or unknown process of this Runtime is left, which
-may hold the lock, or the lock is free. When another holds the lock, for
-example a successor started before an earlier stop of this id finished, or the
-lock cannot be probed, the stop leaves the status file alone, whether it
-succeeded or failed.
+writes it only while it holds the free lock itself, so no service can start,
+and publish its own status, before the write lands. When a service holds the
+lock, whether a successor started before an earlier stop of this id finished or
+this Runtime's own service that did not stop, or the lock cannot be probed, the
+stop leaves the status file alone, whether it succeeded or failed.
 
 `<part>` is the first of `service`, `ui`, `installer`, `opencode` and `unknown`
 that did not stop. Refusal happens before anything is signalled; installers
@@ -99,6 +99,7 @@ observed id and fails the start if the stop is refused or fails. It also fails
 the start if the UI pidfile still names a running UI afterwards: that UI is not
 the superseded Runtime's, and the start would otherwise reuse it or replace it
 with an unscoped stop. The tunnel connector is left for the successor to adopt.
+These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
 
 ## Backend installer ownership (#2131)
 
@@ -150,7 +151,8 @@ with an unscoped stop. The tunnel connector is left for the successor to adopt.
   cannot be shown gone also refuses the claim.
 - The stops read no record. `vibe stop --expect-runtime-id` for the id it
   names, and `vibe stop` and the restart supervisor for their own, stop the UI
-  and then reap the abandoned installer trees. A tree whose owner is alive,
+  and then reap the abandoned installer trees. `vibe stop` reaps before it
+  reports a service or UI that did not stop. A tree whose owner is alive,
   such as the install of a UI a missing or corrupt pidfile hid from the full
   stop, stays. A tree that cannot be shown gone, or whose owner cannot be told,
   fails the stop (exit 2) or the restart. Staging and records stay for the next
@@ -213,6 +215,16 @@ with an unscoped stop. The tunnel connector is left for the successor to adopt.
   code would widen this change beyond the desktop. A test pins both.
 - A non-desktop `vibe start` still replaces an unhealthy UI through `stop_ui`,
   unchanged.
+- The start side of the handover claims by pidfile, lock and command line, as
+  on master. A service another desktop Runtime starts after the scan can be
+  reused under the wrong id, and a live foreign UI whose command line cannot be
+  read passes the UI check. A handover check is check-then-act, so the fix
+  belongs at the start claim points (`_resolve_service_pid`, `start_ui` reuse
+  or replace): with an expected id, claim only processes that carry this
+  Runtime id. Tracked in #2135.
+- If this stop's ancestors cannot all be read, its lineage falls back to its
+  pid and parent pid, with a warning; a role process of this Runtime further up
+  the chain could then be signalled.
 - `--expect-runtime-id` help stays English, like every other argparse help
   string. The diagnostics a stop prints are localized; the JSON lines are not.
 - The expected id comes only from `--expect-runtime-id`, never from the CLI's

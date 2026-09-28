@@ -13654,14 +13654,15 @@ def _handover_superseded_desktop_runtime() -> None:
     # Health names the Runtime that answered; the stop signals only processes
     # that carry its id.
     result = runtime.stop_desktop_runtime(actual_runtime_id)
+    language = _configured_cli_language()
     if result.refusal is not None:
-        raise RuntimeError(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}")
+        raise RuntimeError(i18n_t("desktopRuntime.handoverRefused", language, reason=result.refusal))
     if result.failure is not None:
-        raise RuntimeError(f"Failed to stop the superseded desktop-managed Avibe Runtime: {result.failure}")
+        raise RuntimeError(i18n_t("desktopRuntime.handoverFailed", language, part=result.failure))
     # A UI still running is not the superseded Runtime's. Starting would reuse
     # it, or replace it with an unscoped stop.
     if runtime.ui_pid_file_points_to_running_ui():
-        raise RuntimeError("A UI server that is not the superseded desktop-managed Avibe Runtime's is still running")
+        raise RuntimeError(i18n_t("desktopRuntime.handoverForeignUi", language))
 
 
 def cmd_start(*, open_browser: bool | None = None):
@@ -13939,12 +13940,18 @@ _STOP_FAILURES = {
 }
 
 
-def _stop_failed(part: str, *, write_status: bool = True) -> int:
+def _stop_failed(part: str, write_status: Callable[..., None] | None = None) -> int:
     key, detail = _STOP_FAILURES[part]
     print(i18n_t(key, _configured_cli_language()), file=sys.stderr)
-    if write_status:
-        _write_status("error", detail)
+    (write_status or _write_status)("error", detail)
     return 2
+
+
+def _write_status_unless_a_service_holds_the_lock(*status: str) -> None:
+    # The service holding the lock owns the shared status, even another
+    # Runtime's. The write holds the free lock, so no service can start, and
+    # publish its own status, before it lands.
+    runtime.desktop_service_lock_presence(while_absent=lambda: _write_status(*status))
 
 
 def _report_opencode_stopped() -> None:
@@ -13964,19 +13971,15 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
         _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in result.left_running]})
     if result.opencode_stopped:
         _report_opencode_stopped()
-    # The service holding the lock owns the shared status, even when it is
-    # another Runtime's.
-    owns_status = result.owns_status
     # Unlike a full stop, an OpenCode server of this Runtime that survives
     # fails this stop: the desktop host replaces or removes the bundle it runs from.
     if result.outcome is runtime.DesktopRuntimeStopOutcome.FAILED:
-        status = _stop_failed(result.failure, write_status=owns_status)
+        status = _stop_failed(result.failure, _write_status_unless_a_service_holds_the_lock)
         remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
         _print_stop_json({"failed": result.failure, "remaining": remaining})
         return status
 
-    if owns_status:
-        _write_status("stopped")
+    _write_status_unless_a_service_holds_the_lock("stopped")
     return 0
 
 
@@ -13993,6 +13996,11 @@ def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None
 
     service_stopped = runtime.stop_service()
     ui_stopped = runtime.stop_ui()
+    from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
+
+    # Each tree's owner decides whether it is abandoned, so the reap runs
+    # whichever stop above failed.
+    installers_reaped = reap_abandoned_desktop_backend_installs()
 
     # Also terminate OpenCode server on full stop
     if _stop_opencode_server():
@@ -14002,9 +14010,7 @@ def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None
         return _stop_failed("service")
     if ui_was_running and ui_stopped is False:
         return _stop_failed("ui")
-    from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
-
-    if not reap_abandoned_desktop_backend_installs():
+    if not installers_reaped:
         return _stop_failed("installer")
 
     _write_status("stopped")

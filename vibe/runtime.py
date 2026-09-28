@@ -2592,17 +2592,12 @@ class DesktopRuntimeStopResult:
     ``refusal`` is set when nothing was signalled. ``remaining`` names the
     role processes still carrying the id after the stop, and ``left_running``
     the other programs carrying it, which the stop never signals.
-    ``owns_status`` is set when the shared status is this stop's to write: a
-    service or unknown process of this Runtime is left, which may hold the
-    service lock, or the lock is free. Otherwise the status belongs to
-    whichever service holds the lock, even another Runtime's.
     """
 
     refusal: str | None = None
     remaining: tuple[DesktopRuntimeProcess, ...] = ()
     left_running: tuple[DesktopRuntimeProcess, ...] = ()
     opencode_stopped: bool = False
-    owns_status: bool = False
 
     @property
     def failure(self) -> str | None:
@@ -2731,19 +2726,28 @@ def _scan_desktop_runtime(fingerprint: str, lineage: frozenset[int]) -> list[_Sc
     return scanned
 
 
-def _desktop_service_lock_presence() -> DesktopRuntimePresence:
-    """With no role process carrying the id, whether anything else holds the service lock."""
+def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None) -> DesktopRuntimePresence:
+    """With no role process carrying the id, whether anything else holds the service lock.
+
+    ``while_absent`` runs holding the free lock, so no service can take it,
+    and so publish its status, until it returns.
+    """
 
     try:
         lock_path = get_service_lock_path()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            if not _try_lock_file(lock_file):
-                return DesktopRuntimePresence.MISMATCH
-            _unlock_file(lock_file)
+        lock_file = lock_path.open("a+", encoding="utf-8")
     except OSError:
         logger.warning("Could not probe the service instance lock", exc_info=True)
         return DesktopRuntimePresence.UNKNOWN
+    with lock_file:
+        if not _try_lock_file(lock_file):
+            return DesktopRuntimePresence.MISMATCH
+        try:
+            if while_absent is not None:
+                while_absent()
+        finally:
+            _unlock_file(lock_file)
     return DesktopRuntimePresence.ABSENT
 
 
@@ -2811,7 +2815,7 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     if any(entry.report.role is not None for entry in found):
         presence = DesktopRuntimePresence.MATCH
     else:
-        presence = _desktop_service_lock_presence()
+        presence = desktop_service_lock_presence()
     refusal = _DESKTOP_STOP_REFUSALS.get(presence)
     if refusal is not None:
         return DesktopRuntimeStopResult(refusal=refusal)
@@ -2830,12 +2834,8 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     _stop_desktop_processes(opencode)
 
     left = _scan_desktop_runtime(fingerprint, lineage)
-    remaining = tuple(entry.report for entry in left if entry.report.role is not None)
-    ours_may_hold_lock = any(process.role in ("service", _UNKNOWN_DESKTOP_ROLE) for process in remaining)
     return DesktopRuntimeStopResult(
-        remaining=remaining,
+        remaining=tuple(entry.report for entry in left if entry.report.role is not None),
         left_running=tuple(entry.report for entry in left if entry.report.role is None and not entry.lineage),
         opencode_stopped=any(_desktop_process_gone(process) for process in opencode),
-        # A lock that cannot be probed may be held by another service.
-        owns_status=ours_may_hold_lock or _desktop_service_lock_presence() is DesktopRuntimePresence.ABSENT,
     )

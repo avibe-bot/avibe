@@ -534,6 +534,30 @@ def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(monkeypatch, 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("failing", ["service", "ui"])
+def test_a_full_stop_that_fails_still_reaps_the_tree_of_a_dead_owner(
+    monkeypatch, installer_tree, quiet_stop, failing
+):
+    from vibe import runtime
+
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    pids = _start_killed_owner(env, wait_for_tree)
+    # The stop reports this half as still running.
+    if failing == "service":
+        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: os.getpid())
+    else:
+        config_paths.get_runtime_ui_pid_path().write_text(str(os.getpid()), encoding="utf-8")
+        monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
+
+    assert cli.cmd_stop() == 2
+
+    assert _running(pids) == []
+    assert _install_lock_is_free(env)
+    assert statuses == [("error", f"{failing} stop failed")]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 @pytest.mark.parametrize("ui_pidfile", [None, "not-a-pid"], ids=["missing", "corrupt"])
 @pytest.mark.parametrize("caller", ["stop", "restart"])
 def test_the_tree_of_a_live_owner_stays_whatever_the_ui_pidfile_says(

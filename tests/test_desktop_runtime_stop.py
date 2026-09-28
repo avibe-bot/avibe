@@ -367,6 +367,29 @@ def test_a_service_lock_this_runtime_is_not_shown_to_own_keeps_the_shared_status
     assert stop_env["status"] == []
 
 
+@pytest.mark.parametrize("late_role", [None, "installer"])
+def test_no_service_can_take_the_lock_before_the_stop_s_status_lands(spawn, stop_env, monkeypatch, late_role):
+    # A successor's service that takes the lock right after the stop decides
+    # the status is its own would publish a status the stop then overwrites.
+    record = cli._write_status
+    lock_free_at_write: list[bool] = []
+
+    def write(*args, **kwargs):
+        lock_free_at_write.append(runtime.service_instance_lock_available()[0])
+        record(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_write_status", write)
+    ui = spawn(RUNTIME_ID, "ui")
+    if late_role is not None:
+        _after_first_scan(monkeypatch, lambda _found: spawn(RUNTIME_ID, late_role))
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == (0 if late_role is None else 2)
+
+    ui.wait(timeout=10)
+    assert len(stop_env["status"]) == 1
+    assert lock_free_at_write == [False]
+
+
 def test_a_service_lock_that_cannot_be_probed_refuses_the_stop(stop_env, capsys):
     runtime.get_service_lock_path().mkdir(parents=True)
 
