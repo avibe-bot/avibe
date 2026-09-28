@@ -6,6 +6,7 @@ import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Card } from '../ui/card';
 import { getBackendUiMeta } from '@/lib/agentBackends';
+import { InstallOutcome } from '../shared/InstallOutcome';
 import type { AssistantId } from './collaborationTimeline';
 
 /** One card's reading of its current Model Hub route. */
@@ -18,9 +19,9 @@ export interface AssistantRowProps {
   status: 'unknown' | 'ok' | 'missing';
   installing: boolean;
   detecting: boolean;
-  error?: { message: string; output?: string | null };
+  error?: { message: string; hint?: string | null; output?: string | null; exit_code?: number };
   lifecycle: ReactNode;
-  /** The action the lifecycle pill offers — update or upgrade-in-flight — drawn
+  /** The action the lifecycle pill offers — update, reinstall or upgrade-in-flight — drawn
       opposite the pill on the state row, where the design puts it. */
   upgrade?: ReactNode;
   enabledControl: ReactNode;
@@ -216,10 +217,8 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
           {routeError}
           {onRetryRoute && <Button variant="link" size="xs" onClick={onRetryRoute}>{t('common.retry')}</Button>}
         </div>}
-        {error && <div className="onboarding-assistant-error" role="alert">
-          <p>{error.message}</p>
-          {error.output && <details><summary>{t('onboarding.details')}</summary><pre>{error.output}</pre></details>}
-        </div>}
+        {error && <InstallOutcome className="onboarding-assistant-error"
+          result={{ ...error, ok: false, output: error.output ?? null }} />}
       </div>
     </Card>
   );

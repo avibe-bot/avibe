@@ -4,17 +4,19 @@ import { AlertCircle, Check, Download, RefreshCw, RotateCw, X } from 'lucide-rea
 import clsx from 'clsx';
 import { useApi, type BackendRuntimeInfo } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { InstallOutcome, type InstallOutcomeResult } from '../shared/InstallOutcome';
 import { Button } from '../ui/button';
 import {
   badgeVariants,
   interactiveBadgeTriggerClassName,
   mobileHeaderPopoverClassName,
 } from '../ui/badge-variants';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
 type Operation = 'idle' | 'upgrading' | 'restarting';
-type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'error' | 'loading';
+type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'broken' | 'error' | 'loading';
 
 export type BackendLifecycleVisual = Visual;
 type BadgeVariant = 'secondary' | 'success' | 'info' | 'warning' | 'destructive';
@@ -63,6 +65,7 @@ const BADGE_VARIANT: Record<Visual, BadgeVariant> = {
   ready: 'success',
   updating: 'info',
   update: 'warning',
+  broken: 'destructive',
   error: 'destructive',
 };
 
@@ -71,6 +74,7 @@ const DOT_STYLES: Record<Visual, string> = {
   ready: 'bg-mint',
   updating: 'bg-cyan animate-pulse',
   update: 'bg-gold animate-pulse',
+  broken: 'bg-destructive',
   error: 'bg-destructive',
   loading: 'bg-muted/60',
 };
@@ -92,6 +96,10 @@ const deriveVisual = (
   // that window the local detection is the fresher signal — trust it and
   // do not flip the chip to error just because the saved config is stale.
   if (cliStatus !== 'ok' && runtime && runtime.installed === false) return 'error';
+  // Detection only finds the file; the runtime probe is what runs it. A CLI an
+  // interrupted upgrade left without its platform package is on disk but exits
+  // before printing a version, and a reinstall is what repairs it.
+  if (runtime?.runnable === false) return 'broken';
   // ``opencode serve`` and ``codex app-server`` are lazy-spawn daemons: they
   // stay stopped until a session needs them, so ``process_status === 'stopped'``
   // is the normal idle state, not an error. Restart still works on demand
@@ -129,6 +137,10 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   const [runtime, setRuntime] = React.useState<BackendRuntimeInfo | null>(null);
   const [runtimeLoading, setRuntimeLoading] = React.useState(false);
   const [operation, setOperation] = React.useState<Operation>('idle');
+  // The last upgrade's failure stays in the popover until the next attempt, so
+  // the reason outlives the toast that announced it. It is tied to the host's
+  // refresh generation: an upgrade the host applied itself supersedes it.
+  const [failure, setFailure] = React.useState<{ result: InstallOutcomeResult; refreshKey?: number } | null>(null);
   const popupRef = React.useRef<HTMLDivElement>(null);
   const isMountedRef = React.useRef(true);
   // Monotonic token guards against stale async writes when toggle/detect
@@ -194,6 +206,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const visual = deriveVisual(enabled, cliStatus, runtime, operation);
   const busy = runtimeLoading || operation !== 'idle' || externallyBusy;
+  const shownFailure = failure && failure.refreshKey === refreshKey && visual !== 'disabled' ? failure.result : null;
 
   React.useEffect(() => {
     onVisual?.(visual);
@@ -201,6 +214,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const handleUpgrade = async () => {
     setOperation('upgrading');
+    setFailure(null);
     onOperationChange?.(true);
     try {
       const result = await api.installAgent(name);
@@ -210,9 +224,15 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
         await onChanged?.({ installedPath });
       } else {
-        showToast(result.message || t('backendLifecycle.upgradeFailed'), 'error');
+        const message = result.message || t('backendLifecycle.upgradeFailed');
+        if (isMountedRef.current) setFailure({ result: { ...result, message }, refreshKey });
+        showToast(message, 'error');
+        // A failed upgrade can leave the CLI unable to start; re-probe so the
+        // pill says so instead of the version it had before.
+        await loadRuntime();
       }
     } catch (e) {
+      if (isMountedRef.current) setFailure({ result: { ok: false, message: String(e), output: null }, refreshKey });
       showToast(String(e), 'error');
     } finally {
       onOperationChange?.(false);
@@ -248,6 +268,8 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         return t('backendLifecycle.statusUpdating');
       case 'update':
         return t('backendLifecycle.statusUpdateAvailable');
+      case 'broken':
+        return t('backendLifecycle.statusBroken');
       case 'error':
         return t('backendLifecycle.statusError');
       case 'loading':
@@ -312,7 +334,9 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
               runtime={runtime}
               operation={operation}
               name={name}
+              failed={!!shownFailure}
             />
+            {shownFailure && <InstallOutcome result={shownFailure} className="text-xs" />}
           </div>
 
           {visual !== 'disabled' && visual !== 'updating' && (
@@ -323,13 +347,13 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
                   {t('backendLifecycle.upgradeNow')}
                 </Button>
               )}
-              {visual === 'error' && (
+              {(visual === 'error' || visual === 'broken') && (
                 <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={busy}>
                   <Download size={14} />
                   {t('backendLifecycle.reinstall')}
                 </Button>
               )}
-              {visual !== 'update' && cliStatus === 'ok' && runtime?.supports_restart && (
+              {visual !== 'update' && visual !== 'broken' && cliStatus === 'ok' && runtime?.supports_restart && (
                 <Button
                   variant="secondary"
                   size="xs"
@@ -353,7 +377,8 @@ const ChipPopoverBody: React.FC<{
   runtime: BackendRuntimeInfo | null;
   operation: Operation;
   name: string;
-}> = ({ visual, runtime, operation, name }) => {
+  failed: boolean;
+}> = ({ visual, runtime, operation, name, failed }) => {
   const { t } = useTranslation();
 
   if (visual === 'disabled') {
@@ -376,24 +401,41 @@ const ChipPopoverBody: React.FC<{
           <span className="font-mono font-medium text-foreground">{runtime.latest_version}</span>
         </div>
       )}
-      <StateBlock visual={visual} operation={operation} runtime={runtime} name={name} />
+      <StateBlock visual={visual} operation={operation} runtime={runtime} name={name} failed={failed} />
     </>
   );
 };
 
+/**
+ * The popover's one notice, chosen by urgency: an operation in flight, then what
+ * is wrong and how to fix it, then what can be done, and reassurance last. Who
+ * installed the CLI is reassurance, so it never stands in for a problem, and
+ * nothing reassuring sits beside the last attempt's failure, which the popover
+ * shows under this notice.
+ */
 const StateBlock: React.FC<{
   visual: Visual;
   operation: Operation;
   runtime: BackendRuntimeInfo | null;
   name: string;
-}> = ({ visual, operation, runtime, name }) => {
+  failed: boolean;
+}> = ({ visual, operation, runtime, name, failed }) => {
   const { t } = useTranslation();
+  const label = getBackendUiMeta(name).label;
 
   if (operation === 'upgrading') {
     return (
       <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
         <RefreshCw size={16} className="shrink-0 animate-spin" />
         <span>{t('backendLifecycle.upgrading')}</span>
+      </div>
+    );
+  }
+  if (visual === 'broken' || visual === 'error') {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
+        <AlertCircle size={16} className="shrink-0" />
+        <span>{t(visual === 'broken' ? 'backendLifecycle.brokenHint' : 'backendLifecycle.errorHint', { name: label })}</span>
       </div>
     );
   }
@@ -410,19 +452,12 @@ const StateBlock: React.FC<{
       </div>
     );
   }
+  if (failed) return null;
   if (runtime?.managed_by === 'desktop') {
     return (
       <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan">
         <Check size={16} className="shrink-0" />
         <span>{t('backendLifecycle.desktopManagedHint')}</span>
-      </div>
-    );
-  }
-  if (visual === 'error') {
-    return (
-      <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
-        <AlertCircle size={16} className="shrink-0" />
-        <span>{t('backendLifecycle.errorHint', { name })}</span>
       </div>
     );
   }

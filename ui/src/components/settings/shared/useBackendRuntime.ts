@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useApi } from '@/context/ApiContext';
+import { useApi, type InstallResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { setConfigField } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
@@ -9,12 +9,6 @@ import { errorMessage } from '@/lib/errorMessage';
 export type CliStatus = 'unknown' | 'ok' | 'missing';
 
 export type BackendId = 'claude' | 'codex' | 'opencode';
-
-export interface InstallResult {
-  ok: boolean;
-  message: string;
-  output?: string | null;
-}
 
 export interface UseBackendRuntimeOptions {
   /** Backend identifier used in V2Config keys and install_agent dispatch. */
@@ -41,7 +35,6 @@ export interface BackendRuntimeState {
   detecting: boolean;
   installing: boolean;
   installResult: InstallResult | null;
-  installOutputOpen: boolean;
   savingRuntime: boolean;
   /** True once the user has typed a path different from the saved one. */
   runtimeDirty: boolean;
@@ -49,7 +42,6 @@ export interface BackendRuntimeState {
   connectionRevision: number;
 
   setCliPath: (next: string) => void;
-  setInstallOutputOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
   /** Runs ``detectCli`` and updates ``cliPath`` + ``cliStatus``. */
   detect: (binary?: string) => Promise<void>;
   /** Calls ``installAgent`` then re-runs detect with the resolved path. */
@@ -116,7 +108,6 @@ export function useBackendRuntime({
   const [detecting, setDetecting] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installResult, setInstallResult] = useState<InstallResult | null>(null);
-  const [installOutputOpen, setInstallOutputOpen] = useState(false);
   const [savingRuntime, setSavingRuntime] = useState(false);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const mutationQueue = useRef(Promise.resolve());
@@ -194,13 +185,12 @@ export function useBackendRuntime({
     const intent = pathIntent.current;
     setInstalling(true);
     setInstallResult(null);
-    setInstallOutputOpen(false);
     try {
       const result = await api.installAgent(backend);
       if (!mounted.current) return;
       const installedPath =
         typeof result.path === 'string' && result.path ? result.path : null;
-      setInstallResult({ ok: result.ok, message: result.message, output: result.output });
+      setInstallResult(result);
       if (result.ok) {
         if (installedPath) setSavedCliPath(installedPath);
         if (pathIntent.current === intent) {
@@ -311,12 +301,10 @@ export function useBackendRuntime({
     detecting,
     installing,
     installResult,
-    installOutputOpen,
     savingRuntime,
     runtimeDirty,
     connectionRevision,
     setCliPath: (next) => { pathIntent.current += 1; setCliPath(next); },
-    setInstallOutputOpen,
     detect,
     install,
     onSaveRuntime,

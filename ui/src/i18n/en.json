@@ -3401,7 +3401,8 @@
     "installHint": "Agent not found. Click to install automatically.",
     "installAgent": "Install",
     "installing": "Installing...",
-    "showOutput": "Show details"
+    "showOutput": "Show details",
+    "exitCode": "Exit code: {{code}}"
   },
   "backendLifecycle": {
     "title": "Backend status",
@@ -3410,12 +3411,14 @@
     "statusDisabled": "Disabled",
     "statusError": "Not installed",
     "statusUpdateAvailable": "Update available",
+    "statusBroken": "Can't run",
     "currentVersion": "Current version",
     "latestVersion": "Latest version",
     "readyHint": "Running the latest release.",
     "desktopManagedHint": "Installed privately by Avibe. System tools are unchanged.",
     "updateHint": "Update available: {{from}} → {{to}}",
     "errorHint": "{{name}} CLI is not installed. Install it from this card to enable the backend.",
+    "brokenHint": "{{name}} is installed but can't run. Reinstall it to repair.",
     "disabledHint": "Toggle this backend on in the card header to activate.",
     "upgrading": "Upgrading…",
     "upgradeNow": "Upgrade",

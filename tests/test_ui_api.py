@@ -2146,7 +2146,7 @@ def test_backend_runtime_skips_latest_probe_for_private_desktop_codex(monkeypatc
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
     monkeypatch.setattr(api, "resolve_cli_path", lambda _binary: str(codex_path))
-    monkeypatch.setattr(api, "_cached_version", lambda _name, _path: "1.2.3")
+    monkeypatch.setattr(api, "_cached_probe", lambda _name, _path: api.CliProbe("1.2.3", True))
     monkeypatch.setattr(
         api,
         "_cached_latest",
@@ -2399,7 +2399,7 @@ def test_backend_runtime_checks_updates_for_private_backend(monkeypatch, tmp_pat
     monkeypatch.setattr(api, "resolve_cli_path", lambda _value: str(managed))
     monkeypatch.setattr(api, "is_desktop_backend_path", lambda path: path == str(managed))
     monkeypatch.setattr(api, "is_private_desktop_runtime_path", lambda _path: False)
-    monkeypatch.setattr(api, "_cached_version", lambda _name, _path: "1.0.0")
+    monkeypatch.setattr(api, "_cached_probe", lambda _name, _path: api.CliProbe("1.0.0", True))
     monkeypatch.setattr(api, "_cached_latest", lambda _name: "1.1.0")
     monkeypatch.setattr(api, "_opencode_process_status", lambda: "stopped")
     monkeypatch.setattr(api, "_codex_process_status", lambda _path: "stopped")

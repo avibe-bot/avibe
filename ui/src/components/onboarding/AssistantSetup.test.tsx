@@ -217,7 +217,7 @@ describe('assistant installation presentation', () => {
     await waitFor(() => expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     await act(async () => finishClaude({ ok: false, message: 'Network unavailable', output: 'Installer exited 1' }));
     expect(row('Claude Code').getByText('Network unavailable')).toBeTruthy();
-    expect(row('Claude Code').getByText('View details')).toBeTruthy();
+    expect(row('Claude Code').getByText(en.agentDetection.showOutput)).toBeTruthy();
     expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
     expect(row('OpenCode').getByText('Not installed')).toBeTruthy();
     mock.api.installAgent.mockResolvedValue({ ok: true, path: '/isolated/bin/claude' });
@@ -373,6 +373,28 @@ describe('assistant installation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enter workspace' }));
     await waitFor(() => expect(next).toHaveBeenCalled());
     expect(mock.api.installAgent).not.toHaveBeenCalled();
+  });
+  it('keeps a failed upgrade from the state row on the card with its reason and output', async () => {
+    const saved = data(); saved.agents.codex.status = 'ok';
+    mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: true, current_version: '1', latest_version: '2' });
+    const failure = {
+      ok: false, message: 'Could not upgrade Codex.', code: 'npm_leftover_directory', exit_code: 190,
+      hint: 'npm left a temporary folder behind from an earlier interrupted update: /usr/local/lib/node_modules/@openai/.codex-lD3lp9Ti. Delete that folder, then try again.',
+      output: 'npm error code ENOTEMPTY\nnpm error dest /usr/local/lib/node_modules/@openai/.codex-lD3lp9Ti',
+    };
+    mock.api.installAgent.mockResolvedValue(failure);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    fireEvent.click(await row('Codex').findByRole('button', { name: en.backendLifecycle.upgradeNow }));
+
+    const outcome = await row('Codex').findByRole('alert');
+    expect(mock.showToast).toHaveBeenCalledWith(failure.message, 'error');
+    expect(within(outcome).getByText(failure.message)).toBeTruthy();
+    expect(within(outcome).getByText(failure.hint)).toBeTruthy();
+    expect(within(outcome).getByText(en.agentDetection.showOutput)).toBeTruthy();
+    expect(within(outcome).getByText('Exit code: 190')).toBeTruthy();
+    expect(outcome.querySelector('pre')?.textContent).toBe(failure.output);
+    // The failed upgrade released the row's lock, so trying again is one click away.
+    expect(row('Codex').getByRole('button', { name: en.backendLifecycle.upgradeNow }).hasAttribute('disabled')).toBe(false);
   });
   it('retains a detection error separately from missing installation', async () => {
     mock.api.detectCli.mockRejectedValue(new Error('Probe failed'));
