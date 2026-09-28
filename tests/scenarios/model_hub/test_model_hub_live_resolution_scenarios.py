@@ -896,7 +896,7 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
-def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path) -> None:
+def test_turn_gateway_preserves_only_forwarded_caller_headers(tmp_path: Path) -> None:
     async def exercise() -> None:
         adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
         store = MemoryStore(_config(_source("src_primary1")))
@@ -916,6 +916,8 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
                         "x-api-key": token,
                         "Authorization": "Bearer upstream-must-not-cross",
                         "anthropic-beta": "interleaved-thinking",
+                        "User-Agent": "claude-cli/2.1.280 (external, sdk-cli)",
+                        "x-app": "cli",
                     },
                     json={"model": _requested_model("claude"), "messages": []},
                 ) as response:
@@ -923,6 +925,7 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
             request = adapter.requests[0]
             assert getattr(request, "headers") == {
                 "anthropic-beta": "interleaved-thinking",
+                "user-agent": "claude-cli/2.1.280 (external, sdk-cli)",
             }
         finally:
             await gateway.close()

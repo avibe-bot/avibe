@@ -41,7 +41,7 @@ from .provenance import (
     project_turn_outcome_copy,
     render_turn_outcome_copy,
 )
-from .request import ModelHubRequest
+from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
@@ -112,14 +112,6 @@ def _rewind_and_measure(payload: BinaryIO) -> int:
     payload.seek(0)
     return size
 
-
-_PROTOCOL_HEADERS: Final = frozenset(
-    {
-        "anthropic-beta",
-        "anthropic-version",
-        "openai-beta",
-    }
-)
 
 _CODEX_TURN_METADATA: Final = "x-codex-turn-metadata"
 _CODEX_ROUTE_FIELDS: Final = ("avibe_route_id", "avibe_turn_id")
@@ -929,8 +921,8 @@ class ModelHubTurnGateway:
 
         protocol = _REQUEST_PROTOCOLS[endpoint]
         try:
-            protocol_headers = {
-                name.lower(): value for name, value in request.headers.items() if name.lower() in _PROTOCOL_HEADERS
+            caller_headers = {
+                name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
             }
             if backend == "opencode" and protocol == "openai_chat":
                 translation = translate_opencode_tool_names(payload)
@@ -943,7 +935,7 @@ class ModelHubTurnGateway:
                     request=ModelHubRequest(
                         payload,
                         protocol=protocol,
-                        headers=protocol_headers,
+                        headers=caller_headers,
                     ),
                     stream=stream,
                     supply_channel="hub",

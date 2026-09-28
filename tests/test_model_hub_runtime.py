@@ -4156,6 +4156,65 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
     asyncio.run(run())
 
 
+def test_engine_client_sends_the_caller_user_agent_instead_of_its_own() -> None:
+    """Upstream gateways key Claude Code system-prompt handling on User-Agent."""
+
+    from aiohttp import web
+
+    async def run() -> dict[str, str]:
+        received: dict[str, str] = {}
+
+        async def respond(request: web.Request) -> web.Response:
+            received.update({name.lower(): value for name, value in request.headers.items()})
+            return web.json_response({"type": "message", "content": []})
+
+        app = web.Application()
+        app.router.add_post("/{path:.*}", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            source = SourceRecord(
+                source_id="src_fixture123",
+                vendor="custom",
+                protocol="anthropic",
+                base_url="https://api.example.test",
+                credential_ref="cred_fixture123",
+                allowed_origins=(),
+                model_ids=("model-a",),
+                prefix="source-fixture123",
+            )
+            handle = await EngineClient(
+                EngineConnection(
+                    base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                    management_key="management-key",
+                    gateway_token="gateway-token",
+                )
+            ).invoke(
+                source,
+                "model-a",
+                {},
+                stream=False,
+                request_headers={
+                    "User-Agent": "claude-cli/2.1.280 (external, sdk-cli)",
+                    "anthropic-beta": "interleaved-thinking",
+                    "Authorization": "Bearer caller-must-not-cross",
+                    "x-api-key": "caller-must-not-cross",
+                },
+            )
+            await handle.outcome()
+        finally:
+            await runner.cleanup()
+        return received
+
+    received = asyncio.run(run())
+
+    assert received["user-agent"] == "claude-cli/2.1.280 (external, sdk-cli)"
+    assert received["anthropic-beta"] == "interleaved-thinking"
+    assert received["authorization"] == "Bearer gateway-token"
+    assert "x-api-key" not in received
+
+
 def test_adapter_restores_source_projection_when_reload_fails(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self) -> None:
