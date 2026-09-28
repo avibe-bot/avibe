@@ -1620,7 +1620,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     assert not any(call == "stop" for call in calls)
 
 
-def _superseded_controller(monkeypatch, result):
+def _superseded_controller(monkeypatch, result, *, ui_running=False):
     calls = []
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "b" * 64)
     monkeypatch.setattr(
@@ -1633,6 +1633,7 @@ def _superseded_controller(monkeypatch, result):
         "stop_desktop_runtime",
         lambda runtime_id, **kwargs: calls.append((runtime_id, kwargs)) or result,
     )
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: ui_running)
     return calls
 
 
@@ -1641,22 +1642,28 @@ def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
 
     cli._handover_superseded_desktop_runtime()
 
-    # The Runtime health named is the one stopped, through the scoped stop; the
-    # tunnel is kept for the successor.
-    assert calls == [("a" * 64, {"stop_remote_access": False})]
+    # The Runtime health named is the one stopped, through the scoped stop.
+    assert calls == [("a" * 64, {})]
+
+
+def _left(role):
+    return (cli.runtime.DesktopRuntimeProcess(pid=4242, role=role, name="python"),)
 
 
 @pytest.mark.parametrize(
-    "result",
+    ("result", "ui_running"),
     [
-        cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"),
-        cli.runtime.DesktopRuntimeStopResult(service=cli.runtime.DesktopSlotOutcome.FAILED),
-        cli.runtime.DesktopRuntimeStopResult(installs_drained=False),
-        cli.runtime.DesktopRuntimeStopResult(opencode=cli.runtime.DesktopSlotOutcome.FAILED),
+        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), False),
+        (cli.runtime.DesktopRuntimeStopResult(installs_drained=False), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), False),
+        # Stopped, but a UI of some other Runtime still holds the pidfile.
+        (cli.runtime.DesktopRuntimeStopResult(), True),
     ],
 )
-def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result):
-    _superseded_controller(monkeypatch, result)
+def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, ui_running):
+    _superseded_controller(monkeypatch, result, ui_running=ui_running)
 
     with pytest.raises(RuntimeError):
         cli._handover_superseded_desktop_runtime()
@@ -2205,14 +2212,16 @@ def test_cmd_start_leaves_no_ui_running_when_the_ui_pid_record_cannot_be_written
     `start_ui` never captured it and the rollback -- which only undoes what it
     was told it created -- had nothing to undo. The orphan kept the listener.
     Here the real `start_ui` and the real spawn run against a stand-in
-    interpreter that just sleeps, and the pid record's directory is missing.
+    interpreter that just sleeps, and a file stands where the pid record's
+    directory would be.
     """
 
     started = _ui_refuses_to_start(monkeypatch, reused=False)
-    children = _real_ui_children(monkeypatch, tmp_path, tmp_path / "missing" / "vibe-ui.pid")
+    (tmp_path / "not-a-directory").write_text("", encoding="utf-8")
+    children = _real_ui_children(monkeypatch, tmp_path, tmp_path / "not-a-directory" / "vibe-ui.pid")
 
     try:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(OSError):
             cli.cmd_start()
 
         assert len(children) == 1, children

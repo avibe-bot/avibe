@@ -624,3 +624,35 @@ def test_a_recorded_path_outside_a_staging_directory_is_never_removed(
     # The record was read, and rejected: it names nothing an install made.
     assert not record.exists()
     assert (path / "keep").is_dir()
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX file permissions")
+@pytest.mark.parametrize("entry", ["install", "stop"])
+def test_an_installer_record_that_cannot_be_read_is_unknown_and_kept(monkeypatch, tmp_path, quiet_stop, entry):
+    # Only a record whose content was read and proven invalid is discarded; one
+    # that cannot be read may still name a running installer tree.
+    env = _desktop_env(tmp_path)
+    backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude"
+    backend_root.mkdir(parents=True, exist_ok=True)
+    records = config_paths.get_runtime_dir() / "desktop-backend-installs"
+    records.mkdir(parents=True, exist_ok=True)
+    record = records / f"{'c' * 32}.json"
+    desktop_backends._write_installer_record(
+        record,
+        worker_fingerprint=desktop_backends.fingerprint_process_marker(desktop_backends.new_process_identity_marker()),
+        identity=None,
+        staging=backend_root / f".staging-{'c' * 32}",
+    )
+    record.chmod(0)
+    cli, statuses = quiet_stop
+
+    if entry == "install":
+        _patch_fake_install(monkeypatch)
+        with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+            desktop_backends.install_desktop_backend("claude", base_env=env)
+        assert refused.value.code == "install_locked"
+    else:
+        assert cli.cmd_stop() == 2
+        assert statuses == [("error", "desktop backend install drain failed")]
+
+    assert record.exists()

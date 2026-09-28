@@ -967,8 +967,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             await manager.mark_run_active("ses-active")
 
             with patch.object(
-                Path,
-                "write_text",
+                SERVER_MODULE,
+                "write_atomic",
                 side_effect=OSError("read-only pid file"),
             ):
                 with self.assertRaisesRegex(OSError, "read-only pid file"):

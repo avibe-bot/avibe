@@ -1067,7 +1067,8 @@
       "serviceFailed": "ERROR: Avibe service did not stop; preserving pidfile and aborting.",
       "uiFailed": "ERROR: Avibe UI did not stop; preserving pidfile and aborting.",
       "installsFailed": "ERROR: Desktop backend installer processes did not stop.",
-      "opencodeFailed": "ERROR: The OpenCode server this Runtime started did not stop."
+      "opencodeFailed": "ERROR: The OpenCode server this Runtime started did not stop.",
+      "unknownFailed": "ERROR: A process this Runtime started could not be identified and was left running."
     }
   },
   "doctor": {

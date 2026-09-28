@@ -34,13 +34,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from core.process_isolation import (
-    PersistedProcessIdentity,
-    fingerprint_process_marker,
-    isolated_subprocess_kwargs,
-    process_identity_matches,
-    process_identity_recycled,
-)
+from core.process_isolation import fingerprint_process_marker, isolated_subprocess_kwargs, processes_carrying_marker
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -1300,7 +1294,8 @@ def spawn_background(
     """
 
     def hand_over(process: subprocess.Popen) -> None:
-        pid_path.write_text(str(process.pid), encoding="utf-8")
+        # A reader never sees a half-written record: a full stop acts on it.
+        write_atomic(Path(pid_path), str(process.pid))
         if start_info is not None:
             start_info.capture(process.pid, reused=False)
 
@@ -2508,30 +2503,25 @@ def stop_service():
         return stopped_all
 
 
-def _stop_remote_access(timings: dict[str, float | bool] | None = None) -> bool:
-    remote_access_started_at = time.monotonic()
-    try:
-        from vibe import remote_access
-
-        result = remote_access.stop()
-        if timings is not None:
-            timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
-        if isinstance(result, dict) and result.get("ok") is False:
-            logger.warning("Failed to stop remote access before UI stop: %s", result.get("error"))
-            return False
-    except Exception:
-        if timings is not None and "stop_remote_access_seconds" not in timings:
-            timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
-        logger.warning("Failed to stop remote access before UI stop", exc_info=True)
-        return False
-    return True
-
-
 def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_access: bool = True):
     remote_access_stopped = True
     started_at = time.monotonic()
     if stop_remote_access:
-        remote_access_stopped = _stop_remote_access(timings)
+        remote_access_started_at = time.monotonic()
+        try:
+            from vibe import remote_access
+
+            result = remote_access.stop()
+            if timings is not None:
+                timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
+            if isinstance(result, dict) and result.get("ok") is False:
+                logger.warning("Failed to stop remote access before UI stop: %s", result.get("error"))
+                remote_access_stopped = False
+        except Exception:
+            if timings is not None and "stop_remote_access_seconds" not in timings:
+                timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
+            logger.warning("Failed to stop remote access before UI stop", exc_info=True)
+            remote_access_stopped = False
     elif timings is not None:
         timings["stop_remote_access_seconds"] = 0.0
         timings["stop_remote_access_skipped"] = True
@@ -2543,15 +2533,15 @@ def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_acces
     return bool(ui_stopped and remote_access_stopped)
 
 
-class DesktopSlotState(Enum):
-    """What a scoped stop found in one slot: the service, the UI or OpenCode.
+class DesktopRuntimePresence(Enum):
+    """Whether the desktop Runtime a scoped stop names is running.
 
-    The desktop host mirrors these: ``MATCH`` is Mine, ``MISMATCH`` is Foreign
-    (another Runtime id) or Unmanaged (no id), ``ABSENT`` is Absent and
-    ``UNKNOWN`` is Unknown. ``ABSENT`` needs positive evidence: no pidfile, a
-    pidfile naming no live process or a different program, or an available
-    service lock. Anything live that cannot be shown to be one of the other
-    states is ``UNKNOWN``.
+    ``MATCH`` comes from the process scan: a service, UI or OpenCode server
+    carrying the id is running. With none running, the service lock decides
+    without its record being read: free is ``ABSENT``, held is ``MISMATCH``
+    (the holder is not a service of this Runtime), and a lock that cannot be
+    probed is ``UNKNOWN``. The desktop host mirrors these as Mine, Absent,
+    Foreign and Unknown.
     """
 
     ABSENT = "absent"
@@ -2560,268 +2550,229 @@ class DesktopSlotState(Enum):
     UNKNOWN = "unknown"
 
 
-class DesktopSlotOutcome(Enum):
-    """What a scoped stop did to one slot."""
+class DesktopRuntimeStopOutcome(Enum):
+    """What a scoped stop left behind, decided by the rescan after it."""
 
     NOT_OURS = "not_ours"
     STOPPED = "stopped"
     FAILED = "failed"
 
 
+_DESKTOP_STOP_REFUSALS = {
+    DesktopRuntimePresence.MISMATCH: "service_runtime_id_mismatch",
+    DesktopRuntimePresence.UNKNOWN: "service_identity_unavailable",
+}
+# A process carrying the id whose command line cannot be read may hold any
+# role, so it is never signalled and never counted as stopped.
+_UNKNOWN_DESKTOP_ROLE = "unknown"
+
+
 @dataclass(frozen=True)
-class _VerifiedTarget:
+class DesktopRuntimeProcess:
+    """A process carrying the id: ``role`` is ``service``, ``ui``, ``opencode``,
+    ``unknown``, or ``None`` for any other program."""
+
+    pid: int
+    role: str | None
+    name: str
+
+
+@dataclass(frozen=True)
+class _ScannedDesktopProcess:
     process: psutil.Process
-    expected: PersistedProcessIdentity
-
-
-@dataclass(frozen=True)
-class _DesktopSlot:
-    state: DesktopSlotState
-    pid: int | None = None
-    # Set exactly when ``state`` is MATCH: the handle provenance was read from.
-    target: _VerifiedTarget | None = None
+    report: DesktopRuntimeProcess
+    # This stop or one of its ancestors: never signalled.
+    lineage: bool
 
 
 @dataclass(frozen=True)
 class DesktopRuntimeStopResult:
     """What a stop scoped to one desktop Runtime did.
 
-    ``refusal`` is set when nothing was signalled. ``ui_skipped`` names why the
-    UI the pidfile names was left running together with what it owns.
+    ``refusal`` is set when nothing was signalled. ``remaining`` names the
+    role processes still carrying the id after the stop, and ``left_running``
+    the other programs carrying it, which the stop never signals.
     """
 
     refusal: str | None = None
-    service: DesktopSlotOutcome = DesktopSlotOutcome.NOT_OURS
-    ui: DesktopSlotOutcome = DesktopSlotOutcome.NOT_OURS
-    opencode: DesktopSlotOutcome = DesktopSlotOutcome.NOT_OURS
-    ui_skipped: str | None = None
+    remaining: tuple[DesktopRuntimeProcess, ...] = ()
+    left_running: tuple[DesktopRuntimeProcess, ...] = ()
     installs_drained: bool = True
+    opencode_stopped: bool = False
 
     @property
     def failure(self) -> str | None:
-        """The first part that did not stop: ``service``, ``ui``, ``installs`` or ``opencode``."""
+        """The first part that did not stop: ``service``, ``ui``, ``installs``, ``opencode`` or ``unknown``."""
 
-        if self.service is DesktopSlotOutcome.FAILED:
-            return "service"
-        if self.ui is DesktopSlotOutcome.FAILED:
-            return "ui"
+        roles = {process.role for process in self.remaining}
+        for part in ("service", "ui"):
+            if part in roles:
+                return part
         if not self.installs_drained:
             return "installs"
-        if self.opencode is DesktopSlotOutcome.FAILED:
-            return "opencode"
+        for part in ("opencode", _UNKNOWN_DESKTOP_ROLE):
+            if part in roles:
+                return part
         return None
 
-
-def _verify_desktop_target(pid: int, fingerprint: str) -> _DesktopSlot:
-    """Read ``pid``'s provenance once and classify it."""
-
-    from vibe.desktop_runtime import open_desktop_runtime_provenance
-
-    try:
-        process, live = open_desktop_runtime_provenance(pid)
-    except psutil.ZombieProcess:
-        # It has exited but still holds the pid until its parent reaps it; its
-        # provenance can no longer be read.
-        return _DesktopSlot(DesktopSlotState.UNKNOWN, pid)
-    except psutil.NoSuchProcess:
-        return _DesktopSlot(DesktopSlotState.ABSENT, pid)
-    except (psutil.Error, OSError, ValueError):
-        return _DesktopSlot(DesktopSlotState.UNKNOWN, pid)
-    if not live.marker_readable:
-        return _DesktopSlot(DesktopSlotState.UNKNOWN, pid)
-    expected = PersistedProcessIdentity(pid=pid, create_time=live.create_time, worker_fingerprint=fingerprint)
-    if not process_identity_matches(expected, live):
-        return _DesktopSlot(DesktopSlotState.MISMATCH, pid)
-    return _DesktopSlot(DesktopSlotState.MATCH, pid, _VerifiedTarget(process, expected))
-
-
-def _verified_target_state(target: _VerifiedTarget) -> str:
-    """Re-check a verified target: ``match``, ``gone`` or ``unknown``."""
-
-    from vibe.desktop_runtime import open_desktop_runtime_provenance
-
-    pid = target.expected.pid
-    if not pid_alive(pid):
-        return "gone"
-    try:
-        _process, live = open_desktop_runtime_provenance(pid)
-    except psutil.NoSuchProcess:
-        return "gone"
-    except (psutil.Error, OSError, ValueError):
-        return "unknown"
-    if process_identity_recycled(target.expected, live):
-        return "gone"
-    # The id is shared by the whole Runtime, so it cannot tell the target from
-    # a sibling that inherited its pid; the retained handle's birth time can.
-    if process_identity_matches(target.expected, live) and target.process.is_running():
-        return "match"
-    return "unknown"
-
-
-def _stop_verified_process(target: _VerifiedTarget, timeout: float = 5) -> bool:
-    """Stop the process ``target`` inspected, through the handle it was read from.
-
-    Before each signal the pid is re-checked; a pid that no longer belongs to
-    the target is never signalled.
-    """
-
-    pid = target.expected.pid
-    phases = (None,) if os.name == "nt" else (signal.SIGTERM, signal.SIGKILL)
-    for sig in phases:
-        state = _verified_target_state(target)
-        if state == "gone":
-            return True
-        if state != "match":
-            logger.error("Refusing to signal pid=%s: it can no longer be shown to be the verified target", pid)
-            return False
-        try:
-            if sig is None:
-                logger.info("Terminating verified desktop Runtime pid=%s", pid)
-                target.process.terminate()
-            else:
-                if sig == signal.SIGTERM:
-                    write_shutdown_intent(pid, signum=signal.SIGTERM, reason="stop_pid")
-                logger.info("Sending managed %s to verified desktop Runtime pid=%s", signal.Signals(sig).name, pid)
-                target.process.send_signal(sig)
-        except psutil.NoSuchProcess:
-            return _verified_target_state(target) == "gone"
-        except (psutil.Error, OSError):
-            logger.warning("Failed to signal verified desktop Runtime pid=%s", pid, exc_info=True)
-            return False
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if _verified_target_state(target) == "gone":
-                return True
-            time.sleep(0.1)
-    logger.error("Verified desktop Runtime pid=%s did not exit", pid)
-    return _verified_target_state(target) == "gone"
-
-
-def _stop_desktop_slot(slot: _DesktopSlot) -> DesktopSlotOutcome:
-    if slot.target is None:
-        return DesktopSlotOutcome.NOT_OURS
-    if _stop_verified_process(slot.target):
-        return DesktopSlotOutcome.STOPPED
-    return DesktopSlotOutcome.FAILED
+    @property
+    def outcome(self) -> DesktopRuntimeStopOutcome:
+        if self.refusal is not None:
+            return DesktopRuntimeStopOutcome.NOT_OURS
+        if self.failure is not None:
+            return DesktopRuntimeStopOutcome.FAILED
+        return DesktopRuntimeStopOutcome.STOPPED
 
 
 def _is_opencode_serve_command(command: str) -> bool:
     return "opencode" in command and "serve" in command
 
 
-def _parse_ui_pid(text: str) -> int | None:
+def _is_desktop_service_command(command: str, cwd: str | None) -> bool:
+    # The bundle runs vibe/service_main.py. Its argv names the service even
+    # after an update has replaced or moved the files it started from.
     try:
-        pid = int(text.strip())
+        entry = _service_entry_arg_from_argv(shlex.split(command, posix=(os.name != "nt")))
     except ValueError:
-        return None
-    return pid if pid > 0 else None
+        entry = None
+    if entry is not None:
+        path = Path(entry.strip("\"'"))
+        if path.name == "service_main.py" and path.parent.name == "vibe":
+            return True
+    return _command_looks_like_service_entry(command, cwd=cwd)
 
 
-def _parse_opencode_pid(text: str) -> int | None:
+def _own_lineage() -> frozenset[int]:
+    """This process and its ancestors: started by the desktop host, they carry the id too."""
+
+    lineage = {os.getpid(), os.getppid()}
     try:
-        info = json.loads(text)
-    except ValueError:
-        return None
-    pid = info.get("pid") if isinstance(info, dict) else None
-    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+        lineage.update(parent.pid for parent in psutil.Process().parents())
+    except psutil.Error:
+        logger.warning("Could not read every ancestor of this stop", exc_info=True)
+    return frozenset(lineage)
 
 
-def _opencode_server_pid_path() -> Path:
-    return paths.get_logs_dir() / "opencode_server.json"
-
-
-def _inspect_desktop_pidfile(
-    pid_path: Path,
-    parse: Callable[[str], int | None],
-    fingerprint: str,
-    is_expected_command: Callable[[str], bool],
-) -> _DesktopSlot:
-    """Classify the process a pidfile names.
-
-    A missing pidfile, one naming no live pid, and a pid whose command is
-    readable and is not the expected program are ``ABSENT``: the pidfile is
-    stale. A pidfile that cannot be read, or a matching process whose command
-    cannot be read, is ``UNKNOWN``. Provenance is read before the command, so
-    the re-check that precedes every signal also proves the command came from
-    the target.
-    """
-
+def _desktop_process_gone(process: psutil.Process) -> bool:
     try:
-        text = pid_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return _DesktopSlot(DesktopSlotState.ABSENT)
-    except (OSError, UnicodeError):
-        return _DesktopSlot(DesktopSlotState.UNKNOWN)
-    pid = parse(text)
-    if pid is None or not pid_alive(pid):
-        return _DesktopSlot(DesktopSlotState.ABSENT, pid)
-    slot = _verify_desktop_target(pid, fingerprint)
-    if slot.state is DesktopSlotState.ABSENT:
-        return slot
-    command = get_process_command(pid)
-    if command and not is_expected_command(command):
-        return _DesktopSlot(DesktopSlotState.ABSENT, pid)
-    if slot.state is DesktopSlotState.MATCH and not command:
-        return _DesktopSlot(DesktopSlotState.UNKNOWN, pid)
-    return slot
+        # is_running() compares the birth time psutil read at the scan, so a
+        # pid reused since then reads as gone, never as the scanned process.
+        return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.Error:
+        return False
 
 
-def _inspect_desktop_service(fingerprint: str) -> _DesktopSlot:
-    """Classify the service lock owner; a held lock with no resolvable owner is ``UNKNOWN``."""
+def _desktop_process_role(process: psutil.Process) -> str | None:
+    """Raises ``psutil.NoSuchProcess`` for a process that has exited."""
 
     try:
-        pid = resolve_service_owner_pid(include_starting=True)
-        if pid is None:
-            available, _holder = service_instance_lock_available()
-            return _DesktopSlot(DesktopSlotState.ABSENT if available else DesktopSlotState.UNKNOWN)
-    except OSError:
-        logger.warning("Could not resolve the service lock owner", exc_info=True)
-        return _DesktopSlot(DesktopSlotState.UNKNOWN)
-    return _verify_desktop_target(pid, fingerprint)
-
-
-def _inspect_desktop_ui(fingerprint: str) -> _DesktopSlot:
-    return _inspect_desktop_pidfile(paths.get_runtime_ui_pid_path(), _parse_ui_pid, fingerprint, _is_ui_server_command)
-
-
-def _desktop_stop_refusal(service: _DesktopSlot, ui: _DesktopSlot, opencode: _DesktopSlot) -> str | None:
-    if service.state is DesktopSlotState.MISMATCH:
-        return "service_runtime_id_mismatch"
-    if service.state is DesktopSlotState.UNKNOWN:
-        return "service_identity_unavailable"
-    if ui.state is DesktopSlotState.UNKNOWN:
-        return "ui_identity_unavailable"
-    if opencode.state is DesktopSlotState.UNKNOWN:
-        return "opencode_identity_unavailable"
+        command = shlex.join(str(part) for part in process.cmdline())
+    except psutil.NoSuchProcess:
+        raise
+    except (psutil.Error, OSError):
+        command = ""
+    if not command:
+        if _desktop_process_gone(process):
+            raise psutil.NoSuchProcess(process.pid)
+        return _UNKNOWN_DESKTOP_ROLE
+    if _is_desktop_service_command(command, _process_cwd(process)):
+        return "service"
+    if _is_ui_server_command(command):
+        return "ui"
+    if _is_opencode_serve_command(command):
+        return "opencode"
     return None
 
 
-def _ui_pidfile_moved_on(fingerprint: str, target: _VerifiedTarget | None) -> bool:
-    """Whether the UI pidfile now names anything other than ``target``."""
+def _scan_desktop_runtime(fingerprint: str, lineage: frozenset[int]) -> list[_ScannedDesktopProcess]:
+    """This user's processes carrying the id, by role, each with its scan handle."""
 
-    slot = _inspect_desktop_ui(fingerprint)
-    if slot.state is DesktopSlotState.ABSENT:
-        return False
-    if target is None:
-        return True
-    return not (slot.pid == target.expected.pid and _verified_target_state(target) == "match")
+    from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV
+
+    scanned: list[_ScannedDesktopProcess] = []
+    for process in processes_carrying_marker(fingerprint, marker_env=DESKTOP_RUNTIME_ID_ENV):
+        try:
+            role = _desktop_process_role(process)
+        except psutil.NoSuchProcess:
+            continue
+        try:
+            name = process.name()
+        except psutil.Error:
+            name = ""
+        report = DesktopRuntimeProcess(pid=process.pid, role=role, name=name)
+        scanned.append(_ScannedDesktopProcess(process, report, process.pid in lineage))
+    return scanned
 
 
-def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) -> DesktopRuntimeStopResult:
+def _desktop_service_lock_presence() -> DesktopRuntimePresence:
+    """With no role process carrying the id, whether anything else holds the service lock."""
+
+    try:
+        lock_path = get_service_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            if not _try_lock_file(lock_file):
+                return DesktopRuntimePresence.MISMATCH
+            _unlock_file(lock_file)
+    except OSError:
+        logger.warning("Could not probe the service instance lock", exc_info=True)
+        return DesktopRuntimePresence.UNKNOWN
+    return DesktopRuntimePresence.ABSENT
+
+
+def _stop_desktop_processes(processes: list[psutil.Process], timeout: float = 5) -> None:
+    """Stop ``processes`` gracefully, then forcefully, through the handles the scan returned.
+
+    ``is_running()`` holds right before every signal, and psutil itself
+    refuses to signal a handle whose pid has been reused since the scan.
+    """
+
+    phases = (None,) if os.name == "nt" else (signal.SIGTERM, signal.SIGKILL)
+    alive = list(processes)
+    for sig in phases:
+        for process in alive:
+            if _desktop_process_gone(process):
+                continue
+            try:
+                if sig is None:
+                    logger.info("Terminating desktop Runtime pid=%s", process.pid)
+                    process.terminate()
+                else:
+                    if sig == signal.SIGTERM:
+                        write_shutdown_intent(process.pid, signum=signal.SIGTERM, reason="stop_pid")
+                    logger.info("Sending managed %s to desktop Runtime pid=%s", signal.Signals(sig).name, process.pid)
+                    process.send_signal(sig)
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.Error, OSError):
+                logger.warning("Failed to signal desktop Runtime pid=%s", process.pid, exc_info=True)
+        deadline = time.monotonic() + timeout
+        while True:
+            alive = [process for process in alive if not _desktop_process_gone(process)]
+            if not alive or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if not alive:
+            return
+    logger.error("Desktop Runtime processes did not exit: %s", [process.pid for process in alive])
+
+
+def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     """Stop only what the desktop Runtime ``runtime_id`` started.
 
-    All three slots (the service lock owner, the process the UI pidfile names,
-    and the OpenCode server its pidfile names) are inspected once, before
-    anything is signalled. A service that does not match, or any slot this stop
-    would act on that is ``UNKNOWN``, refuses the whole stop. Only a ``MATCH``
-    is signalled, through the handle it was inspected with. Service processes
-    beyond the lock owner are left to a full stop.
+    Discovery is one scan of this user's processes for the id they inherited
+    in ``AVIBE_DESKTOP_RUNTIME_ID``; no pidfile or lock record is read. This
+    stop and its ancestors carry the id when the desktop host started it and
+    are never signalled. Service processes stop first, then the UI, then, once
+    no UI of this Runtime is left, its abandoned backend installs, then its
+    OpenCode server, each through the handle the scan returned. A rescan
+    decides the outcome.
 
-    What the UI owns (remote access and its backend installs) is handled only
-    while the UI pidfile still names the verified UI, or no UI at all. A UI of
-    another Runtime, or one that has taken the pidfile during the stop, is left
-    running together with what it owns. Remote access is stopped only through
-    a verified UI or, with no UI, a verified service.
+    Other programs carrying the id, such as agent CLIs and the tunnel
+    connector, are reported and left running. With no role process carrying
+    the id, a held service lock refuses the stop and nothing is signalled.
     """
 
     from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
@@ -2829,68 +2780,38 @@ def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) ->
     if desktop_runtime_id({DESKTOP_RUNTIME_ID_ENV: runtime_id}) != runtime_id:
         return DesktopRuntimeStopResult(refusal="invalid_runtime_id")
     fingerprint = fingerprint_process_marker(runtime_id)
+    lineage = _own_lineage()
+    found = _scan_desktop_runtime(fingerprint, lineage)
+    if any(entry.report.role is not None for entry in found):
+        presence = DesktopRuntimePresence.MATCH
+    else:
+        presence = _desktop_service_lock_presence()
+    refusal = _DESKTOP_STOP_REFUSALS.get(presence)
+    if refusal is not None:
+        return DesktopRuntimeStopResult(refusal=refusal)
+
+    def targets(role: str) -> list[psutil.Process]:
+        return [entry.process for entry in found if entry.report.role == role and not entry.lineage]
+
     with _SERVICE_LOCK:
-        service = _inspect_desktop_service(fingerprint)
-        ui = _inspect_desktop_ui(fingerprint)
-        opencode = _inspect_desktop_pidfile(
-            _opencode_server_pid_path(), _parse_opencode_pid, fingerprint, _is_opencode_serve_command
-        )
-        refusal = _desktop_stop_refusal(service, ui, opencode)
-        if refusal is not None:
-            return DesktopRuntimeStopResult(refusal=refusal)
-
-        service_outcome = _stop_desktop_slot(service)
-        if service_outcome is DesktopSlotOutcome.STOPPED:
-            _clear_service_pid_reservation(service.pid)
-        elif service_outcome is DesktopSlotOutcome.FAILED:
-            logger.error(
-                "Failed to stop desktop Runtime service pid=%s; preserving pid and lock state",
-                service.pid,
-            )
-
-    # The tunnel is the UI's, or with no UI the service's; nothing of this
-    # Runtime running means nothing to stop it through. Stopping the service
-    # takes time, so a UI that took the pidfile meanwhile owns it, and the
-    # installs, now.
-    tunnel_owner_verified = ui.target is not None or service.target is not None
-    ui_skipped = "ui_runtime_id_mismatch" if ui.state is DesktopSlotState.MISMATCH else None
-    if ui_skipped is None and tunnel_owner_verified and _ui_pidfile_moved_on(fingerprint, ui.target):
-        ui_skipped = "ui_changed"
-    remote_access_stopped = True
-    if ui_skipped is None and tunnel_owner_verified and stop_remote_access:
-        remote_access_stopped = _stop_remote_access()
-    ui_outcome = _stop_desktop_slot(ui)
-    ui_process_stopped = ui_outcome is not DesktopSlotOutcome.FAILED
-    if ui_outcome is DesktopSlotOutcome.STOPPED:
-        _forget_pid_record(paths.get_runtime_ui_pid_path(), ui.pid)
-        # As in a full stop, remote access failing to stop fails the stop only
-        # when there was a UI to stop.
-        if not remote_access_stopped:
-            ui_outcome = DesktopSlotOutcome.FAILED
-    if ui_skipped is not None:
-        logger.warning("Leaving the UI the pidfile names running: %s", ui_skipped)
-
+        _stop_desktop_processes(targets("service"))
+    _stop_desktop_processes(targets("ui"))
     installs_drained = True
-    if ui_skipped is None and ui_process_stopped:
+    # The UI owns backend installs and drains them itself as it exits.
+    if not any(
+        entry.report.role in ("ui", _UNKNOWN_DESKTOP_ROLE) and not _desktop_process_gone(entry.process)
+        for entry in found
+    ):
         from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
         installs_drained = reap_abandoned_desktop_backend_installs(runtime_id=runtime_id)
+    opencode = targets("opencode")
+    _stop_desktop_processes(opencode)
 
-    opencode_outcome = _stop_desktop_slot(opencode)
-    if opencode_outcome is DesktopSlotOutcome.STOPPED:
-        # The pidfile is shared, so it may already name a successor's server.
-        pid_path = _opencode_server_pid_path()
-        try:
-            if _parse_opencode_pid(pid_path.read_text(encoding="utf-8")) == opencode.pid:
-                pid_path.unlink(missing_ok=True)
-        except (OSError, UnicodeError):
-            pass
-    elif opencode_outcome is DesktopSlotOutcome.FAILED:
-        logger.warning("Failed to stop the OpenCode server this Runtime started (pid=%s)", opencode.pid)
+    left = _scan_desktop_runtime(fingerprint, lineage)
     return DesktopRuntimeStopResult(
-        service=service_outcome,
-        ui=ui_outcome,
-        opencode=opencode_outcome,
-        ui_skipped=ui_skipped,
+        remaining=tuple(entry.report for entry in left if entry.report.role is not None),
+        left_running=tuple(entry.report for entry in left if entry.report.role is None and not entry.lineage),
         installs_drained=installs_drained,
+        opencode_stopped=any(_desktop_process_gone(process) for process in opencode),
     )

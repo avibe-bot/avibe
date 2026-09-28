@@ -31,7 +31,7 @@ from core.process_isolation import (
     process_identity_recycled,
     process_identity_subprocess_env,
     probe_process_liveness,
-    _processes_carrying_marker,
+    processes_carrying_marker,
     reap_marked_processes,
     reap_orphaned_process_tree,
     signal_process_tree,
@@ -561,9 +561,13 @@ def test_marker_scan_skips_processes_it_cannot_inspect(monkeypatch: pytest.Monke
         info={"uids": SimpleNamespace(real=own_uid, effective=0, saved=0), "username": "me"},
         environ=lambda: pytest.fail("a setuid process cannot carry our marker"),
     )
-    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: iter([setuid, unreadable, ours]))
+    def process_iter(_attrs):
+        return iter([setuid, unreadable, ours])
 
-    assert _processes_carrying_marker(fingerprint_process_marker(marker)) == [ours]
+    process_iter.cache_clear = lambda: None
+    monkeypatch.setattr(psutil, "process_iter", process_iter)
+
+    assert processes_carrying_marker(fingerprint_process_marker(marker)) == [ours]
     assert (
         reap_marked_processes(
             logging.getLogger(__name__),

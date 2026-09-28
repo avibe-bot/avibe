@@ -1,48 +1,73 @@
-"""``vibe stop --expect-runtime-id``: a stop that signals only the Runtime it verified.
+"""``vibe stop --expect-runtime-id``: a stop that signals only the Runtime it scanned.
 
 Targets are real child processes whose environment does or does not carry
 ``AVIBE_DESKTOP_RUNTIME_ID`` and whose command line names the program they
-stand for; only how the service is *found* (the lock owner) is substituted.
+stand for. Discovery is never substituted: the stop finds them by scanning.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
+import shutil
 import signal
 import subprocess
 import sys
-from dataclasses import replace
+from pathlib import Path
 
 import psutil
 import pytest
 
 from config import paths
-from core.process_isolation import fingerprint_process_marker
 from vibe import cli, desktop_backends, desktop_runtime, remote_access, runtime
 
-RUNTIME_ID = "a" * 64
-OTHER_ID = "b" * 64
-UI = ("vibe.ui_server", "run_ui_server")
-OPENCODE = ("opencode", "serve")
+# Random, so no process another test file started with a fixed id is ever in scope.
+RUNTIME_ID = secrets.token_hex(32)
+OTHER_ID = secrets.token_hex(32)
+# Printed once the program is running, so it no longer needs its files.
+SLEEP = "import time; print('ready', flush=True); time.sleep(120)"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
 
 
 @pytest.fixture
-def spawn():
+def argv_for(tmp_path):
+    vibe_dir = tmp_path / "bundle" / "vibe"
+    vibe_dir.mkdir(parents=True)
+    service_main = vibe_dir / "service_main.py"
+    service_main.write_text(SLEEP + "\n", encoding="utf-8")
+
+    def _argv_for(role: str | None) -> list[str]:
+        return {
+            "service": [sys.executable, str(service_main)],
+            "ui": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
+            "opencode": [sys.executable, "-c", SLEEP, "opencode", "serve"],
+            None: [sys.executable, "-c", SLEEP, "agent-cli"],
+        }[role]
+
+    return _argv_for
+
+
+def _child_env(runtime_id: str | None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key != desktop_runtime.DESKTOP_RUNTIME_ID_ENV}
+    if runtime_id is not None:
+        env[desktop_runtime.DESKTOP_RUNTIME_ID_ENV] = runtime_id
+    return env
+
+
+@pytest.fixture
+def spawn(argv_for):
     children: list[subprocess.Popen] = []
 
-    def _spawn(runtime_id: str | None, *program: str) -> subprocess.Popen:
-        env = {key: value for key, value in os.environ.items() if key != desktop_runtime.DESKTOP_RUNTIME_ID_ENV}
-        if runtime_id is not None:
-            env[desktop_runtime.DESKTOP_RUNTIME_ID_ENV] = runtime_id
+    def _spawn(runtime_id: str | None, role: str | None = "service") -> subprocess.Popen:
+        argv = argv_for(role)
         child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(120)", *program],
-            env=env,
-            start_new_session=True,
+            argv, env=_child_env(runtime_id), stdout=subprocess.PIPE, text=True, start_new_session=True
         )
         children.append(child)
+        assert child.stdout.readline() == "ready\n"
         return child
 
     yield _spawn
@@ -50,6 +75,7 @@ def spawn():
         if child.poll() is None:
             child.kill()
         child.wait(timeout=10)
+        child.stdout.close()
 
 
 def _alive(child: subprocess.Popen) -> bool:
@@ -59,7 +85,7 @@ def _alive(child: subprocess.Popen) -> bool:
 
 @pytest.fixture
 def stop_env(monkeypatch):
-    """Record every side effect a stop may have; point resolution at test children."""
+    """Record every side effect a stop may have."""
 
     effects: dict[str, list] = {"signals": [], "stop_pid": [], "remote_access": [], "reaps": [], "status": []}
     real_kill = os.kill
@@ -72,36 +98,18 @@ def stop_env(monkeypatch):
     monkeypatch.setattr(os, "kill", recording_kill)
     monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=5: effects["stop_pid"].append(pid) or False)
     monkeypatch.setattr(remote_access, "stop", lambda: effects["remote_access"].append(True) or {"ok": True})
-    monkeypatch.setattr(
-        desktop_backends,
-        "reap_abandoned_desktop_backend_installs",
-        lambda *, runtime_id=None: effects["reaps"].append(runtime_id) or True,
-    )
+    effects["reap_hook"] = []
+
+    def reap(*, runtime_id=None):
+        effects["reaps"].append(runtime_id)
+        for hook in effects["reap_hook"]:
+            hook()
+        return True
+
+    monkeypatch.setattr(desktop_backends, "reap_abandoned_desktop_backend_installs", reap)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: effects["status"].append(args))
     paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
     paths.get_logs_dir().mkdir(parents=True, exist_ok=True)
-
-    def targets(
-        service: subprocess.Popen | None,
-        ui: subprocess.Popen | None = None,
-        *,
-        services=None,
-        opencode: subprocess.Popen | None = None,
-    ):
-        resolved = iter(services) if services is not None else None
-
-        def resolve_service_owner_pid(*, include_starting=True):
-            if resolved is not None:
-                return next(resolved).pid
-            return None if service is None else service.pid
-
-        monkeypatch.setattr(runtime, "resolve_service_owner_pid", resolve_service_owner_pid)
-        if ui is not None:
-            paths.get_runtime_ui_pid_path().write_text(str(ui.pid), encoding="utf-8")
-        if opencode is not None:
-            _opencode_pid_path().write_text(json.dumps({"pid": opencode.pid, "port": 4096}), encoding="utf-8")
-
-    effects["targets"] = targets
     return effects
 
 
@@ -113,12 +121,12 @@ def _opencode_pid_path():
     return paths.get_logs_dir() / "opencode_server.json"
 
 
-def _last_stderr_json(capsys):
-    return json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+def _stderr_lines(capsys) -> list[str]:
+    return capsys.readouterr().err.strip().splitlines()
 
 
 def _assert_refused_untouched(stop_env, capsys, reason, *children):
-    assert _last_stderr_json(capsys) == {"reason": reason}
+    assert json.loads(_stderr_lines(capsys)[-1]) == {"reason": reason}
     assert stop_env["signals"] == []
     assert stop_env["stop_pid"] == []
     assert stop_env["remote_access"] == []
@@ -127,70 +135,148 @@ def _assert_refused_untouched(stop_env, capsys, reason, *children):
     assert all(_alive(child) for child in children)
 
 
-def _provenance_unreadable(monkeypatch, child, *, after_reads=0):
-    real_open = desktop_runtime.open_desktop_runtime_provenance
-    reads: list[int] = []
-
-    def open_provenance(pid):
-        if pid == child.pid:
-            reads.append(pid)
-            if len(reads) > after_reads:
-                raise psutil.AccessDenied(pid)
-        return real_open(pid)
-
-    monkeypatch.setattr(desktop_runtime, "open_desktop_runtime_provenance", open_provenance)
-
-
-def test_matching_service_ui_and_opencode_are_all_stopped(spawn, stop_env):
-    service, ui, opencode = spawn(RUNTIME_ID), spawn(RUNTIME_ID, *UI), spawn(RUNTIME_ID, *OPENCODE)
-    stop_env["targets"](service, ui, opencode=opencode)
+def test_the_service_ui_and_opencode_carrying_the_id_are_all_stopped(spawn, stop_env, tmp_path):
+    service, ui, opencode = spawn(RUNTIME_ID), spawn(RUNTIME_ID, "ui"), spawn(RUNTIME_ID, "opencode")
+    # An update may already have replaced or moved the files they started from.
+    shutil.rmtree(tmp_path / "bundle")
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
     for child in (service, ui, opencode):
         child.wait(timeout=10)
         assert (child.pid, signal.SIGTERM) in stop_env["signals"]
-    assert stop_env["remote_access"] == [True]
+    # The tunnel is not stopped through the connector's files; see the ledger.
+    assert stop_env["remote_access"] == []
     assert stop_env["reaps"] == [RUNTIME_ID]
     assert stop_env["status"] == [("stopped",)]
-    assert not paths.get_runtime_ui_pid_path().exists()
-    assert not _opencode_pid_path().exists()
+
+
+@pytest.mark.parametrize("foreign_id", [OTHER_ID, None])
+def test_processes_without_the_id_are_left_running_whatever_the_pidfiles_say(spawn, stop_env, foreign_id):
+    service = spawn(RUNTIME_ID)
+    foreign = {role: spawn(foreign_id, role) for role in ("service", "ui", "opencode")}
+    paths.get_runtime_pid_path().write_text(str(foreign["service"].pid), encoding="utf-8")
+    paths.get_runtime_ui_pid_path().write_text(str(foreign["ui"].pid), encoding="utf-8")
+    _opencode_pid_path().write_text(json.dumps({"pid": foreign["opencode"].pid, "port": 4096}), encoding="utf-8")
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
+
+    service.wait(timeout=10)
+    for child in foreign.values():
+        assert _alive(child) and not _signalled(stop_env, child)
+    assert stop_env["stop_pid"] == []
+
+
+def test_a_garbage_opencode_pidfile_does_not_hide_the_opencode_server_carrying_the_id(spawn, stop_env):
+    opencode = spawn(RUNTIME_ID, "opencode")
+    _opencode_pid_path().write_bytes(b"\x00{not json")
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
+
+    opencode.wait(timeout=10)
+    assert (opencode.pid, signal.SIGTERM) in stop_env["signals"]
+
+
+def test_the_stop_and_its_ancestors_are_never_signalled(spawn, tmp_path):
+    # The desktop host starts the stop, so the stop and every process above it
+    # carry the id too. Here the parent even looks like this Runtime's UI.
+    service = spawn(RUNTIME_ID)
+    result_path = tmp_path / "stop-result.json"
+    script = (
+        "import json, subprocess, sys\n"
+        f"stop = subprocess.run([sys.executable, '-m', 'vibe', 'stop', '--expect-runtime-id', {RUNTIME_ID!r}],"
+        f" cwd={str(REPO_ROOT)!r}, capture_output=True, text=True)\n"
+        f"open({str(result_path)!r}, 'w').write(json.dumps({{'code': stop.returncode, 'stderr': stop.stderr}}))\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", script, "vibe.ui_server", "run_ui_server"],
+        env=_child_env(RUNTIME_ID),
+        start_new_session=True,
+    )
+    try:
+        parent.wait(timeout=60)
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=10)
+
+    # The parent lived to write this, and returned on its own.
+    assert parent.returncode == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["code"] == 2
+    assert json.loads(result["stderr"].strip().splitlines()[-1]) == {
+        "failed": "ui",
+        "remaining": [{"pid": parent.pid, "role": "ui"}],
+    }
+    service.wait(timeout=10)
 
 
 @pytest.mark.parametrize(
-    ("slot", "state", "reason"),
+    ("role", "failure", "language", "diagnostic"),
     [
-        ("service", OTHER_ID, "service_runtime_id_mismatch"),
-        ("service", None, "service_runtime_id_mismatch"),
-        ("service", "provenance-unreadable", "service_identity_unavailable"),
-        ("ui", "command-unreadable", "ui_identity_unavailable"),
-        ("opencode", "provenance-unreadable", "opencode_identity_unavailable"),
+        ("service", "service", None, "ERROR: Avibe service did not stop; preserving pidfile and aborting."),
+        ("opencode", "opencode", None, "ERROR: The OpenCode server this Runtime started did not stop."),
+        ("opencode", "opencode", "zh", "错误：此 Runtime 启动的 OpenCode 服务未能停止。"),
     ],
 )
-def test_an_unverified_slot_refuses_the_whole_stop(spawn, stop_env, monkeypatch, capsys, slot, state, reason):
-    unreadable = state in ("provenance-unreadable", "command-unreadable")
-    ids = {name: RUNTIME_ID if unreadable or name != slot else state for name in ("service", "ui", "opencode")}
-    children = {"service": spawn(ids["service"]), "ui": spawn(ids["ui"], *UI), "opencode": spawn(ids["opencode"], *OPENCODE)}
-    stop_env["targets"](children["service"], children["ui"], opencode=children["opencode"])
-    target = children[slot]
-    if state == "provenance-unreadable":
-        _provenance_unreadable(monkeypatch, target)
-    elif state == "command-unreadable":
-        real_command = runtime.get_process_command
-        monkeypatch.setattr(runtime, "get_process_command", lambda pid: None if pid == target.pid else real_command(pid))
+def test_a_role_process_carrying_the_id_at_the_rescan_fails_the_stop(
+    spawn, stop_env, capsys, role, failure, language, diagnostic
+):
+    ui = spawn(RUNTIME_ID, "ui")
+    late: list[subprocess.Popen] = []
+    # Started after the scan, it is never signalled; the rescan still sees it.
+    stop_env["reap_hook"].append(lambda: late.append(spawn(RUNTIME_ID, role)))
+    if language is not None:
+        paths.get_config_path().parent.mkdir(parents=True, exist_ok=True)
+        paths.get_config_path().write_text(json.dumps({"language": language}), encoding="utf-8")
 
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 3
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 2
 
-    _assert_refused_untouched(stop_env, capsys, reason, *children.values())
+    ui.wait(timeout=10)
+    assert _alive(late[0]) and not _signalled(stop_env, late[0])
+    lines = _stderr_lines(capsys)
+    assert lines[-2] == diagnostic
+    assert json.loads(lines[-1]) == {"failed": failure, "remaining": [{"pid": late[0].pid, "role": role}]}
+    assert stop_env["status"] == [("error", cli._STOP_FAILURES[failure][1])]
 
 
-def test_a_held_service_lock_with_an_unreadable_owner_refuses_the_whole_stop(spawn, stop_env, monkeypatch, capsys):
-    # A live service rewrites its lock record in place, so for a moment the
-    # lock is held and the record is empty: the owner is unknown, not absent.
-    real_resolve = runtime.resolve_service_owner_pid
-    ui, opencode = spawn(RUNTIME_ID, *UI), spawn(RUNTIME_ID, *OPENCODE)
-    stop_env["targets"](None, ui, opencode=opencode)
-    monkeypatch.setattr(runtime, "resolve_service_owner_pid", real_resolve)
+def test_a_pid_recycled_after_the_scan_is_not_signalled(spawn, stop_env, monkeypatch):
+    service = spawn(RUNTIME_ID)
+    real_scan = runtime.processes_carrying_marker
+    scans: list[int] = []
+
+    def scan(fingerprint, **kwargs):
+        found = real_scan(fingerprint, **kwargs)
+        scans.append(len(found))
+        if len(scans) == 1:
+            for process in found:
+                if process.pid == service.pid:
+                    # The scanned process was an earlier holder of this pid.
+                    process._ident = (process.pid, process.create_time() - 60)
+        return found
+
+    monkeypatch.setattr(runtime, "processes_carrying_marker", scan)
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 2
+
+    assert len(scans) == 2
+    assert _alive(service) and not _signalled(stop_env, service)
+
+
+def test_other_programs_carrying_the_id_are_reported_and_left_running(spawn, stop_env, capsys):
+    service, agent = spawn(RUNTIME_ID), spawn(RUNTIME_ID, None)
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
+
+    service.wait(timeout=10)
+    assert _alive(agent) and not _signalled(stop_env, agent)
+    reported = json.loads(_stderr_lines(capsys)[-1])
+    assert reported == {"left_running": [{"pid": agent.pid, "name": psutil.Process(agent.pid).name()}]}
+    assert stop_env["status"] == [("stopped",)]
+
+
+def test_a_foreign_service_lock_holder_refuses_the_stop(spawn, stop_env, capsys):
+    foreign = spawn(OTHER_ID)
     lock_path = runtime.get_service_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -198,175 +284,36 @@ def test_a_held_service_lock_with_an_unreadable_owner_refuses_the_whole_stop(spa
         assert runtime._try_lock_file(held)
         assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 3
 
-    _assert_refused_untouched(stop_env, capsys, "service_identity_unavailable", ui, opencode)
+    _assert_refused_untouched(stop_env, capsys, "service_runtime_id_mismatch", foreign)
+
+
+def test_a_service_lock_that_cannot_be_probed_refuses_the_stop(stop_env, capsys):
+    runtime.get_service_lock_path().mkdir(parents=True)
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 3
+
+    _assert_refused_untouched(stop_env, capsys, "service_identity_unavailable")
 
 
 def test_invalid_expected_id_is_refused(stop_env, capsys):
-    stop_env["targets"](None)
-
     assert cli.cmd_stop(expect_runtime_id="A" * 64) == 3
 
-    assert _last_stderr_json(capsys) == {"reason": "invalid_runtime_id"}
-    assert stop_env["remote_access"] == [] and stop_env["reaps"] == []
+    _assert_refused_untouched(stop_env, capsys, "invalid_runtime_id")
 
 
-@pytest.mark.parametrize("service_running", [False, True])
-def test_without_a_ui_remote_access_is_stopped_only_through_a_verified_service(spawn, stop_env, service_running):
-    service = spawn(RUNTIME_ID) if service_running else None
-    stop_env["targets"](service)
-
+def test_with_nothing_running_and_a_free_lock_the_stop_succeeds(stop_env):
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
-    # With nothing of this Runtime running there is no owner to stop the tunnel
-    # through: another Runtime may be between restarts and about to adopt it.
-    assert stop_env["remote_access"] == ([True] if service_running else [])
+    assert stop_env["signals"] == []
     assert stop_env["reaps"] == [RUNTIME_ID]
     assert stop_env["status"] == [("stopped",)]
-
-
-def test_a_service_resolved_after_the_check_is_never_signalled(spawn, stop_env):
-    verified, successor = spawn(RUNTIME_ID), spawn(RUNTIME_ID)
-    stop_env["targets"](None, services=[verified, successor, successor, successor])
-
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
-
-    verified.wait(timeout=10)
-    assert _alive(successor)
-    assert not _signalled(stop_env, successor)
-
-
-def test_a_pid_recycled_after_the_check_is_not_signalled(spawn, stop_env, monkeypatch):
-    service = spawn(RUNTIME_ID)
-    stop_env["targets"](service)
-    real_open = desktop_runtime.open_desktop_runtime_provenance
-    opened: list[int] = []
-
-    def open_provenance(pid):
-        process, identity = real_open(pid)
-        opened.append(pid)
-        if len(opened) == 1:
-            return process, identity
-        # From here on the pid is held by a stranger born later, without the id.
-        return process, replace(identity, create_time=identity.create_time + 60, worker_fingerprint=None)
-
-    monkeypatch.setattr(desktop_runtime, "open_desktop_runtime_provenance", open_provenance)
-
-    cli.cmd_stop(expect_runtime_id=RUNTIME_ID)
-
-    assert len(opened) >= 2
-    assert not _signalled(stop_env, service)
-    assert _alive(service)
-
-
-def test_extra_service_processes_are_left_to_a_full_stop(spawn, stop_env, monkeypatch):
-    service, extra = spawn(RUNTIME_ID), spawn(RUNTIME_ID)
-    stop_env["targets"](service)
-    monkeypatch.setattr(runtime, "extra_service_process_pids", lambda owner_pid=None: [extra.pid])
-
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
-
-    service.wait(timeout=10)
-    assert _alive(extra)
-    assert not _signalled(stop_env, extra)
-
-
-@pytest.mark.parametrize("ui_id", [OTHER_ID, None])
-def test_matching_service_with_a_ui_of_another_runtime_stops_only_the_service(spawn, stop_env, capsys, ui_id):
-    service = spawn(RUNTIME_ID)
-    ui = spawn(ui_id, *UI)
-    stop_env["targets"](service, ui)
-
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
-
-    service.wait(timeout=10)
-    assert _alive(ui)
-    assert not _signalled(stop_env, ui)
-    assert _last_stderr_json(capsys) == {"skipped": "ui", "reason": "ui_runtime_id_mismatch"}
-    # Remote access and backend installs belong to the UI that is left running.
-    assert stop_env["remote_access"] == []
-    assert stop_env["reaps"] == []
-    assert paths.get_runtime_ui_pid_path().read_text(encoding="utf-8") == str(ui.pid)
-
-
-@pytest.mark.parametrize("had_ui", [True, False])
-def test_a_ui_that_took_the_pidfile_during_the_stop_keeps_its_remote_access(
-    spawn, stop_env, monkeypatch, capsys, had_ui
-):
-    service = spawn(RUNTIME_ID)
-    verified_ui = spawn(RUNTIME_ID, *UI) if had_ui else None
-    stop_env["targets"](service, verified_ui)
-    successor: list[subprocess.Popen] = []
-    real_clear = runtime._clear_service_pid_reservation
-
-    def service_stopped_while_a_ui_took_over(pid):
-        real_clear(pid)
-        if verified_ui is not None:
-            verified_ui.kill()
-            verified_ui.wait(timeout=10)
-        successor.append(spawn(OTHER_ID, *UI))
-        paths.get_runtime_ui_pid_path().write_text(str(successor[0].pid), encoding="utf-8")
-
-    monkeypatch.setattr(runtime, "_clear_service_pid_reservation", service_stopped_while_a_ui_took_over)
-
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
-
-    service.wait(timeout=10)
-    assert _alive(successor[0])
-    assert not _signalled(stop_env, successor[0])
-    assert _last_stderr_json(capsys) == {"skipped": "ui", "reason": "ui_changed"}
-    assert stop_env["remote_access"] == []
-    assert stop_env["reaps"] == []
-    assert paths.get_runtime_ui_pid_path().read_text(encoding="utf-8") == str(successor[0].pid)
-
-
-@pytest.mark.parametrize("opencode_id", [OTHER_ID, None])
-def test_an_opencode_server_another_runtime_started_is_left_running(spawn, stop_env, opencode_id):
-    # The shared pidfile names the server of whichever Runtime wrote it last,
-    # for example a successor that started its own after this service exited.
-    service, opencode = spawn(RUNTIME_ID), spawn(opencode_id, *OPENCODE)
-    stop_env["targets"](service, opencode=opencode)
-
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
-
-    service.wait(timeout=10)
-    assert _alive(opencode)
-    assert not _signalled(stop_env, opencode)
-    assert stop_env["stop_pid"] == []
-    assert _opencode_pid_path().exists()
-
-
-@pytest.mark.parametrize(
-    ("language", "diagnostic"),
-    [
-        (None, "ERROR: The OpenCode server this Runtime started did not stop."),
-        ("zh", "错误：此 Runtime 启动的 OpenCode 服务未能停止。"),
-    ],
-)
-def test_a_verified_opencode_server_that_survives_fails_the_scoped_stop(
-    spawn, stop_env, monkeypatch, capsys, language, diagnostic
-):
-    service, opencode = spawn(RUNTIME_ID), spawn(RUNTIME_ID, *OPENCODE)
-    stop_env["targets"](service, opencode=opencode)
-    if language is not None:
-        paths.get_config_path().parent.mkdir(parents=True, exist_ok=True)
-        paths.get_config_path().write_text(json.dumps({"language": language}), encoding="utf-8")
-    # Verified, then no longer shown to be the target: it is never signalled.
-    _provenance_unreadable(monkeypatch, opencode, after_reads=1)
-
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 2
-
-    service.wait(timeout=10)
-    assert _alive(opencode) and not _signalled(stop_env, opencode)
-    assert capsys.readouterr().err.strip().splitlines()[-1] == diagnostic
-    assert stop_env["status"] == [("error", "opencode stop failed")]
-    assert _opencode_pid_path().exists()
 
 
 def test_a_full_stop_keeps_a_surviving_opencode_server_non_fatal(spawn, stop_env, monkeypatch):
     # Only the desktop host replaces the bundle OpenCode runs from; a full stop
     # also serves people and the upgrade and restart flows, and keeps its exit.
-    opencode = spawn(RUNTIME_ID, *OPENCODE)
-    stop_env["targets"](None, opencode=opencode)
+    opencode = spawn(RUNTIME_ID, "opencode")
+    _opencode_pid_path().write_text(json.dumps({"pid": opencode.pid, "port": 4096}), encoding="utf-8")
     monkeypatch.setattr(runtime, "stop_service", lambda: False)
     monkeypatch.setattr(runtime, "stop_ui", lambda: False)
     monkeypatch.setattr(runtime, "extra_service_process_pids", lambda owner_pid=None: [])
@@ -376,14 +323,3 @@ def test_a_full_stop_keeps_a_surviving_opencode_server_non_fatal(spawn, stop_env
     assert stop_env["stop_pid"] == [opencode.pid]
     assert _alive(opencode)
     assert stop_env["status"] == [("stopped",)]
-
-
-@pytest.mark.parametrize("runtime_id", [RUNTIME_ID, None])
-def test_provenance_is_read_from_a_real_child_environment(spawn, runtime_id):
-    child = spawn(runtime_id)
-
-    process, identity = desktop_runtime.open_desktop_runtime_provenance(child.pid)
-
-    assert process.pid == child.pid
-    assert identity.marker_readable
-    assert identity.worker_fingerprint == (None if runtime_id is None else fingerprint_process_marker(runtime_id))

@@ -13652,12 +13652,16 @@ def _handover_superseded_desktop_runtime() -> None:
         return
 
     # Health names the Runtime that answered; the stop signals only processes
-    # that verifiably belong to it. The tunnel is kept for the successor.
-    result = runtime.stop_desktop_runtime(actual_runtime_id, stop_remote_access=False)
+    # that carry its id.
+    result = runtime.stop_desktop_runtime(actual_runtime_id)
     if result.refusal is not None:
         raise RuntimeError(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}")
     if result.failure is not None:
         raise RuntimeError(f"Failed to stop the superseded desktop-managed Avibe Runtime: {result.failure}")
+    # A UI still running is not the superseded Runtime's. Starting would reuse
+    # it, or replace it with an unscoped stop.
+    if runtime.ui_pid_file_points_to_running_ui():
+        raise RuntimeError("A UI server that is not the superseded desktop-managed Avibe Runtime's is still running")
 
 
 def cmd_start(*, open_browser: bool | None = None):
@@ -13931,6 +13935,7 @@ _STOP_FAILURES = {
     "ui": ("runtime.stop.uiFailed", "ui stop failed"),
     "installs": ("runtime.stop.installsFailed", "desktop backend install drain failed"),
     "opencode": ("runtime.stop.opencodeFailed", "opencode stop failed"),
+    "unknown": ("runtime.stop.unknownFailed", "unidentified runtime process left running"),
 }
 
 
@@ -13945,19 +13950,26 @@ def _report_opencode_stopped() -> None:
     print(i18n_t("runtime.stop.opencodeStopped", _configured_cli_language()))
 
 
+def _print_stop_json(payload: dict) -> None:
+    print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
+
+
 def _stop_expected_desktop_runtime(runtime_id: str) -> int:
     result = runtime.stop_desktop_runtime(runtime_id)
-    if result.refusal is not None:
-        print(json.dumps({"reason": result.refusal}, separators=(",", ":")), file=sys.stderr)
+    if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
+        _print_stop_json({"reason": result.refusal})
         return 3
-    if result.ui_skipped is not None:
-        print(json.dumps({"skipped": "ui", "reason": result.ui_skipped}, separators=(",", ":")), file=sys.stderr)
-    if result.opencode is runtime.DesktopSlotOutcome.STOPPED:
+    if result.left_running:
+        _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in result.left_running]})
+    if result.opencode_stopped:
         _report_opencode_stopped()
-    # Unlike a full stop, a verified OpenCode server that survives fails this
-    # stop: the desktop host replaces or removes the bundle it runs from.
-    if result.failure is not None:
-        return _stop_failed(result.failure)
+    # Unlike a full stop, an OpenCode server of this Runtime that survives
+    # fails this stop: the desktop host replaces or removes the bundle it runs from.
+    if result.outcome is runtime.DesktopRuntimeStopOutcome.FAILED:
+        status = _stop_failed(result.failure)
+        remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
+        _print_stop_json({"failed": result.failure, "remaining": remaining})
+        return status
 
     _write_status("stopped")
     return 0

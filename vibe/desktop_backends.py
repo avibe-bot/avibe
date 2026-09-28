@@ -745,9 +745,16 @@ def _recorded_staging(value: Any) -> Path | None:
 
 
 def _read_installer_record(record_path: Path) -> _InstallerRecord | None:
+    """The record at ``record_path``, or ``None`` when what it holds is invalid.
+
+    Raises ``OSError`` when it cannot be read: such a record is unknown, not
+    invalid, and must not be discarded.
+    """
+
+    text = record_path.read_bytes()
     try:
-        payload = json.loads(record_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        payload = json.loads(text.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict) or payload.get("schema_version") != INSTALL_RECORD_SCHEMA_VERSION:
         return None
@@ -774,14 +781,18 @@ def _read_installer_record(record_path: Path) -> _InstallerRecord | None:
 
 
 def _installer_records() -> list[_InstallerRecord]:
-    """Every readable installer record. Raises ``OSError`` when they cannot be listed."""
+    """Every installer record. Raises ``OSError`` when one cannot be listed or read."""
 
     records = []
     for record_path in sorted(_installer_records_dir().glob("*.json")):
-        record = _read_installer_record(record_path)
+        try:
+            record = _read_installer_record(record_path)
+        except FileNotFoundError:
+            # Its install finished after the listing.
+            continue
         if record is None:
             # Nothing in it can identify a process, so it authorises nothing.
-            logger.warning("Discarding unreadable %s record %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
+            logger.warning("Discarding invalid %s record %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
             _forget_installer_record(record_path)
             continue
         records.append(record)
