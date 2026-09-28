@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use avibe_runtime_host::window_frame::{clamp_window_frame, MonitorArea, WindowFrame};
+use avibe_runtime_host::window_frame::{clamp_window_frame, WindowFrame};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, Runtime, Window, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
@@ -25,19 +25,27 @@ pub fn clamp<R: Runtime>(window: &Window<R>) -> tauri::Result<()> {
         width: size.width,
         height: size.height,
     };
-    let monitors: Vec<_> = window
+    let scale_factor = window.scale_factor()?;
+    let work_areas: Vec<_> = window
         .available_monitors()?
         .into_iter()
         .map(|monitor| {
+            // macOS reports each display's pixels at that display's scale and
+            // the window's at the window's, so a display at another scale is
+            // brought into the window's pixels. Windows and Linux report every
+            // display and window on one shared physical desktop.
+            let ratio = if cfg!(target_os = "macos") {
+                scale_factor / monitor.scale_factor()
+            } else {
+                1.0
+            };
+            let scaled = |value: f64| (value * ratio).round();
             let area = monitor.work_area();
-            MonitorArea {
-                frame: WindowFrame {
-                    x: area.position.x,
-                    y: area.position.y,
-                    width: area.size.width,
-                    height: area.size.height,
-                },
-                scale_factor: monitor.scale_factor(),
+            WindowFrame {
+                x: scaled(f64::from(area.position.x)) as i32,
+                y: scaled(f64::from(area.position.y)) as i32,
+                width: scaled(f64::from(area.size.width)) as u32,
+                height: scaled(f64::from(area.size.height)) as u32,
             }
         })
         .collect();
@@ -52,7 +60,8 @@ pub fn clamp<R: Runtime>(window: &Window<R>) -> tauri::Result<()> {
     };
     let restored = clamp_window_frame(
         frame,
-        &monitors,
+        scale_factor,
+        &work_areas,
         (config.min_width.unwrap_or(0.0), config.min_height.unwrap_or(0.0)),
     );
     if restored.width != frame.width || restored.height != frame.height {
