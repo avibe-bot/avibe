@@ -2057,6 +2057,7 @@ class Controller:
         from storage import agent_events_retention
         from storage.db import get_cached_sqlite_engine
 
+        self._run_sqlite_backup_expiry_pass(cancel_event)
         # Skill privacy retention remains active when collection/tool retention
         # is disabled; both policies share this bounded maintenance worker.
         engine = get_cached_sqlite_engine()
@@ -2070,6 +2071,33 @@ class Controller:
             compact=False,
             cancel_event=cancel_event,
         )
+
+    def _run_sqlite_backup_expiry_pass(self, cancel_event=None) -> dict:
+        import os
+
+        from config import paths
+        from storage.backups import expire_sqlite_migration_backups
+        from vibe.runtime import (
+            confirm_pending_sqlite_backup_readiness,
+            current_process_owns_service_instance,
+            service_instance_started,
+        )
+
+        if cancel_event is not None and cancel_event.is_set():
+            return {"status": "cancelled", "removed": []}
+        if not current_process_owns_service_instance() or not service_instance_started(os.getpid()):
+            return {"status": "not_owner", "removed": []}
+        try:
+            confirm_pending_sqlite_backup_readiness()
+            result = expire_sqlite_migration_backups(
+                paths.get_sqlite_state_path(), cancel_event=cancel_event
+            )
+            if result["status"] == "unconfirmed":
+                logger.info("SQLite backup expiry deferred: no verified ready migration lifecycle")
+            return result
+        except Exception:
+            logger.warning("SQLite backup expiry deferred; retaining rollback files", exc_info=True)
+            return {"status": "deferred", "removed": []}
 
     async def _join_trace_retention_future(self) -> None:
         """Wait for the worker's current batch to observe cooperative stop."""

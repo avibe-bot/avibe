@@ -7,10 +7,14 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+
+from storage.lock import MigrationFileLock, MigrationLockTimeout, migration_lock_path_for
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,7 @@ logger = logging.getLogger(__name__)
 JSON_STATE_BACKUP_RETENTION = 3
 SQLITE_BACKUP_RETENTION = 2
 BACKUP_MANIFEST_VERSION = 1
+SQLITE_BACKUP_MAX_AGE = timedelta(hours=72)
 
 #: The name a restore gives the database it takes out of service, inside the
 #: backup directory it restored from. That directory is the record of "we rolled
@@ -133,7 +138,7 @@ def _read_manifest(path: Path) -> dict | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -525,6 +530,19 @@ def create_sqlite_migration_backup(
     to_revisions: Iterable[str] = (),
     now: datetime | None = None,
 ) -> Path:
+    with MigrationFileLock(migration_lock_path_for(db_path), timeout_seconds=None):
+        return _create_sqlite_migration_backup_locked(
+            db_path, backups_dir=backups_dir, to_revisions=to_revisions, now=now
+        )
+
+
+def _create_sqlite_migration_backup_locked(
+    db_path: Path,
+    *,
+    backups_dir: Path | None = None,
+    to_revisions: Iterable[str] = (),
+    now: datetime | None = None,
+) -> Path:
     """Hold a rollback point for the database as it stands, in a bounded window.
 
     Bounding the window belongs here rather than at the call sites. A backup is
@@ -630,6 +648,295 @@ def create_sqlite_migration_backup(
     # would not count itself against the bound.
     prune_state_backups(target_root, json_retention=None, protect=backup_dir)
     return backup_dir
+
+
+def _lifecycle_path(db_path: Path) -> Path:
+    return db_path.with_name(f".{db_path.name}.backup-lifecycle.json")
+
+
+def _write_backup_metadata(path: Path, payload: dict) -> None:
+    """Publish one private receipt durably, without exposing a partial JSON file."""
+    if path.is_symlink():
+        raise OSError(f"Refusing symlink backup metadata: {path}")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _database_identity(db_path: Path) -> list[int]:
+    info = db_path.stat()
+    return [info.st_dev, info.st_ino]
+
+
+def _valid_lifecycle_shape(record: object, db_path: Path) -> bool:
+    return isinstance(record, dict) and (
+        type(record.get("schema_version")) is int
+        and record["schema_version"] == 1
+        and record.get("database") == str(db_path)
+        and isinstance(record.get("attempt_id"), str)
+        and re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"]) is not None
+        and isinstance(record.get("backup_name"), str)
+        and _SQLITE_BACKUP_RE.fullmatch(record["backup_name"]) is not None
+        and isinstance(record.get("to_revisions"), list)
+        and bool(record["to_revisions"])
+        and all(isinstance(value, str) and value for value in record["to_revisions"])
+        and isinstance(record.get("database_identity"), list)
+        and len(record["database_identity"]) == 2
+        and all(type(value) is int for value in record["database_identity"])
+        and isinstance(record.get("phase"), str)
+        and record.get("phase") in {"migrating", "migrated", "validating", "validated", "ready", "restoring", "restored"}
+    )
+
+
+def _lifecycle_record(db_path: Path) -> dict | None:
+    record = _read_manifest(_lifecycle_path(db_path))
+    if not (
+        _valid_lifecycle_shape(record, db_path)
+        and record["database_identity"] == _database_identity(db_path)
+    ):
+        return None
+    return record
+
+
+def _attempt_manifest(db_path: Path, record: dict) -> tuple[Path, dict] | None:
+    root = db_path.parent / "backups"
+    if root.is_symlink():
+        return None
+    backup = root / record["backup_name"]
+    candidate = _directory_candidate(backup)
+    manifest = _read_manifest(backup / "manifest.json")
+    if (
+        candidate is None
+        or candidate.kind != "sqlite"
+        or manifest is None
+        or manifest.get("expiry_lifecycle") != record
+        or manifest.get("to_revisions") != record["to_revisions"]
+    ):
+        return None
+    return backup / "manifest.json", manifest
+
+
+def _advance_backup_lifecycle(db_path: Path, record: dict, *, phase: str, **fields) -> None:
+    admitted = _attempt_manifest(db_path, record)
+    if admitted is None:
+        raise OSError("Migration backup lifecycle no longer matches its manifest")
+    manifest_path, manifest = admitted
+    updated = {**record, **fields, "phase": phase}
+    manifest["expiry_lifecycle"] = updated
+    # A crash between these writes leaves disagreement, never deletion authority.
+    _write_backup_metadata(manifest_path, manifest)
+    _write_backup_metadata(_lifecycle_path(db_path), updated)
+
+
+def begin_sqlite_backup_migration(db_path: Path, backup_dir: Path) -> str | None:
+    """Invalidate prior expiry authority before this attempt can change the DB."""
+    target = db_path.expanduser().resolve()
+    with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=None):
+        candidate = _directory_candidate(backup_dir)
+        manifest_path = backup_dir / "manifest.json"
+        manifest = _read_manifest(manifest_path)
+        if candidate is None or candidate.kind != "sqlite" or manifest is None:
+            raise ValueError("Migration backup is not a recognized SQLite rollback point")
+        record = {
+            "schema_version": 1,
+            "attempt_id": uuid.uuid4().hex,
+            "database": str(target),
+            "database_identity": _database_identity(target),
+            "backup_name": backup_dir.name,
+            "to_revisions": manifest["to_revisions"],
+            "phase": "migrating",
+        }
+        # Publish the blocking record first; an incomplete attempt must stop
+        # expiry even when the subsequent manifest write or migration fails.
+        _write_backup_metadata(_lifecycle_path(target), record)
+        root = target.parent / "backups"
+        if backup_dir.parent != root or root.is_symlink():
+            logger.info("SQLite backup expiry disabled for relocated backup directory %s", backup_dir.parent)
+            return None
+        manifest["expiry_lifecycle"] = record
+        _write_backup_metadata(manifest_path, manifest)
+        return record["attempt_id"]
+
+
+def _validate_migrated_database(db_path: Path, revisions: Iterable[str]) -> None:
+    with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
+        if _stamped_revisions(connection) != _normalized_position(revisions):
+            raise sqlite3.DatabaseError("Migration did not reach its recorded target revisions")
+        if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise sqlite3.DatabaseError("Migrated SQLite database failed quick_check")
+
+
+def complete_sqlite_backup_migration(
+    db_path: Path, attempt_id: str, *, now: datetime | None = None
+) -> None:
+    target = db_path.expanduser().resolve()
+    with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=None):
+        record = _lifecycle_record(target)
+        if record is None or record["attempt_id"] != attempt_id or record.get("phase") != "migrating":
+            raise OSError("SQLite migration completion lost its exact backup attempt")
+        _validate_migrated_database(target, record["to_revisions"])
+        _advance_backup_lifecycle(
+            target,
+            record,
+            phase="migrated",
+            migration_completed_at=(now or datetime.now(timezone.utc)).isoformat(),
+        )
+
+
+def begin_sqlite_backup_validation(db_path: Path) -> str | None:
+    target = db_path.expanduser().resolve()
+    with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=None):
+        record = _lifecycle_record(target)
+        if record is None or record.get("phase") not in {"migrated", "validating", "validated"}:
+            return None
+        _advance_backup_lifecycle(target, record, phase="validating")
+        return record["attempt_id"]
+
+
+def complete_sqlite_backup_validation(
+    db_path: Path, attempt_id: str | None, *, now: datetime | None = None
+) -> None:
+    if attempt_id is None:
+        return
+    target = db_path.expanduser().resolve()
+    with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=None):
+        record = _lifecycle_record(target)
+        if record is None or record["attempt_id"] != attempt_id or record.get("phase") != "validating":
+            raise OSError("SQLite state validation lost its exact backup attempt")
+        _validate_migrated_database(target, record["to_revisions"])
+        _advance_backup_lifecycle(
+            target,
+            record,
+            phase="validated",
+            validated_at=(now or datetime.now(timezone.utc)).isoformat(),
+        )
+
+
+def confirm_sqlite_backup_readiness(
+    db_path: Path, *, attempt_id: str, expected_revisions: Iterable[str], now: datetime | None = None
+) -> bool:
+    """Only the actual service-readiness owner calls this, not the hourly sweep."""
+    target = db_path.expanduser().resolve()
+    if not target.is_file() or not _lifecycle_path(target).is_file():
+        return False
+    with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=0):
+        record = _lifecycle_record(target)
+        if record is None or record["attempt_id"] != attempt_id or record.get("phase") != "validated":
+            return False
+        if _normalized_position(expected_revisions) != _normalized_position(record["to_revisions"]):
+            return False
+        with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as connection:
+            if _stamped_revisions(connection) != _normalized_position(record["to_revisions"]):
+                return False
+        _advance_backup_lifecycle(
+            target,
+            record,
+            phase="ready",
+            ready_at=(now or datetime.now(timezone.utc)).isoformat(),
+        )
+        return True
+
+
+def _lifecycle_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def expire_sqlite_migration_backups(
+    db_path: Path, *, now: datetime | None = None, cancel_event=None
+) -> dict:
+    """Remove only proven successful copies; a pending/failed attempt fences all."""
+    target = db_path.expanduser().resolve()
+    root = target.parent / "backups"
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        raise ValueError("Backup expiry requires an offset-aware timestamp")
+    if not target.is_file() or not root.is_dir() or root.is_symlink():
+        return {"status": "not_due", "removed": []}
+    removed: list[str] = []
+    try:
+        with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=0):
+            record = _lifecycle_record(target)
+            if record is None or record.get("phase") != "ready":
+                return {"status": "unconfirmed", "removed": []}
+            with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as connection:
+                if _stamped_revisions(connection) != _normalized_position(record["to_revisions"]):
+                    return {"status": "unconfirmed", "removed": []}
+            for candidate in _managed_candidates(root):
+                if cancel_event is not None and cancel_event.is_set():
+                    return {"status": "cancelled", "removed": removed}
+                if candidate.kind != "sqlite" or not candidate.root.is_dir():
+                    continue
+                manifest = _read_manifest(candidate.root / "manifest.json") or {}
+                lifecycle = manifest.get("expiry_lifecycle")
+                if not _valid_lifecycle_shape(lifecycle, target) or not (
+                    lifecycle.get("phase") == "ready"
+                    and lifecycle.get("database_identity") == record["database_identity"]
+                    and lifecycle.get("backup_name") == candidate.root.name
+                    and lifecycle.get("to_revisions") == manifest.get("to_revisions")
+                ):
+                    continue
+                completed = _lifecycle_time(lifecycle.get("migration_completed_at"))
+                validated = _lifecycle_time(lifecycle.get("validated_at"))
+                ready = _lifecycle_time(lifecycle.get("ready_at"))
+                if not (
+                    completed is not None
+                    and validated is not None
+                    and ready is not None
+                    and completed <= validated <= ready <= current_time
+                    and current_time - ready >= SQLITE_BACKUP_MAX_AGE
+                ):
+                    continue
+                # Restored/displaced data and user-added files are not temporary
+                # upgrade copies. Never remove them through the new age policy.
+                if {entry.name for entry in candidate.root.iterdir()} != {"manifest.json", "vibe.sqlite"}:
+                    continue
+                logical_bytes = (candidate.root / "vibe.sqlite").stat().st_size
+                if _remove_candidate(candidate):
+                    removed.append(candidate.root.name)
+                    logger.info(
+                        "Expired SQLite migration backup %s after 72 hours (logical bytes=%d)",
+                        candidate.root.name,
+                        logical_bytes,
+                    )
+    except MigrationLockTimeout:
+        logger.info("SQLite backup expiry deferred: migration or restore owns the database lock")
+        return {"status": "busy", "removed": []}
+    return {"status": "ok" if removed else "not_due", "removed": removed}
+
+
+def _invalidate_backup_expiry_for_restore(db_path: Path) -> None:
+    lifecycle_path = _lifecycle_path(db_path)
+    if not lifecycle_path.exists() and not lifecycle_path.is_symlink():
+        return
+    record = _read_manifest(lifecycle_path) or {}
+    _write_backup_metadata(lifecycle_path, {**record, "phase": "restoring"})
+    root = db_path.parent / "backups"
+    if root.is_symlink():
+        return
+    for candidate in _managed_candidates(root):
+        if candidate.kind != "sqlite" or not candidate.root.is_dir():
+            continue
+        manifest_path = candidate.root / "manifest.json"
+        manifest = _read_manifest(manifest_path) or {}
+        lifecycle = manifest.get("expiry_lifecycle")
+        if isinstance(lifecycle, dict) and lifecycle.get("database") == str(db_path):
+            manifest["expiry_lifecycle"] = {**lifecycle, "phase": "restored"}
+            _write_backup_metadata(manifest_path, manifest)
 
 
 def _duplicate_file(source: Path, destination: Path) -> None:
@@ -822,6 +1129,14 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
 
 
 def restore_sqlite_backup(backup_dir: Path, db_path: Path) -> Path | None:
+    target = db_path.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with MigrationFileLock(migration_lock_path_for(target), timeout_seconds=None):
+        _invalidate_backup_expiry_for_restore(target)
+        return _restore_sqlite_backup_locked(backup_dir, target)
+
+
+def _restore_sqlite_backup_locked(backup_dir: Path, db_path: Path) -> Path | None:
     """Put a rollback point back into service, destroying nothing.
 
     A restore is a swap, never an overwrite. The database it takes out of service
