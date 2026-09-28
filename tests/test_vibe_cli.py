@@ -1454,9 +1454,11 @@ def receipt_runtime(monkeypatch):
     monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: True)
     monkeypatch.setattr(runtime, "spawn_service_background_process", spawn_service)
     monkeypatch.setattr(runtime, "spawn_background", spawn_ui)
-    # A failed start now rolls the service back, and the real stop_service()
-    # resolves its target from the live process table rather than from anything
-    # this fixture controls. Record the call instead of making it.
+    # A failed start rolls back the UI and then the service it spawned. The
+    # real stops act on the process table, where the fake pids above can name
+    # someone else's live process: the real stop_ui() would signal pid 5678.
+    # Record both calls instead of making them.
+    monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: stopped.append("stop_ui") or True)
     monkeypatch.setattr(runtime, "stop_service", lambda: stopped.append("stop_service") or True)
     return SimpleNamespace(
         service_path=service_path, ui_path=ui_path, process_times=process_times,
@@ -1579,8 +1581,8 @@ def test_cmd_start_does_not_emit_a_receipt_with_unreadable_identity(monkeypatch,
     # The far end of the pre-receipt region, and the only failure in it that
     # needs no monkeypatched failure to reach: the receipt builder rejects an
     # identity it cannot read, with the service this command started already up.
-    assert receipt_runtime.stopped == ["stop_service"], (
-        f"a start that could not build its receipt left its own service running: {receipt_runtime.stopped}"
+    assert receipt_runtime.stopped == ["stop_ui", "stop_service"], (
+        f"a start that could not build its receipt must stop its UI, then its service: {receipt_runtime.stopped}"
     )
 
 
