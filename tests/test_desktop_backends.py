@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from config import paths as config_paths
@@ -329,11 +330,15 @@ with open({pids!r} + ".tmp", "w") as handle:
 os.replace({pids!r} + ".tmp", {pids!r})
 time.sleep(120)
 """
-_INSTALL_OWNER_SCRIPT = """
-import json, sys
+# `start_ui` launches the UI, the only process that installs, as `<python> -c "<this>..."`.
+_UI_LAUNCH = "from vibe.ui_server import run_ui_server; "
+_INSTALL_OWNER_SCRIPT = (
+    _UI_LAUNCH
+    + """import json, sys
 from vibe import desktop_backends
 desktop_backends.install_desktop_backend("claude", base_env=json.loads(sys.argv[1]))
 """
+)
 
 
 def _installer_env(tmp_path: Path, npm_script: str) -> dict[str, str]:
@@ -428,6 +433,30 @@ def _start_owner(children: list[subprocess.Popen], env: dict[str, str], wait_for
     pids = wait_for_tree()
     assert _running(pids) == pids
     return pids
+
+
+def _start_ui_stand_in(children: list[subprocess.Popen], tmp_path: Path, env: dict[str, str]) -> int:
+    """A process launched the way the UI is, running with ``env``."""
+
+    ready = tmp_path / f"ui-{len(children)}.ready"
+    script = _UI_LAUNCH + "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(120)"
+    children.append(subprocess.Popen([sys.executable, "-c", script, str(ready)], cwd=_REPO_ROOT, env=env))
+    deadline = time.monotonic() + 15
+    while not ready.exists():
+        assert time.monotonic() < deadline, "UI stand-in did not start"
+        time.sleep(0.05)
+    return children[-1].pid
+
+
+def _shift_create_time(monkeypatch, pid: int) -> None:
+    """psutil shows ``pid`` started at another time, as macOS can after sleep while it keeps running."""
+
+    from vibe import runtime
+
+    real_create_time = runtime.process_create_time
+    monkeypatch.setattr(
+        runtime, "process_create_time", lambda other: real_create_time(other) + 1.0 if other == pid else real_create_time(other)
+    )
 
 
 def _start_tree_naming(children: list[subprocess.Popen], env: dict[str, str], wait_for_tree, owner: str | None):
@@ -596,13 +625,38 @@ def test_the_tree_of_a_live_owner_stays_whatever_the_ui_pidfile_says(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
-def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(installer_tree, quiet_stop, children):
+def test_a_live_owner_whose_create_time_shifted_keeps_its_tree(monkeypatch, installer_trees, children):
+    # A Claude install runs, macOS then shows its UI started at another time,
+    # and a second install's claim scans the Runtime for abandoned trees.
+    pids = _start_owner(children, *installer_trees("first"))
+    _shift_create_time(monkeypatch, children[-1].pid)
+    second_env, _ = installer_trees("second")
+    _patch_fake_install(monkeypatch)
+
+    desktop_backends.install_desktop_backend("claude", base_env=second_env)
+
+    assert _running(pids) == pids
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("holder", ["not-a-ui", "ui-of-another-runtime", "ui-without-a-runtime-id"])
+def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
+    tmp_path, installer_tree, quiet_stop, children, holder
+):
     from vibe import runtime
 
     env, wait_for_tree = installer_tree
     cli, statuses = quiet_stop
-    # The owner exited and its pid now belongs to a process started later: this test.
-    reused = f"{os.getpid()}:{runtime.process_create_time(os.getpid()) - 1.0!r}"
+    # The owner exited and its pid now belongs to a process started later:
+    # this test, or a UI that is not one of this Runtime.
+    if holder == "not-a-ui":
+        pid = os.getpid()
+    else:
+        ui_env = {key: value for key, value in os.environ.items() if key != desktop_backends.DESKTOP_RUNTIME_ID_ENV}
+        if holder == "ui-of-another-runtime":
+            ui_env[desktop_backends.DESKTOP_RUNTIME_ID_ENV] = secrets.token_hex(32)
+        pid = _start_ui_stand_in(children, tmp_path, ui_env)
+    reused = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
     pids = _start_tree_naming(children, env, wait_for_tree, reused)
 
     assert cli.cmd_stop() == 0
@@ -623,13 +677,22 @@ def test_a_tree_whose_owner_cannot_be_told_fails_every_caller_closed(
     cli, statuses = quiet_stop
     named = {"missing": None, "malformed": "not-an-owner"}.get(owner)
     if owner == "uninspectable":
+        # Shown started at another time, and nothing else about it can be read.
         live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         children.append(live)
         named = f"{live.pid}:{runtime.process_create_time(live.pid)!r}"
-        real_create_time = runtime.process_create_time
-        monkeypatch.setattr(
-            runtime, "process_create_time", lambda pid: None if pid == live.pid else real_create_time(pid)
-        )
+        _shift_create_time(monkeypatch, live.pid)
+
+        def unreadable(real):
+            def read(process):
+                if process.pid == live.pid:
+                    raise psutil.AccessDenied(process.pid)
+                return real(process)
+
+            return read
+
+        for method in ("environ", "cmdline"):
+            monkeypatch.setattr(psutil.Process, method, unreadable(getattr(psutil.Process, method)))
     pids = _start_tree_naming(children, env, wait_for_tree, named)
     npm_runs: list[bool] = []
     _patch_fake_install(monkeypatch, before=lambda: npm_runs.append(True))

@@ -30,8 +30,11 @@ DESKTOP_INSTALLER_ROLE = "installer"
 # The OpenCode server manager stamps the server. The agent work it runs inherits
 # the stamp too, so the stamp alone names no role.
 DESKTOP_OPENCODE_ROLE = "opencode"
-# ``<pid>:<create time>`` of the process that started an installer tree, which
-# every member inherits: the tree is abandoned once that process is gone.
+# ``<pid>:<create time>`` of the UI that started an installer tree, which every
+# member inherits: the tree is abandoned once that UI is gone. A pid that is not
+# alive is gone. macOS can shift the create time of a running process, so a
+# different one is a reused pid only when the process holding it is readable and
+# is not a UI of the tree's Runtime; when it cannot be read, nobody can tell.
 DESKTOP_INSTALLER_OWNER_ENV = "AVIBE_DESKTOP_INSTALLER_OWNER"
 START_RECEIPT_PREFIX = "@avibe-start-receipt:"
 START_RECEIPT_TIME_TOLERANCE_MS = 2.0

@@ -848,12 +848,15 @@ def _installer_owner() -> str:
     return f"{os.getpid()}:{started_at!r}"
 
 
-def _installer_owner_gone(owner: str) -> bool | None:
-    """Whether the process named by an installer's owner value has exited.
+def _installer_owner_gone(owner: str, runtime_id: str | None) -> bool | None:
+    """Whether the process named by the owner value of a ``runtime_id`` tree has exited.
 
-    A pid that is no longer alive, or now belongs to a process started at
-    another time, is gone. ``None`` when the value is malformed or the owner
-    cannot be inspected.
+    The owner is gone when its pid is not alive, and alive while that pid
+    keeps its create time. macOS can shift the create time psutil shows for a
+    process that keeps running, so another one alone proves nothing: the pid
+    was reused only when the process now holding it is readable and is not a
+    UI of that Runtime, as every owner is. ``None`` when the value is
+    malformed, or the create time differs and the process cannot be read.
     """
 
     from vibe import runtime
@@ -867,10 +870,10 @@ def _installer_owner_gone(owner: str) -> bool | None:
         return None
     if not runtime.pid_alive(pid):
         return True
-    current = runtime.process_create_time(pid)
-    if current is None:
-        return None
-    return current != started_at
+    if runtime.process_create_time(pid) == started_at:
+        return False
+    is_ui = runtime.is_desktop_ui(pid, runtime_id)
+    return None if is_ui is None else not is_ui
 
 
 def reap_abandoned_desktop_backend_installs(runtime_id: str | None = None) -> bool:
@@ -905,7 +908,7 @@ def reap_abandoned_desktop_backend_installs(runtime_id: str | None = None) -> bo
         if not marker or not marker.isascii():
             logger.error("The %s pid=%s carries no identity marker", DESKTOP_BACKEND_INSTALL_LABEL, process.pid)
             return False
-        gone = _installer_owner_gone(env.get(DESKTOP_INSTALLER_OWNER_ENV, ""))
+        gone = _installer_owner_gone(env.get(DESKTOP_INSTALLER_OWNER_ENV, ""), runtime_id)
         if gone is None:
             logger.error("Could not tell whether the owner of the %s pid=%s is alive", DESKTOP_BACKEND_INSTALL_LABEL, process.pid)
             return False

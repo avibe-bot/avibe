@@ -118,12 +118,16 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
   workers, command runners and the Model Hub supervisor carry
   `AVIBE_PROCESS_IDENTITY` too. The spawn point sets the Runtime id itself
   because the installer environment is an allowlist without `AVIBE_*`.
-- Ownership travels with the tree. A tree is abandoned exactly when no process
-  has its owner's pid, or the process with that pid started at another time
-  (the pid was reused), compared through `runtime.process_create_time` with
-  exact equality like the restart supervisor's checks. A missing or malformed
-  owner value, or an owner that cannot be inspected, fails closed: the reap
-  reports failure and stops nothing. One function,
+- Ownership travels with the tree. A tree is abandoned when no process has
+  its owner's pid. While that pid keeps its create time
+  (`runtime.process_create_time`, exact equality) the owner is alive. macOS can
+  shift the create time psutil shows for a process that keeps running (#2129),
+  so a different one alone proves nothing: the pid was reused only when the
+  process holding it is readable and is not a UI of the tree's Runtime, known
+  by the launch shape and id the scoped stop's scan uses
+  (`runtime.is_desktop_ui`). A missing or malformed owner value, or a different
+  create time on a process that cannot be read, fails closed: the reap reports
+  failure and stops nothing. One function,
   `desktop_backends.reap_abandoned_desktop_backend_installs`, applies this for
   every caller, so no caller's registry, pidfile or knowledge of the UI decides.
   The owner registry serves only the owner's own drain.
@@ -246,6 +250,12 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
   string. The diagnostics a stop prints are localized; the JSON lines are not.
 - The expected id comes only from `--expect-runtime-id`, never from the CLI's
   own environment.
+- An owner's pid taken over by another UI of the same Runtime, after the owner
+  was killed, reads as the owner with a shifted create time, so its tree stays
+  until the next scoped stop, which stops that UI first, or the next claim of
+  its backend root reaps it through its record. That takes a full pid wrap
+  landing on a UI. An owner launched outside the UI's `-c` shape, which Avibe
+  never does, reads as reused on a shifted create time, as before this rule.
 
 ## Consumer notes for the desktop host (PR2)
 

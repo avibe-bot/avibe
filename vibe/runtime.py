@@ -2721,6 +2721,27 @@ def _desktop_process_role(process: psutil.Process) -> str | None:
     return None
 
 
+def is_desktop_ui(pid: int, runtime_id: str | None) -> bool | None:
+    """Whether ``pid`` runs a UI carrying ``runtime_id``, or no Runtime id when that is ``None``.
+
+    A scan knows a UI by the same launch shape. ``None`` when the process
+    cannot be read; a process that has exited is no UI.
+    """
+
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    try:
+        process = psutil.Process(pid)
+        role = _desktop_process_role(process)
+        if role != "ui":
+            return None if role == _UNKNOWN_DESKTOP_ROLE else False
+        return desktop_runtime_id(process.environ()) == runtime_id
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.Error, OSError):
+        return None
+
+
 def _scan_desktop_runtime(fingerprint: str, lineage: frozenset[int]) -> list[_ScannedDesktopProcess]:
     """This user's processes carrying the id, by role, each with its scan handle."""
 
