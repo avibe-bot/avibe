@@ -60,10 +60,13 @@ class _EngineRecord:
 class EngineUnavailableError(RuntimeError):
     """The Hub path is unavailable; callers may use explicitly configured Direct mode."""
 
-    def __init__(self, error_key: str, *, reason: str | None = None) -> None:
+    def __init__(
+        self, error_key: str, *, reason: str | None = None, os_errno: int | None = None,
+    ) -> None:
         super().__init__(error_key)
         self.error_key = error_key
         self.reason = reason
+        self.os_errno = os_errno
         self.direct_mode_available = True
 
 

@@ -220,6 +220,8 @@ class TurnOutcomeProjectionInput:
     source_transition_persisted: bool | None = None
     # Redacted, bounded upstream error text for this turn's reply only.
     upstream_detail: str | None = None
+    # An OS-generated reason, separate from summary copy and upstream text.
+    local_error_detail: str | None = None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -684,11 +686,12 @@ class GatewayTurnTerminalizer:
             force=True,
         )
 
-    def engine_down(self) -> None:
+    def engine_down(self, *, local_error_detail: str | None = None) -> None:
         self._registry._terminalize_gateway_exit(
             self.turn_id,
             request_id=self._request_id,
             reason="engine_down",
+            local_error_detail=local_error_detail,
             stream_started=self._stream_started,
             force=True,
         )
@@ -1762,6 +1765,7 @@ class TurnCorrelationRegistry:
         ] = "protocol_error",
         stream_started: bool,
         force: bool = False,
+        local_error_detail: str | None = None,
     ) -> None:
         if turn_id is None:
             return
@@ -1791,6 +1795,7 @@ class TurnCorrelationRegistry:
                     "channel": None,
                     "reason": reason,
                     "stream_started": stream_started,
+                    **({"local_error_detail": local_error_detail} if local_error_detail else {}),
                 }
                 return
             identity = trace.pending_attempts.get(request_id)

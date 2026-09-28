@@ -4699,6 +4699,7 @@
       }
     },
     "failureDetails": {
+      "localError": "本地错误",
       "show": "查看详情",
       "hide": "收起详情",
       "outcome": {

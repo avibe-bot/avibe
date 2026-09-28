@@ -191,7 +191,7 @@ class ManagedRuntimeManager:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to acquire managed %s runtime lock", self.spec.runtime_id)
-            return self._failure(self._reason("install_lock_failed"), message=str(exc))
+            return self._failure(self._reason("install_lock_failed"), message=str(exc), error=exc)
         if file_lock is None:
             return self._failure(
                 self._reason("install_already_running"),
@@ -452,6 +452,7 @@ class ManagedRuntimeManager:
             manifest=manifest,
             archive=archive,
             message=str(error),
+            error=error,
         )
 
     def resolve_binary(self) -> Path | None:
@@ -2090,6 +2091,7 @@ class ManagedRuntimeManager:
         archive: ManagedRuntimeArchive | None = None,
         message: str | None = None,
         skipped: bool = False,
+        error: Exception | None = None,
     ) -> dict[str, Any]:
         self._install_reason = reason
         return {
@@ -2108,6 +2110,7 @@ class ManagedRuntimeManager:
             "platform": archive.platform if archive else runtime_platform_tag(),
             "path": None,
             "download_error": self._download_error,
+            **({"os_errno": error.errno} if isinstance(error, OSError) and type(error.errno) is int else {}),
         }
 
     def _reason(self, suffix: str) -> str:

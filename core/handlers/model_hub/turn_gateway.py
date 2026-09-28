@@ -11,7 +11,7 @@ import tempfile
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
 
@@ -961,7 +961,8 @@ class ModelHubTurnGateway:
             if turn_outcome is None and exc.code == "engine_down":
                 turn_outcome = ENGINE_DOWN_TURN_OUTCOME
             if turn_outcome is not None and turn_outcome.discriminator == "engine_down":
-                terminalizer.engine_down()
+                turn_outcome = replace(turn_outcome, local_error_detail=exc.local_error_detail)
+                terminalizer.engine_down(local_error_detail=exc.local_error_detail)
             elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
             if exc.code == RECOVERY_EXHAUSTED_CODE:

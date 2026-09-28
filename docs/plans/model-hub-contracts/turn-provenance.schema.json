@@ -167,6 +167,10 @@
           ]
         },
         "stream_started": { "type": "boolean" },
+        "local_error_detail": {
+          "type": "string",
+          "description": "Optional local OS errno and system message. Produced from numeric errno only; never contains exception paths, upstream text, credentials, or request bodies. Historical records may omit it."
+        },
         "http_status": {
           "type": ["integer", "null"],
           "minimum": 100,

@@ -6,9 +6,8 @@
 // HTTP status and machine error code, and why it moved on. That is what lets a
 // user see the refusal came from the upstream API and not from the gateway.
 //
-// Raw upstream response prose is never retained — the record keeps closed
-// machine codes and status only, so a credential echoed in an error body can
-// never reach the transcript. The details say so rather than implying more.
+// Raw upstream response prose is never retained. Local OS reasons are also
+// carried by the notice, so details survive an unavailable provenance read.
 import * as React from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -36,9 +35,7 @@ const RECORD_RETRY_MS = 1_000;
 type Detail = { record: TurnProvenance; names: Record<string, string> };
 
 // Drawn as the notice bubble's second line. The record is read up front, and
-// a turn with no readable record (direct mode, no gateway record, an ambiguous
-// attribution, a failed read) offers no details at all rather than a toggle
-// that opens onto an apology.
+// a turn with neither a readable record nor a local diagnostic offers no toggle.
 export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
@@ -48,6 +45,9 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   const { capabilities } = useInstanceAuthorization();
   const eligible = capabilities.can_manage_instance && isRetryableFailureNotice(message);
   const turnId = typeof message.metadata?.turn_id === 'string' ? message.metadata.turn_id : '';
+  const localErrorDetail = (
+    typeof message.metadata?.local_error_detail === 'string' ? message.metadata.local_error_detail : ''
+  ).trim() || detail?.record.terminal_error?.local_error_detail;
 
   React.useEffect(() => {
     if (!eligible || !turnId) return;
@@ -76,7 +76,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
     };
   }, [eligible, turnId]);
 
-  if (!eligible || !turnId || !detail) return null;
+  if (!eligible || !turnId || (!detail && !localErrorDetail)) return null;
 
   // Blockers carry the event-reason vocabulary (`cooldown`, `credential_expired`,
   // …); only a source detail arrives as a full i18n key.
@@ -111,6 +111,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   };
 
   const body = (() => {
+    if (!detail) return null;
     const { record, names } = detail;
     const attempts = rows(record, names);
     // A terminal failure is an upstream refusal only when the upstream refused
@@ -171,7 +172,17 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
         {open ? <ChevronDown className="size-3" aria-hidden /> : <ChevronRight className="size-3" aria-hidden />}
         {t(open ? 'chat.failureDetails.hide' : 'chat.failureDetails.show')}
       </button>
-      {open && <div className="mt-1.5 text-[12px] leading-relaxed">{body}</div>}
+      {open && (
+        <div className="mt-1.5 flex min-w-0 flex-col gap-2 text-[12px] leading-relaxed">
+          {localErrorDetail && (
+            <div className="flex min-w-0 flex-col gap-1">
+              <span className="text-gold-ink/70">{t('chat.failureDetails.localError')}</span>
+              <pre className="whitespace-pre-wrap break-words font-mono text-gold-ink">{localErrorDetail}</pre>
+            </div>
+          )}
+          {body}
+        </div>
+      )}
     </>
   );
 }

@@ -1274,6 +1274,12 @@ canceled or other record without a terminal error supersedes older error display
 Success uses exactly `{ok: true, contract_version: 10, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
+Local `engine_down` records may also contain `local_error_detail`, an OS-generated
+errno and system message. Failure notifications snapshot the same field in their
+metadata so the collapsed details remain available if the provenance read fails.
+It never contains exception filenames, arbitrary exception text, or upstream
+payloads; it does not change summary copy, classification, or authorization.
+
 New `terminal_error` records may contain `http_status` (integer 100-599 or null) and
 `upstream_error_code` (a recognized upstream machine code or null). The existing
 `UPSTREAM_MACHINE_ERROR_CODES` authority owns code membership. When `model_not_found`

@@ -99,7 +99,7 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .errors import ModelDiscoveryError
+from .errors import ModelDiscoveryError, local_error_detail
 from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
 from .migration import (
     MigrationConflictError,
@@ -305,6 +305,7 @@ class ModelHubError(Exception):
         data: Optional[Mapping[str, Any]] = None,
         blockers: Iterable[ExactHopBlocker] = (),
         turn_outcome: TurnOutcomeProjectionInput | None = None,
+        local_error_detail: str | None = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -315,6 +316,7 @@ class ModelHubError(Exception):
         self.data = dict(data or {})
         self.blockers = tuple(blockers)
         self.turn_outcome = turn_outcome
+        self.local_error_detail = local_error_detail
 
 
 class CredentialCleanupUnsettledError(ModelHubError):
@@ -874,6 +876,7 @@ async def ensure_runtime_dependency(
             "engine_down",
             status=503,
             data={"reason": reason} if isinstance(reason, str) and reason else None,
+            local_error_detail=local_error_detail(exc),
         ) from None
     except ModelHubError:
         raise
@@ -888,6 +891,7 @@ async def ensure_runtime_dependency(
             "engine_down",
             status=503,
             data={"reason": safe_reason} if safe_reason else None,
+            local_error_detail=local_error_detail(exc),
         ) from None
 
 
@@ -1129,15 +1133,15 @@ class ModelHubService:
             raise ModelHubError("discovery_failed", status=502) from None
         except RuntimePlatformUnsupportedError:
             raise ModelHubError("runtime_platform_unsupported", status=422) from None
-        except EngineUnavailableError:
-            raise ModelHubError("engine_down", status=503) from None
+        except EngineUnavailableError as exc:
+            raise ModelHubError("engine_down", status=503, local_error_detail=local_error_detail(exc)) from None
         except NativeOAuthUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
         except ModelHubError:
             raise
-        except Exception:
+        except Exception as exc:
             # Engine failures may carry upstream context. Never expose or log it.
-            raise ModelHubError("engine_down", status=503) from None
+            raise ModelHubError("engine_down", status=503, local_error_detail=local_error_detail(exc)) from None
 
     async def _oauth_call(self, awaitable, *, flow_id: Optional[str] = None):
         try:

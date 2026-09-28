@@ -1656,10 +1656,10 @@ class CLIProxyEngineAdapter:
         return "model_hub_engine_install_failed"
 
     @staticmethod
-    def _install_failure(reason: str) -> Exception:
+    def _install_failure(reason: str, *, os_errno: int | None = None) -> Exception:
         if reason == INSTALL_PLATFORM_UNSUPPORTED_REASON:
             return RuntimePlatformUnsupportedError()
-        return EngineUnavailableError("models.engine.install_failed", reason=reason)
+        return EngineUnavailableError("models.engine.install_failed", reason=reason, os_errno=os_errno)
 
     async def ensure_installed(
         self,
@@ -1692,7 +1692,7 @@ class CLIProxyEngineAdapter:
                 )
             if not install.get("ok"):
                 reason = str(install.get("reason") or "engine_install_failed")
-                raise self._install_failure(reason)
+                raise self._install_failure(reason, os_errno=install.get("os_errno"))
             if install.get("changed"):
                 await self._transports_idle.wait()
                 await run_owned_in_thread(self.supervisor.restart_if_running)
