@@ -2280,11 +2280,15 @@ def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
     return ui_server_healthy(host, port)
 
 
+def _is_ui_server_command(command: str) -> bool:
+    return "vibe.ui_server" in command and "run_ui_server" in command
+
+
 def _pid_matches_ui_server(pid: int) -> bool:
     command = get_process_command(pid)
     if not command:
         return False
-    return "vibe.ui_server" in command and "run_ui_server" in command
+    return _is_ui_server_command(command)
 
 
 def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
@@ -2501,8 +2505,8 @@ class DesktopRuntimeStopResult:
     """What a stop scoped to one desktop Runtime did.
 
     ``refusal`` is set when nothing was signalled because the service could
-    not be shown to belong to that Runtime. ``ui_skipped`` names why a live UI
-    that does not belong to it was left running.
+    not be shown to belong to that Runtime. ``ui_skipped`` names why the UI the
+    pidfile names was left running together with what it owns.
     """
 
     refusal: str | None = None
@@ -2510,6 +2514,7 @@ class DesktopRuntimeStopResult:
     ui_stopped: bool = True
     ui_skipped: str | None = None
     installs_drained: bool = True
+    opencode_stopped: bool = False
 
 
 @dataclass(frozen=True)
@@ -2599,15 +2604,106 @@ def _stop_verified_process(target: _VerifiedTarget, timeout: float = 5) -> bool:
     return _verified_target_state(target) == "gone"
 
 
+def _is_opencode_serve_command(command: str) -> bool:
+    return "opencode" in command and "serve" in command
+
+
+def _inspect_desktop_target(
+    pid: int, fingerprint: str, is_expected_command: Callable[[str], bool]
+) -> tuple[str, _VerifiedTarget | None]:
+    """Inspect a pidfile's process: ``absent``, ``match``, ``mismatch`` or ``unreadable``.
+
+    A pid whose command is readable and is not the expected program is
+    ``absent``: the pidfile is stale. A live pid whose command cannot be read is
+    never ``absent``. Provenance is read before the command, so the re-check
+    that precedes every signal also proves the command came from the target.
+    """
+
+    verdict, target = _verify_desktop_target(pid, fingerprint)
+    if verdict == "gone":
+        return "absent", None
+    command = get_process_command(pid)
+    if command and not is_expected_command(command):
+        return "absent", None
+    if verdict == "match" and command:
+        return "match", target
+    if verdict == "mismatch":
+        return "mismatch", None
+    return "unreadable", None
+
+
+def _inspect_desktop_ui(pid_path: Path, fingerprint: str) -> tuple[str, int | None, _VerifiedTarget | None]:
+    pid = _read_pid_file(pid_path)
+    if pid is None or not pid_alive(pid):
+        return "absent", None, None
+    verdict, target = _inspect_desktop_target(pid, fingerprint, _is_ui_server_command)
+    return verdict, pid, target
+
+
+def _ui_pidfile_moved_on(pid_path: Path, fingerprint: str, target: _VerifiedTarget | None) -> bool:
+    """Whether the UI pidfile now names a live process other than ``target``."""
+
+    verdict, pid, _ = _inspect_desktop_ui(pid_path, fingerprint)
+    if verdict == "absent":
+        return False
+    if target is None:
+        return True
+    return not (pid == target.expected.pid and _verified_target_state(target) == "match")
+
+
+def _read_opencode_server_pid(pid_path: Path) -> int | None:
+    try:
+        info = json.loads(pid_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    pid = info.get("pid") if isinstance(info, dict) else None
+    return pid if isinstance(pid, int) and pid > 0 else None
+
+
+def _stop_desktop_opencode_server(fingerprint: str) -> bool:
+    """Stop the OpenCode server the pidfile names only if this Runtime started it.
+
+    The pidfile is shared by every Runtime of this home and may already name a
+    successor's server, so the server's own provenance decides. A server this
+    Runtime adopted from another is terminated by the Controller that adopted
+    it when that Controller stops.
+    """
+
+    pid_path = paths.get_logs_dir() / "opencode_server.json"
+    pid = _read_opencode_server_pid(pid_path)
+    if pid is None or not pid_alive(pid):
+        return False
+    verdict, target = _inspect_desktop_target(pid, fingerprint, _is_opencode_serve_command)
+    if target is None:
+        if verdict != "absent":
+            logger.info("Leaving OpenCode server pid=%s running: %s", pid, verdict)
+        return False
+    if not _stop_verified_process(target):
+        logger.warning("Failed to stop OpenCode server (pid=%s)", pid)
+        return False
+    if _read_opencode_server_pid(pid_path) == pid:
+        pid_path.unlink(missing_ok=True)
+    return True
+
+
+_UI_SKIP_REASONS = {"mismatch": "ui_runtime_id_mismatch", "unreadable": "ui_identity_unavailable"}
+
+
 def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) -> DesktopRuntimeStopResult:
     """Stop only the service and UI that the desktop Runtime ``runtime_id`` started.
 
     Each target is resolved and inspected once, and only a matching target is
     signalled, through the handle it was inspected with. A service that does
     not match, or whose provenance cannot be read, refuses the whole stop
-    before anything is signalled. A UI that does not match is left running
-    together with what it owns (remote access and its backend installs).
-    Service processes beyond the lock owner are left to a full stop.
+    before anything is signalled. Service processes beyond the lock owner are
+    left to a full stop.
+
+    What the UI owns (remote access and its backend installs) is handled only
+    while the UI pidfile still names the verified UI, or no UI at all. A UI
+    that does not match, cannot be read, or has taken the pidfile during the
+    stop is left running together with what it owns. Remote access is stopped
+    only through a verified UI or, with no UI, a verified service. The OpenCode
+    server is stopped only when its own provenance names this Runtime.
     """
 
     from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
@@ -2618,9 +2714,7 @@ def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) ->
     ui_pid_path = paths.get_runtime_ui_pid_path()
     with _SERVICE_LOCK:
         service_pid = resolve_service_owner_pid(include_starting=True)
-        ui_pid = _read_pid_file(ui_pid_path)
-        if ui_pid is not None and not (pid_alive(ui_pid) and _pid_matches_ui_server(ui_pid)):
-            ui_pid = None
+        ui_verdict, _ui_pid, ui_target = _inspect_desktop_ui(ui_pid_path, fingerprint)
 
         service_target = None
         if service_pid is not None:
@@ -2629,14 +2723,6 @@ def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) ->
                 return DesktopRuntimeStopResult(refusal="service_identity_unavailable")
             if verdict == "mismatch":
                 return DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch")
-        ui_target = None
-        ui_skipped = None
-        if ui_pid is not None:
-            verdict, ui_target = _verify_desktop_target(ui_pid, fingerprint)
-            if verdict == "mismatch":
-                ui_skipped = "ui_runtime_id_mismatch"
-            elif verdict == "unreadable":
-                ui_skipped = "ui_identity_unavailable"
 
         service_stopped = True
         if service_target is not None:
@@ -2649,11 +2735,17 @@ def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) ->
                     service_target.expected.pid,
                 )
 
-    if ui_skipped is not None:
-        logger.warning("Leaving UI pid=%s running: %s", ui_pid, ui_skipped)
-        return DesktopRuntimeStopResult(service_stopped=service_stopped, ui_skipped=ui_skipped)
-
-    remote_access_stopped = _stop_remote_access() if stop_remote_access else True
+    # The tunnel is the UI's, or with no UI the service's; nothing of this
+    # Runtime running means nothing to stop it through. Stopping the service
+    # takes time, so a UI that took the pidfile meanwhile owns it, and the
+    # installs, now.
+    tunnel_owner_verified = ui_target is not None or service_target is not None
+    ui_skipped = _UI_SKIP_REASONS.get(ui_verdict)
+    if ui_skipped is None and tunnel_owner_verified and _ui_pidfile_moved_on(ui_pid_path, fingerprint, ui_target):
+        ui_skipped = "ui_changed"
+    remote_access_stopped = True
+    if ui_skipped is None and tunnel_owner_verified and stop_remote_access:
+        remote_access_stopped = _stop_remote_access()
     ui_process_stopped = True
     if ui_target is not None:
         ui_process_stopped = _stop_verified_process(ui_target)
@@ -2662,13 +2754,19 @@ def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) ->
     # As in a full stop, remote access failing to stop fails the stop only when
     # there was a UI to stop.
     ui_stopped = ui_process_stopped and (remote_access_stopped or ui_target is None)
+    if ui_skipped is not None:
+        logger.warning("Leaving the UI the pidfile names running: %s", ui_skipped)
+
     installs_drained = True
-    if ui_process_stopped:
+    if ui_skipped is None and ui_process_stopped:
         from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
         installs_drained = reap_abandoned_desktop_backend_installs(runtime_id=runtime_id)
+    opencode_stopped = _stop_desktop_opencode_server(fingerprint)
     return DesktopRuntimeStopResult(
         service_stopped=service_stopped,
         ui_stopped=ui_stopped,
+        ui_skipped=ui_skipped,
         installs_drained=installs_drained,
+        opencode_stopped=opencode_stopped,
     )

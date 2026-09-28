@@ -13934,8 +13934,7 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
         return 3
     if result.ui_skipped is not None:
         print(json.dumps({"skipped": "ui", "reason": result.ui_skipped}, separators=(",", ":")), file=sys.stderr)
-
-    if _stop_opencode_server():
+    if result.opencode_stopped:
         print("OpenCode server stopped")
 
     if not result.service_stopped:
