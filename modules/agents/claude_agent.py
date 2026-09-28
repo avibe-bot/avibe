@@ -4482,7 +4482,10 @@ class ClaudeAgent(BaseAgent):
 
         A turn that starts with a replayed human input ends with a human
         Result, so its frames need not wait for that Result. Held frames and
-        unsettled detached output are earlier, so they are never overtaken.
+        claimed detached output that is not yet delivered are earlier, so they
+        are never overtaken. Queued completed Activity output follows the human
+        Result either way: the Activity flush defers while a human request is
+        pending.
         """
 
         if turn_origin != "human":

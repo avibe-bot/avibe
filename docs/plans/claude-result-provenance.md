@@ -25,9 +25,12 @@ The only earlier signal is the replayed input that starts a human turn.
   while an Activity competes. Such a turn ends with a human Result (see Measured
   turn shape), so its frames take the human replay path early: they attach to
   the pending human request and never claim Activity output. Any other first
-  frame, a human input drained into a running turn, held frames, and unsettled
-  detached output keep the Result-owned path; a later frame never overtakes
-  earlier held output.
+  frame, a human input drained into a running turn, held frames, and claimed
+  detached output that is not yet delivered keep the Result-owned path; a later
+  frame never overtakes earlier held output. Completed Activity output that is
+  still queued follows the human Result on both paths, because the Activity
+  flush defers while a human request is pending; streaming earlier does not
+  change that order.
 - Treat a missing or unknown origin as foreground only when no competing Activity
   evidence exists; otherwise preserve it as detached output and leave the pending
   human request untouched.
