@@ -1281,6 +1281,10 @@ The snapshot is management-only: transcript and live-event responses remove it
 for chat-only readers. Durable owed notices retain and replay the same snapshot.
 It never contains exception filenames, arbitrary exception text, or upstream
 payloads; it does not change summary copy, classification, or authorization.
+The internal `RawCallOutcome.os_errno` optionally carries a recognized local OS
+code through an engine-down completed/streamed handle. L2 and provenance format
+it using the same validated OS formatter; upstream error codes cannot populate
+it. Runtime status retains path, reason, and errno from one installed inspection.
 
 New `terminal_error` records may contain `http_status` (integer 100-599 or null) and
 `upstream_error_code` (a recognized upstream machine code or null). The existing

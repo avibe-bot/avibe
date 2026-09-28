@@ -15,6 +15,7 @@ from typing import Any, Callable, TypeVar
 
 from config import paths
 from config.atomic_io import write_atomic
+from core.os_errors import local_os_errno
 from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
@@ -93,6 +94,8 @@ class EngineSupervisor:
         self._last_check: str | None = None
         self._start_attempted = False
         self._health_failure_signature: tuple[str, str, int | None] | None = None
+        self._health_os_errno: int | None = None
+        self._record_os_errno: int | None = None
         self._config_generation = 0
 
     def ensure_running(self) -> EngineConnection:
@@ -142,7 +145,10 @@ class EngineSupervisor:
 
     def _require_no_untracked_engine_locked(self) -> None:
         if not self._reap_recorded_engines_locked():
-            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+            raise EngineUnavailableError(
+                "models.engine.stop_unconfirmed", reason="previous_engine_alive",
+                os_errno=self._record_os_errno,
+            )
 
     def reload_config_if_running(self, previous_sources: list[SourceRecord] | None = None) -> None:
         """Hot-apply the current source projection to a live engine.
@@ -202,10 +208,12 @@ class EngineSupervisor:
         # PUT, and its watcher reloads the same file.
         deadline = time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
         while True:
+            os_errno = None
             try:
                 listed = client.list_model_names(timeout=1.0)
-            except EngineClientError:
+            except EngineClientError as exc:
                 listed = None
+                os_errno = local_os_errno(exc)
             if (
                 listed is not None
                 and all(listed.get(model) == name for model, name in expected.items())
@@ -213,7 +221,7 @@ class EngineSupervisor:
             ):
                 return
             if time.monotonic() >= deadline:
-                raise EngineUnavailableError("models.engine.health_failed")
+                raise EngineUnavailableError("models.engine.health_failed", os_errno=os_errno)
             time.sleep(_STARTUP_POLL_INTERVAL_SECONDS)
 
     def _next_generation_locked(self) -> str:
@@ -235,10 +243,14 @@ class EngineSupervisor:
 
     def _prepare_instance_locked(self):
         managed = self.installer.status()
-        binary = self.installer.resolve_engine_path()
+        # Status owns one coherent inspection snapshot, including its failure.
+        # A second resolve could fail for a different reason or replace errno.
+        binary = Path(managed["path"]) if managed.get("path") else None
         if binary is None:
             reason = str(managed.get("reason") or "engine_not_installed")
-            raise EngineUnavailableError("models.engine.install_failed", reason=reason)
+            raise EngineUnavailableError(
+                "models.engine.install_failed", reason=reason, os_errno=managed.get("os_errno"),
+            )
         install_id = Path(str(managed.get("install_dir") or binary.parent)).name
         instance_dir, runtime_secrets = self.state_store.prepare_instance(install_id, rotate=False)
         return managed, binary, instance_dir, runtime_secrets
@@ -338,7 +350,10 @@ class EngineSupervisor:
         # rotates in place; a second engine beside it is never safe. Each later
         # start retries the reap, so this clears once the survivor is confirmed gone.
         if not self._reap_recorded_engines_locked():
-            raise EngineUnavailableError("models.engine.start_failed", reason="previous_engine_alive")
+            raise EngineUnavailableError(
+                "models.engine.start_failed", reason="previous_engine_alive",
+                os_errno=self._record_os_errno,
+            )
         managed, binary, instance_dir, runtime_secrets = self._prepare_instance_locked()
         port = self._port_allocator()
         config_path = instance_dir / "config.yaml"
@@ -364,7 +379,10 @@ class EngineSupervisor:
         if not self._store_engine_records_locked([launch]):
             # A launch no record names would become a permanent orphan if this
             # service died, so it never runs untracked.
-            raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked")
+            raise EngineUnavailableError(
+                "models.engine.start_failed", reason="engine_untracked",
+                os_errno=self._record_os_errno,
+            )
         try:
             process = self._process_factory(
                 [str(binary), "-config", str(config_path)],
@@ -387,8 +405,11 @@ class EngineSupervisor:
         if not self._record_engine_locked(process, marker):
             # The marker-only launch record still names the tree, so the stop below
             # confirms every process it forked is gone before the record retires.
+            os_errno = self._record_os_errno
             self._stop_locked()
-            raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked")
+            raise EngineUnavailableError(
+                "models.engine.start_failed", reason="engine_untracked", os_errno=os_errno,
+            )
         started_at = time.monotonic()
         deadline = started_at + self.startup_timeout
         exit_code: int | None = None
@@ -415,6 +436,7 @@ class EngineSupervisor:
                 )
                 return connection
             time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+        os_errno = self._health_os_errno if exit_code is None else None
         self._stop_locked()
         logger.warning(
             "Model Hub engine startup outcome=%s managed_version=%s exit_code=%s "
@@ -426,7 +448,7 @@ class EngineSupervisor:
             time.monotonic() - started_at,
             self.startup_timeout,
         )
-        raise EngineUnavailableError("models.engine.health_failed")
+        raise EngineUnavailableError("models.engine.health_failed", os_errno=os_errno)
 
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:
@@ -437,6 +459,7 @@ class EngineSupervisor:
         healthy = client.health()
         self._last_check = _utc_now()
         failure = client.health_failure
+        self._health_os_errno = failure.os_errno if failure is not None else None
         if failure is not None:
             signature = (failure.path, failure.reason, failure.http_status)
             if signature != self._health_failure_signature:
@@ -457,7 +480,10 @@ class EngineSupervisor:
 
     def _require_stopped_locked(self) -> None:
         if not self._stop_locked():
-            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+            raise EngineUnavailableError(
+                "models.engine.stop_unconfirmed", reason="previous_engine_alive",
+                os_errno=self._record_os_errno,
+            )
 
     def _stop_locked(self) -> bool:
         """Stop the engine; return whether no engine it may have started remains."""
@@ -466,6 +492,7 @@ class EngineSupervisor:
         self._process = None
         self._connection = None
         self._health_failure_signature = None
+        self._health_os_errno = None
         if process is not None and process.poll() is None:
             signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
             try:
@@ -484,6 +511,7 @@ class EngineSupervisor:
     def _load_engine_records_locked(self) -> list[_EngineRecord] | None:
         """Return the recorded engines, or ``None`` if the record is unreadable."""
 
+        self._record_os_errno = None
         try:
             text: str | None = self._engine_record_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -491,7 +519,8 @@ class EngineSupervisor:
         except UnicodeDecodeError:
             # Corrupt contents, like malformed JSON: nothing in it can be trusted.
             text = None
-        except OSError:
+        except OSError as exc:
+            self._record_os_errno = local_os_errno(exc)
             logger.warning("Model Hub engine process record could not be read", exc_info=True)
             return None
         try:
@@ -511,6 +540,7 @@ class EngineSupervisor:
 
     def _store_engine_records_locked(self, records: list[_EngineRecord]) -> bool:
         path = self._engine_record_path
+        self._record_os_errno = None
         try:
             if not records:
                 path.unlink(missing_ok=True)
@@ -526,7 +556,8 @@ class EngineSupervisor:
                 )
                 + "\n",
             )
-        except OSError:
+        except OSError as exc:
+            self._record_os_errno = local_os_errno(exc)
             logger.warning("Model Hub engine process record could not be written", exc_info=True)
             return False
         return True
@@ -534,6 +565,7 @@ class EngineSupervisor:
     def _record_engine_locked(self, process: Any, marker: str) -> bool:
         """Complete the launch record with the engine's pid; return whether it is tracked."""
 
+        self._record_os_errno = None
         pid = getattr(process, "pid", None)
         identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
         if identity is None:

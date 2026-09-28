@@ -208,7 +208,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         install_state = self.install_state()
         if install_state and install_state.get("state") == "not_installed":
             reason = install_state.get("reason")
-            if isinstance(reason, str) and reason:
+            if isinstance(reason, str) and reason and not managed.get("reason"):
                 managed["status"] = "error"
                 managed["reason"] = reason
         return managed

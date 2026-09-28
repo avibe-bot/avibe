@@ -55,6 +55,18 @@ append and suppressed-message promotion must both retain the internal snapshot
 until recipient projection. Reuse their existing projection option and the
 existing backend-failure identity check instead of creating another detail path.
 
+The class recurred on `83a304338`: installed-runtime inspection and the admitted
+call's completed `engine_down` outcome also erase errors. Audit the three entry
+paths (installation, installed inspection, invocation) and their neighboring
+record/health/loopback conversions before another push. Use the existing status
+snapshot as the supervisor's single inspection result (path, reason, errno);
+do not mix two inspections. Add optional numeric errno to the existing
+`RawCallOutcome`, with one validated formatter at the service boundary.
+Preserve errno in process-record and health sentinels as well, scoped to the
+failed operation and captured before cleanup can replace it. Keep cleanup,
+retry, process exclusion, source health, and transport ownership policies
+unchanged. No exception prose or upstream body becomes a local diagnostic.
+
 ## Known by design
 
 - Historical errors cannot acquire diagnostics that were discarded before this

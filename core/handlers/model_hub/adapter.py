@@ -151,6 +151,9 @@ class RawCallOutcome:
     # by L1. Display-only: classification never reads it, it is never persisted
     # into events or provenance, and it stays out of repr so logs cannot echo it.
     upstream_detail: str | None = field(default=None, repr=False)
+    # Recognized local OS failure only, never an upstream code or error prose.
+    # Display-only; does not participate in classification or Source health.
+    os_errno: int | None = None
 
 
 class ObservationOutcome(str, Enum):

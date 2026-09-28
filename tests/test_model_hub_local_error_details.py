@@ -29,7 +29,8 @@ from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailabl
 
 
 @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EMFILE])
-async def test_runtime_lock_error_reaches_notice_and_persisted_details(tmp_path, monkeypatch, code):
+@pytest.mark.parametrize("stage", ["install_lock", "invoke_spawn", "record_read", "record_write"])
+async def test_runtime_error_reaches_notice_and_persisted_details(tmp_path, monkeypatch, code, stage):
     # Existing gateway tests replace sync_sources with a generic failure, which
     # misses the installer -> adapter boundary that discarded the real errno.
     installer = EngineRuntimeManager(runtime_dir=tmp_path / "engine", offline=True)
@@ -46,6 +47,34 @@ async def test_runtime_lock_error_reaches_notice_and_persisted_details(tmp_path,
     # Only the external model is fake. Installation, error conversion,
     # correlation, notification, and provenance storage use production code.
     service.adapter.ensure_installed = runtime.ensure_installed
+    expected_status = 503
+    if stage != "install_lock":
+        from pathlib import Path
+        from tests.test_model_hub_runtime import _binding, _fixture_supervisor
+
+        def fail(*_args, **_kwargs):
+            fail_lock()
+
+        supervisor, state = _fixture_supervisor(tmp_path / "invocation", process_factory=fail)
+        credential = state.store_api_key("fixture-key", base_url="https://api.example.test/v1")
+        state.sync_sources([_binding(credential, source_id="src_primary01")])
+        runtime = CLIProxyEngineAdapter(supervisor=supervisor)
+        # Keep preparation successful so the real adapter's invocation boundary,
+        # not sync_sources/ensure_installed, owns the failure.
+        service.adapter.ensure_installed = AsyncMock()
+        service.adapter.invoke = runtime.invoke
+        if stage == "record_read":
+            read_text = Path.read_text
+
+            def read(path, *args, **kwargs):
+                if path == supervisor._engine_record_path:
+                    fail()
+                return read_text(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "read_text", read)
+        elif stage == "record_write":
+            monkeypatch.setattr("vibe.model_hub_runtime.supervisor.write_atomic", fail)
+        expected_status = 502
     gateway = ModelHubTurnGateway(service, language_provider=lambda: "zh")
     turn_id = "turn-local-error"
     base_url, token = await gateway.endpoint(
@@ -70,11 +99,11 @@ async def test_runtime_lock_error_reaches_notice_and_persisted_details(tmp_path,
                 json={"model": "shared-model", "input": "ping", "stream": False},
                 headers={"Authorization": f"Bearer {token}"},
             )
-            assert response.status == 503
+            assert response.status == expected_status
             payload = await response.json()
             summary = i18n_t("modelHub.errors.engine_down", "zh")
             assert payload["error"]["message"] == summary
-        await emit_backend_failure(controller, context, "codex", f"API Error: 503 {summary}")
+        await emit_backend_failure(controller, context, "codex", f"API Error: {expected_status} {summary}")
         notify, terminal = controller.emit_agent_message.call_args_list
         assert notify.args[1:3] == ("notify", summary)
         assert notify.kwargs["output"].metadata["local_error_detail"] == expected
@@ -91,6 +120,109 @@ async def test_runtime_lock_error_reaches_notice_and_persisted_details(tmp_path,
     _assert_valid("turn-provenance.schema.json", record)
     assert "fixture-secret" not in service.provenance.path.read_text()
     assert "凭证" not in service.provenance.path.read_text()
+
+
+@pytest.mark.parametrize("stage", ["pointer", "metadata", "binary", "probe"])
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EMFILE])
+def test_installed_inspection_keeps_errno_without_stale_diagnostics(tmp_path, monkeypatch, stage, code):
+    # Real installed inspection used to swallow errors before the supervisor
+    # raised; fresh installation and synthetic supervisor errors miss that gap.
+    from pathlib import Path
+    from tests.test_managed_runtime import _write_subclass_runtime_fixture
+
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "model-hub")
+    installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = installer.ensure()
+    assert installed["ok"]
+    supervisor = EngineSupervisor(installer=installer, state_store=EngineStateStore(tmp_path / "state"))
+    binary = Path(installed["path"])
+    target = {
+        "pointer": installer.runtime_dir / "current.json",
+        "metadata": binary.parent / installer.spec.metadata_filename,
+        "binary": binary,
+    }.get(stage)
+    open_path = Path.open
+
+    def fail(*_args, **_kwargs):
+        raise OSError(code, "private reason", "/private/凭证")
+
+    def open_file(path, *args, **kwargs):
+        if path == target:
+            fail()
+        return open_path(path, *args, **kwargs)
+
+    installer._verified_binary_cache = None
+    with monkeypatch.context() as patch:
+        if stage == "probe":
+            patch.setattr("vibe.model_hub_runtime.installer.subprocess.run", fail)
+        else:
+            patch.setattr(Path, "open", open_file)
+        with pytest.raises(EngineUnavailableError) as raised:
+            supervisor._prepare_instance_locked()
+        assert local_error_detail(raised.value) == f"[Errno {code}] {os.strerror(code)}"
+    assert installer.status()["installed"]
+    (installer.runtime_dir / "current.json").write_text("{}")
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor._prepare_instance_locked()
+    assert local_error_detail(raised.value) is None
+
+
+def test_supervisor_health_error_keeps_errno_before_cleanup(tmp_path, monkeypatch):
+    # Health projects request exceptions into a bool. Drive the real urllib
+    # wrapper and supervisor, whose stop operation must not replace the cause.
+    import urllib.error
+    from tests.test_model_hub_runtime import _fixture_supervisor
+
+    supervisor, _state = _fixture_supervisor(tmp_path, startup_timeout=0.05)
+
+    def fail(*_args, **_kwargs):
+        raise urllib.error.URLError(OSError(errno.EMFILE, "private", "/private/凭证"))
+
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.client.urllib.request.build_opener",
+        lambda *_args: SimpleNamespace(open=fail),
+    )
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+    assert local_error_detail(raised.value) == f"[Errno {errno.EMFILE}] {os.strerror(errno.EMFILE)}"
+
+
+@pytest.mark.parametrize("code", [errno.ENOSPC, None, 999999, True])
+async def test_streamed_engine_outcome_retains_safe_detail_in_projection_and_record(tmp_path, code):
+    # Stream settlement bypasses ModelHubError. Its live projection and durable
+    # terminal record are separate consumers of the actual adapter outcome.
+    from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+    from core.handlers.model_hub.service import ResolvedInvocation
+    from tests.test_model_hub_provenance import _live_registry
+
+    service = _service(tmp_path, sources=[_source("src_primary01", "Primary")])
+    registry = _live_registry(tmp_path)
+    registry.begin_attempt(
+        "turn-live", source_id="src_primary01", resolved_model_id="shared-model",
+        channel="hub", via_mapping=False,
+    )
+    outcome = RawCallOutcome(
+        kind=RawOutcomeKind.NETWORK_ERROR, http_status=200, error_code="engine_down",
+        redacted_message=None, stream_started=True, model_id="shared-model",
+        source_id="src_primary01", os_errno=code,
+    )
+    settlement = await service.settle_handle_outcome(
+        ResolvedInvocation(
+            backend="codex", requested_model_id="shared-model",
+            source_id="src_primary01", source_label="Primary", model_id="shared-model",
+            handle=None, outcome=None,
+        ),
+        outcome,
+        termination_origin="upstream_terminal",
+        record_attempt=lambda raw, decision: registry.finish_attempt("turn-live", outcome=raw, decision=decision),
+    )
+    expected = "[Errno 28] No space left on device" if code == errno.ENOSPC else None
+    assert settlement.turn_outcome.local_error_detail == expected
+    registry.settle("turn-live", settled_by=SETTLED_BY_TERMINAL_RESULT)
+    record = BoundedProvenanceStore(tmp_path / "records.json").get("turn-live")
+    assert record["terminal_error"].get("local_error_detail") == expected
+    assert service.store.load().sources[0].state.status == "standby"
+    assert service.events.list() == []
 
 
 @pytest.mark.parametrize("error,expected", [

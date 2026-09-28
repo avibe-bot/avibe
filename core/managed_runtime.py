@@ -69,6 +69,7 @@ _ENSURE_FAILURE_SUFFIXES = frozenset(
         "install_already_running",
         "install_claim_failed",
         "install_failed",
+        "install_inspection_failed",
         "install_lock_failed",
         "install_missing_binary",
         "install_target_changed",
@@ -485,13 +486,14 @@ class ManagedRuntimeManager:
     def resolve_binary(self) -> Path | None:
         """Resolve an already installed runtime without performing network I/O."""
 
+        self._install_reason = None
         inspection_reason = f"{self.spec.runtime_id}_install_inspection_failed"
         try:
             pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, RecursionError, UnicodeError, ValueError):
-            self._install_reason = inspection_reason
+        except (OSError, RecursionError, UnicodeError, ValueError) as exc:
+            self._set_install_failure(inspection_reason, exc)
             return None
 
         self._install_reason = inspection_reason
@@ -589,16 +591,19 @@ class ManagedRuntimeManager:
                     archive.sha256,
                 )
             if selected_is_installed:
+                self._install_reason = None
                 if self._verified_manifest_binary(install_dir, manifest, archive) != binary:
-                    self._install_reason = inspection_reason
+                    self._install_failure = _ManagedRuntimeFailure(
+                        inspection_reason, self._install_failure.os_errno,
+                    )
                     return None
             elif self.spec.binary_artifact and file_sha256(binary) != binary_sha256:
                 self._install_reason = inspection_reason
                 return None
             self._install_reason = None
             return binary
-        except (OSError, RecursionError, RuntimeError, UnicodeError, ValueError):
-            self._install_reason = inspection_reason
+        except (OSError, RecursionError, RuntimeError, UnicodeError, ValueError) as exc:
+            self._set_install_failure(inspection_reason, exc)
             logger.debug("Failed to resolve managed %s runtime", self.spec.runtime_id, exc_info=True)
             return None
 
@@ -646,6 +651,7 @@ class ManagedRuntimeManager:
             "manifest": self._manifest_status_payload(manifest),
             "archive": self._archive_status_payload(archive),
             "reason": self._install_reason if binary is None else None,
+            "os_errno": self._install_failure.os_errno if binary is None else None,
             "download_error": self._download_error,
         }
 
@@ -1889,9 +1895,11 @@ class ManagedRuntimeManager:
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
     ) -> Path | None:
+        self._install_reason = None
         try:
             metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            self._set_install_failure(self._reason("install_inspection_failed"), exc)
             return None
         bin_path = metadata.get("bin_path", self.spec.default_bin_path)
         if not isinstance(bin_path, str) or archive_path_is_unsafe(bin_path):
@@ -1899,7 +1907,8 @@ class ManagedRuntimeManager:
         try:
             install_dir_resolved = install_dir.resolve(strict=True)
             binary = (install_dir_resolved / bin_path).resolve(strict=True)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError) as exc:
+            self._set_install_failure(self._reason("install_inspection_failed"), exc)
             return None
         if (
             install_dir_resolved not in binary.parents

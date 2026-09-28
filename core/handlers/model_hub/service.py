@@ -41,7 +41,7 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
-from core.os_errors import local_error_detail
+from core.os_errors import format_os_errno, local_error_detail
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
@@ -7238,9 +7238,9 @@ class ModelHubService:
             # a request-incompatible projection would misclassify the failure.
             return None
         if category == "engine_down":
-            return produce_turn_outcome(
-                "turn.engine_down",
-                stream_started=outcome.stream_started,
+            return replace(
+                produce_turn_outcome("turn.engine_down", stream_started=outcome.stream_started),
+                local_error_detail=format_os_errno(outcome.os_errno),
             )
         if (
             category == "fallback_source"
@@ -8112,6 +8112,7 @@ class ModelHubService:
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
+                    local_error_detail=format_os_errno(outcome.os_errno),
                     status=decision.downstream_status or (
                         outcome.http_status
                         if outcome.http_status is not None and 400 <= outcome.http_status <= 599
@@ -8148,6 +8149,7 @@ class ModelHubService:
                 decision.error_code or "engine_down",
                 status=502,
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
+                local_error_detail=format_os_errno(outcome.os_errno),
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),

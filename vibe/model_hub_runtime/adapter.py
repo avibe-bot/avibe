@@ -47,6 +47,7 @@ from core.handlers.model_hub.quota import (
     parse_subscription_quota,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
+from core.os_errors import local_os_errno
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
     EngineClient,
@@ -2793,7 +2794,7 @@ class CLIProxyEngineAdapter:
                 raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
             try:
                 client = await asyncio.to_thread(self.supervisor.client)
-            except EngineUnavailableError:
+            except EngineUnavailableError as exc:
                 return completed_handle(
                     RawCallOutcome(
                         kind=RawOutcomeKind.NETWORK_ERROR,
@@ -2803,6 +2804,7 @@ class CLIProxyEngineAdapter:
                         stream_started=False,
                         model_id=model_id,
                         source_id=source_id,
+                        os_errno=local_os_errno(exc),
                     )
                 )
             release = self._acquire_transport()

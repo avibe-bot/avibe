@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 from config.v2_config import ModelHubConfig
+from core.os_errors import format_os_errno
 
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
@@ -2030,6 +2031,7 @@ class TurnCorrelationRegistry:
                 request_id=request_id,
                 reason="engine_down",
                 stream_started=outcome.stream_started,
+                local_error_detail=format_os_errno(outcome.os_errno),
                 force=True,
             )
             return

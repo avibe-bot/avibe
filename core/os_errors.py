@@ -30,5 +30,12 @@ def local_os_errno(error: BaseException | None) -> int | None:
 def local_error_detail(error: BaseException) -> str | None:
     """Publish the system message without filenames, credentials, or payloads."""
 
-    code = local_os_errno(error)
-    return f"[Errno {code}] {os.strerror(code)}" if code is not None else None
+    return format_os_errno(local_os_errno(error))
+
+
+def format_os_errno(code: int | None) -> str | None:
+    """Format only recognized numeric OS codes from internal result contracts."""
+
+    if type(code) is not int or code not in errno.errorcode:
+        return None
+    return f"[Errno {code}] {os.strerror(code)}"
