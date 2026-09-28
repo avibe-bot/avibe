@@ -314,12 +314,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 # Random, so no process another test file started is ever in scope.
 _TREE_RUNTIME_ID = secrets.token_hex(32)
 # npm-shaped: the leader starts one child in its group and one that leaves it
-# (and ignores SIGTERM), then works until stopped.
+# (and ignores SIGTERM), then works until stopped. Each child names the test's
+# temporary directory, which is how the conftest signal guard knows it as this
+# test's own once its leader no longer parents it.
 _INSTALLER_TREE_SCRIPT = """
 import json, os, subprocess, sys, time
-member = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+member = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", {pids!r}])
 escaped = subprocess.Popen(
-    [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"],
+    [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)", {pids!r}],
     start_new_session=True,
 )
 with open({pids!r} + ".tmp", "w") as handle:
