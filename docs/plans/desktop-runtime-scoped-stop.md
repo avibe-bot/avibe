@@ -23,15 +23,17 @@ starts inherits it. The flag is mutually exclusive with `--receipt`.
 `core.process_isolation.processes_carrying_marker`, for those whose inherited
 `AVIBE_DESKTOP_RUNTIME_ID` hashes to the expected id. Each one is classified by
 its environment, then by the exact argv shape Avibe launches that role with.
-An agent's command line is arbitrary text, so words it merely contains, such as
+Only the arguments Avibe writes decide; the program in front of them is whatever
+interpreter, configured executable or shim runs them. An agent's command line is
+arbitrary text, so words it merely contains, such as
 `rg vibe.ui_server run_ui_server` or `rg opencode serve`, name no role:
 
 | Role | Recognized by |
 | --- | --- |
 | `installer` | `AVIBE_DESKTOP_ROLE=installer` in its environment, whatever it runs |
 | `service` | runs `vibe/service_main.py` (argv only, so a bundle an update replaced or moved is still recognized), or the development `main.py` |
-| `ui` | `<python> -c "from vibe.ui_server import run_ui_server; …"`, the launch `start_ui` and the UI restart have always used |
-| `opencode` | `opencode serve …`, or `node <…>/opencode serve …` through an npm install's shim; `opencode-server-helper` is neither |
+| `ui` | `<interpreter> -c "from vibe.ui_server import run_ui_server; …"`, the launch `start_ui` and the UI restart have always used |
+| `opencode` | ends with `serve --hostname=… --port=…`, the arguments the server manager appends to `agents.opencode.cli_path`, whether that runs natively, through an npm install's `node` shim or as a wrapper; `opencode-server-helper` is not |
 | `unknown` | carries the id, but its command line cannot be read |
 | none | any other program: agent CLIs, the tunnel connector |
 

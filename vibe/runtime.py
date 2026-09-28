@@ -2620,25 +2620,25 @@ class DesktopRuntimeStopResult:
 
 # A scan classifies every process carrying the id, and an agent's command line
 # is arbitrary text, so each role is the exact argv shape Avibe launches it with.
+# Only the arguments Avibe writes decide: the program is whatever interpreter,
+# configured executable or shim runs them.
 _UI_SERVER_PAYLOAD = "from vibe.ui_server import run_ui_server;"
 
 
 def _is_ui_server_argv(argv: list[str]) -> bool:
     # `start_ui` and the UI restart run `<python> -c "from vibe.ui_server import run_ui_server; ..."`.
-    return (
-        len(argv) >= 3
-        and Path(argv[0]).name.lower().startswith("python")
-        and argv[1] == "-c"
-        and argv[2].startswith(_UI_SERVER_PAYLOAD)
-    )
+    return len(argv) >= 3 and argv[1] == "-c" and argv[2].startswith(_UI_SERVER_PAYLOAD)
 
 
 def _is_opencode_serve_argv(argv: list[str]) -> bool:
-    # The server manager runs `<opencode> serve ...`; an npm install's shim
-    # runs it as `node <opencode> serve ...`.
-    names = [Path(part).name.lower().removesuffix(".exe") for part in argv[:2]]
-    program = 1 if names[:1] in (["node"], ["bun"]) else 0
-    return len(argv) > program + 1 and names[program] == "opencode" and argv[program + 1] == "serve"
+    # The server manager runs `<agents.opencode.cli_path> serve --hostname=... --port=...`;
+    # a shim or wrapper runs it with its own program in front.
+    return (
+        len(argv) >= 4
+        and argv[-3] == "serve"
+        and argv[-2].startswith("--hostname=")
+        and argv[-1].startswith("--port=")
+    )
 
 
 def _is_desktop_service_command(command: str, cwd: str | None) -> bool:

@@ -30,6 +30,8 @@ OTHER_ID = secrets.token_hex(32)
 # Printed once the program is running, so it no longer needs its files.
 SLEEP = "import time; print('ready', flush=True); time.sleep(120)"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The arguments the OpenCode server manager appends to the configured executable.
+OPENCODE_SERVE = ["serve", "--hostname=127.0.0.1", "--port=4096"]
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
 
@@ -43,12 +45,13 @@ def bundle(tmp_path) -> Path:
     (root / "vibe" / "__init__.py").write_text("", encoding="utf-8")
     (root / "vibe" / "service_main.py").write_text(SLEEP + "\n", encoding="utf-8")
     (root / "vibe" / "ui_server.py").write_text(f"def run_ui_server(host, port):\n    {SLEEP}\n", encoding="utf-8")
-    # OpenCode runs natively, or through an npm install's `node` shim; here
-    # both are this interpreter under those names.
+    # OpenCode runs natively, through an npm install's `node` shim, or as
+    # whatever executable `agents.opencode.cli_path` names; here each is this
+    # interpreter under that name.
     (root / "bin").mkdir()
     (root / "bin" / "opencode").write_text(SLEEP + "\n", encoding="utf-8")
     (root / "serve").write_text(SLEEP + "\n", encoding="utf-8")
-    for name in ("node", "opencode"):
+    for name in ("node", "opencode", "my-opencode"):
         (root / name).symlink_to(sys.executable)
     return root
 
@@ -61,8 +64,9 @@ def argv_for(bundle):
             "ui": [sys.executable, "-c", "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 0)"],
             # An installer is known by its environment, whatever it runs.
             "installer": [sys.executable, "-c", SLEEP, "npm-cli.js", "install"],
-            "opencode": [str(bundle / "node"), str(bundle / "bin" / "opencode"), "serve", "--port=4096"],
-            "opencode-native": [str(bundle / "opencode"), "serve", "--port=4096"],
+            "opencode": [str(bundle / "node"), str(bundle / "bin" / "opencode"), *OPENCODE_SERVE],
+            "opencode-native": [str(bundle / "opencode"), *OPENCODE_SERVE],
+            "opencode-configured": [str(bundle / "my-opencode"), *OPENCODE_SERVE],
             # Other programs whose command lines only mention a role.
             "ui-lookalike": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
             "opencode-lookalike": [sys.executable, "-c", SLEEP, "opencode", "serve"],
@@ -190,7 +194,7 @@ def test_the_service_ui_installer_and_opencode_carrying_the_id_are_all_stopped(s
     ui = spawn(RUNTIME_ID, "ui")
     # Started by the UI, the installer tree is abandoned once the UI has stopped.
     children = [ui, spawn(RUNTIME_ID, "installer", owner=ui)]
-    children += [spawn(RUNTIME_ID, role) for role in ("service", "opencode", "opencode-native")]
+    children += [spawn(RUNTIME_ID, role) for role in ("service", "opencode", "opencode-native", "opencode-configured")]
     # An update may already have replaced or moved the files they started from.
     shutil.rmtree(bundle)
 
