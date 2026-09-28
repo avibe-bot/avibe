@@ -13650,12 +13650,17 @@ def _handover_superseded_desktop_runtime() -> None:
     if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
         return
 
-    service_was_running = runtime.resolve_service_owner_pid(include_starting=True) is not None
-    ui_was_running = runtime.ui_pid_file_points_to_running_ui()
-    if service_was_running and runtime.stop_service() is not True:
+    # Health names the Runtime that answered; the stop signals only processes
+    # that verifiably belong to it. The tunnel is kept for the successor.
+    result = runtime.stop_desktop_runtime(actual_runtime_id, stop_remote_access=False)
+    if result.refusal is not None:
+        raise RuntimeError(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}")
+    if not result.service_stopped:
         raise RuntimeError("Failed to stop the superseded desktop-managed Avibe service")
-    if ui_was_running and runtime.stop_ui(stop_remote_access=False) is not True:
+    if not result.ui_stopped:
         raise RuntimeError("Failed to stop the superseded desktop-managed Avibe UI")
+    if not result.installs_drained:
+        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe backend installs")
 
 
 def cmd_start(*, open_browser: bool | None = None):
@@ -13922,7 +13927,37 @@ def _stop_receipt_refusal(receipt_json: str) -> str | None:
     return None
 
 
-def cmd_stop(*, receipt: str | None = None):
+def _stop_expected_desktop_runtime(runtime_id: str) -> int:
+    result = runtime.stop_desktop_runtime(runtime_id)
+    if result.refusal is not None:
+        print(json.dumps({"reason": result.refusal}, separators=(",", ":")), file=sys.stderr)
+        return 3
+    if result.ui_skipped is not None:
+        print(json.dumps({"skipped": "ui", "reason": result.ui_skipped}, separators=(",", ":")), file=sys.stderr)
+
+    if _stop_opencode_server():
+        print("OpenCode server stopped")
+
+    if not result.service_stopped:
+        print("ERROR: Avibe service did not stop; preserving pidfile and aborting.", file=sys.stderr)
+        _write_status("error", "service stop failed")
+        return 2
+    if not result.ui_stopped:
+        print("ERROR: Avibe UI did not stop; preserving pidfile and aborting.", file=sys.stderr)
+        _write_status("error", "ui stop failed")
+        return 2
+    if not result.installs_drained:
+        print("ERROR: Desktop backend installer processes did not stop.", file=sys.stderr)
+        _write_status("error", "desktop backend install drain failed")
+        return 2
+
+    _write_status("stopped")
+    return 0
+
+
+def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None):
+    if expect_runtime_id is not None:
+        return _stop_expected_desktop_runtime(expect_runtime_id)
     if receipt is not None:
         reason = _stop_receipt_refusal(receipt)
         if reason is not None:
@@ -13945,6 +13980,12 @@ def cmd_stop(*, receipt: str | None = None):
     if ui_was_running and ui_stopped is False:
         print("ERROR: Avibe UI did not stop; preserving pidfile and aborting.", file=sys.stderr)
         _write_status("error", "ui stop failed")
+        return 2
+    from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
+
+    if not reap_abandoned_desktop_backend_installs():
+        print("ERROR: Desktop backend installer processes did not stop.", file=sys.stderr)
+        _write_status("error", "desktop backend install drain failed")
         return 2
 
     _write_status("stopped")
@@ -16519,9 +16560,15 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command")
 
     stop_parser = subparsers.add_parser("stop", help="Stop all services")
-    stop_parser.add_argument(
+    stop_scope = stop_parser.add_mutually_exclusive_group()
+    stop_scope.add_argument(
         "--receipt",
         help="Stop only if the service identity matches this startup receipt JSON.",
+    )
+    stop_scope.add_argument(
+        "--expect-runtime-id",
+        metavar="RUNTIME_ID",
+        help="Stop only the processes the desktop Runtime with this id started.",
     )
     start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
     start_parser.add_argument(
@@ -18666,7 +18713,11 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
-        sys.exit(cmd_stop(receipt=args.receipt) if args.receipt is not None else cmd_stop())
+        if args.receipt is not None:
+            sys.exit(cmd_stop(receipt=args.receipt))
+        if args.expect_runtime_id is not None:
+            sys.exit(cmd_stop(expect_runtime_id=args.expect_runtime_id))
+        sys.exit(cmd_stop())
     if args.command == "start":
         if _generation_downgrade_blocks("start", allow_downgrade=args.allow_downgrade):
             sys.exit(1)

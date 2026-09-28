@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from config import paths as config_paths
+from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe import desktop_backends
+from vibe.runtime import pid_alive
 
 
 def _desktop_env(tmp_path: Path) -> dict[str, str]:
@@ -315,3 +322,201 @@ def test_resolver_rejects_descriptor_traversal_and_non_native_file(tmp_path):
         encoding="utf-8",
     )
     assert desktop_backends.resolve_published_desktop_backend("codex", env) is None
+
+
+# --- The installer tree is owned by the process that started it (#2131) ---
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_TREE_RUNTIME_ID = "a" * 64
+# npm-shaped: the leader starts one child in its group and one that leaves it
+# (and ignores SIGTERM), then works until stopped.
+_INSTALLER_TREE_SCRIPT = """
+import json, os, subprocess, sys, time
+member = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+escaped = subprocess.Popen(
+    [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"],
+    start_new_session=True,
+)
+with open({pids!r} + ".tmp", "w") as handle:
+    json.dump([os.getpid(), member.pid, escaped.pid], handle)
+os.replace({pids!r} + ".tmp", {pids!r})
+time.sleep(120)
+"""
+_INSTALL_OWNER_SCRIPT = """
+import json, sys
+from vibe import desktop_backends
+desktop_backends.install_desktop_backend("claude", base_env=json.loads(sys.argv[1]))
+"""
+
+
+def _installer_env(tmp_path: Path, npm_script: str) -> dict[str, str]:
+    env = _desktop_env(tmp_path)
+    node = Path(env["VIBE_SHOW_RUNTIME_NODE_BIN"])
+    node.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    node.chmod(0o755)
+    Path(env["AVIBE_DESKTOP_NPM_CLI"]).write_text(npm_script, encoding="utf-8")
+    return env
+
+
+@pytest.fixture
+def installer_tree(tmp_path):
+    pids_path = tmp_path / "installer-pids.json"
+    started: list[int] = []
+
+    def wait_for_tree() -> list[int]:
+        deadline = time.monotonic() + 15
+        while not pids_path.exists():
+            assert time.monotonic() < deadline, "installer tree did not start"
+            time.sleep(0.05)
+        started.extend(json.loads(pids_path.read_text(encoding="utf-8")))
+        return list(started)
+
+    env = _installer_env(tmp_path, _INSTALLER_TREE_SCRIPT.format(pids=str(pids_path)))
+    yield env, wait_for_tree
+    for pid in started:
+        if pid_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _running(pids: list[int]) -> list[int]:
+    return [pid for pid in pids if pid_alive(pid)]
+
+
+def _install_records() -> list[Path]:
+    records = config_paths.get_runtime_dir() / "desktop-backend-installs"
+    return sorted(records.glob("*.json")) if records.exists() else []
+
+
+def _install_lock_is_free(env: dict[str, str]) -> bool:
+    lock = MigrationFileLock(
+        Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude" / ".install.lock",
+        timeout_seconds=0,
+    )
+    try:
+        lock.acquire()
+    except MigrationLockTimeout:
+        return False
+    lock.release()
+    return True
+
+
+def _start_killed_owner(env: dict[str, str], wait_for_tree) -> list[int]:
+    """An owner that dies (SIGKILL) mid-install, before it can drain its tree."""
+
+    owner_env = dict(os.environ, AVIBE_DESKTOP_RUNTIME_ID=_TREE_RUNTIME_ID)
+    owner = subprocess.Popen(
+        [sys.executable, "-c", _INSTALL_OWNER_SCRIPT, json.dumps(env)],
+        cwd=_REPO_ROOT,
+        env=owner_env,
+    )
+    try:
+        pids = wait_for_tree()
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)
+    assert _running(pids) == pids
+    assert len(_install_records()) == 1
+    return pids
+
+
+@pytest.fixture
+def quiet_stop(monkeypatch):
+    from vibe import cli, remote_access, runtime
+
+    # The full stop's service and UI halves scan live processes; nothing of
+    # this test runs there, and the real host must not be touched.
+    monkeypatch.setattr(runtime, "stop_service", lambda: False)
+    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: None)
+    monkeypatch.setattr(remote_access, "stop", lambda: {"ok": True})
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    statuses: list[tuple] = []
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: statuses.append(args))
+    return cli, statuses
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_ui_shutdown_signal_drains_the_installer_tree_before_returning(monkeypatch, installer_tree):
+    import uvicorn
+
+    from vibe import ui_server
+
+    monkeypatch.setattr(desktop_backends, "_INSTALLERS_CLOSED", False)
+    env, wait_for_tree = installer_tree
+    outcome: dict[str, str] = {}
+
+    def install() -> None:
+        try:
+            desktop_backends.install_desktop_backend("claude", base_env=env)
+        except desktop_backends.DesktopBackendError as exc:
+            outcome["code"] = exc.code
+
+    worker = threading.Thread(target=install)
+    worker.start()
+    pids = wait_for_tree()
+
+    ui_server._create_ui_server(uvicorn.Config(ui_server.app)).handle_exit(signal.SIGTERM, None)
+
+    assert _running(pids) == []
+    assert _install_records() == []
+    worker.join(timeout=30)
+    assert outcome == {"code": "npm_install_failed"}
+    assert _install_lock_is_free(env)
+    # A drained owner starts no installer that could outlive it.
+    with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+        desktop_backends.install_desktop_backend("claude", base_env=env)
+    assert refused.value.code == "install_shutting_down"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("expect_runtime_id", [None, _TREE_RUNTIME_ID])
+def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(installer_tree, quiet_stop, expect_runtime_id):
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    pids = _start_killed_owner(env, wait_for_tree)
+
+    exit_code = cli.cmd_stop() if expect_runtime_id is None else cli.cmd_stop(expect_runtime_id=expect_runtime_id)
+
+    assert exit_code == 0
+    assert _running(pids) == []
+    assert _install_records() == []
+    assert _install_lock_is_free(env)
+    assert statuses == [("stopped",)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_stop_fails_and_keeps_the_record_when_the_tree_cannot_be_shown_gone(
+    monkeypatch, installer_tree, quiet_stop
+):
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    _start_killed_owner(env, wait_for_tree)
+    monkeypatch.setattr(desktop_backends, "reap_marked_processes", lambda *args, **kwargs: "unconfirmed")
+
+    assert cli.cmd_stop() == 2
+
+    assert statuses == [("error", "desktop backend install drain failed")]
+    assert len(_install_records()) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_install_keeps_its_lock_and_staging_while_its_tree_is_not_shown_gone(monkeypatch, tmp_path):
+    env = _installer_env(tmp_path, "")
+    backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude"
+    monkeypatch.setattr(desktop_backends, "_reap_installer_tree", lambda *args: False)
+    outcome: dict[str, str] = {}
+
+    def install() -> None:
+        try:
+            desktop_backends.install_desktop_backend("claude", base_env=env)
+        except desktop_backends.DesktopBackendError as exc:
+            outcome["code"] = exc.code
+
+    worker = threading.Thread(target=install)
+    worker.start()
+    worker.join(timeout=30)
+
+    assert outcome == {"code": "install_drain_failed"}
+    assert not _install_lock_is_free(env)
+    assert list(backend_root.glob(".staging-*"))
+    assert len(_install_records()) == 1

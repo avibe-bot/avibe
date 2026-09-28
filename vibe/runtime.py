@@ -32,7 +32,13 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from core.process_isolation import isolated_subprocess_kwargs
+from core.process_isolation import (
+    PersistedProcessIdentity,
+    fingerprint_process_marker,
+    isolated_subprocess_kwargs,
+    process_identity_matches,
+    process_identity_recycled,
+)
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -2455,25 +2461,30 @@ def stop_service():
         return stopped_all
 
 
+def _stop_remote_access(timings: dict[str, float | bool] | None = None) -> bool:
+    remote_access_started_at = time.monotonic()
+    try:
+        from vibe import remote_access
+
+        result = remote_access.stop()
+        if timings is not None:
+            timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
+        if isinstance(result, dict) and result.get("ok") is False:
+            logger.warning("Failed to stop remote access before UI stop: %s", result.get("error"))
+            return False
+    except Exception:
+        if timings is not None and "stop_remote_access_seconds" not in timings:
+            timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
+        logger.warning("Failed to stop remote access before UI stop", exc_info=True)
+        return False
+    return True
+
+
 def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_access: bool = True):
     remote_access_stopped = True
     started_at = time.monotonic()
     if stop_remote_access:
-        remote_access_started_at = time.monotonic()
-        try:
-            from vibe import remote_access
-
-            result = remote_access.stop()
-            if timings is not None:
-                timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
-            if isinstance(result, dict) and result.get("ok") is False:
-                logger.warning("Failed to stop remote access before UI stop: %s", result.get("error"))
-                remote_access_stopped = False
-        except Exception:
-            if timings is not None and "stop_remote_access_seconds" not in timings:
-                timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
-            logger.warning("Failed to stop remote access before UI stop", exc_info=True)
-            remote_access_stopped = False
+        remote_access_stopped = _stop_remote_access(timings)
     elif timings is not None:
         timings["stop_remote_access_seconds"] = 0.0
         timings["stop_remote_access_skipped"] = True
@@ -2483,3 +2494,181 @@ def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_acces
         timings["stop_ui_process_seconds"] = _rounded_seconds(time.monotonic() - ui_started_at)
         timings["stop_ui_seconds"] = _rounded_seconds(time.monotonic() - started_at)
     return bool(ui_stopped and remote_access_stopped)
+
+
+@dataclass(frozen=True)
+class DesktopRuntimeStopResult:
+    """What a stop scoped to one desktop Runtime did.
+
+    ``refusal`` is set when nothing was signalled because the service could
+    not be shown to belong to that Runtime. ``ui_skipped`` names why a live UI
+    that does not belong to it was left running.
+    """
+
+    refusal: str | None = None
+    service_stopped: bool = True
+    ui_stopped: bool = True
+    ui_skipped: str | None = None
+    installs_drained: bool = True
+
+
+@dataclass(frozen=True)
+class _VerifiedTarget:
+    process: psutil.Process
+    expected: PersistedProcessIdentity
+
+
+def _verify_desktop_target(pid: int, fingerprint: str) -> tuple[str, _VerifiedTarget | None]:
+    """Inspect ``pid`` once: ``match``, ``mismatch``, ``unreadable`` or ``gone``."""
+
+    from vibe.desktop_runtime import open_desktop_runtime_provenance
+
+    try:
+        process, live = open_desktop_runtime_provenance(pid)
+    except psutil.NoSuchProcess:
+        return "gone", None
+    except (psutil.Error, OSError, ValueError):
+        return "unreadable", None
+    if not live.marker_readable:
+        return "unreadable", None
+    expected = PersistedProcessIdentity(pid=pid, create_time=live.create_time, worker_fingerprint=fingerprint)
+    if not process_identity_matches(expected, live):
+        return "mismatch", None
+    return "match", _VerifiedTarget(process, expected)
+
+
+def _verified_target_state(target: _VerifiedTarget) -> str:
+    """Re-check a verified target: ``match``, ``gone`` or ``unknown``."""
+
+    from vibe.desktop_runtime import open_desktop_runtime_provenance
+
+    pid = target.expected.pid
+    if not pid_alive(pid):
+        return "gone"
+    try:
+        _process, live = open_desktop_runtime_provenance(pid)
+    except psutil.NoSuchProcess:
+        return "gone"
+    except (psutil.Error, OSError, ValueError):
+        return "unknown"
+    if process_identity_recycled(target.expected, live):
+        return "gone"
+    # The id is shared by the whole Runtime, so it cannot tell the target from
+    # a sibling that inherited its pid; the retained handle's birth time can.
+    if process_identity_matches(target.expected, live) and target.process.is_running():
+        return "match"
+    return "unknown"
+
+
+def _stop_verified_process(target: _VerifiedTarget, timeout: float = 5) -> bool:
+    """Stop the process ``target`` inspected, through the handle it was read from.
+
+    Before each signal the pid is re-checked; a pid that no longer belongs to
+    the target is never signalled.
+    """
+
+    pid = target.expected.pid
+    phases = (None,) if os.name == "nt" else (signal.SIGTERM, signal.SIGKILL)
+    for sig in phases:
+        state = _verified_target_state(target)
+        if state == "gone":
+            return True
+        if state != "match":
+            logger.error("Refusing to signal pid=%s: it can no longer be shown to be the verified target", pid)
+            return False
+        try:
+            if sig is None:
+                logger.info("Terminating verified desktop Runtime pid=%s", pid)
+                target.process.terminate()
+            else:
+                if sig == signal.SIGTERM:
+                    write_shutdown_intent(pid, signum=signal.SIGTERM, reason="stop_pid")
+                logger.info("Sending managed %s to verified desktop Runtime pid=%s", signal.Signals(sig).name, pid)
+                target.process.send_signal(sig)
+        except psutil.NoSuchProcess:
+            return _verified_target_state(target) == "gone"
+        except (psutil.Error, OSError):
+            logger.warning("Failed to signal verified desktop Runtime pid=%s", pid, exc_info=True)
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _verified_target_state(target) == "gone":
+                return True
+            time.sleep(0.1)
+    logger.error("Verified desktop Runtime pid=%s did not exit", pid)
+    return _verified_target_state(target) == "gone"
+
+
+def stop_desktop_runtime(runtime_id: str, *, stop_remote_access: bool = True) -> DesktopRuntimeStopResult:
+    """Stop only the service and UI that the desktop Runtime ``runtime_id`` started.
+
+    Each target is resolved and inspected once, and only a matching target is
+    signalled, through the handle it was inspected with. A service that does
+    not match, or whose provenance cannot be read, refuses the whole stop
+    before anything is signalled. A UI that does not match is left running
+    together with what it owns (remote access and its backend installs).
+    Service processes beyond the lock owner are left to a full stop.
+    """
+
+    from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
+
+    if desktop_runtime_id({DESKTOP_RUNTIME_ID_ENV: runtime_id}) != runtime_id:
+        return DesktopRuntimeStopResult(refusal="invalid_runtime_id")
+    fingerprint = fingerprint_process_marker(runtime_id)
+    ui_pid_path = paths.get_runtime_ui_pid_path()
+    with _SERVICE_LOCK:
+        service_pid = resolve_service_owner_pid(include_starting=True)
+        ui_pid = _read_pid_file(ui_pid_path)
+        if ui_pid is not None and not (pid_alive(ui_pid) and _pid_matches_ui_server(ui_pid)):
+            ui_pid = None
+
+        service_target = None
+        if service_pid is not None:
+            verdict, service_target = _verify_desktop_target(service_pid, fingerprint)
+            if verdict == "unreadable":
+                return DesktopRuntimeStopResult(refusal="service_identity_unavailable")
+            if verdict == "mismatch":
+                return DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch")
+        ui_target = None
+        ui_skipped = None
+        if ui_pid is not None:
+            verdict, ui_target = _verify_desktop_target(ui_pid, fingerprint)
+            if verdict == "mismatch":
+                ui_skipped = "ui_runtime_id_mismatch"
+            elif verdict == "unreadable":
+                ui_skipped = "ui_identity_unavailable"
+
+        service_stopped = True
+        if service_target is not None:
+            service_stopped = _stop_verified_process(service_target)
+            if service_stopped:
+                _clear_service_pid_reservation(service_target.expected.pid)
+            else:
+                logger.error(
+                    "Failed to stop desktop Runtime service pid=%s; preserving pid and lock state",
+                    service_target.expected.pid,
+                )
+
+    if ui_skipped is not None:
+        logger.warning("Leaving UI pid=%s running: %s", ui_pid, ui_skipped)
+        return DesktopRuntimeStopResult(service_stopped=service_stopped, ui_skipped=ui_skipped)
+
+    remote_access_stopped = _stop_remote_access() if stop_remote_access else True
+    ui_process_stopped = True
+    if ui_target is not None:
+        ui_process_stopped = _stop_verified_process(ui_target)
+        if ui_process_stopped:
+            _forget_pid_record(ui_pid_path, ui_target.expected.pid)
+    # As in a full stop, remote access failing to stop fails the stop only when
+    # there was a UI to stop.
+    ui_stopped = ui_process_stopped and (remote_access_stopped or ui_target is None)
+    installs_drained = True
+    if ui_process_stopped:
+        from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
+
+        installs_drained = reap_abandoned_desktop_backend_installs(runtime_id=runtime_id)
+    return DesktopRuntimeStopResult(
+        service_stopped=service_stopped,
+        ui_stopped=ui_stopped,
+        installs_drained=installs_drained,
+    )

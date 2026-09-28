@@ -15,7 +15,12 @@ import os
 import socket
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
+
+if TYPE_CHECKING:
+    import psutil
+
+    from core.process_isolation import ProcessIdentity
 
 DESKTOP_ENDPOINT_SCHEMA_VERSION: Literal[1] = 1
 DESKTOP_RUNTIME_ID_ENV = "AVIBE_DESKTOP_RUNTIME_ID"
@@ -78,6 +83,22 @@ def desktop_runtime_id(base_env: Mapping[str, str] | None = None) -> str | None:
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         return None
     return value
+
+
+def open_desktop_runtime_provenance(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
+    """Open ``pid`` and read which desktop Runtime started it.
+
+    This is the one place that decides where another process's provenance comes
+    from. It currently reads the ``AVIBE_DESKTOP_RUNTIME_ID`` the process
+    inherited; the identity's ``worker_fingerprint`` is the fingerprint of that
+    value, compared against ``fingerprint_process_marker(expected_id)``.
+    ``marker_readable`` is False when the environment cannot be read. The
+    returned handle is the one the provenance was read from.
+    """
+
+    from core.process_isolation import open_process_identity
+
+    return open_process_identity(pid, marker_env=DESKTOP_RUNTIME_ID_ENV)
 
 
 def private_desktop_runtime_root(base_env: Mapping[str, str] | None = None) -> Path | None:

@@ -176,13 +176,24 @@ def process_identity_recycled(expected: PersistedProcessIdentity, live: ProcessI
     return live.marker_readable and live.create_time != expected.create_time and not _marker_matches(expected, live)
 
 
-def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
+def open_process_identity(
+    pid: int,
+    *,
+    marker_env: str = PROCESS_IDENTITY_ENV,
+) -> tuple[psutil.Process, ProcessIdentity]:
+    """Open ``pid`` and read the identity marker it inherited under ``marker_env``.
+
+    The returned ``psutil.Process`` is the handle the identity was read from, so
+    a caller that signals through it signals the process it inspected: psutil
+    refuses a retained handle whose pid has since been reused.
+    """
+
     process = psutil.Process(pid)
     create_time = float(process.create_time())
     worker_fingerprint = None
     marker_readable = True
     try:
-        marker = process.environ().get(PROCESS_IDENTITY_ENV)
+        marker = process.environ().get(marker_env)
     except (psutil.Error, OSError):
         marker = None
         marker_readable = False
@@ -194,6 +205,10 @@ def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
         worker_fingerprint=worker_fingerprint,
         marker_readable=marker_readable,
     )
+
+
+def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
+    return open_process_identity(pid)
 
 
 def inspect_process_identity(pid: int) -> ProcessIdentity | None:
