@@ -1118,17 +1118,56 @@ class ModelHubTurnGateway:
 
         if not stream:
             try:
-                response, outcome, settlement = await self._buffered_response(
-                    request, handle, terminalizer=terminalizer, execution=execution,
-                )
+                response = None
+                with tempfile.SpooledTemporaryFile(max_size=_BUFFERED_RESPONSE_MEMORY_BYTES) as payload:
+                    async for chunk in handle.stream:
+                        await run_owned_in_thread(payload.write, chunk)
+                    execution.completed_at = self._now()
+                    outcome, settlement, _rendered = await self._settle_metered_turn(
+                        execution, terminalizer, termination_origin="upstream_terminal",
+                        defer_projection=True,
+                    )
+                    assert outcome is not None
+                    assert settlement is not None
+                    assert settlement.decision is not None
+                    if settlement.decision.action == "return":
+                        await run_owned_in_thread(payload.seek, 0)
+                        rewritten_payload = await run_owned_in_thread(
+                            rewrite_buffered_tool_names_file, payload, execution.response_tool_aliases,
+                        )
+                        response_payload = rewritten_payload or payload
+                        try:
+                            response_size = await run_owned_in_thread(_rewind_and_measure, response_payload)
+                            if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
+                                body = await run_owned_in_thread(response_payload.read)
+                                response = web.Response(
+                                    status=200, body=body, content_type="application/json",
+                                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                                )
+                            else:
+                                response = web.StreamResponse(
+                                    status=200,
+                                    headers={
+                                        "Cache-Control": "no-store", "Content-Length": str(response_size),
+                                        "Content-Type": "application/json", "X-Content-Type-Options": "nosniff",
+                                    },
+                                )
+                                await self._downstream_io(response.prepare(request))
+                                execution.buffered_response = response
+                                while chunk := await run_owned_in_thread(response_payload.read, _RESPONSE_CHUNK_BYTES):
+                                    await self._downstream_io(response.write(chunk))
+                        finally:
+                            if rewritten_payload is not None:
+                                await run_owned_in_thread(rewritten_payload.close)
             except OSError as exc:
                 # The upstream result still owns usage and source health. Only
                 # this gateway's delivery failed; publish that failure after
                 # settling the real producer instead of rewriting its outcome.
-                await self._settle_turn_handle(
+                _outcome, _settlement, _rendered = await self._settle_metered_turn(
                     execution,
                     terminalizer,
                     termination_origin="upstream_terminal",
+                    defer_projection=True,
                 )
                 detail = local_error_detail(exc)
                 terminalizer.engine_down(local_error_detail=detail)
@@ -1188,60 +1227,6 @@ class ModelHubTurnGateway:
         )
         await self._downstream_io(response.write_eof())
         return response
-
-    async def _buffered_response(
-        self,
-        request: web.Request,
-        handle: InvokeHandle,
-        *,
-        terminalizer: GatewayTurnTerminalizer,
-        execution: _TurnExecution,
-    ) -> tuple[web.StreamResponse | None, RawCallOutcome, HandleSettlement]:
-        """Prepare local bytes before committing the gateway's delivery result."""
-        assert handle.stream is not None
-        with tempfile.SpooledTemporaryFile(max_size=_BUFFERED_RESPONSE_MEMORY_BYTES) as payload:
-            async for chunk in handle.stream:
-                await run_owned_in_thread(payload.write, chunk)
-            execution.completed_at = self._now()
-            outcome, settlement = await self._settle_turn_handle(
-                execution, terminalizer, termination_origin="upstream_terminal",
-            )
-            assert outcome is not None
-            assert settlement.decision is not None
-            if settlement.decision.action != "return":
-                return None, outcome, settlement
-            await run_owned_in_thread(payload.seek, 0)
-            rewritten_payload = await run_owned_in_thread(
-                rewrite_buffered_tool_names_file, payload, execution.response_tool_aliases,
-            )
-            response_payload = rewritten_payload or payload
-            try:
-                response_size = await run_owned_in_thread(_rewind_and_measure, response_payload)
-                if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
-                    body = await run_owned_in_thread(response_payload.read)
-                    return (
-                        web.Response(
-                            status=200, body=body, content_type="application/json",
-                            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
-                        ),
-                        outcome,
-                        settlement,
-                    )
-                response = web.StreamResponse(
-                    status=200,
-                    headers={
-                        "Cache-Control": "no-store", "Content-Length": str(response_size),
-                        "Content-Type": "application/json", "X-Content-Type-Options": "nosniff",
-                    },
-                )
-                await self._downstream_io(response.prepare(request))
-                execution.buffered_response = response
-                while chunk := await run_owned_in_thread(response_payload.read, _RESPONSE_CHUNK_BYTES):
-                    await self._downstream_io(response.write(chunk))
-                return response, outcome, settlement
-            finally:
-                if rewritten_payload is not None:
-                    await run_owned_in_thread(rewritten_payload.close)
 
     async def _record_usage(self, execution: _TurnExecution) -> None:
         """Fold one forwarded upstream call into the usage ledger, best-effort.
@@ -1355,6 +1340,7 @@ class ModelHubTurnGateway:
         terminalizer: GatewayTurnTerminalizer,
         *,
         termination_origin: HandleTerminationOrigin,
+        defer_projection: bool = False,
     ) -> tuple[RawCallOutcome | None, HandleSettlement | None, _RenderedTurnOutcome | None]:
         """End one turn: meter the call, then settle it, then commit what it was.
 
@@ -1376,6 +1362,10 @@ class ModelHubTurnGateway:
         without settling a second time. An ending that arrives after the turn was
         already committed gets the committed rendering and no settlement, which is
         the same thing the projection choke would have handed it.
+
+        A buffered response settles the producer before reading or rewriting its
+        local bytes, but defers the Turn projection until those operations finish.
+        It uses this same owner for metering and settlement, including failures.
         """
 
         if execution.settlement_recorded:
@@ -1387,6 +1377,8 @@ class ModelHubTurnGateway:
             terminalizer,
             termination_origin=termination_origin,
         )
+        if defer_projection:
+            return outcome, settlement, None
         rendered = self._commit_and_render_handle_settlement(
             execution,
             terminalizer,

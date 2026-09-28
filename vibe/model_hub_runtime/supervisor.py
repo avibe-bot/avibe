@@ -398,7 +398,10 @@ class EngineSupervisor:
             # No process was created, so nothing can carry this marker: retire the
             # launch record directly instead of scanning for a tree that never was.
             if not self._store_engine_records_locked([]):
-                raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked") from exc
+                raise EngineUnavailableError(
+                    "models.engine.start_failed", reason="engine_untracked",
+                    os_errno=self._record_os_errno,
+                ) from exc
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection

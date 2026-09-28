@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -101,6 +102,12 @@ def _is_regular_file(path: Path) -> bool:
         return stat.S_ISREG(path.stat().st_mode)
     except (FileNotFoundError, NotADirectoryError):
         return False
+
+
+def _require_execute_permission(path: Path) -> None:
+    """Make the existing execute-access rejection an explicit permission error."""
+    if not os.access(path, os.X_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
 
 
 def _is_reparse_point(info: os.stat_result) -> bool:
@@ -579,11 +586,12 @@ class ManagedRuntimeManager:
                 and metadata_bin_path == bin_path
                 and binary_integrity_valid
                 and _is_regular_file(binary)
-                and (not self.spec.binary_artifact or os.access(binary, os.X_OK))
                 and self._record_matches_configured_source(metadata)
                 and self._record_install_dir_matches(install_dir, metadata)
             ):
                 return None
+            if self.spec.binary_artifact:
+                _require_execute_permission(binary)
 
             manifest = self._load_manifest(allow_network=False)
             selected_is_installed = False
@@ -1926,19 +1934,16 @@ class ManagedRuntimeManager:
             install_dir_resolved = install_dir.resolve(strict=True)
             binary = (install_dir_resolved / bin_path).resolve(strict=True)
             regular_file = _is_regular_file(binary)
+            if install_dir_resolved not in binary.parents or not regular_file:
+                return None
+            if self.spec.binary_artifact:
+                _require_execute_permission(binary)
         except FileNotFoundError:
             return None
         except (OSError, RuntimeError) as exc:
             self._set_install_failure(self._reason("install_inspection_failed"), exc)
             return None
         self._install_reason = None
-        if (
-            install_dir_resolved not in binary.parents
-            or not regular_file
-            or self.spec.binary_artifact
-            and not os.access(binary, os.X_OK)
-        ):
-            return None
         target = self._install_target_identity(manifest, archive)
         target_platform = target.pop("platform")
         metadata_platform = metadata.get("platform")

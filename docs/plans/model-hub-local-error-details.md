@@ -90,6 +90,19 @@ policy. Keep upstream settlement/metering separate from a gateway buffer failure
 the original call still owns usage and source health, while the gateway owns
 the failed local delivery and its Turn diagnostic. Do not commit buffered
 success before the local reads/rewrites needed to produce the response finish.
+The CI structure guards also require every ending to use `_settle_metered_turn`
+and capture completion where the body is consumed. Keep buffered consumption in
+the response owner and defer only projection through that existing settlement
+wrapper; do not introduce another route to handle settlement or weaken guards.
+
+On `a057c8ed1`, pair a failed spawn rollback with the record error that actually
+blocks recovery, rather than the superseded spawn cause. For required executable
+files, the permission predicate is itself a policy rejection: preserve that
+denial as EACCES at one shared check instead of retaining a bare boolean.
+Keep required-file stat failures distinct, and do not run or chmod rejected
+binaries to obtain a diagnostic. Cover status, candidate verification, actual
+non-executable mode bits, and a denied-access predicate, alongside two different
+spawn/rollback failures and successful cleanup.
 
 ## Known by design
 

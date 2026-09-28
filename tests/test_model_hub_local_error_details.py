@@ -227,6 +227,78 @@ def test_spawn_identity_error_keeps_errno_and_stops_child(tmp_path, monkeypatch,
                 process.wait(timeout=5)
 
 
+@pytest.mark.parametrize("spawn_code", [None, errno.EMFILE])
+def test_spawn_rollback_reports_the_record_failure_that_blocks_recovery(tmp_path, monkeypatch, spawn_code):
+    from pathlib import Path
+    from tests.test_model_hub_runtime import _fixture_supervisor
+
+    def spawn(*_args, **_kwargs):
+        if spawn_code is None:
+            raise ValueError("private launch error")
+        raise OSError(spawn_code, "private launch error", "/private/凭证")
+
+    supervisor, state = _fixture_supervisor(tmp_path, process_factory=spawn)
+    record = state.root / "engine-process.json"
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == record and path.exists():
+            raise PermissionError(errno.EACCES, "private cleanup error", "/private/凭证")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", unlink)
+        with pytest.raises(EngineUnavailableError) as raised:
+            supervisor.ensure_running()
+        assert raised.value.reason == "engine_untracked"
+        assert local_error_detail(raised.value) == f"[Errno {errno.EACCES}] {os.strerror(errno.EACCES)}"
+        assert record.exists()
+    assert supervisor._reap_recorded_engines_locked()
+    assert not record.exists()
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+    expected = f"[Errno {spawn_code}] {os.strerror(spawn_code)}" if spawn_code else None
+    assert local_error_detail(raised.value) == expected
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("inspection", ["status", "candidate"])
+@pytest.mark.parametrize("denial", ["mode", "access"])
+def test_runtime_execute_permission_denial_is_a_local_diagnostic(tmp_path, monkeypatch, inspection, denial):
+    from pathlib import Path
+    from tests.test_managed_runtime import _write_subclass_runtime_fixture
+
+    if denial == "mode" and os.name == "nt":
+        pytest.skip("POSIX executable mode bits")
+    _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, "model-hub")
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    installed = manager.ensure()
+    assert installed["ok"]
+    binary = Path(installed["path"])
+    manifest = manager._load_manifest(allow_network=False)
+    archive = manager._manifest_archive_for_platform(manifest)
+    mode = binary.stat().st_mode
+    original_access = os.access
+    with monkeypatch.context() as patch:
+        if denial == "mode":
+            binary.chmod(mode & ~0o111)
+        else:
+            patch.setattr(os, "access", lambda path, flags: False if Path(path) == binary else original_access(path, flags))
+        try:
+            if inspection == "status":
+                result = manager.status()
+                assert not result["installed"]
+                code = result.get("os_errno")
+            else:
+                assert manager._verified_manifest_binary(binary.parent, manifest, archive) is None
+                code = manager._install_failure.os_errno
+            assert code == errno.EACCES
+        finally:
+            binary.chmod(mode)
+    assert manager.status()["installed"]
+    assert manager._install_failure.os_errno is None
+
+
 @pytest.mark.parametrize("code", [errno.ENOSPC, None, 999999, True])
 async def test_streamed_engine_outcome_retains_safe_detail_in_projection_and_record(tmp_path, code):
     # Stream settlement bypasses ModelHubError. Its live projection and durable
