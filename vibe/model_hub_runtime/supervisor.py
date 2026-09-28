@@ -567,7 +567,14 @@ class EngineSupervisor:
 
         self._record_os_errno = None
         pid = getattr(process, "pid", None)
-        identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
+
+        def capture_error(error: BaseException) -> None:
+            self._record_os_errno = local_os_errno(error)
+
+        identity = (
+            capture_spawned_process_identity(pid, marker, on_error=capture_error)
+            if isinstance(pid, int) else None
+        )
         if identity is None:
             return False
         return self._store_engine_records_locked([_EngineRecord(identity.worker_fingerprint, identity)])

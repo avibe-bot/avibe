@@ -3330,7 +3330,7 @@ def test_supervisor_refuses_an_engine_whose_identity_was_not_captured(
 ) -> None:
     from vibe.model_hub_runtime import supervisor as supervisor_module
 
-    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_: None)
+    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_, **__: None)
     supervisor, store = _fixture_supervisor(tmp_path)
 
     with pytest.raises(EngineUnavailableError):
@@ -3668,7 +3668,7 @@ def test_supervisor_failed_tracking_reaps_a_descendant_that_ignores_sigterm(
         time.sleep(0.5)
         return process
 
-    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_: None)
+    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_, **__: None)
     supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
 
     with pytest.raises(EngineUnavailableError) as raised:

@@ -187,6 +187,46 @@ def test_supervisor_health_error_keeps_errno_before_cleanup(tmp_path, monkeypatc
     assert local_error_detail(raised.value) == f"[Errno {errno.EMFILE}] {os.strerror(errno.EMFILE)}"
 
 
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EMFILE])
+def test_spawn_identity_error_keeps_errno_and_stops_child(tmp_path, monkeypatch, code):
+    # Popen succeeds; the shared process identity capture swallows the next OS
+    # failure. Exercise that helper without changing safe orphan/stop policy.
+    import subprocess
+    import psutil
+    from tests.test_model_hub_runtime import _fixture_supervisor
+
+    spawned = []
+
+    def spawn(*args, **kwargs):
+        process = subprocess.Popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    original_create_time = psutil.Process.create_time
+    failed = False
+
+    def create_time(process):
+        nonlocal failed
+        if spawned and process.pid == spawned[0].pid and not failed:
+            failed = True
+            raise OSError(code, "private reason", "/private/凭证")
+        return original_create_time(process)
+
+    monkeypatch.setattr(psutil.Process, "create_time", create_time)
+    supervisor, state = _fixture_supervisor(tmp_path, process_factory=spawn)
+    try:
+        with pytest.raises(EngineUnavailableError) as raised:
+            supervisor.ensure_running()
+        assert failed and spawned[0].poll() is not None
+        assert not (state.root / "engine-process.json").exists()
+        assert local_error_detail(raised.value) == f"[Errno {code}] {os.strerror(code)}"
+    finally:
+        for process in spawned:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
 @pytest.mark.parametrize("code", [errno.ENOSPC, None, 999999, True])
 async def test_streamed_engine_outcome_retains_safe_detail_in_projection_and_record(tmp_path, code):
     # Stream settlement bypasses ModelHubError. Its live projection and durable
@@ -394,10 +434,11 @@ def test_local_details_authorized_in_history_and_live_events(
             assert ("local_error_detail" in history["messages"][0]["metadata"]) is visible
         public = messages_service.get_message(conn, row["id"])
         assert "local_error_detail" not in public["metadata"]
-    payload = ui_server._workbench_event_payload_for_context(
-        context, "message.new", json.dumps({"type": "message.new", "data": row}),
-    )
-    assert ("local_error_detail" in json.loads(payload)["data"]["metadata"]) is visible
+    for event in ("message.new", "message.updated"):
+        payload = ui_server._workbench_event_payload_for_context(
+            context, event, json.dumps({"type": event, "data": row}),
+        )
+        assert ("local_error_detail" in json.loads(payload)["data"]["metadata"]) is visible
 
 
 @pytest.mark.parametrize("stage", ["manifest_path", "manifest_cache", "manifest_package", "manifest_download", "archive"])
@@ -455,6 +496,10 @@ def test_installer_helper_failures_keep_only_the_current_errno(tmp_path, monkeyp
         else:
             patch.setattr(Path, "open", open_file)
         failed = manager.ensure()
+        if stage in {"manifest_path", "manifest_cache", "manifest_package"}:
+            # Status reads the same failed manifest, then finds no installed
+            # pointer. That second fact must not erase this operation's cause.
+            assert manager.status()["os_errno"] == code
     assert not failed["ok"]
     assert failed["os_errno"] == code
     manager.manifest_path, manager.manifest_url, manager.offline = manifest, None, False

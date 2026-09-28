@@ -67,6 +67,17 @@ failed operation and captured before cleanup can replace it. Keep cleanup,
 retry, process exclusion, source health, and transport ownership policies
 unchanged. No exception prose or upstream body becomes a local diagnostic.
 
+On `1c1f52c50`, inspect the remaining consumers of those owners: Retry reloads a
+notice into both a POST reply and `message.updated`, and process identity capture
+has its own fail-closed sentinel. Preserve internal message diagnostics until
+both HTTP and event recipient projection; cover new and updated event types.
+Keep process capture's existing `None` behavior for all callers, adding an
+optional error observer used by the supervisor to retain only numeric errno.
+Neither capture failures nor diagnostics authorize killing an unverified process.
+Preserve the current status operation's manifest failure when there is no
+installed pointer; an actual inspection failure replaces it. CI's existing Git
+runtime, Doctor localization, and interface-mirror checks cover those consumers.
+
 ## Known by design
 
 - Historical errors cannot acquire diagnostics that were discarded before this

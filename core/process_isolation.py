@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import psutil
 
@@ -72,12 +72,18 @@ def process_identity_subprocess_env(marker: str) -> dict[str, str]:
 def capture_spawned_process_identity(
     pid: int,
     marker: str,
+    *,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> PersistedProcessIdentity | None:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
         create_time = float(psutil.Process(pid).create_time())
-    except (psutil.Error, OSError, TypeError, ValueError, OverflowError):
+    except (psutil.Error, OSError, TypeError, ValueError, OverflowError) as exc:
+        # Callers may retain a safe diagnostic without changing the fail-closed
+        # identity result or gaining authority to signal an unverified pid.
+        if on_error is not None:
+            on_error(exc)
         return None
     if not math.isfinite(create_time) or create_time <= 0:
         return None

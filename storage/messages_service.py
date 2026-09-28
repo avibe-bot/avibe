@@ -632,6 +632,7 @@ def get_message(
     message_id: str,
     *,
     session_id: Optional[str] = None,
+    include_local_error_detail: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Load one message by id, optionally requiring its owning session."""
 
@@ -644,7 +645,7 @@ def get_message(
     # The ``message.new`` publisher loads the live row through here, so the
     # sender resolved on delivery is the one the following reload shows.
     return attach_sender_labels(
-        conn, [_row_to_payload(dict(row), conn=conn)]
+        conn, [_row_to_payload(dict(row), conn=conn, include_local_error_detail=include_local_error_detail)]
     )[0]
 
 

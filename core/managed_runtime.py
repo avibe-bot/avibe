@@ -610,6 +610,7 @@ class ManagedRuntimeManager:
     def status(self) -> dict[str, Any]:
         manifest = self._load_manifest(allow_network=False)
         archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        manifest_failure = self._install_failure
         pointer_path = self.runtime_dir / "current.json"
         pointer: dict[str, Any] = {}
         binary: Path | None = None
@@ -633,6 +634,10 @@ class ManagedRuntimeManager:
         else:
             binary = None
             self._install_reason = self._reason("install_inspection_failed")
+        if binary is None and self._install_reason is None:
+            # A missing pointer does not erase this status read's manifest
+            # failure; an actual installed-inspection failure takes priority.
+            self._install_failure = manifest_failure
         matches_manifest = False if binary is not None and manifest and archive else None
         if matches_manifest is not None and isinstance(pointer.get("install_dir"), str):
             with contextlib.suppress(Exception):  # noqa: BLE001
@@ -1895,9 +1900,12 @@ class ManagedRuntimeManager:
         manifest: ManagedRuntimeManifest,
         archive: ManagedRuntimeArchive,
     ) -> Path | None:
-        self._install_reason = None
         try:
             metadata = json.loads((install_dir / self.spec.metadata_filename).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # Alternate candidate directories may not exist. Their absence
+            # must not replace a failure from an actual installed candidate.
+            return None
         except Exception as exc:  # noqa: BLE001
             self._set_install_failure(self._reason("install_inspection_failed"), exc)
             return None
@@ -1907,9 +1915,12 @@ class ManagedRuntimeManager:
         try:
             install_dir_resolved = install_dir.resolve(strict=True)
             binary = (install_dir_resolved / bin_path).resolve(strict=True)
+        except FileNotFoundError:
+            return None
         except (OSError, RuntimeError) as exc:
             self._set_install_failure(self._reason("install_inspection_failed"), exc)
             return None
+        self._install_reason = None
         if (
             install_dir_resolved not in binary.parents
             or not binary.is_file()
