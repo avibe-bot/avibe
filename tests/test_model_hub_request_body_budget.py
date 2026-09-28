@@ -144,6 +144,7 @@ async def _post(ingress, body: bytes, framing: str, *, token: str | None = None)
                 "Content-Type": "application/json; charset=utf-8",
                 "anthropic-version": "2023-06-01",
                 "openai-beta": "fixture",
+                "User-Agent": "fixture-agent/1.0",
             },
         ) as response:
             headers = response.request_info.headers
@@ -212,7 +213,11 @@ async def test_large_multi_image_request_is_forwarded_exactly(ingress, framing):
     assert forwarded == payload
     assert _encode(forwarded) == body
     assert forwarded.protocol == ingress.protocol
-    assert forwarded.headers == {"anthropic-version": "2023-06-01", "openai-beta": "fixture"}
+    assert forwarded.headers == {
+        "anthropic-version": "2023-06-01",
+        "openai-beta": "fixture",
+        "user-agent": "fixture-agent/1.0",
+    }
     record = _settle(ingress)
     if ingress.backend == "opencode":
         assert record is None
