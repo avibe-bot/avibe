@@ -185,13 +185,35 @@ def test_an_orphan_left_in_a_group_the_test_started_stays_signalable(stop):
         pytest.param(lambda pid: os.killpg(pid, signal.SIGTERM), id="os.killpg"),
     ],
 )
-def test_a_detached_process_naming_this_sessions_temp_dir_stays_signalable(stop, tmp_path):
+def test_a_detached_process_naming_this_tests_tmp_path_stays_signalable(stop, tmp_path):
     # Its spawner has exited and it leads its own session, so only the temp
     # directory in its command line ties it to this test.
     _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(tmp_path)])
     try:
         stop(detached)
         assert _wait_until_gone(detached)
+    finally:
+        with suppress(ProcessLookupError):
+            _REAL_OS_KILL(detached, signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    "named",
+    [
+        pytest.param(lambda tmp_path: tmp_path.parent / "another_test0", id="another-tests-dir"),
+        pytest.param(lambda tmp_path: f"{tmp_path}0", id="a-longer-name-it-prefixes"),
+    ],
+)
+def test_a_detached_process_naming_another_tests_temp_dir_is_refused(named, tmp_path, _foreign_signal_guard):
+    # Every test's tmp_path shares the session's temp root, so that root proves nothing.
+    _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(named(tmp_path))])
+    try:
+        with pytest.raises(pytest.fail.Exception, match="was not delivered"):
+            os.kill(detached, signal.SIGTERM)
+        _foreign_signal_guard.violations.clear()
+
+        time.sleep(0.2)
+        assert _alive(detached), "the refused signal reached the process anyway"
     finally:
         with suppress(ProcessLookupError):
             _REAL_OS_KILL(detached, signal.SIGKILL)

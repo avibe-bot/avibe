@@ -47,6 +47,7 @@ import ast
 import errno
 import inspect
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -377,18 +378,19 @@ class _ForeignSignalGuard:
     session: the test's ``subprocess.Popen`` children, and any process it has
     signalled as its own. That keeps an orphan in a spawned child's group
     signalable after reparenting hides it from ancestry. A process whose
-    command line names this pytest session's temporary directory is owned too:
-    a detached grandchild keeps nothing else that ties it to the test, and it is
-    the proof harnesses such as the Model Hub e2e driver already clean up by.
+    command line names this test's own ``tmp_path`` is owned too: a detached
+    grandchild keeps nothing else that ties it to the test, and it is the proof
+    harnesses such as the Model Hub e2e driver already clean up by.
     This pytest process is refused: it is what a fake pid killed on a CI
     runner. A pid that names no process gets the ESRCH the real call would
     raise, delivered to nothing, because a descendant the test collected may
     exit before it is signalled. Signal 0 is a liveness probe and passes.
     """
 
-    def __init__(self, session_temp: Path) -> None:
+    def __init__(self, test_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
-        self.session_temp = str(session_temp)
+        # The whole final component: `test_x1` must not claim `test_x10`.
+        self.names_test_temp = re.compile(re.escape(str(test_temp)) + r"(?![\w.-])").search
         self.owned: set[int] = set()
         self.violations: list[str] = []
 
@@ -419,7 +421,7 @@ class _ForeignSignalGuard:
             cmdline = _REAL_PSUTIL_PROCESS(pid).cmdline()
         except psutil.Error:
             cmdline = []
-        if any(self.session_temp in part for part in cmdline):
+        if any(self.names_test_temp(part) for part in cmdline):
             self.owned.add(pid)
             return True
         return False
@@ -537,7 +539,7 @@ if _SIGNAL_GUARD_SUPPORTED:
 
 
 @pytest.fixture(autouse=True)
-def _foreign_signal_guard(request, tmp_path_factory):
+def _foreign_signal_guard(request, tmp_path):
     """Fail any test that signals a process it did not start, and deliver nothing.
 
     Tests routinely make ``pid_alive`` true for fake pids such as 1234 or 5678.
@@ -557,7 +559,7 @@ def _foreign_signal_guard(request, tmp_path_factory):
     if not _SIGNAL_GUARD_SUPPORTED:
         yield None
         return
-    guard = _ForeignSignalGuard(tmp_path_factory.getbasetemp())
+    guard = _ForeignSignalGuard(tmp_path)
     _active_signal_guard = guard
     try:
         yield guard
