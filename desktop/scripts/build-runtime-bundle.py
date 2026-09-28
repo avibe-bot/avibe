@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -19,7 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -30,6 +31,7 @@ DEFAULT_OUTPUT = DESKTOP_DIR / "src-tauri" / "resources" / "runtime"
 COPY_CHUNK = 1024 * 1024
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 TREE_HASH_DOMAIN = b"avibe-runtime-tree-v1\0"
+CLI_BIN_DIR = "bin"  # Also prepended by RuntimeCommand::private in launcher.rs.
 
 # Everything the probe Runtime records about its own startup, relative to the
 # probe HOME. The process logs are the runtime directory's sink files; the
@@ -226,6 +228,43 @@ for name in ("claude", "claude.exe"):
         cwd=work_dir,
         check=True,
     )
+
+
+def install_runtime_cli(target_config: dict[str, Any], payload: Path) -> None:
+    """Replace build-machine console scripts with one relocatable CLI.
+
+    Python dependencies are consumed as modules. Their generated console
+    scripts embed the build interpreter's path and cannot survive relocation.
+    Keep the interpreter binaries, but do not ship these unusable launchers.
+    """
+    for scripts in (payload / "python" / "bin", payload / "python" / "Scripts"):
+        if not scripts.is_dir():
+            continue
+        for path in scripts.iterdir():
+            if path.is_symlink() or not path.is_file():
+                continue
+            with path.open("rb") as source:
+                is_script = source.read(2) == b"#!"
+            if is_script or (scripts.name == "Scripts" and path.suffix.lower() in {".exe", ".py", ".pyw"}):
+                path.unlink()
+
+    cli_dir = payload / CLI_BIN_DIR
+    cli_dir.mkdir()
+    interpreter = PurePosixPath(target_config["python_entrypoint"])
+    if target_config["os"] == "windows":
+        relative_python = "\\".join(interpreter.parts)
+        (cli_dir / "vibe.cmd").write_bytes(
+            f'@echo off\r\n"%~dp0..\\{relative_python}" -I -B -m vibe %*\r\n'.encode("utf-8")
+        )
+    else:
+        cli = cli_dir / "vibe"
+        cli.write_text(
+            '#!/bin/sh\n'
+            'here=$(CDPATH= cd -- "${0%/*}" && pwd -P) || exit 1\n'
+            f'exec "$here/../{interpreter.as_posix()}" -I -B -m vibe "$@"\n',
+            encoding="utf-8",
+        )
+        cli.chmod(0o755)
 
 
 def install_node_toolchain(
@@ -477,7 +516,7 @@ def verify_payload(
             raise
 
 
-def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> dict[str, str]:
+def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path, payload: Path) -> dict[str, str]:
     inherited_path = os.environ.get("PATH", "")
     retained_env = {
         name: value
@@ -498,6 +537,7 @@ def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> di
     return {
         **retained_env,
         "HOME": str(probe_home),
+        "ZDOTDIR": str(probe_home),
         "USERPROFILE": str(probe_home),
         "APPDATA": str(probe_home / "appdata"),
         "LOCALAPPDATA": str(probe_home / "local-appdata"),
@@ -510,6 +550,7 @@ def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> di
         "PATH": os.pathsep.join(
             part
             for part in (
+                str(payload / CLI_BIN_DIR),
                 str(node.parent),
                 inherited_path,
             )
@@ -519,6 +560,7 @@ def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> di
         "AVIBE_DESKTOP_NPM_CLI": str(npm_cli),
         "AVIBE_DESKTOP_BACKENDS_ROOT": str(probe_home / "backends"),
         "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
+        "AVIBE_DESKTOP_RUNTIME_ROOT": str(payload),
         "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
         "VIBE_INSTALL_SKIP_ASKILL": "1",
         "VIBE_ASKILL_AUTO_UPDATE": "0",
@@ -596,8 +638,25 @@ def _verify_payload_with_home(
     config_dir.mkdir(parents=True)
     port = reserve_loopback_port()
     config_path = config_dir / "config.json"
-    env = private_probe_environment(probe_home, node, npm_cli)
-    command = [str(python), "-I", "-m", "vibe"]
+    env = private_probe_environment(probe_home, node, npm_cli, payload)
+    command = [str(python), "-I", "-B", "-m", "vibe"]
+    agent_cwd = probe_home / "workspace"
+    agent_cwd.mkdir()
+
+    def agent_cli(*args: str) -> subprocess.CompletedProcess[str]:
+        # Use the same login-shell shape as macOS agents, not a direct Python
+        # module call that bypasses command discovery and the packaged shim.
+        shell_command = (
+            [env.get("COMSPEC", "cmd.exe"), "/d", "/c", "vibe", *args]
+            if target_config["os"] == "windows"
+            else ["/bin/zsh", "-lc", shlex.join(["vibe", *args])]
+        )
+        return subprocess.run(shell_command, cwd=agent_cwd, env=env, check=True, capture_output=True, text=True)
+
+    for skill in ("use-avibe", "use-avibe-vault"):
+        loaded = agent_cli("skill", "load", "--", skill)
+        if f'<skill_content name="{skill}"' not in loaded.stdout:
+            raise SystemExit(f"Bundled CLI did not load {skill}")
     endpoint = subprocess.run(
         [*command, "desktop", "endpoint", "--json"],
         cwd=work_dir,
@@ -735,6 +794,7 @@ def main() -> int:
             sources.get("sdist_build_allowlist", []),
         )
         verify_python_runtime_excludes_agent_backends(private_python, work_dir)
+        install_runtime_cli(target_config, payload)
         install_node_toolchain(
             target_config,
             node_archive,
@@ -743,6 +803,12 @@ def main() -> int:
             sources["npm_version"],
         )
         write_inventory(private_python, payload)
+        # The installed location differs from the build location and commonly
+        # contains spaces (Application Support / AppData). Probe that boundary
+        # before hashing the payload, so no install-time repair is necessary.
+        installed_payload = work_dir / "relocated runtime"
+        payload.rename(installed_payload)
+        payload = installed_payload
         verify_payload(target_config, payload, work_dir, sources["npm_version"])
         prune_payload(payload)
 
