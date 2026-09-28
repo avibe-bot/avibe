@@ -78,10 +78,12 @@ The desktop host mirrors these as Mine, Absent, Foreign and Unknown.
 | Every role process carrying the id stopped | 0 | `{"left_running":[{"pid":…,"name":…}]}` when other programs carry the id | status `stopped` |
 | A role process carrying the id is left | 2 | localized error, then `{"failed":"<part>","remaining":[{"pid":…,"role":…}]}` | status `error` |
 
-The status file belongs to the service holding the service lock. When no
-service or unknown process of this Runtime is left and another holds the lock,
-for example a successor started before an earlier stop of this id finished,
-the stop leaves the status file to it, whether it succeeded or failed.
+The status file belongs to the service holding the service lock. The stop
+writes it only when a service or unknown process of this Runtime is left, which
+may hold the lock, or the lock is free. When another holds the lock, for
+example a successor started before an earlier stop of this id finished, or the
+lock cannot be probed, the stop leaves the status file alone, whether it
+succeeded or failed.
 
 `<part>` is the first of `service`, `ui`, `installer`, `opencode` and `unknown`
 that did not stop. Refusal happens before anything is signalled; installers

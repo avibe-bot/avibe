@@ -2592,15 +2592,17 @@ class DesktopRuntimeStopResult:
     ``refusal`` is set when nothing was signalled. ``remaining`` names the
     role processes still carrying the id after the stop, and ``left_running``
     the other programs carrying it, which the stop never signals.
-    ``foreign_service`` is set when, with no service of this Runtime left,
-    another holds the service lock, so the shared status is that service's.
+    ``owns_status`` is set when the shared status is this stop's to write: a
+    service or unknown process of this Runtime is left, which may hold the
+    service lock, or the lock is free. Otherwise the status belongs to
+    whichever service holds the lock, even another Runtime's.
     """
 
     refusal: str | None = None
     remaining: tuple[DesktopRuntimeProcess, ...] = ()
     left_running: tuple[DesktopRuntimeProcess, ...] = ()
     opencode_stopped: bool = False
-    foreign_service: bool = False
+    owns_status: bool = False
 
     @property
     def failure(self) -> str | None:
@@ -2834,6 +2836,6 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
         remaining=remaining,
         left_running=tuple(entry.report for entry in left if entry.report.role is None and not entry.lineage),
         opencode_stopped=any(_desktop_process_gone(process) for process in opencode),
-        foreign_service=not ours_may_hold_lock
-        and _desktop_service_lock_presence() is DesktopRuntimePresence.MISMATCH,
+        # A lock that cannot be probed may be held by another service.
+        owns_status=ours_may_hold_lock or _desktop_service_lock_presence() is DesktopRuntimePresence.ABSENT,
     )

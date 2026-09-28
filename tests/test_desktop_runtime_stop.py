@@ -8,6 +8,7 @@ never substituted: the stop finds them by scanning.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
@@ -342,17 +343,24 @@ def test_a_foreign_service_lock_holder_refuses_the_stop(spawn, stop_env, capsys)
 
 
 @pytest.mark.parametrize("late_role", [None, "installer"])
-def test_a_foreign_service_holding_the_lock_keeps_the_shared_status(spawn, stop_env, monkeypatch, late_role):
-    # A successor's service already holds the lock while this Runtime's UI is stopped.
+@pytest.mark.parametrize("lock", ["held", "unprobeable"])
+def test_a_service_lock_this_runtime_is_not_shown_to_own_keeps_the_shared_status(
+    spawn, stop_env, monkeypatch, lock, late_role
+):
+    # While this Runtime's UI is stopped, a successor's service already holds
+    # the lock, or the lock cannot be probed to show that none does.
     ui = spawn(RUNTIME_ID, "ui")
     late: list[subprocess.Popen] = []
     if late_role is not None:
         _after_first_scan(monkeypatch, lambda _found: late.append(spawn(RUNTIME_ID, late_role)))
     lock_path = runtime.get_service_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with lock_path.open("w", encoding="utf-8") as held:
-        assert runtime._try_lock_file(held)
+    with contextlib.ExitStack() as stack:
+        if lock == "held":
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            assert runtime._try_lock_file(stack.enter_context(lock_path.open("w", encoding="utf-8")))
+        else:
+            lock_path.mkdir(parents=True)
         assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == (0 if late_role is None else 2)
 
     ui.wait(timeout=10)

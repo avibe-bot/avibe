@@ -13966,7 +13966,7 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
         _report_opencode_stopped()
     # The service holding the lock owns the shared status, even when it is
     # another Runtime's.
-    owns_status = not result.foreign_service
+    owns_status = result.owns_status
     # Unlike a full stop, an OpenCode server of this Runtime that survives
     # fails this stop: the desktop host replaces or removes the bundle it runs from.
     if result.outcome is runtime.DesktopRuntimeStopOutcome.FAILED:
