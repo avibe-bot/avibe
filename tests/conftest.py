@@ -359,6 +359,7 @@ _REAL_OS_GETSID = getattr(os, "getsid", None)
 _REAL_OS_GETPGRP = getattr(os, "getpgrp", None)
 _REAL_PSUTIL_PROCESS = psutil.Process
 _REAL_PSUTIL_PIDS = psutil.pids
+_REAL_POPEN_INIT = subprocess.Popen.__init__
 
 
 def _describe_pid(pid: int) -> str:
@@ -369,24 +370,25 @@ def _describe_pid(pid: int) -> str:
 
 
 class _ForeignSignalGuard:
-    """Stand-ins for ``os.kill`` / ``os.killpg`` that refuse targets a test did not start.
+    """One test's record of the processes it may signal.
 
     A process is the test's own when it descends from this pytest process, or
     when the test already owned it or the founder of its process group or
     session: the test's ``subprocess.Popen`` children, and any process it has
     signalled as its own. That keeps an orphan in a spawned child's group
-    signalable after reparenting hides it from ancestry. This pytest process is
-    refused too: it is what a fake pid killed on a CI runner. A pid that names
-    no process gets the ESRCH the real call would raise, delivered to nothing,
-    because a descendant the test collected may exit before it is signalled.
-
-    psutil's ``send_signal``/``terminate``/``kill`` and ``subprocess.Popen``'s
-    all end in ``os.kill`` on POSIX, so replacing the ``os`` attribute covers
-    them. Signal 0 is a liveness probe and passes through unchanged.
+    signalable after reparenting hides it from ancestry. A process whose
+    command line names this pytest session's temporary directory is owned too:
+    a detached grandchild keeps nothing else that ties it to the test, and it is
+    the proof harnesses such as the Model Hub e2e driver already clean up by.
+    This pytest process is refused: it is what a fake pid killed on a CI
+    runner. A pid that names no process gets the ESRCH the real call would
+    raise, delivered to nothing, because a descendant the test collected may
+    exit before it is signalled. Signal 0 is a liveness probe and passes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
+        self.session_temp = str(session_temp)
         self.owned: set[int] = set()
         self.violations: list[str] = []
 
@@ -413,6 +415,13 @@ class _ForeignSignalGuard:
             if founder in self.owned:
                 self.owned.add(pid)
                 return True
+        try:
+            cmdline = _REAL_PSUTIL_PROCESS(pid).cmdline()
+        except psutil.Error:
+            cmdline = []
+        if any(self.session_temp in part for part in cmdline):
+            self.owned.add(pid)
+            return True
         return False
 
     def _group_reason(self, pgid: int) -> str | None:
@@ -461,7 +470,7 @@ class _ForeignSignalGuard:
             pass
         return f"pid {_describe_pid(pid)} is not a process this test started"
 
-    def _refuse_foreign(self, primitive: str, target, sig, kill_target) -> None:
+    def refuse_foreign(self, primitive: str, target, sig, kill_target) -> None:
         __tracebackhide__ = True
         if sig == 0 or not isinstance(target, int):
             return
@@ -482,20 +491,53 @@ class _ForeignSignalGuard:
         # cannot swallow it; the teardown check covers anything broader.
         pytest.fail(message)
 
-    def kill(self, pid, sig):
-        __tracebackhide__ = True
-        self._refuse_foreign("kill", pid, sig, pid)
-        return _REAL_OS_KILL(pid, sig)
 
-    def killpg(self, pgid, sig):
-        __tracebackhide__ = True
+# The running test's guard, or None between tests and in opted-out tests.
+_active_signal_guard: _ForeignSignalGuard | None = None
+
+
+def _guarded_kill(pid, sig):
+    __tracebackhide__ = True
+    guard = _active_signal_guard
+    if guard is not None:
+        guard.refuse_foreign("kill", pid, sig, pid)
+    return _REAL_OS_KILL(pid, sig)
+
+
+def _guarded_killpg(pgid, sig):
+    __tracebackhide__ = True
+    guard = _active_signal_guard
+    if guard is not None:
         # libc's killpg(pgid) is kill(-pgid): on macOS a negative pgid names one pid.
-        self._refuse_foreign("killpg", pgid, sig, -pgid if isinstance(pgid, int) else pgid)
-        return _REAL_OS_KILLPG(pgid, sig)
+        guard.refuse_foreign("killpg", pgid, sig, -pgid if isinstance(pgid, int) else pgid)
+    return _REAL_OS_KILLPG(pgid, sig)
+
+
+@wraps(_REAL_POPEN_INIT)
+def _recording_popen_init(popen, *args, **kwargs):
+    _REAL_POPEN_INIT(popen, *args, **kwargs)
+    guard = _active_signal_guard
+    if guard is not None:
+        guard.owned.add(popen.pid)
+
+
+# Installed once for the whole run rather than per test through `monkeypatch`:
+# a test's own `monkeypatch.undo()` would otherwise remove the guard mid-test.
+# psutil's `send_signal`/`terminate`/`kill` and `subprocess.Popen`'s all end in
+# `os.kill` on POSIX, so replacing the `os` attributes covers them. POSIX only:
+# on Windows `os.kill` is TerminateProcess (and signal 0 is CTRL_C_EVENT, not a
+# probe), `os.killpg` does not exist, and the product's Windows stop path calls
+# TerminateProcess through ctypes, so wrapping `os.kill` there would guard
+# nothing the product reaches.
+_SIGNAL_GUARD_SUPPORTED = os.name != "nt" and _REAL_OS_KILLPG is not None
+if _SIGNAL_GUARD_SUPPORTED:
+    os.kill = _guarded_kill
+    os.killpg = _guarded_killpg
+    subprocess.Popen.__init__ = _recording_popen_init
 
 
 @pytest.fixture(autouse=True)
-def _foreign_signal_guard(request, monkeypatch):
+def _foreign_signal_guard(request, tmp_path_factory):
     """Fail any test that signals a process it did not start, and deliver nothing.
 
     Tests routinely make ``pid_alive`` true for fake pids such as 1234 or 5678.
@@ -503,34 +545,24 @@ def _foreign_signal_guard(request, monkeypatch):
     pid -- on a CI runner that was the pytest process itself, on a developer
     machine it can be the live Avibe service. Processes a test starts stay
     signalable; ``allow_foreign_signals(reason=...)`` opts a test out.
-
-    POSIX only: on Windows ``os.kill`` is TerminateProcess (and signal 0 is
-    CTRL_C_EVENT, not a probe), ``os.killpg`` does not exist, and the product's
-    Windows stop path calls TerminateProcess through ctypes, so wrapping
-    ``os.kill`` there would guard nothing the product reaches.
     """
 
+    global _active_signal_guard
     marker = request.node.get_closest_marker("allow_foreign_signals")
     if marker is not None:
         if not (marker.kwargs.get("reason") or marker.args):
             pytest.fail("@pytest.mark.allow_foreign_signals needs a reason")
         yield None
         return
-    if os.name == "nt" or _REAL_OS_KILLPG is None:
+    if not _SIGNAL_GUARD_SUPPORTED:
         yield None
         return
-    guard = _ForeignSignalGuard()
-    popen_init = subprocess.Popen.__init__
-
-    @wraps(popen_init)
-    def recording_popen_init(popen, *args, **kwargs):
-        popen_init(popen, *args, **kwargs)
-        guard.owned.add(popen.pid)
-
-    monkeypatch.setattr(subprocess.Popen, "__init__", recording_popen_init)
-    monkeypatch.setattr(os, "kill", guard.kill)
-    monkeypatch.setattr(os, "killpg", guard.killpg)
-    yield guard
+    guard = _ForeignSignalGuard(tmp_path_factory.getbasetemp())
+    _active_signal_guard = guard
+    try:
+        yield guard
+    finally:
+        _active_signal_guard = None
     __tracebackhide__ = True
     if guard.violations:
         pytest.fail("signals to processes this test did not start were blocked:\n" + "\n".join(guard.violations))

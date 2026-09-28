@@ -28,7 +28,9 @@ _SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
 _NO_SUCH_PID = 2**22 + 1
 
 
-def _spawn_detached(*, sleeper_session: bool, **popen_kwargs) -> tuple[subprocess.Popen, int]:
+def _spawn_detached(
+    *, sleeper_session: bool, sleeper: list[str] = _SLEEP, **popen_kwargs
+) -> tuple[subprocess.Popen, int]:
     """Start a child that starts a sleeper and exits, orphaning the sleeper."""
 
     spawner = subprocess.Popen(
@@ -36,7 +38,7 @@ def _spawn_detached(*, sleeper_session: bool, **popen_kwargs) -> tuple[subproces
             sys.executable,
             "-c",
             "import subprocess, sys; "
-            f"print(subprocess.Popen({_SLEEP!r}, start_new_session={sleeper_session}, "
+            f"print(subprocess.Popen({sleeper!r}, start_new_session={sleeper_session}, "
             "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)",
         ],
         stdout=subprocess.PIPE,
@@ -82,6 +84,16 @@ def stranger():
 def test_a_process_the_test_did_not_start_is_refused_and_left_alone(stranger, send, _foreign_signal_guard):
     with pytest.raises(pytest.fail.Exception, match="was not delivered"):
         send(stranger)
+    _foreign_signal_guard.violations.clear()
+
+    time.sleep(0.2)
+    assert _alive(stranger), "the refused signal reached the process anyway"
+
+
+def test_the_guard_survives_a_tests_own_monkeypatch_undo(stranger, monkeypatch, _foreign_signal_guard):
+    monkeypatch.undo()
+    with pytest.raises(pytest.fail.Exception, match="was not delivered"):
+        os.kill(stranger, signal.SIGTERM)
     _foreign_signal_guard.violations.clear()
 
     time.sleep(0.2)
@@ -166,12 +178,32 @@ def test_an_orphan_left_in_a_group_the_test_started_stays_signalable(stop):
             _REAL_OS_KILL(orphan, signal.SIGKILL)
 
 
+@pytest.mark.parametrize(
+    "stop",
+    [
+        pytest.param(lambda pid: os.kill(pid, signal.SIGTERM), id="os.kill"),
+        pytest.param(lambda pid: os.killpg(pid, signal.SIGTERM), id="os.killpg"),
+    ],
+)
+def test_a_detached_process_naming_this_sessions_temp_dir_stays_signalable(stop, tmp_path):
+    # Its spawner has exited and it leads its own session, so only the temp
+    # directory in its command line ties it to this test.
+    _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(tmp_path)])
+    try:
+        stop(detached)
+        assert _wait_until_gone(detached)
+    finally:
+        with suppress(ProcessLookupError):
+            _REAL_OS_KILL(detached, signal.SIGKILL)
+
+
 def test_signal_zero_still_probes_any_pid(stranger):
     os.kill(stranger, 0)
     with pytest.raises(ProcessLookupError):
         os.kill(_NO_SUCH_PID, 0)
 
 
-@pytest.mark.allow_foreign_signals(reason="asserts the opt-out leaves the real primitive in place")
-def test_the_opt_out_marker_leaves_the_real_primitive_in_place():
-    assert os.kill is _REAL_OS_KILL
+@pytest.mark.allow_foreign_signals(reason="asserts the opt-out delivers what the guard would refuse")
+def test_the_opt_out_marker_delivers_a_signal_the_guard_would_refuse(stranger):
+    os.kill(stranger, signal.SIGTERM)
+    assert _wait_until_gone(stranger)
