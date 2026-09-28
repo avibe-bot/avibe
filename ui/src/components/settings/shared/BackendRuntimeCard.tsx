@@ -105,6 +105,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               name={backend}
               enabled={runtime.enabled}
               cliStatus={runtime.cliStatus}
+              cliPath={runtime.cliPath}
               onChanged={runtime.handleLifecycleChanged}
               onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
             />

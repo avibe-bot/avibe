@@ -20,8 +20,8 @@ export function Fixture() {
   const runtime: BackendRuntimeState = {
     loaded: true, configError: false, enabled, cliPath,
     cliStatus: state === 'error' ? 'missing' : state === 'loading' ? 'unknown' : 'ok',
-    detecting: false, installing: false, installResult: null, installOutputOpen: false,
-    savingRuntime: false, runtimeDirty: false, connectionRevision: 0, setCliPath, setInstallOutputOpen: noop,
+    detecting: false, installing: false, installResult: null,
+    savingRuntime: false, runtimeDirty: false, connectionRevision: 0, setCliPath,
     detect: asyncNoop, install: asyncNoop, onSaveRuntime: asyncNoop,
     toggleEnabled: () => setEnabled((previous) => !previous), handleLifecycleChanged: asyncNoop,
   };

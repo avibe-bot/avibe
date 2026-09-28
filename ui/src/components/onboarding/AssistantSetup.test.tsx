@@ -393,8 +393,49 @@ describe('assistant installation presentation', () => {
     expect(within(outcome).getByText(en.agentDetection.showOutput)).toBeTruthy();
     expect(within(outcome).getByText('Exit code: 190')).toBeTruthy();
     expect(outcome.querySelector('pre')?.textContent).toBe(failure.output);
-    // The failed upgrade released the row's lock, so trying again is one click away.
-    expect(row('Codex').getByRole('button', { name: en.backendLifecycle.upgradeNow }).hasAttribute('disabled')).toBe(false);
+    // Once the chip has read the CLI back, trying again is one click away.
+    await waitFor(() => expect(row('Codex').getByRole('button', { name: en.backendLifecycle.upgradeNow }).hasAttribute('disabled')).toBe(false));
+  });
+  it('re-detects a CLI a failed upgrade from the state row removed, keeping the reason', async () => {
+    const saved = data(); saved.agents.codex.status = 'ok';
+    mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: true, current_version: '1', latest_version: '2' });
+    mock.api.installAgent.mockImplementation(async () => {
+      mock.api.detectCli.mockResolvedValue({ found: false, path: null });
+      mock.api.getBackendRuntime.mockResolvedValue({ installed: false, has_update: false, resolved_path: null });
+      return { ok: false, message: 'Could not upgrade Codex.', output: 'npm error code ENOTEMPTY' };
+    });
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    fireEvent.click(await row('Codex').findByRole('button', { name: en.backendLifecycle.upgradeNow }));
+
+    // The row falls back to the install state, marked as failed, with the reason kept.
+    expect(await row('Codex').findByRole('button', { name: en.common.retry })).toBeTruthy();
+    expect(row('Codex').getByText(en.onboarding.setup.installFailed)).toBeTruthy();
+    expect(row('Codex').getByText('Could not upgrade Codex.')).toBeTruthy();
+  });
+  it('holds the state row until the chip reads a repair back, then offers it again if still broken', async () => {
+    const path = '/isolated/bin/codex';
+    const saved = data(); saved.agents.codex.status = 'ok'; saved.agents.codex.cli_path = path;
+    const broken = { installed: true, runnable: false, has_update: false, current_version: null, resolved_path: path };
+    mock.api.getBackendRuntime.mockResolvedValue(broken);
+    mock.api.detectCli.mockResolvedValue({ found: true, path });
+    let readBack!: (runtime: typeof broken) => void;
+    mock.api.installAgent.mockImplementation(async () => {
+      // A native updater can exit zero without repairing a damaged launcher.
+      mock.api.getBackendRuntime.mockReturnValue(new Promise((resolve) => { readBack = resolve; }));
+      return { ok: true, path };
+    });
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    const detections = mock.api.detectCli.mock.calls.length;
+    fireEvent.click(await row('Codex').findByRole('button', { name: en.backendLifecycle.reinstall }));
+
+    await waitFor(() => expect(mock.api.detectCli.mock.calls.length).toBeGreaterThan(detections));
+    await act(async () => {});
+    // The attempt is over but the chip has not read it back: nothing to re-arm on yet.
+    expect(row('Codex').queryByRole('button', { name: en.backendLifecycle.reinstall })).toBeNull();
+    expect(row('Codex').getByRole('button', { name: en.backendLifecycle.upgrading }).hasAttribute('disabled')).toBe(true);
+
+    await act(async () => readBack(broken));
+    await waitFor(() => expect(row('Codex').getByRole('button', { name: en.backendLifecycle.reinstall }).hasAttribute('disabled')).toBe(false));
   });
   it('retains a detection error separately from missing installation', async () => {
     mock.api.detectCli.mockRejectedValue(new Error('Probe failed'));

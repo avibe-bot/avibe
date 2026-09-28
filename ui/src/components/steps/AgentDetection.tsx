@@ -284,12 +284,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [visuals, setVisuals] = useState<Partial<Record<string, BackendLifecycleVisual>>>({});
   const [refreshingAgents, setRefreshingAgents] = useState<Record<string, boolean>>({});
   const [chipRefresh, setChipRefresh] = useState<Record<string, number>>({});
-  // A successful upgrade leaves the chip's own runtime probe in flight while this
-  // handler has already finished, so the pill still reads `update` for a moment and
-  // would re-arm the card's upgrade button against a backend that was just upgraded.
-  // The lock holds the button disabled until the chip's reported visual leaves
-  // `update`, which is the probe confirming what the upgrade did.
-  const [upgradeLocks, setUpgradeLocks] = useState<Record<string, boolean>>({});
   const pendingInstalls = useRef(new Set<string>());
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
@@ -508,58 +502,42 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // The setup card draws the update action on the state row, beside the pill the
   // chip renders, while the chip still owns the probe and the write. Bumping
   // `chipRefresh` is what lets the chip re-probe a runtime the card's own button
-  // changed, without the card duplicating the chip's lifecycle knowledge.
-  useEffect(() => {
-    setUpgradeLocks((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const [name, locked] of Object.entries(current)) {
-        if (locked && visuals[name] !== 'update' && visuals[name] !== 'updating' && visuals[name] !== 'broken') {
-          next[name] = false;
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [visuals]);
-
-  const releaseUpgradeLock = (name: string) =>
-    setUpgradeLocks((current) => (current[name] ? { ...current, [name]: false } : current));
-
+  // changed, without the card duplicating the chip's lifecycle knowledge. The chip
+  // reads as updating until that probe settles, so the button cannot re-arm on the
+  // verdict from before the attempt, whatever the probe then finds.
   const upgradeAgent = async (name: string) => {
     setRefreshingAgents((current) => ({ ...current, [name]: true }));
-    setUpgradeLocks((current) => ({ ...current, [name]: true }));
     clearInstallResult(name);
     // The chip's own upgrade handler owns the toast contract for lifecycle
     // operations; the card's affordance is the same operation drawn on the state
     // row, so it settles failures the same way rather than swallowing them, and
     // `refreshingAgents` is handed to the chip as externally busy so its popover
     // cannot launch a second install against the same backend.
+    let installedPath: string | null = null;
+    let failure: InstallOutcomeResult | null = null;
     try {
       const result = await api.installAgent(name);
       if (result.ok) {
         showToast(t('backendLifecycle.upgradeSuccess'), 'success');
-        const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
-        if (installedPath) {
-          setAgents((prev) => ({ ...prev, [name]: { ...prev[name], cli_path: installedPath } }));
-        }
-        setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
-        await detect(name, installedPath || agents[name]?.cli_path || name);
+        const path = typeof result.path === 'string' && result.path ? result.path : null;
+        if (path) setAgents((prev) => ({ ...prev, [name]: { ...prev[name], cli_path: path } }));
+        installedPath = path;
       } else {
-        // A failed upgrade leaves the pill on `update` with no probe in flight, so
-        // the visuals-driven release never fires; settle the lock here instead of
-        // stranding the button disabled until a remount.
-        releaseUpgradeLock(name);
-        const message = result.message || t('backendLifecycle.upgradeFailed');
-        setInstallResults((prev) => ({ ...prev, [name]: { ...result, message } }));
-        showToast(message, 'error');
-        // The chip re-probes: a failed upgrade can leave the CLI unable to start.
-        setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
+        failure = { ...result, message: result.message || t('backendLifecycle.upgradeFailed') };
+        showToast(failure.message, 'error');
       }
     } catch (cause) {
-      releaseUpgradeLock(name);
-      setInstallResults((prev) => ({ ...prev, [name]: { ok: false, message: String(cause), output: null } }));
-      showToast(String(cause), 'error');
+      failure = { ok: false, message: String(cause), output: null };
+      showToast(failure.message, 'error');
+    }
+    try {
+      // Failed or not, the attempt may have replaced, broken or removed the CLI:
+      // the chip re-probes it and the card re-detects the file.
+      setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
+      await detect(name, installedPath || agents[name]?.cli_path || name);
+      // Detection retires a failed install once it finds the CLI; a failed upgrade
+      // of a CLI that is still there stays on the card.
+      if (failure) setInstallResults((prev) => ({ ...prev, [name]: failure }));
     } finally {
       setRefreshingAgents((current) => ({ ...current, [name]: false }));
     }
@@ -760,6 +738,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                     name={name}
                     enabled={agent.enabled}
                     cliStatus={active ? agent.status || 'unknown' : 'unknown'}
+                    cliPath={agent.cli_path}
                     onChanged={async (info) => {
                       // After a successful (re)install the chip hands back the
                       // path the installer landed at — adopt it before
@@ -965,6 +944,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
               onClick={() => toggle(name, !agent.enabled)} />}
             lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={active ? agent.status || 'unknown' : 'unknown'}
+              cliPath={agent.cli_path}
               readyLabel={t('onboarding.setup.enabled')}
               disabledLabel={t('onboarding.setup.notEnabled')}
               refreshKey={chipRefresh[name]}
@@ -984,7 +964,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               || visuals[name] === 'broken' || refreshingAgents[name]) ? (
               <Button type="button" variant="secondary" className="onboarding-life-action"
                 onClick={() => void upgradeAgent(name)}
-                disabled={refreshingAgents[name] || !!upgradeLocks[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
+                disabled={refreshingAgents[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
                 {refreshingAgents[name] || visuals[name] === 'updating'
                   ? <RefreshCw size={14} className="motion-safe:animate-spin" />
                   : visuals[name] === 'broken' ? <Download size={14} /> : <ArrowUpToLine size={14} />}

@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { useState } from 'react';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,12 +29,13 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+const codexPath = '/usr/local/bin/codex';
 const updateAvailable = {
   ok: true,
   name: 'codex',
   enabled: true,
-  cli_path: '/usr/local/bin/codex',
-  resolved_path: '/usr/local/bin/codex',
+  cli_path: codexPath,
+  resolved_path: codexPath,
   installed: true,
   current_version: '1.0.0',
   latest_version: '1.1.0',
@@ -85,7 +87,7 @@ describe('BackendLifecycleChip', () => {
     api.installAgent.mockReturnValue(install.promise);
     const user = userEvent.setup();
 
-    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" />);
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
 
     const chip = await screen.findByRole('button', {
       name: 'backendLifecycle.statusUpdateAvailable',
@@ -126,7 +128,7 @@ describe('BackendLifecycleChip', () => {
     api.installAgent.mockResolvedValue(failure);
     const user = userEvent.setup();
 
-    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" />);
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
     const chip = await screen.findByRole('button', { name: 'backendLifecycle.statusUpdateAvailable' });
     await user.click(chip);
     await user.click(await screen.findByRole('button', { name: 'backendLifecycle.upgradeNow' }));
@@ -157,7 +159,7 @@ describe('BackendLifecycleChip', () => {
     });
     const user = userEvent.setup();
 
-    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" />);
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
     const chip = await screen.findByRole('button', { name: 'backendLifecycle.statusUpdateAvailable' });
     await user.click(chip);
     await user.click(await screen.findByRole('button', { name: 'backendLifecycle.upgradeNow' }));
@@ -167,6 +169,34 @@ describe('BackendLifecycleChip', () => {
     expect(screen.getByRole('alert').textContent).toContain(npmLeftover.hint);
     expect(screen.getByRole('button', { name: 'backendLifecycle.reinstall' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'backendLifecycle.upgradeNow' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'backendLifecycle.restart' })).toBeNull();
+  });
+
+  it('has the host re-detect a CLI a failed upgrade removed, so it offers a reinstall', async () => {
+    const disk = { present: true };
+    api.installAgent.mockImplementation(async () => {
+      disk.present = false;
+      api.getBackendRuntime.mockResolvedValue({ ...updateAvailable, resolved_path: null, installed: false, current_version: null, has_update: false });
+      return npmLeftover;
+    });
+    // The host owns detection: it reads the disk again whenever the chip reports a change.
+    const Host = () => {
+      const [cliStatus, setCliStatus] = useState<'ok' | 'missing'>('ok');
+      return (
+        <BackendLifecycleChip name="codex" enabled cliStatus={cliStatus} cliPath={codexPath}
+          onChanged={() => setCliStatus(disk.present ? 'ok' : 'missing')} />
+      );
+    };
+    const user = userEvent.setup();
+
+    render(<Host />);
+    const chip = await screen.findByRole('button', { name: 'backendLifecycle.statusUpdateAvailable' });
+    await user.click(chip);
+    await user.click(await screen.findByRole('button', { name: 'backendLifecycle.upgradeNow' }));
+
+    await waitFor(() => expect(chip.getAttribute('aria-label')).toBe('backendLifecycle.statusError'));
+    expect(screen.getByRole('alert').textContent).toContain(npmLeftover.hint);
+    expect(screen.getByRole('button', { name: 'backendLifecycle.reinstall' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'backendLifecycle.restart' })).toBeNull();
   });
 
@@ -189,10 +219,12 @@ describe('BackendLifecycleChip', () => {
     { state: 'desktop-managed with an update', runtime: { ...updateAvailable, ...managed }, notice: 'backendLifecycle.updateHint' },
     { state: 'desktop-managed and not found', runtime: { ...latest, ...managed }, cliStatus: 'missing' as const, notice: 'backendLifecycle.errorHint {"name":"Codex"}' },
     { state: 'desktop-managed and unable to run', runtime: { ...latest, ...managed, runnable: false }, notice: 'backendLifecycle.brokenHint {"name":"Codex"}' },
+    // The probe ran the saved CLI; the detected draft at another path is not it.
+    { state: 'a detected draft beside a saved CLI unable to run', runtime: { ...latest, runnable: false }, cliPath: '/opt/draft/codex', notice: 'backendLifecycle.readyHint' },
     { state: 'desktop-managed after a failed upgrade', runtime: { ...updateAvailable, ...managed }, after: { ...latest, ...managed }, notice: null },
     { state: 'reading as latest after a failed upgrade', runtime: updateAvailable, after: latest, notice: null },
     { state: 'still behind after a failed upgrade', runtime: updateAvailable, after: updateAvailable, notice: 'backendLifecycle.updateHint' },
-  ])('says what matters most when $state', async ({ runtime, cliStatus = 'ok', after, notice }) => {
+  ])('says what matters most when $state', async ({ runtime, cliStatus = 'ok', cliPath = codexPath, after, notice }) => {
     api.getBackendRuntime.mockResolvedValue(runtime);
     api.installAgent.mockImplementation(async () => {
       api.getBackendRuntime.mockResolvedValue(after);
@@ -200,7 +232,7 @@ describe('BackendLifecycleChip', () => {
     });
     const user = userEvent.setup();
 
-    render(<BackendLifecycleChip name="codex" enabled cliStatus={cliStatus} />);
+    render(<BackendLifecycleChip name="codex" enabled cliStatus={cliStatus} cliPath={cliPath} />);
     await user.click(screen.getByRole('button'));
     const popover = (await screen.findByText('backendLifecycle.title')).closest('div.z-50') as HTMLElement;
     const refresh = within(popover).getByRole('button', { name: 'common.refresh' });

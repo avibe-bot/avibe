@@ -34,6 +34,10 @@ interface BackendLifecycleChipProps {
   name: string;
   enabled: boolean;
   cliStatus: CliStatus;
+  /** The executable ``cliStatus`` was detected at. The runtime probe reads the
+      saved configuration, so its verdict on whether the CLI can start describes
+      this executable only when it resolved to the same path. */
+  cliPath: string;
   /** Setup describes executable availability separately from connection readiness. */
   readyLabel?: string;
   /** Setup reads an off switch as a step the person has not taken yet, not as a
@@ -48,7 +52,9 @@ interface BackendLifecycleChipProps {
   onVisual?: (visual: Visual) => void;
   /** Bumped by a host that applied an upgrade through its own affordance — the
       setup card's state-row button — so the chip's projection, and with it the
-      pill, follows a change the chip did not make itself. */
+      pill, follows a change the chip did not make itself. The pill reads as
+      updating until that probe settles, so the host's affordance cannot re-arm
+      on the verdict from before the change. */
   refreshKey?: number;
   /** A host-owned lifecycle operation in flight — the setup card draws its own
       upgrade affordance on the state row — so the chip's popover cannot launch a
@@ -82,8 +88,10 @@ const DOT_STYLES: Record<Visual, string> = {
 const deriveVisual = (
   enabled: boolean,
   cliStatus: CliStatus,
+  cliPath: string,
   runtime: BackendRuntimeInfo | null,
   operation: Operation,
+  confirming: boolean,
 ): Visual => {
   // An in-flight upgrade outranks a stale "disabled" — if the user toggles a
   // backend off mid-install we still want the progress affordance visible.
@@ -96,10 +104,15 @@ const deriveVisual = (
   // that window the local detection is the fresher signal — trust it and
   // do not flip the chip to error just because the saved config is stale.
   if (cliStatus !== 'ok' && runtime && runtime.installed === false) return 'error';
+  // A change the host applied is not done until the probe it asked for has read
+  // it back, just as the chip's own upgrade stays in progress through its probe;
+  // until then the runtime still describes the CLI from before the change.
+  if (confirming) return 'updating';
   // Detection only finds the file; the runtime probe is what runs it. A CLI an
   // interrupted upgrade left without its platform package is on disk but exits
-  // before printing a version, and a reinstall is what repairs it.
-  if (runtime?.runnable === false) return 'broken';
+  // before printing a version, and a reinstall is what repairs it. The verdict
+  // belongs to the executable the probe ran, which a detected draft may not be.
+  if (runtime?.runnable === false && runtime.resolved_path === cliPath) return 'broken';
   // ``opencode serve`` and ``codex app-server`` are lazy-spawn daemons: they
   // stay stopped until a session needs them, so ``process_status === 'stopped'``
   // is the normal idle state, not an error. Restart still works on demand
@@ -122,6 +135,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   name,
   enabled,
   cliStatus,
+  cliPath,
   onChanged,
   onOperationChange,
   readyLabel,
@@ -146,6 +160,10 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   // Monotonic token guards against stale async writes when toggle/detect
   // changes fire faster than the runtime probe completes.
   const loadTokenRef = React.useRef(0);
+  // The host refresh generation the current ``runtime`` was probed under.
+  const refreshKeyRef = React.useRef(refreshKey);
+  refreshKeyRef.current = refreshKey;
+  const [probedKey, setProbedKey] = React.useState(refreshKey);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -168,6 +186,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const loadRuntime = React.useCallback(async () => {
     const myToken = ++loadTokenRef.current;
+    const key = refreshKeyRef.current;
     setRuntimeLoading(true);
     let info: BackendRuntimeInfo | null = null;
     try {
@@ -179,6 +198,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       // unmounted while we were in flight.
       if (isMountedRef.current && loadTokenRef.current === myToken) {
         setRuntime(info);
+        setProbedKey(key);
         setRuntimeLoading(false);
       }
     }
@@ -204,7 +224,9 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     if (enabled && isOpen) void loadRuntime();
   }, [enabled, isOpen, loadRuntime]);
 
-  const visual = deriveVisual(enabled, cliStatus, runtime, operation);
+  // The effect above probes whenever the host refreshes an enabled, detected CLI.
+  const confirming = enabled && cliStatus === 'ok' && probedKey !== refreshKey;
+  const visual = deriveVisual(enabled, cliStatus, cliPath, runtime, operation, confirming);
   const busy = runtimeLoading || operation !== 'idle' || externallyBusy;
   const shownFailure = failure && failure.refreshKey === refreshKey && visual !== 'disabled' ? failure.result : null;
 
@@ -217,23 +239,26 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     setFailure(null);
     onOperationChange?.(true);
     try {
-      const result = await api.installAgent(name);
-      if (result.ok) {
-        showToast(t('backendLifecycle.upgradeSuccess'), 'success');
-        await loadRuntime();
-        const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
-        await onChanged?.({ installedPath });
-      } else {
-        const message = result.message || t('backendLifecycle.upgradeFailed');
-        if (isMountedRef.current) setFailure({ result: { ...result, message }, refreshKey });
-        showToast(message, 'error');
-        // A failed upgrade can leave the CLI unable to start; re-probe so the
-        // pill says so instead of the version it had before.
-        await loadRuntime();
+      let installedPath: string | null = null;
+      try {
+        const result = await api.installAgent(name);
+        if (result.ok) {
+          showToast(t('backendLifecycle.upgradeSuccess'), 'success');
+          installedPath = typeof result.path === 'string' && result.path ? result.path : null;
+        } else {
+          const message = result.message || t('backendLifecycle.upgradeFailed');
+          if (isMountedRef.current) setFailure({ result: { ...result, message }, refreshKey });
+          showToast(message, 'error');
+        }
+      } catch (e) {
+        if (isMountedRef.current) setFailure({ result: { ok: false, message: String(e), output: null }, refreshKey });
+        showToast(String(e), 'error');
       }
-    } catch (e) {
-      if (isMountedRef.current) setFailure({ result: { ok: false, message: String(e), output: null }, refreshKey });
-      showToast(String(e), 'error');
+      // Failed or not, the attempt may have replaced, broken or removed the CLI.
+      // The probe reads what it left, and the host re-detects the file its
+      // status describes, or a CLI the attempt removed goes on reading as ready.
+      await loadRuntime();
+      await onChanged?.({ installedPath });
     } finally {
       onOperationChange?.(false);
       if (isMountedRef.current) setOperation('idle');
