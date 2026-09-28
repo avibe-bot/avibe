@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import ssl
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,7 +13,7 @@ import aiohttp
 import pytest
 
 from core.backend_failure import emit_backend_failure
-from core.handlers.model_hub.errors import local_error_detail
+from core.os_errors import local_error_detail
 from core.handlers.model_hub.provenance import BoundedProvenanceStore
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -97,6 +98,7 @@ async def test_runtime_lock_error_reaches_notice_and_persisted_details(tmp_path,
     (OSError("private text"), None),
     (RuntimeError("private text"), None),
     (OSError(999999, "private text"), None),
+    (ssl.SSLError(ssl.SSL_ERROR_SSL, "private TLS detail"), None),
 ])
 async def test_engine_call_only_exposes_recognized_os_reasons(tmp_path, error, expected):
     service = _service(tmp_path, sources=[_source("src_primary01", "Primary")])
@@ -123,6 +125,24 @@ def test_spawn_failure_keeps_its_os_reason(tmp_path, code):
     with pytest.raises(EngineUnavailableError) as raised:
         supervisor.ensure_running()
     assert local_error_detail(raised.value) == f"[Errno {code}] {os.strerror(code)}"
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EMFILE])
+def test_engine_binary_probe_failure_keeps_errno(tmp_path, monkeypatch, code):
+    # The engine installer's version probe is another exception -> sentinel
+    # boundary; a generic fixture installer does not execute that code.
+    from tests.test_managed_runtime import _write_subclass_runtime_fixture
+
+    _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "model-hub")
+    installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    def fail(*_args, **_kwargs):
+        raise OSError(code, "private reason", "/private/凭证")
+
+    monkeypatch.setattr("vibe.model_hub_runtime.installer.subprocess.run", fail)
+    result = installer.ensure()
+    assert result["reason"] == "model_hub_engine_binary_not_runnable"
+    assert result["os_errno"] == code
 
 
 @pytest.mark.parametrize("stage", ["claim", "pointer", "existing_validation", "new_validation"])
@@ -200,7 +220,10 @@ async def test_failure_snapshot_survives_durable_notice_replay(tmp_path, deferre
 
 
 @pytest.mark.parametrize("role,visible", [("owner", True), ("member", True), ("editor", False), ("viewer", False)])
-def test_local_details_authorized_in_history_and_live_events(isolated_state, tmp_path, role, visible):
+@pytest.mark.parametrize("promoted", [False, True])
+def test_local_details_authorized_in_history_and_live_events(
+    isolated_state, tmp_path, monkeypatch, role, visible, promoted,
+):
     # React gating is not authorization. The persisted transcript and the actual
     # mirror publication must each be projected before reaching a chat-only reader.
     from core import message_mirror
@@ -213,11 +236,25 @@ def test_local_details_authorized_in_history_and_live_events(isolated_state, tmp
     scope_id, session_id = _make_session(tmp_path)
     context = AuthorizationContext(instance_role=role, is_remote=True)
     metadata = {"event": "backend_failure", "local_error_detail": "[Errno 28] No space left on device"}
-    with create_sqlite_engine().begin() as conn:
-        row = message_mirror._append_quietly(
-            conn, scope_id=scope_id, session_id=session_id, platform="avibe",
-            author="assistant", message_type="notify", text="gateway unavailable", metadata=metadata,
-        )
+    if promoted:
+        with create_sqlite_engine().begin() as conn:
+            messages_service.append(
+                conn, scope_id=scope_id, session_id=session_id, platform="avibe",
+                author="agent", message_type="notify", text="hidden failure",
+                native_message_id="local-failure", metadata={"delivery_suppressed": True},
+            )
+    published = []
+    monkeypatch.setattr(message_mirror, "_publish_session_message", published.append)
+    monkeypatch.setattr("core.web_push_notifications.maybe_notify_inbox_message", lambda *_args: None)
+    message_mirror.persist_agent_message(
+        MessageContext(
+            user_id="U1", channel_id="C1", platform="avibe",
+            platform_specific={"agent_session_id": session_id},
+        ),
+        "notify", "gateway unavailable", metadata=metadata, native_message_id="local-failure",
+    )
+    [row] = published
+    with create_sqlite_engine().connect() as conn:
         for window in ({}, {"tail": True}, {"around_id": row["id"]}):
             history = messages_service.list_session_messages(
                 conn, session_id=session_id, authorization_context=context, **window,
@@ -229,3 +266,68 @@ def test_local_details_authorized_in_history_and_live_events(isolated_state, tmp
         context, "message.new", json.dumps({"type": "message.new", "data": row}),
     )
     assert ("local_error_detail" in json.loads(payload)["data"]["metadata"]) is visible
+
+
+@pytest.mark.parametrize("stage", ["manifest_path", "manifest_cache", "manifest_package", "manifest_download", "archive"])
+@pytest.mark.parametrize("code", [errno.ENOSPC, errno.EMFILE])
+def test_installer_helper_failures_keep_only_the_current_errno(tmp_path, monkeypatch, stage, code):
+    # Helpers return sentinels before ensure builds its failure result. Exercise
+    # actual dependency wrappers and reads, not a fixture failure dictionary.
+    import urllib.error
+    from core import managed_runtime
+    from pathlib import Path
+    from tests.test_managed_runtime import _fixture_runtime_manager, _write_fixture_runtime_release
+
+    manifest = tmp_path / "unused.json"
+    _write_fixture_runtime_release(tmp_path, manifest, label="helper-errno", version="1.0.0")
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest)
+    failed_read = manifest
+    if stage in {"manifest_cache", "manifest_download"}:
+        manager.manifest_path = None
+        manager.manifest_url = manifest.as_uri()
+    if stage == "manifest_cache":
+        manager.offline = True
+        failed_read = manager._remote_manifest_cache_path()
+        failed_read.parent.mkdir(parents=True)
+        failed_read.write_bytes(manifest.read_bytes())
+    if stage == "manifest_package":
+        manager.manifest_path = None
+
+    read_bytes, open_path, urlopen = Path.read_bytes, Path.open, managed_runtime.urllib.request.urlopen
+
+    def fail():
+        raise OSError(code, "private reason", "/private/凭证")
+
+    def read(path):
+        if path == failed_read:
+            fail()
+        return read_bytes(path)
+
+    def open_file(path, *args, **kwargs):
+        if path.parent == manager.runtime_dir / "downloads" and path.suffix == ".tmp":
+            fail()
+        return open_path(path, *args, **kwargs)
+
+    def open_url(url, *args, **kwargs):
+        if url == manager.manifest_url:
+            raise urllib.error.URLError(OSError(code, "private reason", "/private/凭证"))
+        return urlopen(url, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        if stage == "manifest_package":
+            patch.setattr(managed_runtime.package_resources, "files", lambda _package: tmp_path)
+        if stage in {"manifest_path", "manifest_cache", "manifest_package"}:
+            patch.setattr(Path, "read_bytes", read)
+        elif stage == "manifest_download":
+            patch.setattr(managed_runtime.urllib.request, "urlopen", open_url)
+        else:
+            patch.setattr(Path, "open", open_file)
+        failed = manager.ensure()
+    assert not failed["ok"]
+    assert failed["os_errno"] == code
+    manager.manifest_path, manager.manifest_url, manager.offline = manifest, None, False
+    succeeded = manager.ensure()
+    assert succeeded["ok"] and "os_errno" not in succeeded
+    manifest.write_text("{}")
+    invalid = manager.ensure()
+    assert not invalid["ok"] and "os_errno" not in invalid

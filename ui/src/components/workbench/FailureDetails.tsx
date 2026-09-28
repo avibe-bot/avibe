@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
-import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
+import { isBackendFailureNotice, isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import type { TurnProvenance } from '../settings/models/types';
 import { ApiCallError } from '../settings/models/modelsApi';
 import { CopyButton } from '../ui/copy-button';
@@ -43,8 +43,10 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   // The record names Sources and routes, so it is Model Hub management data:
   // a chat-only role gets the notice and its retry, not a read bound to fail.
   const { capabilities } = useInstanceAuthorization();
-  const eligible = capabilities.can_manage_instance && isRetryableFailureNotice(message);
-  const turnId = typeof message.metadata?.turn_id === 'string' ? message.metadata.turn_id : '';
+  const eligible = capabilities.can_manage_instance && isBackendFailureNotice(message);
+  // A cross-Session replay may display its snapshot but cannot read another
+  // Session's Turn record or acquire Retry eligibility.
+  const turnId = isRetryableFailureNotice(message) ? message.metadata!.turn_id as string : '';
   const localErrorDetail = (
     typeof message.metadata?.local_error_detail === 'string' ? message.metadata.local_error_detail : ''
   ).trim() || detail?.record.terminal_error?.local_error_detail;
@@ -76,7 +78,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
     };
   }, [eligible, turnId]);
 
-  if (!eligible || !turnId || (!detail && !localErrorDetail)) return null;
+  if (!eligible || (!detail && !localErrorDetail)) return null;
 
   // Blockers carry the event-reason vocabulary (`cooldown`, `credential_expired`,
   // …); only a source detail arrives as a full i18n key.

@@ -461,6 +461,7 @@ def persist_agent_message(
                         text=text,
                         content=content,
                         metadata=metadata,
+                        include_local_error_detail=True,
                     )
                 # Recompute the session's inbox row so the realtime event can patch
                 # the browser without a refetch. avibe-only: the workbench inbox is

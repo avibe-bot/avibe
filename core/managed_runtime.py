@@ -31,6 +31,7 @@ from core.dependency_network import (
     probe_url,
     redact_url,
 )
+from core.os_errors import local_os_errno
 from storage.lock import (
     MigrationFileLock,
     MigrationLockTimeout,
@@ -156,6 +157,12 @@ class _ManagedRuntimeInstall:
     mtime: float
 
 
+@dataclass(frozen=True)
+class _ManagedRuntimeFailure:
+    reason: str | None
+    os_errno: int | None = None
+
+
 class ManagedRuntimeManager:
     """Shared manifest/download/verify/install core for managed runtimes."""
 
@@ -173,11 +180,24 @@ class ManagedRuntimeManager:
         self.manifest_path = Path(manifest_path).expanduser() if manifest_path else None
         self.manifest_url = manifest_url
         self.offline = offline
-        self._install_reason: str | None = None
+        self._install_failure = _ManagedRuntimeFailure(None)
         self._download_error: dict[str, Any] | None = None
         self._install_lock = install_lock_for(spec.runtime_id)
         self._install_file_lock_path = self.runtime_dir / ".install.lock"
         self._archive_provenance_path = self.runtime_dir / _ARCHIVE_PROVENANCE_FILENAME
+
+    @property
+    def _install_reason(self) -> str | None:
+        return self._install_failure.reason
+
+    @_install_reason.setter
+    def _install_reason(self, reason: str | None) -> None:
+        # Existing classification-only writers replace the complete failure.
+        # A new reason must never inherit an earlier operation's OS diagnostic.
+        self._install_failure = _ManagedRuntimeFailure(reason)
+
+    def _set_install_failure(self, reason: str, error: BaseException) -> None:
+        self._install_failure = _ManagedRuntimeFailure(reason, local_os_errno(error))
 
     def ensure(
         self,
@@ -1595,6 +1615,7 @@ class ManagedRuntimeManager:
         raise NotImplementedError
 
     def _binary_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
+        self._install_reason = None
         return self._binary_version(binary) == manifest.runtime_version
 
     def load_manifest_for_diagnostics(self) -> ManagedRuntimeManifest | None:
@@ -1611,6 +1632,7 @@ class ManagedRuntimeManager:
         allow_network: bool,
         persist_remote_cache: bool = True,
     ) -> ManagedRuntimeManifest | None:
+        self._install_reason = None
         payload: bytes
         loaded_from: str
         cache_remote = False
@@ -1620,8 +1642,8 @@ class ManagedRuntimeManager:
                 return None
             try:
                 payload = self.manifest_path.read_bytes()
-            except OSError:
-                self._install_reason = self._manifest_path_read_error_reason()
+            except OSError as exc:
+                self._set_install_failure(self._manifest_path_read_error_reason(), exc)
                 return None
             loaded_from = str(self.manifest_path)
         elif self.manifest_url:
@@ -1632,8 +1654,8 @@ class ManagedRuntimeManager:
                     return None
                 try:
                     payload = cached_manifest.read_bytes()
-                except OSError:
-                    self._install_reason = self._reason("manifest_unavailable_offline")
+                except OSError as exc:
+                    self._set_install_failure(self._reason("manifest_unavailable_offline"), exc)
                     return None
                 loaded_from = f"cache:{self.manifest_url}"
             else:
@@ -1649,7 +1671,7 @@ class ManagedRuntimeManager:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Failed to download %s manifest", self.spec.runtime_id)
-                    self._install_reason = self._reason("manifest_download_failed")
+                    self._set_install_failure(self._reason("manifest_download_failed"), exc)
                     self._download_error = dependency_error_details(exc, self.manifest_url)
                     return None
                 loaded_from = self.manifest_url
@@ -1657,15 +1679,16 @@ class ManagedRuntimeManager:
         else:
             try:
                 resource = package_resources.files(self.spec.package).joinpath(self.spec.manifest_resource)
-            except Exception:  # noqa: BLE001
-                resource = None
+            except Exception as exc:  # noqa: BLE001
+                self._set_install_failure(self._reason("manifest_missing"), exc)
+                return None
             if resource is None or not resource.is_file():
                 self._install_reason = self._reason("manifest_missing")
                 return None
             try:
                 payload = resource.read_bytes()
-            except OSError:
-                self._install_reason = self._reason("manifest_missing")
+            except OSError as exc:
+                self._set_install_failure(self._reason("manifest_missing"), exc)
                 return None
             loaded_from = f"package:{self.spec.manifest_resource}"
 
@@ -1779,6 +1802,7 @@ class ManagedRuntimeManager:
         return archive
 
     def _resolve_manifest_archive(self, archive: ManagedRuntimeArchive) -> Path | None:
+        self._install_reason = None
         cached = self.runtime_dir / "downloads" / self._archive_cache_name(archive)
         if cached.is_file() and self._downloaded_archive_matches(cached, archive):
             return cached
@@ -1809,7 +1833,7 @@ class ManagedRuntimeManager:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to download %s archive", self.spec.runtime_id)
             temporary.unlink(missing_ok=True)
-            self._install_reason = self._reason("archive_download_failed")
+            self._set_install_failure(self._reason("archive_download_failed"), exc)
             self._download_error = dependency_error_details(exc, archive.url)
             return None
 
@@ -1921,7 +1945,8 @@ class ManagedRuntimeManager:
         ):
             return None
         if not self._binary_matches_manifest(binary, manifest):
-            self._install_reason = self._reason("binary_not_runnable")
+            if self._install_reason != self._reason("binary_not_runnable"):
+                self._install_reason = self._reason("binary_not_runnable")
             return None
         return binary
 
@@ -2101,7 +2126,12 @@ class ManagedRuntimeManager:
         skipped: bool = False,
         error: Exception | None = None,
     ) -> dict[str, Any]:
-        self._install_reason = reason
+        failure = (
+            _ManagedRuntimeFailure(reason, local_os_errno(error))
+            if error is not None or self._install_failure.reason != reason
+            else self._install_failure
+        )
+        self._install_failure = failure
         return {
             "ok": False,
             "installed": False,
@@ -2118,7 +2148,7 @@ class ManagedRuntimeManager:
             "platform": archive.platform if archive else runtime_platform_tag(),
             "path": None,
             "download_error": self._download_error,
-            **({"os_errno": error.errno} if isinstance(error, OSError) and type(error.errno) is int else {}),
+            **({"os_errno": failure.os_errno} if failure.os_errno is not None else {}),
         }
 
     def _reason(self, suffix: str) -> str:

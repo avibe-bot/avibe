@@ -673,6 +673,7 @@ def get_native_message(
     platform: str,
     scope_id: str | None,
     native_message_id: str,
+    include_local_error_detail: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Load one accepted Message by its conversation-scoped native identity."""
 
@@ -692,7 +693,7 @@ def get_native_message(
         .where(messages.c.native_message_id == native_message_id)
         .limit(1)
     ).mappings().first()
-    return _row_to_payload(dict(row)) if row else None
+    return _row_to_payload(dict(row), include_local_error_detail=include_local_error_detail) if row else None
 
 
 def promote_suppressed_native_message(
@@ -706,6 +707,7 @@ def promote_suppressed_native_message(
     text: str,
     content: Optional[dict[str, Any]] = None,
     metadata: Optional[dict[str, Any]] = None,
+    include_local_error_detail: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Turn local-only history into a receipt after outward delivery succeeds.
 
@@ -756,6 +758,7 @@ def promote_suppressed_native_message(
         platform=platform,
         scope_id=scope_id,
         native_message_id=native_message_id,
+        include_local_error_detail=include_local_error_detail,
     )
 
 

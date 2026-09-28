@@ -8,6 +8,7 @@ import type { WorkbenchMessage } from '../../context/ApiContext';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
 import { DENIED_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import zh from '../../i18n/zh.json';
 import { ApiCallError, modelsApi } from '../settings/models/modelsApi';
 import type { TurnProvenance } from '../settings/models/types';
@@ -111,6 +112,23 @@ describe('failed-turn upstream details', () => {
     mount();
     fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
     expect(screen.getByText(diagnostic)).toBeTruthy();
+  });
+
+  it.each([null, 'original-turn'])('shows detached replay details without provenance or Retry (%s)', (turnId) => {
+    const read = vi.spyOn(modelsApi, 'getTurnProvenance');
+    const diagnostic = '[Errno 28] No space left on device';
+    const message = {
+      ...notice,
+      metadata: {
+        ...notice.metadata, turn_id: turnId, detached: true, replayed: true,
+        local_error_detail: diagnostic,
+      },
+    } as WorkbenchMessage;
+    mount(message);
+    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
+    expect(screen.getByText(diagnostic)).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+    expect(isRetryableFailureNotice(message)).toBe(false);
   });
 
   it('shares one Sources read across the notices of a transcript', async () => {

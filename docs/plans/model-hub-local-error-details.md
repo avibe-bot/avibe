@@ -37,6 +37,24 @@ Review regressions additionally cover real supervisor spawn failures, installer
 claim/pointer/candidate-validation failures, immediate/deferred durable replay,
 and manager versus chat-only history/live-event reads.
 
+## Boundary audit and scope decision
+
+The installer-loss class recurred on reviewed heads `11a2165ea` and `9b4b150dc`.
+Forwarding caught exceptions only at `_failure()` call sites is insufficient:
+manifest/archive helpers convert exceptions to a stored reason and a sentinel
+before the caller builds its failure result. Evolve that existing reason owner
+into a reason/errno pair, clear diagnostics whenever a reason is replaced, and
+preserve explicit causes through the shared OS-error extractor. Do not change
+download retries, cache fallback, or best-effort cleanup into terminal failures.
+Verify failed -> successful -> unrelated failed operations do not reuse errno.
+
+The other consumer boundaries are independent of retry permission and of how a
+message became visible. A management-authorized local snapshot can be expanded
+on a detached/cross-Session replay without a Turn read or Retry action. Normal
+append and suppressed-message promotion must both retain the internal snapshot
+until recipient projection. Reuse their existing projection option and the
+existing backend-failure identity check instead of creating another detail path.
+
 ## Known by design
 
 - Historical errors cannot acquire diagnostics that were discarded before this

@@ -41,6 +41,7 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.os_errors import local_error_detail
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
@@ -99,7 +100,7 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .errors import ModelDiscoveryError, local_error_detail
+from .errors import ModelDiscoveryError
 from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
 from .migration import (
     MigrationConflictError,
