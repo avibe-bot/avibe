@@ -189,6 +189,14 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
 - Agent work an OpenCode server runs inherits the stamp, so one of its
   programs whose argv ends with `serve --hostname=… --port=…` is taken for an
   OpenCode server.
+- Role classification guards against accidental collisions, not mimicry. An
+  agent process already runs with the user's full authority and could signal
+  the service itself, so a process deliberately shaped like a role is not a
+  boundary the scan defends. Every descendant of the service inherits every
+  variable it carries, so no inherited marker separates the service from its
+  agent tasks, and the service is known by its launch shape and the id alone:
+  a process carrying the id that runs a file ending in `vibe/service_main.py`
+  is stopped with the Runtime it belongs to.
 - An owner killed between creating its staging directory and writing its record
   leaves an almost empty staging directory that no record names.
 - `vibe stop` and a claim scan only for installer trees of their own Runtime

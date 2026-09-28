@@ -2824,6 +2824,15 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     Other programs carrying the id, such as agent CLIs and the tunnel
     connector, are reported and left running. With no role process carrying
     the id, a held service lock refuses the stop and nothing is signalled.
+
+    Role classification guards against accidental collisions, not mimicry.
+    An agent process already runs with the user's full authority and could
+    signal the service itself, so a process deliberately shaped like a role is
+    not a boundary this scan defends. Every descendant of the service inherits
+    every variable the service carries, so no inherited marker separates the
+    service from its agent tasks: the service is known by its launch shape and
+    the id alone. A process carrying the id that runs a file ending in
+    ``vibe/service_main.py`` is therefore stopped with the Runtime it belongs to.
     """
 
     from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
