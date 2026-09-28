@@ -128,22 +128,28 @@ async def _start_watch_service(service: ManagedWatchService) -> None:
         await startup_task
 
 
-async def _await_fused_watch(
+async def _await_backed_off_watch(
     service: ManagedWatchService,
     watch_id: str,
     timeout: float = 10.0,
 ) -> None:
-    """Wait for a watch to be fused instead of sleeping a fixed interval.
+    """Wait for a watch to back off instead of sleeping a fixed interval.
 
-    Fusing needs a real waiter subprocess to start and its result to reach the
-    raising store, so the wait covers a process spawn plus interpreter startup.
-    A fixed 0.12s was enough locally and not on a loaded CI runner, where the
-    assertion saw an empty fused set.
+    Backing off needs a real waiter subprocess to start and its result to reach
+    the raising store, so the wait covers a process spawn plus interpreter
+    startup. A fixed 0.12s was enough locally and not on a loaded CI runner.
     """
 
     deadline = time.monotonic() + timeout
-    while watch_id not in service._fused_watch_ids:
-        assert time.monotonic() < deadline, "watch was never fused after the store error"
+    while watch_id not in service._watch_store_retries:
+        assert time.monotonic() < deadline, "watch never backed off after the store error"
+        await asyncio.sleep(0.02)
+
+
+async def _await_condition(predicate, message: str, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, message
         await asyncio.sleep(0.02)
 
 
@@ -2366,66 +2372,104 @@ def test_managed_watch_service_forever_non_retry_error_disables_and_enqueues_fai
     assert pending[0].prompt.startswith("Investigate the failure.\n\nWatch 'Broken forever waiter' stopped because the waiter exited with code 1.")
 
 
-def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> None:
-    class FailingResultStore(ManagedWatchStore):
+def test_managed_watch_service_backs_off_one_watch_after_its_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store error stops one watch for a doubling backoff, not the whole service.
+
+    The watch sits out each backoff instead of restarting into the same error, and
+    runs again once the store accepts its cycle result. A watch created meanwhile
+    starts at once: a store error one watch saw says nothing about the others, and
+    a service-wide fuse left every Watch created after a brief disk-full episode
+    unstarted until the service restarted.
+    """
+
+    monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("core.watches.WATCH_STORE_RETRY_INITIAL_SECONDS", 0.2)
+
+    class FlakyResultStore(ManagedWatchStore):
         def __init__(self, path: Path):
             super().__init__(path)
-            self.starts = 0
+            self.starts: dict[str, list[float]] = {}
+            self.failures: dict[str, list[float]] = {}
+            self.failing: dict[str, int] = {}
 
         def mark_cycle_start(self, watch_id: str) -> bool:
-            self.starts += 1
+            self.starts.setdefault(watch_id, []).append(time.monotonic())
             return super().mark_cycle_start(watch_id)
 
-        def mark_cycle_result(self, *args, **kwargs) -> bool:
-            raise RuntimeError("database disk image is malformed")
+        def mark_cycle_result(self, watch_id: str, *args, **kwargs) -> bool:
+            if self.failing.get(watch_id, 0) > 0:
+                self.failing[watch_id] -= 1
+                self.failures.setdefault(watch_id, []).append(time.monotonic())
+                raise RuntimeError("unable to open database file")
+            return super().mark_cycle_result(watch_id, *args, **kwargs)
 
-    store = FailingResultStore(tmp_path / "watches.json")
-    request_store = TaskExecutionStore(tmp_path / "task_requests")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
-    watch = store.add_watch(
-        name="Broken persistence",
-        session_key="slack::channel::C123",
-        command=[sys.executable, "-c", "import sys; sys.exit(75)"],
-        shell_command=None,
-        prefix="Should not storm.",
-        cwd=None,
-        mode="forever",
-        timeout_seconds=5,
-        lifetime_timeout_seconds=0,
-        retry_exit_codes=[75],
-        retry_delay_seconds=0.01,
-        post_to=None,
-        deliver_key=None,
-    )
+    def add_retrying_watch(name: str) -> watches_module.ManagedWatch:
+        return store.add_watch(
+            name=name,
+            session_key="slack::channel::C123",
+            command=[sys.executable, "-c", "import sys; sys.exit(75)"],
+            shell_command=None,
+            prefix="Should not storm.",
+            cwd=None,
+            mode="forever",
+            timeout_seconds=5,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=0.01,
+            post_to=None,
+            deliver_key=None,
+        )
+
+    store = FlakyResultStore(tmp_path / "watches.json")
+    broken = add_retrying_watch("Broken persistence")
+    store.failing[broken.id] = 2
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
-        request_store=request_store,
-        runtime_store=runtime_store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await _await_fused_watch(service, watch.id)
-        # Settle briefly: a fused store must not let the cycle start again.
-        await asyncio.sleep(0.08)
+        await _await_backed_off_watch(service, broken.id)
+        created = add_retrying_watch("Created during the outage")
+        await _await_condition(
+            lambda: created.id in store.starts,
+            "a watch created after another watch's store error never started",
+        )
+        await _await_condition(
+            lambda: store.failing[broken.id] == 0 and broken.id not in service._watch_store_retries,
+            "the backed-off watch never committed a cycle after the store recovered",
+        )
         await service.stop()
 
     asyncio.run(_run())
 
-    assert store.starts == 1
-    assert service._store_error_fused is True
-    assert request_store.list_pending() == []
+    starts = store.starts[broken.id]
+    failures = store.failures[broken.id]
+    assert len(failures) == 2
+    assert len(starts) >= 3
+    assert starts[1] - failures[0] >= 0.2, "the watch restarted before its backoff elapsed"
+    assert starts[2] - failures[1] >= 0.4, "the second backoff did not double"
 
 
-def test_managed_watch_service_fuses_quiet_cycle_after_store_error(tmp_path: Path) -> None:
+def test_managed_watch_service_backs_off_quiet_cycle_after_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A quiet cycle commits through the same wrapper as every other result branch.
 
     Called synchronously, a raising ``mark_cycle_result`` escapes ``_run_cycle`` and
-    kills the watch task with the store unfused and the cycle unrecorded. Reconcile
-    then restarts the same quiet cycle and repeats it, so a real storage failure
-    never reaches the user as one.
+    kills the watch task with no backoff and the cycle unrecorded. Reconcile then
+    restarts the same quiet cycle and repeats it, so a real storage failure never
+    reaches the user as one.
     """
+
+    monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
 
     class FailingResultStore(ManagedWatchStore):
         def __init__(self, path: Path):
@@ -2466,57 +2510,84 @@ def test_managed_watch_service_fuses_quiet_cycle_after_store_error(tmp_path: Pat
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await _await_fused_watch(service, watch.id)
-        # Settle briefly: a fused store must not let the cycle start again.
+        await _await_backed_off_watch(service, watch.id)
+        # Settle across several reconcile ticks: the backoff must keep the quiet
+        # cycle from starting again.
         await asyncio.sleep(0.08)
         await service.stop()
 
     asyncio.run(_run())
 
-    assert store.starts == 1, "the fused store let the quiet cycle restart"
-    assert service._store_error_fused is True
+    assert store.starts == 1, "reconcile restarted the quiet cycle inside its backoff"
     # A quiet cycle authorises no hook, and a failed one must not invent it.
     assert request_store.list_pending() == []
 
 
-def test_managed_watch_service_fuses_reconcile_after_store_read_error(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+def test_managed_watch_service_resumes_reconcile_after_store_outage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The polling loop pauses on a store outage and resumes when the store heals.
 
-    class FailingListStore(ManagedWatchStore):
+    A pause quiets the logs; it must not stop the probing. Before the fix the
+    loop stopped reading after three errors, so a watch the store listed again
+    once the outage ended never started until the service restarted.
+    """
+
+    monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+    outage_reads = watches_module.WATCH_STORE_RECONCILE_PAUSE_FAILURES + 3
+
+    class OutageListStore(ManagedWatchStore):
         def __init__(self, path: Path):
             super().__init__(path)
-            self.calls = 0
+            self.failures_remaining = outage_reads
 
         def list_watches(self):
-            self.calls += 1
-            raise RuntimeError("database disk image is malformed")
+            if self.failures_remaining > 0:
+                self.failures_remaining -= 1
+                raise RuntimeError("unable to open database file")
+            return super().list_watches()
 
-    store = FailingListStore(tmp_path / "watches.json")
-    request_store = TaskExecutionStore(tmp_path / "task_requests")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = OutageListStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="Waiting out the outage",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        shell_command=None,
+        prefix="Done.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=60,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
-        request_store=request_store,
-        runtime_store=runtime_store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
 
     async def _run() -> None:
-        service._running = True
-        task = asyncio.create_task(service._watch_store())
-        await asyncio.sleep(0.05)
-        service._running = False
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        await _start_watch_service(service)
+        await _await_condition(
+            lambda: watch.id in service._active_tasks,
+            "the watch never started after the store outage ended",
+        )
+        await service.stop()
 
-    asyncio.run(_run())
+    with caplog.at_level(logging.INFO, logger="core.watches"):
+        asyncio.run(_run())
 
-    assert service._store_error_fused is True
-    assert store.calls == 3
-    assert service._active_tasks == {}
+    assert store.failures_remaining == 0
+    assert service._store_reconcile_failures == 0
+    pauses = [record for record in caplog.records if "Pausing managed watch reconciliation" in record.message]
+    assert len(pauses) == 1, "the pause must be reported once, not per probe"
+    assert any("reconciliation resumed" in record.message for record in caplog.records)
 
 
 def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: Path, monkeypatch) -> None:
@@ -3387,7 +3458,6 @@ def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
             "unblocked": (),
             "watches": (),
             "store_error": None,
-            "fused": False,
         },
         rearm_after_process=False,
     )
@@ -3419,7 +3489,6 @@ def test_hfr_179_pending_watch_recovery_uses_watch_lane_cadence(
             "unblocked": (),
             "watches": (),
             "store_error": None,
-            "fused": False,
         },
         rearm_after_process=False,
     )
@@ -3429,10 +3498,20 @@ def test_hfr_179_pending_watch_recovery_uses_watch_lane_cadence(
     assert delayed == [(token, watches_module.WATCH_RECONCILE_INTERVAL_SECONDS)]
 
 
-def test_hfr_179_watch_store_fuse_stops_generation_reads_and_retries(
+def test_hfr_179_paused_watch_store_keeps_probing_and_resumes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """A store outage pauses the watch lane; it must not end it.
+
+    Consecutive read errors pause reconciliation: the lane drops its fast retry
+    and reports the pause once. Every later scan still probes the store, so the
+    lane reconciles again on the first clean read. The old one-way fuse stopped
+    reading for good, and Watches created after a brief "unable to open database
+    file" episode never started until the service restarted.
+    """
+
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=ManagedWatchStore(tmp_path / "watches.json"),
@@ -3441,52 +3520,69 @@ def test_hfr_179_watch_store_fuse_stops_generation_reads_and_retries(
     )
     service._recovery_pending = False
     service._runtime_state_dirty = False
+    watch = service.store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    healthy = False
     reads = 0
+    reload = service.store.maybe_reload
 
-    def fail_read() -> bool:
+    def flaky_read() -> bool:
         nonlocal reads
         reads += 1
-        raise OSError("watch store unavailable")
+        if not healthy:
+            raise OSError("unable to open database file")
+        return reload()
 
-    monkeypatch.setattr(service.store, "maybe_reload", fail_read)
+    reconciled: list[list[str]] = []
+
+    def record_reconcile(watches) -> bool:
+        reconciled.append([item.id for item in watches])
+        return False
+
+    persisted = 0
+
+    async def persist_runtime_state() -> None:
+        nonlocal persisted
+        persisted += 1
+        service._runtime_state_dirty = False
+
+    monkeypatch.setattr(service.store, "maybe_reload", flaky_read)
+    monkeypatch.setattr(service, "reconcile_watches", record_reconcile)
+    monkeypatch.setattr(service, "_persist_runtime_state", persist_runtime_state)
     handler = _ManagedWatchRuntimeWorkHandler(service)
+    pause_after = watches_module.WATCH_STORE_RECONCILE_PAUSE_FAILURES
 
-    async def _run() -> None:
-        outcomes = []
-        for _ in range(watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES):
-            items, _has_more = await asyncio.to_thread(
-                handler.scan,
-                limit=1,
-                occupied=frozenset(),
-                cursor=None,
-            )
-            outcomes.append(await handler.process(items[0]))
-
-        assert outcomes[:-1] == [False] * (len(outcomes) - 1)
-        assert outcomes[-1] is True
-        assert service._store_error_fused is True
-        assert reads == watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES
-
-        persisted = 0
-
-        async def persist_runtime_state() -> None:
-            nonlocal persisted
-            persisted += 1
-            service._runtime_state_dirty = False
-
-        monkeypatch.setattr(service, "_persist_runtime_state", persist_runtime_state)
-        service._runtime_state_dirty = True
+    async def scan_and_process() -> bool:
         items, _has_more = await asyncio.to_thread(
             handler.scan,
             limit=1,
             occupied=frozenset(),
             cursor=None,
         )
-        assert await handler.process(items[0]) is True
-        assert reads == watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES
-        assert persisted == 1
+        return await handler.process(items[0])
 
-    asyncio.run(_run())
+    async def _run() -> None:
+        nonlocal healthy
+        outcomes = [await scan_and_process() for _ in range(pause_after)]
+        # ``False`` asks the supervisor for a fast retry; the pause stops asking.
+        assert outcomes == [False] * (pause_after - 1) + [True]
+
+        service._runtime_state_dirty = True
+        assert await scan_and_process() is True, "a paused lane must not fast-retry"
+        assert reads == pause_after + 1, "the paused lane stopped probing the store"
+        assert persisted == 1, "runtime state must still persist while paused"
+        assert reconciled == []
+
+        healthy = True
+        assert await scan_and_process() is True
+        assert reconciled == [[watch.id]], "the lane did not resume once the store read cleanly"
+        assert service._store_reconcile_failures == 0
+
+    with caplog.at_level(logging.DEBUG, logger="core.watches"):
+        asyncio.run(_run())
+
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "Pausing managed watch reconciliation" in errors[0].message
+    assert any("reconciliation resumed" in record.message for record in caplog.records)
 
 
 def test_watch_runtime_state_persistence_failure_rearms_maintenance(
@@ -3892,7 +3988,6 @@ def test_managed_watch_service_retries_transient_reconcile_errors(tmp_path: Path
 
     asyncio.run(_run())
 
-    assert service._store_error_fused is False
     assert service._store_reconcile_failures == 0
 
 
@@ -3913,7 +4008,6 @@ def test_managed_watch_service_start_retries_initial_reconcile_error(tmp_path: P
 
     async def _run() -> None:
         await _start_watch_service(service)
-        assert service._store_error_fused is False
         assert 1 <= service._store_reconcile_failures < 3
         await service.stop()
 
@@ -5376,3 +5470,49 @@ def test_managed_watch_service_names_the_watch_in_the_cycle_environment(tmp_path
     asyncio.run(_run())
 
     assert echoed.read_text(encoding="utf-8") == watch.id
+
+
+def test_a_watch_committed_before_a_failed_reload_is_not_lost_with_the_probe() -> None:
+    """The commit a failed reload consumed must still reach the mirror.
+
+    ``PRAGMA data_version`` reports another connection's commit once. When the
+    reload it triggers fails -- as every read does while the disk is full -- a
+    later probe no longer sees that commit, so a watch created during the outage
+    stayed enabled in SQLite and invisible to reconcile until an unrelated commit
+    or a restart. Nothing commits between the failure and the recovery below, so
+    the mirror can only heal because the store remembered it must reload.
+    """
+    from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the SQLite probe"
+    store.maybe_reload()
+    assert store.maybe_reload() is False, "the store's probe is not settled"
+
+    created = ManagedWatchStore().add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    witness_engine = create_sqlite_engine(store._sqlite.db_path)
+    witness = SqliteInvalidationProbe(witness_engine)
+    witness.has_external_write()
+    assert witness.has_external_write() is False, "the witness probe is not settled"
+
+    fault = _fail_the_definition_write_and_the_reload(store._sqlite.engine)
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+            store.maybe_reload()
+        assert fault["reads"] >= 1, "the probe did not report the commit, so no reload failed"
+        assert store.get_watch(created.id) is None, "the mirror already holds the new watch"
+
+        fault["live"] = False
+        assert witness.has_external_write() is False, (
+            "something COMMITTED after the failed reload; a data_version bump heals "
+            "the mirror on its own, so this test would pass without the fix"
+        )
+        assert store.maybe_reload() is True, (
+            "the failed reload consumed the only change signal, so the watch created "
+            "during the outage stays invisible to reconcile"
+        )
+        assert [item.id for item in store.list_watches()] == [created.id]
+        assert store.maybe_reload() is False, "the repairing reload must clear the flag"
+    finally:
+        witness.close()
+        witness_engine.dispose()

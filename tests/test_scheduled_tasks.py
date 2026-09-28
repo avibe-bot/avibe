@@ -16496,6 +16496,52 @@ def test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it() ->
     )
 
 
+def test_a_task_committed_before_a_failed_reload_is_not_lost_with_the_probe() -> None:
+    """The commit a failed reload consumed must still reach the mirror.
+
+    The watch store's twin. ``PRAGMA data_version`` reports another connection's
+    commit once. When the reload it triggers fails -- as every read does while the
+    disk is full -- a later probe no longer sees that commit, so a task created
+    during the outage stayed enabled in SQLite and unscheduled until an unrelated
+    commit or a restart. Nothing commits between the failure and the recovery
+    below, so the mirror can only heal because the store remembered to reload.
+    """
+    from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the SQLite probe"
+    store.maybe_reload()
+    assert store.maybe_reload() is False, "the store's probe is not settled"
+
+    created = ScheduledTaskStore().add_task(**_TASK_FIXTURE_PAYLOAD)
+    witness_engine = create_sqlite_engine(store._sqlite.db_path)
+    witness = SqliteInvalidationProbe(witness_engine)
+    witness.has_external_write()
+    assert witness.has_external_write() is False, "the witness probe is not settled"
+
+    fault = _fail_the_definition_write_and_the_reload(store._sqlite.engine)
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+            store.maybe_reload()
+        assert fault["reads"] >= 1, "the probe did not report the commit, so no reload failed"
+        assert store.get_task(created.id) is None, "the mirror already holds the new task"
+
+        fault["live"] = False
+        assert witness.has_external_write() is False, (
+            "something COMMITTED after the failed reload; a data_version bump heals "
+            "the mirror on its own, so this test would pass without the fix"
+        )
+        assert store.maybe_reload() is True, (
+            "the failed reload consumed the only change signal, so the task created "
+            "during the outage is never scheduled"
+        )
+        assert [item.id for item in store.list_tasks()] == [created.id]
+        assert store.maybe_reload() is False, "the repairing reload must clear the flag"
+    finally:
+        witness.close()
+        witness_engine.dispose()
+
+
 # --- Command tasks: a definition that runs a subprocess instead of an Agent turn ---
 
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -118,7 +119,15 @@ FOLLOW_UP_SLOT_READY = "ready"
 FOLLOW_UP_SLOT_STOPPED = "stopped"
 FOLLOW_UP_SLOT_LIFETIME_EXPIRED = "lifetime_expired"
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
-WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
+#: Consecutive reconcile store errors that pause reconciliation. A paused lane
+#: stops its fast retries and probes the store once per regular scan instead,
+#: resuming on the first scan that reconciles cleanly.
+WATCH_STORE_RECONCILE_PAUSE_FAILURES = 3
+#: Backoff for one watch whose own store call raised: the watch sits out this
+#: long before reconcile restarts it, doubling per consecutive failure. A cycle
+#: result that commits proves its store path again and clears the backoff.
+WATCH_STORE_RETRY_INITIAL_SECONDS = 30.0
+WATCH_STORE_RETRY_MAX_SECONDS = 600.0
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
 
 
@@ -383,6 +392,10 @@ class ManagedWatchStore:
         SQLite anyway, so there is nothing for it to survive. Making it durable would
         also mean writing to the database that was just proven unwritable. Only ``load``
         clears it, so a reload that fails again is retried on every later tick.
+
+        A reload that fails after the probe reported a commit sets the same flag: the
+        probe has consumed that commit, and without the flag a definition created
+        during a store outage stays invisible until some unrelated commit.
         """
 
         with self._mirror_lock:
@@ -395,13 +408,17 @@ class ManagedWatchStore:
                         # Still unreachable. Keep the flag and the incomplete mirror, and
                         # report "nothing changed" -- the retry is the next tick's.
                         logger.exception(
-                            "Could not reload managed watches after a lost write; the live "
-                            "store stays incomplete until a later attempt succeeds"
+                            "Could not reload managed watches; the live store stays "
+                            "stale until a later attempt succeeds"
                         )
                         return False
                     return True
                 if changed:
-                    self.load()
+                    try:
+                        self.load()
+                    except Exception:
+                        self._reload_required = True
+                        raise
                 return changed
             signature = _path_signature(self.path)
             if signature == self._signature and not self._reload_required:
@@ -1074,8 +1091,7 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
             )
             watches: tuple[ManagedWatch, ...] = ()
             store_error: Exception | None = None
-            fused = self.service._store_error_fused
-            if recovery.recovered and not fused:
+            if recovery.recovered:
                 try:
                     self.service.store.maybe_reload()
                     watches = tuple(
@@ -1092,7 +1108,6 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                     "unblocked": unblocked,
                     "watches": watches,
                     "store_error": store_error,
-                    "fused": fused,
                 },
                 rearm_after_process=False,
             )
@@ -1116,29 +1131,29 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
         if observation["unblocked"]:
             self.service._runtime_state_dirty = True
         store_error = observation.get("store_error")
+        if store_error is None:
+            try:
+                # Another shared-store reader may have consumed maybe_reload's change
+                # result. Reconcile the snapshot, not which reader refreshed it; the
+                # active-task map already makes unchanged reconciliation idempotent.
+                if self.service.reconcile_watches(observation["watches"]):
+                    self.service._runtime_state_dirty = True
+            except Exception as exc:
+                store_error = exc
         if store_error is not None:
-            self.service._handle_reconcile_store_error(store_error)
-            return self.service._store_error_fused
-        if observation.get("fused") or self.service._store_error_fused:
+            if not self.service._handle_reconcile_store_error(store_error):
+                return False
+            # Paused: skip the fast retry. The next regular scan probes the store
+            # again and resumes reconciliation once it reads cleanly.
             if self.service._runtime_state_dirty:
                 await self.service._persist_runtime_state()
-                return not self.service._runtime_state_dirty
             return True
-        try:
-            # Another shared-store reader may have consumed maybe_reload's change
-            # result. Reconcile the snapshot, not which reader refreshed it; the
-            # active-task map already makes unchanged reconciliation idempotent.
-            if self.service.reconcile_watches(observation["watches"]):
-                self.service._runtime_state_dirty = True
+        self.service._note_store_reconcile_ok()
+        if self.service._runtime_state_dirty:
+            await self.service._persist_runtime_state()
             if self.service._runtime_state_dirty:
-                await self.service._persist_runtime_state()
-                if self.service._runtime_state_dirty:
-                    return False
-            self.service._store_reconcile_failures = 0
-            return True
-        except Exception as exc:
-            self.service._handle_reconcile_store_error(exc)
-            return self.service._store_error_fused
+                return False
+        return True
 
 
 class ManagedWatchService:
@@ -1161,10 +1176,11 @@ class ManagedWatchService:
         self._active_pids: dict[str, int] = {}
         self._active_process_identities: dict[str, PersistedProcessIdentity] = {}
         self._watch_started_at: dict[str, str] = {}
-        self._fused_watch_ids: set[str] = set()
+        #: watch_id -> (backoff seconds, monotonic retry deadline) after that
+        #: watch's own store call raised.
+        self._watch_store_retries: dict[str, tuple[float, float]] = {}
         self._recovery_blocked_watch_ids: set[str] = set()
         self._unreaped_runtime_entries: dict[str, dict[str, Any]] = {}
-        self._store_error_fused = False
         self._store_reconcile_failures = 0
         self._recovery_pending = True
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
@@ -1608,9 +1624,6 @@ class ManagedWatchService:
                     continue
                 self._recovery_pending = False
                 self._runtime_state_dirty = True
-            if self._store_error_fused:
-                await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
-                continue
             try:
                 if self._recovery_blocked_watch_ids:
                     blocked = {
@@ -1631,7 +1644,7 @@ class ManagedWatchService:
                     self._runtime_state_dirty = True
                 if self._runtime_state_dirty:
                     self._write_runtime_state()
-                self._store_reconcile_failures = 0
+                self._note_store_reconcile_ok()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1644,18 +1657,21 @@ class ManagedWatchService:
     ) -> bool:
         if not self._owns_service_instance():
             return False
-        if self._store_error_fused:
-            return False
         watches = self.store.list_watches() if watches is None else watches
         desired_ids = {watch.id for watch in watches if watch.enabled}
+        for watch_id in self._watch_store_retries.keys() - desired_ids:
+            del self._watch_store_retries[watch_id]
         changed = False
         for watch in watches:
             if (
                 not watch.enabled
                 or watch.id in self._active_tasks
-                or watch.id in self._fused_watch_ids
                 or watch.id in self._recovery_blocked_watch_ids
             ):
+                continue
+            retry_in = self._watch_store_retry_in(watch.id)
+            if retry_in > 0:
+                self._schedule_runtime_work_wake(retry_in)
                 continue
             task = asyncio.create_task(self._run_watch(watch.id))
             self._active_tasks[watch.id] = task
@@ -1749,38 +1765,74 @@ class ManagedWatchService:
             self._runtime_state_dirty = True
             logger.exception("Failed to persist watch runtime state")
 
-    def _fuse_store_after_error(self, operation: str, exc: Exception, *, watch_id: str | None = None) -> None:
-        if watch_id is not None:
-            self._fused_watch_ids.add(watch_id)
-        self._store_error_fused = True
+    def _back_off_watch_after_store_error(self, operation: str, exc: Exception, *, watch_id: str) -> None:
+        """Keep one watch out of reconcile after its own store call raised.
+
+        Only this watch backs off: a store error seen by one watch says nothing
+        about the definitions reconcile has yet to start.
+        """
+
+        previous = self._watch_store_retries.get(watch_id)
+        delay = (
+            WATCH_STORE_RETRY_INITIAL_SECONDS
+            if previous is None
+            else min(previous[0] * 2, WATCH_STORE_RETRY_MAX_SECONDS)
+        )
+        self._watch_store_retries[watch_id] = (delay, time.monotonic() + delay)
         logger.error(
-            "Disabling watch store reconciliation after persistent store error "
-            "(watch_id=%s operation=%s): %s",
+            "Watch %s stopped after a store error (operation=%s); retrying in %.0fs: %s",
             watch_id,
             operation,
+            delay,
             exc,
             exc_info=True,
         )
 
-    def _handle_reconcile_store_error(self, exc: Exception) -> None:
+    def _watch_store_retry_in(self, watch_id: str) -> float:
+        retry = self._watch_store_retries.get(watch_id)
+        if retry is None:
+            return 0.0
+        return max(0.0, retry[1] - time.monotonic())
+
+    def _handle_reconcile_store_error(self, exc: Exception) -> bool:
+        """Count one reconcile store error; ``True`` means reconciliation is paused."""
+
         self._store_reconcile_failures += 1
-        if self._store_reconcile_failures >= WATCH_STORE_RECONCILE_FUSE_FAILURES:
-            self._fuse_store_after_error("reconcile", exc)
-            return
-        logger.warning(
-            "Managed watch reconcile failed; will retry "
-            "(attempt=%s/%s): %s",
-            self._store_reconcile_failures,
-            WATCH_STORE_RECONCILE_FUSE_FAILURES,
-            exc,
-            exc_info=True,
-        )
+        failures = self._store_reconcile_failures
+        if failures < WATCH_STORE_RECONCILE_PAUSE_FAILURES:
+            logger.warning(
+                "Managed watch reconcile failed; will retry (attempt=%s/%s): %s",
+                failures,
+                WATCH_STORE_RECONCILE_PAUSE_FAILURES,
+                exc,
+                exc_info=True,
+            )
+        elif failures == WATCH_STORE_RECONCILE_PAUSE_FAILURES:
+            logger.error(
+                "Pausing managed watch reconciliation after %s consecutive store errors; "
+                "probing the store on each regular scan until it recovers: %s",
+                failures,
+                exc,
+                exc_info=True,
+            )
+        else:
+            logger.debug("Managed watch store still unavailable (attempt=%s): %s", failures, exc)
+        return failures >= WATCH_STORE_RECONCILE_PAUSE_FAILURES
+
+    def _note_store_reconcile_ok(self) -> None:
+        if self._store_reconcile_failures >= WATCH_STORE_RECONCILE_PAUSE_FAILURES:
+            logger.info(
+                "Managed watch store recovered after %s failed reconcile attempts; "
+                "reconciliation resumed",
+                self._store_reconcile_failures,
+            )
+        self._store_reconcile_failures = 0
 
     def _watch_store_call(self, watch_id: str, operation: str, callback, *, guarded: bool = False) -> bool:
         """Run a store call for ``watch_id``; ``False`` means "do not proceed".
 
         TWO ways a store call can fail to happen, and the supervisor has to stop for
-        BOTH. An exception fuses the store, as before. ``guarded=True`` says the
+        BOTH. An exception backs the watch off, as before. ``guarded=True`` says the
         callback's OWN return value is the answer as well: ``mark_cycle_start`` and
         ``mark_cycle_result`` are compare-and-set writes (HFR-261) that return
         ``False`` when a ``/new`` reclaim or an archive committed after the payload
@@ -1798,8 +1850,8 @@ class ManagedWatchService:
             result = callback()
         if guarded and result is False:
             # NOT a store error: the row is fine, this write simply lost to a
-            # concurrent lifecycle change. Fusing would disable reconciliation for a
-            # healthy database, so the watch is stopped and the store left alone.
+            # concurrent lifecycle change. Backing off would restart a watch whose
+            # row has been torn down, so the watch is simply stopped.
             logger.warning(
                 "Watch %s stopping: the store refused %s because a guarded lifecycle "
                 "or follow-up admission prerequisite changed",
@@ -1826,7 +1878,7 @@ class ManagedWatchService:
                 guarded=guarded,
             )
         except Exception as exc:
-            self._fuse_store_after_error(operation, exc, watch_id=watch_id)
+            self._back_off_watch_after_store_error(operation, exc, watch_id=watch_id)
             return False
 
     def _current_asyncio_task(self) -> Optional["asyncio.Task[Any]"]:
@@ -1957,18 +2009,21 @@ class ManagedWatchService:
         result: _CycleResult,
     ) -> bool:
         try:
-            return await self._run_runtime_sync(
+            committed = await self._run_runtime_sync(
                 self._commit_success_cycle,
                 watch,
                 result,
             )
         except Exception as exc:
-            self._fuse_store_after_error(
+            self._back_off_watch_after_store_error(
                 "commit successful watch cycle",
                 exc,
                 watch_id=watch.id,
             )
             return False
+        if committed:
+            self._watch_store_retries.pop(watch.id, None)
+        return committed
 
     async def _wait_for_follow_up_slot(
         self,
@@ -2003,7 +2058,7 @@ class ManagedWatchService:
                     watch_id,
                 )
             except Exception as exc:
-                self._fuse_store_after_error(
+                self._back_off_watch_after_store_error(
                     "read follow-up fence",
                     exc,
                     watch_id=watch_id,
@@ -2030,7 +2085,7 @@ class ManagedWatchService:
             try:
                 run = await self._run_runtime_sync(self.request_store.get_run, run_id)
             except Exception as exc:
-                self._fuse_store_after_error(
+                self._back_off_watch_after_store_error(
                     "read previous follow-up",
                     exc,
                     watch_id=watch_id,
@@ -2138,7 +2193,7 @@ class ManagedWatchService:
         while self._running:
             if not self._owns_service_instance():
                 return
-            if watch_id in self._fused_watch_ids:
+            if self._watch_store_retry_in(watch_id) > 0:
                 return
             if not await self._watch_store_call_async(
                 watch_id,
@@ -2270,7 +2325,7 @@ class ManagedWatchService:
                 # so ``vibe watch show`` can say the cycle ran and found nothing.
                 #
                 # Through the async wrapper like every other result branch: a store
-                # failure here must fuse the store and stop the watch, not escape
+                # failure here must back the watch off and stop it, not escape
                 # ``_run_cycle`` and kill the task silently -- reconcile would restart
                 # the same quiet cycle and hide the storage problem instead of
                 # surfacing it.
@@ -2584,18 +2639,21 @@ class ManagedWatchService:
         **kwargs: Any,
     ) -> bool:
         try:
-            return await self._run_runtime_sync(
+            committed = await self._run_runtime_sync(
                 self._commit_cycle_result,
                 watch,
                 **kwargs,
             )
         except Exception as exc:
-            self._fuse_store_after_error(
+            self._back_off_watch_after_store_error(
                 "mark_cycle_result",
                 exc,
                 watch_id=watch.id,
             )
             return False
+        if committed:
+            self._watch_store_retries.pop(watch.id, None)
+        return committed
 
     def _stop_watch_for_missing_cwd(self, watch: ManagedWatch, *, error_text: str) -> None:
         watch_label = watch.name or watch.id
@@ -2624,7 +2682,7 @@ class ManagedWatchService:
                 error_text=error_text,
             )
         except Exception as exc:
-            self._fuse_store_after_error(
+            self._back_off_watch_after_store_error(
                 "mark_cycle_result",
                 exc,
                 watch_id=watch.id,

@@ -1344,6 +1344,10 @@ class ScheduledTaskStore:
         it durable would mean writing to the very database that was just proven
         unwritable. It is cleared only by the reload that repairs the mirror (``load``),
         so a reload that fails again keeps retrying on every later tick.
+
+        A reload that fails after the probe reported a commit sets the same flag: the
+        probe has consumed that commit, and without the flag a task created during a
+        store outage stays invisible until some unrelated commit.
         """
 
         with self._reload_lock:
@@ -1365,7 +1369,11 @@ class ScheduledTaskStore:
                     return False
                 return True
             if changed:
-                self.load()
+                try:
+                    self.load()
+                except Exception:
+                    self._reload_required = True
+                    raise
             return changed
         signature = _path_signature(self.path)
         if signature == self._signature and not self._reload_required:
