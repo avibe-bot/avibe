@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
 type Operation = 'idle' | 'upgrading' | 'restarting';
-type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'broken' | 'error' | 'loading';
+type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'error' | 'loading';
 
 export type BackendLifecycleVisual = Visual;
 type BadgeVariant = 'secondary' | 'success' | 'info' | 'warning' | 'destructive';
@@ -34,9 +34,9 @@ interface BackendLifecycleChipProps {
   name: string;
   enabled: boolean;
   cliStatus: CliStatus;
-  /** The executable ``cliStatus`` was detected at. The runtime probe reads the
-      saved configuration, so its verdict on whether the CLI can start describes
-      this executable only when it resolved to the same path. */
+  /** The executable ``cliStatus`` was detected at. A failed upgrade describes
+      the executable it ran against, so its explanation retires once the host
+      detects a different one. */
   cliPath: string;
   /** Setup describes executable availability separately from connection readiness. */
   readyLabel?: string;
@@ -71,7 +71,6 @@ const BADGE_VARIANT: Record<Visual, BadgeVariant> = {
   ready: 'success',
   updating: 'info',
   update: 'warning',
-  broken: 'destructive',
   error: 'destructive',
 };
 
@@ -80,7 +79,6 @@ const DOT_STYLES: Record<Visual, string> = {
   ready: 'bg-mint',
   updating: 'bg-cyan animate-pulse',
   update: 'bg-gold animate-pulse',
-  broken: 'bg-destructive',
   error: 'bg-destructive',
   loading: 'bg-muted/60',
 };
@@ -88,7 +86,6 @@ const DOT_STYLES: Record<Visual, string> = {
 const deriveVisual = (
   enabled: boolean,
   cliStatus: CliStatus,
-  cliPath: string,
   runtime: BackendRuntimeInfo | null,
   operation: Operation,
   confirming: boolean,
@@ -108,11 +105,6 @@ const deriveVisual = (
   // it back, just as the chip's own upgrade stays in progress through its probe;
   // until then the runtime still describes the CLI from before the change.
   if (confirming) return 'updating';
-  // Detection only finds the file; the runtime probe is what runs it. A CLI an
-  // interrupted upgrade left without its platform package is on disk but exits
-  // before printing a version, and a reinstall is what repairs it. The verdict
-  // belongs to the executable the probe ran, which a detected draft may not be.
-  if (runtime?.runnable === false && runtime.resolved_path === cliPath) return 'broken';
   // ``opencode serve`` and ``codex app-server`` are lazy-spawn daemons: they
   // stay stopped until a session needs them, so ``process_status === 'stopped'``
   // is the normal idle state, not an error. Restart still works on demand
@@ -152,9 +144,14 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   const [runtimeLoading, setRuntimeLoading] = React.useState(false);
   const [operation, setOperation] = React.useState<Operation>('idle');
   // The last upgrade's failure stays in the popover until the next attempt, so
-  // the reason outlives the toast that announced it. It is tied to the host's
-  // refresh generation: an upgrade the host applied itself supersedes it.
-  const [failure, setFailure] = React.useState<{ result: InstallOutcomeResult; refreshKey?: number } | null>(null);
+  // the reason outlives the toast that announced it. It is tied to what it
+  // describes: the executable it ran against, and the host's refresh generation,
+  // so a different CLI or an upgrade the host applied itself supersedes it.
+  const [failure, setFailure] = React.useState<{
+    result: InstallOutcomeResult;
+    cliPath: string;
+    refreshKey?: number;
+  } | null>(null);
   const popupRef = React.useRef<HTMLDivElement>(null);
   const isMountedRef = React.useRef(true);
   // Monotonic token guards against stale async writes when toggle/detect
@@ -226,9 +223,12 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   // The effect above probes whenever the host refreshes an enabled, detected CLI.
   const confirming = enabled && cliStatus === 'ok' && probedKey !== refreshKey;
-  const visual = deriveVisual(enabled, cliStatus, cliPath, runtime, operation, confirming);
+  const visual = deriveVisual(enabled, cliStatus, runtime, operation, confirming);
   const busy = runtimeLoading || operation !== 'idle' || externallyBusy;
-  const shownFailure = failure && failure.refreshKey === refreshKey && visual !== 'disabled' ? failure.result : null;
+  const shownFailure =
+    failure && failure.cliPath === cliPath && failure.refreshKey === refreshKey && visual !== 'disabled'
+      ? failure.result
+      : null;
 
   React.useEffect(() => {
     onVisual?.(visual);
@@ -247,14 +247,16 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
           installedPath = typeof result.path === 'string' && result.path ? result.path : null;
         } else {
           const message = result.message || t('backendLifecycle.upgradeFailed');
-          if (isMountedRef.current) setFailure({ result: { ...result, message }, refreshKey });
+          if (isMountedRef.current) setFailure({ result: { ...result, message }, cliPath, refreshKey });
           showToast(message, 'error');
         }
       } catch (e) {
-        if (isMountedRef.current) setFailure({ result: { ok: false, message: String(e), output: null }, refreshKey });
+        if (isMountedRef.current) {
+          setFailure({ result: { ok: false, message: String(e), output: null }, cliPath, refreshKey });
+        }
         showToast(String(e), 'error');
       }
-      // Failed or not, the attempt may have replaced, broken or removed the CLI.
+      // Failed or not, the attempt may have replaced or removed the CLI.
       // The probe reads what it left, and the host re-detects the file its
       // status describes, or a CLI the attempt removed goes on reading as ready.
       await loadRuntime();
@@ -293,8 +295,6 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         return t('backendLifecycle.statusUpdating');
       case 'update':
         return t('backendLifecycle.statusUpdateAvailable');
-      case 'broken':
-        return t('backendLifecycle.statusBroken');
       case 'error':
         return t('backendLifecycle.statusError');
       case 'loading':
@@ -372,13 +372,13 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
                   {t('backendLifecycle.upgradeNow')}
                 </Button>
               )}
-              {(visual === 'error' || visual === 'broken') && (
+              {visual === 'error' && (
                 <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={busy}>
                   <Download size={14} />
                   {t('backendLifecycle.reinstall')}
                 </Button>
               )}
-              {visual !== 'update' && visual !== 'broken' && cliStatus === 'ok' && runtime?.supports_restart && (
+              {visual !== 'update' && cliStatus === 'ok' && runtime?.supports_restart && (
                 <Button
                   variant="secondary"
                   size="xs"
@@ -456,11 +456,11 @@ const StateBlock: React.FC<{
       </div>
     );
   }
-  if (visual === 'broken' || visual === 'error') {
+  if (visual === 'error') {
     return (
       <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
         <AlertCircle size={16} className="shrink-0" />
-        <span>{t(visual === 'broken' ? 'backendLifecycle.brokenHint' : 'backendLifecycle.errorHint', { name: label })}</span>
+        <span>{t('backendLifecycle.errorHint', { name: label })}</span>
       </div>
     );
   }

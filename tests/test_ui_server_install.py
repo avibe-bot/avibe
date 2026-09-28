@@ -270,7 +270,7 @@ def test_install_job_measures_configured_runtime(monkeypatch, tmp_path, backend,
 
     monkeypatch.setattr(api, "resolve_cli_path", resolve)
     monkeypatch.setattr(api, "_probe_cli_version", probe)
-    monkeypatch.setattr(api, "_cached_probe", Mock(side_effect=AssertionError("must measure, not use cached versions")))
+    monkeypatch.setattr(api, "_cached_version", Mock(side_effect=AssertionError("must measure, not use cached versions")))
     monkeypatch.setattr(api.subprocess, "Popen", InstallProcess)
     monkeypatch.setattr(
         api, "install_agent",

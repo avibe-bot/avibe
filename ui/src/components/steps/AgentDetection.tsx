@@ -531,7 +531,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       showToast(failure.message, 'error');
     }
     try {
-      // Failed or not, the attempt may have replaced, broken or removed the CLI:
+      // Failed or not, the attempt may have replaced or removed the CLI:
       // the chip re-probes it and the card re-detects the file.
       setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
       await detect(name, installedPath || agents[name]?.cli_path || name);
@@ -960,17 +960,16 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                 setAgents((previous) => ({ ...previous, [name]: { ...previous[name], cli_path: installedPath } }));
                 await detect(name, installedPath);
               }} />}
-            upgrade={agent.status === 'ok' && (visuals[name] === 'update' || visuals[name] === 'updating'
-              || visuals[name] === 'broken' || refreshingAgents[name]) ? (
+            upgrade={agent.status === 'ok' && (visuals[name] === 'update' || visuals[name] === 'updating' || refreshingAgents[name]) ? (
               <Button type="button" variant="secondary" className="onboarding-life-action"
                 onClick={() => void upgradeAgent(name)}
                 disabled={refreshingAgents[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
                 {refreshingAgents[name] || visuals[name] === 'updating'
                   ? <RefreshCw size={14} className="motion-safe:animate-spin" />
-                  : visuals[name] === 'broken' ? <Download size={14} /> : <ArrowUpToLine size={14} />}
+                  : <ArrowUpToLine size={14} />}
                 {t(refreshingAgents[name] || visuals[name] === 'updating'
                   ? 'backendLifecycle.upgrading'
-                  : visuals[name] === 'broken' ? 'backendLifecycle.reinstall' : 'backendLifecycle.upgradeNow')}
+                  : 'backendLifecycle.upgradeNow')}
               </Button>
             ) : undefined}
           />;

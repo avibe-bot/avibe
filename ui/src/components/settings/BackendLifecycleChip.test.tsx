@@ -151,25 +151,21 @@ describe('BackendLifecycleChip', () => {
     await waitFor(() => expect(showToast).toHaveBeenCalledWith('backendLifecycle.upgradeSuccess', 'success'));
   });
 
-  it('offers a reinstall when a failed upgrade leaves the CLI unable to run', async () => {
-    api.installAgent.mockImplementation(async () => {
-      // The interrupted upgrade removed the platform package; the file is still there.
-      api.getBackendRuntime.mockResolvedValue({ ...updateAvailable, current_version: null, runnable: false });
-      return npmLeftover;
-    });
+  it('retires a failure once the host detects a different executable', async () => {
+    api.installAgent.mockResolvedValue(npmLeftover);
     const user = userEvent.setup();
 
-    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
+    // A Settings card has no refresh generation; only the path says which CLI it shows.
+    const { rerender } = render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
     const chip = await screen.findByRole('button', { name: 'backendLifecycle.statusUpdateAvailable' });
     await user.click(chip);
     await user.click(await screen.findByRole('button', { name: 'backendLifecycle.upgradeNow' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(npmLeftover.hint);
 
-    await waitFor(() => expect(chip.getAttribute('aria-label')).toBe('backendLifecycle.statusBroken'));
-    expect(screen.getByText('backendLifecycle.brokenHint {"name":"Codex"}')).toBeTruthy();
-    expect(screen.getByRole('alert').textContent).toContain(npmLeftover.hint);
-    expect(screen.getByRole('button', { name: 'backendLifecycle.reinstall' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'backendLifecycle.upgradeNow' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'backendLifecycle.restart' })).toBeNull();
+    rerender(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath="/opt/homebrew/bin/codex" />);
+
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByText('backendLifecycle.title')).toBeTruthy();
   });
 
   it('has the host re-detect a CLI a failed upgrade removed, so it offers a reinstall', async () => {
@@ -205,7 +201,6 @@ describe('BackendLifecycleChip', () => {
   // the popover must say what is wrong rather than that all is well.
   const NOTICES = [
     'backendLifecycle.upgrading',
-    'backendLifecycle.brokenHint',
     'backendLifecycle.errorHint',
     'backendLifecycle.updateHint',
     'backendLifecycle.desktopManagedHint',
@@ -218,13 +213,10 @@ describe('BackendLifecycleChip', () => {
     { state: 'desktop-managed', runtime: { ...latest, ...managed }, notice: 'backendLifecycle.desktopManagedHint' },
     { state: 'desktop-managed with an update', runtime: { ...updateAvailable, ...managed }, notice: 'backendLifecycle.updateHint' },
     { state: 'desktop-managed and not found', runtime: { ...latest, ...managed }, cliStatus: 'missing' as const, notice: 'backendLifecycle.errorHint {"name":"Codex"}' },
-    { state: 'desktop-managed and unable to run', runtime: { ...latest, ...managed, runnable: false }, notice: 'backendLifecycle.brokenHint {"name":"Codex"}' },
-    // The probe ran the saved CLI; the detected draft at another path is not it.
-    { state: 'a detected draft beside a saved CLI unable to run', runtime: { ...latest, runnable: false }, cliPath: '/opt/draft/codex', notice: 'backendLifecycle.readyHint' },
     { state: 'desktop-managed after a failed upgrade', runtime: { ...updateAvailable, ...managed }, after: { ...latest, ...managed }, notice: null },
     { state: 'reading as latest after a failed upgrade', runtime: updateAvailable, after: latest, notice: null },
     { state: 'still behind after a failed upgrade', runtime: updateAvailable, after: updateAvailable, notice: 'backendLifecycle.updateHint' },
-  ])('says what matters most when $state', async ({ runtime, cliStatus = 'ok', cliPath = codexPath, after, notice }) => {
+  ])('says what matters most when $state', async ({ runtime, cliStatus = 'ok', after, notice }) => {
     api.getBackendRuntime.mockResolvedValue(runtime);
     api.installAgent.mockImplementation(async () => {
       api.getBackendRuntime.mockResolvedValue(after);
@@ -232,7 +224,7 @@ describe('BackendLifecycleChip', () => {
     });
     const user = userEvent.setup();
 
-    render(<BackendLifecycleChip name="codex" enabled cliStatus={cliStatus} cliPath={cliPath} />);
+    render(<BackendLifecycleChip name="codex" enabled cliStatus={cliStatus} cliPath={codexPath} />);
     await user.click(screen.getByRole('button'));
     const popover = (await screen.findByText('backendLifecycle.title')).closest('div.z-50') as HTMLElement;
     const refresh = within(popover).getByRole('button', { name: 'common.refresh' });

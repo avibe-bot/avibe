@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
-from typing import Any, List, NamedTuple, Optional
+from typing import Any, List, Optional
 
 import yaml
 from sqlalchemy import select
@@ -7553,7 +7553,7 @@ def _run_install_command(
         output = truncate_output(raw_output)
         # Success or failure, the command may have replaced the CLI: the chip
         # refreshes runtime right after this, and must read the new
-        # ``--version`` (or learn it no longer runs), not the 30s-cached value.
+        # ``--version``, not the 30s-cached value.
         _invalidate_version_cache(name)
         if result.returncode == 0:
             installed_path = resolve_cli_path(resolve_from or name)
@@ -9588,7 +9588,7 @@ def start_dependency_install_job(dep: str) -> dict:
 # ``RuntimeError: dictionary changed size during iteration`` during the
 # scan in ``_invalidate_version_cache``.
 _BACKEND_CACHE_LOCK = __import__("threading").Lock()
-_BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, "CliProbe"]] = {}
+_BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
 _BACKEND_VERSION_TTL_SECONDS = 30.0
 _BACKEND_RUNTIME_USER_AGENT = "avibe/backend-runtime"
 _ASKILL_RELEASE_REPOSITORY = "avibe-bot/askill"
@@ -9612,20 +9612,10 @@ def _parse_semver(text: str) -> str | None:
     return match.group(0) if match else None
 
 
-class CliProbe(NamedTuple):
-    """What ``<cli> --version`` showed about an installed CLI."""
-
-    version: str | None
-    #: ``False`` when the CLI cannot start or exits nonzero: installed but broken,
-    #: e.g. an npm upgrade that lost its platform package. ``None`` when the probe
-    #: timed out and cannot tell.
-    runnable: bool | None
-
-
-def _probe_cli(cli_path: str | None) -> CliProbe:
-    """Run ``<cli> --version`` with a short timeout."""
+def _probe_cli_version(cli_path: str | None) -> str | None:
+    """Run ``<cli> --version`` with a short timeout and return the parsed version."""
     if not cli_path:
-        return CliProbe(None, None)
+        return None
     try:
         result = subprocess.run(
             [cli_path, "--version"],
@@ -9634,23 +9624,11 @@ def _probe_cli(cli_path: str | None) -> CliProbe:
             timeout=5,
             env=_command_env_for(cli_path if os.path.isabs(cli_path) else None),
         )
-    except subprocess.TimeoutExpired as exc:
-        logger.debug("CLI version probe timed out for %s: %s", cli_path, exc)
-        return CliProbe(None, None)
-    except OSError as exc:
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         logger.debug("CLI version probe failed for %s: %s", cli_path, exc)
-        return CliProbe(None, False)
-    if result.returncode != 0:
-        # A crashing launcher still prints something version-shaped -- Node ends
-        # an uncaught error with ``Node.js v22.18.0`` -- that is not the CLI's.
-        logger.debug("CLI version probe exited %s for %s", result.returncode, cli_path)
-        return CliProbe(None, False)
+        return None
     output = (result.stdout or "") + " " + (result.stderr or "")
-    return CliProbe(_parse_semver(output.strip()), True)
-
-
-def _probe_cli_version(cli_path: str | None) -> str | None:
-    return _probe_cli(cli_path).version
+    return _parse_semver(output.strip())
 
 
 def _http_opener_for_best_effort_probe():
@@ -9711,7 +9689,7 @@ def _fetch_latest_version(name: str) -> str | None:
     return raw.lstrip("v").strip() or None
 
 
-def _cached_probe(name: str, cli_path: str | None) -> CliProbe:
+def _cached_version(name: str, cli_path: str | None) -> str | None:
     key = (name, cli_path or "")
     with _BACKEND_CACHE_LOCK:
         cached = _BACKEND_VERSION_CACHE.get(key)
@@ -9719,10 +9697,10 @@ def _cached_probe(name: str, cli_path: str | None) -> CliProbe:
         return cached[1]
     # Probe outside the lock — CLI invocation can block on subprocess for
     # seconds, and we don't want unrelated lookups stuck behind it.
-    probe = _probe_cli(cli_path)
+    version = _probe_cli_version(cli_path)
     with _BACKEND_CACHE_LOCK:
-        _BACKEND_VERSION_CACHE[key] = (time.time(), probe)
-    return probe
+        _BACKEND_VERSION_CACHE[key] = (time.time(), version)
+    return version
 
 
 def _invalidate_version_cache(name: str) -> None:
@@ -10130,8 +10108,7 @@ def get_backend_runtime(name: str) -> dict:
         else None
     )
 
-    probe = _cached_probe(name, resolved_path) if installed else CliProbe(None, None)
-    current_version = probe.version
+    current_version = _cached_version(name, resolved_path) if installed else None
     latest_version = None if legacy_bundled_codex else _cached_latest(name)
     has_update = _compare_versions(current_version, latest_version)
 
@@ -10151,9 +10128,6 @@ def get_backend_runtime(name: str) -> dict:
         "cli_path": configured_path,
         "resolved_path": resolved_path,
         "installed": installed,
-        # Installed but broken (``False``) reads differently from missing: the
-        # fix is a reinstall, not a first install.
-        "runnable": probe.runnable,
         "current_version": current_version,
         "latest_version": latest_version,
         "has_update": has_update,

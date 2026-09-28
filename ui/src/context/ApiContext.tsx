@@ -1956,8 +1956,6 @@ export type BackendRuntimeInfo = {
   managed_by?: 'desktop';
   supports_restart?: boolean;
   process_status?: 'running' | 'stopped' | 'unknown';
-  /** ``false``: the CLI is on disk but cannot start; ``null``: unknown. */
-  runnable?: boolean | null;
   error?: string;
 };
 
