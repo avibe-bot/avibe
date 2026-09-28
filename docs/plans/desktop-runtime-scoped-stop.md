@@ -66,7 +66,8 @@ arbitrary text, so words it merely contains, such as
 
 `runtime.DesktopRuntimePresence` is `MATCH` when the scan finds a role process.
 Otherwise the service lock decides without reading its record: free is
-`ABSENT`, held is `MISMATCH`, and a lock that cannot be probed is `UNKNOWN`.
+`ABSENT`, held by another handle is `MISMATCH`, and a lock that cannot be
+probed, including a lock call that fails for any other reason, is `UNKNOWN`.
 The desktop host mirrors these as Mine, Absent, Foreign and Unknown.
 `runtime.DesktopRuntimeStopOutcome` is `NOT_OURS` (nothing signalled),
 `STOPPED` or `FAILED`.

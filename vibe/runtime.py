@@ -1,4 +1,5 @@
 import calendar
+import errno
 import getpass
 import ipaddress
 import json
@@ -307,21 +308,32 @@ def _windows_lock_byte(lock_file, mode: int) -> None:
         lock_file.seek(0)
 
 
-def _try_lock_file(lock_file) -> bool:
-    if os.name == "nt":
-        import msvcrt
+# What a non-blocking lock attempt fails with when another handle holds the lock.
+_LOCK_HELD_ERRNOS = frozenset({errno.EACCES, errno.EDEADLK} if os.name == "nt" else {errno.EAGAIN, errno.EWOULDBLOCK})
 
-        try:
-            _windows_lock_byte(lock_file, msvcrt.LK_NBLCK)
-            return True
-        except OSError:
-            return False
 
-    import fcntl
+def _take_lock_file(lock_file) -> bool:
+    """False when another handle holds the lock; raises ``OSError`` when the attempt itself failed."""
 
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
+        if os.name == "nt":
+            import msvcrt
+
+            _windows_lock_byte(lock_file, msvcrt.LK_NBLCK)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in _LOCK_HELD_ERRNOS:
+            return False
+        raise
+    return True
+
+
+def _try_lock_file(lock_file) -> bool:
+    try:
+        return _take_lock_file(lock_file)
     except OSError:
         return False
 
@@ -2744,7 +2756,13 @@ def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None
         logger.warning("Could not probe the service instance lock", exc_info=True)
         return DesktopRuntimePresence.UNKNOWN
     with lock_file:
-        if not _try_lock_file(lock_file):
+        # Only another holder is a mismatch; a lock call that failed says nothing.
+        try:
+            taken = _take_lock_file(lock_file)
+        except OSError:
+            logger.warning("Could not probe the service instance lock", exc_info=True)
+            return DesktopRuntimePresence.UNKNOWN
+        if not taken:
             return DesktopRuntimePresence.MISMATCH
         try:
             if while_absent is not None:

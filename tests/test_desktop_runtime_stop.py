@@ -9,6 +9,7 @@ never substituted: the stop finds them by scanning.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import secrets
@@ -406,8 +407,23 @@ def test_no_service_can_take_the_lock_before_the_stop_s_status_lands(spawn, stop
     assert lock_free_at_write == [False]
 
 
-def test_a_service_lock_that_cannot_be_probed_refuses_the_stop(stop_env, capsys):
+def _lock_path_is_a_directory(monkeypatch):
     runtime.get_service_lock_path().mkdir(parents=True)
+
+
+def _lock_call_fails(monkeypatch):
+    # Not contention: the lock operation itself failed, so no holder is known.
+    import fcntl
+
+    def _flock(fd, operation):
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr(fcntl, "flock", _flock)
+
+
+@pytest.mark.parametrize("unprobeable", [_lock_path_is_a_directory, _lock_call_fails])
+def test_a_service_lock_that_cannot_be_probed_refuses_the_stop(stop_env, capsys, monkeypatch, unprobeable):
+    unprobeable(monkeypatch)
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 3
 
