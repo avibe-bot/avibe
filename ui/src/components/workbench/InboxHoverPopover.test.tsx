@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { Popover } from '../ui/popover';
 import type { InboxSession } from '../../context/ApiContext';
@@ -11,11 +11,17 @@ import { InboxHoverPopover } from './WorkbenchSidebar';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../ui/markdown', () => ({ Markdown: ({ content }: { content: string }) => <p>{content}</p> }));
 
+// Each row renders its activity time relative to `Date.now()`, and the title is
+// read out of the same button text, so the clock is pinned to the instant the
+// fixture counts back from. Left on the wall clock, a week later the label turns
+// into a calendar date and its digits run into the title.
+const NOW = Date.UTC(2026, 8, 21, 12, 0);
+
 // Newest first, the order the feed hands the popover.
 const row = (id: number, minutesAgo: number): InboxSession => ({
   session_id: `session-${id}`, title: `Session ${id}`, scope_id: null,
   project_id: null, project_name: null,
-  last_activity_at: new Date(Date.UTC(2026, 8, 21, 12, 0) - minutesAgo * 60_000).toISOString(),
+  last_activity_at: new Date(NOW - minutesAgo * 60_000).toISOString(),
   last_message_author: 'agent', replied: false, preview_text: `Preview ${id}`,
   preview_at: null, unread_count: 0, unread: false,
 });
@@ -59,9 +65,14 @@ function mount(
     .map((text) => text.match(/Session \d+/)?.[0] ?? '');
 }
 
+beforeEach(() => {
+  vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
+});
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  vi.useRealTimers();
 });
 
 it('stacks unread sessions above read ones', () => {
