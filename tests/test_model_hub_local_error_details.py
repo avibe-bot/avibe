@@ -441,6 +441,246 @@ def test_local_details_authorized_in_history_and_live_events(
         assert ("local_error_detail" in json.loads(payload)["data"]["metadata"]) is visible
 
 
+@pytest.mark.parametrize("role", ["owner", "member", "editor"])
+def test_local_details_redacted_in_every_harness_run_projection(isolated_state, monkeypatch, role):
+    from storage.background import SQLiteBackgroundTaskStore
+    from vibe import ui_server
+    from vibe.authorization import AuthorizationContext
+
+    metadata = {
+        "owed_failure_notice": {"local_error_detail": "[Errno 28] No space left on device"},
+        "turn_failure_notification": {"local_error_detail": "[Errno 28] No space left on device"},
+        "ordinary": "retained",
+    }
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run({
+            "id": "diagnostic-run", "run_type": "agent_run", "status": "failed",
+            "created_at": "2026-09-28T00:00:00+00:00", "updated_at": "2026-09-28T00:00:00+00:00",
+            "metadata": metadata,
+        })
+    finally:
+        store.close()
+    monkeypatch.setattr(
+        ui_server, "_request_authorization_context",
+        lambda: AuthorizationContext(instance_role=role, is_remote=True),
+    )
+    client = ui_server.app.test_client()
+    for route in (
+        "/api/harness/runs", "/api/harness/runs/diagnostic-run",
+        "/api/harness/bootstrap?tab=runs",
+    ):
+        response = client.get(route)
+        assert response.status_code == 200
+        body = response.get_json()
+        if route.startswith("/api/harness/bootstrap"):
+            body = body["page"]
+        run = body.get("run") or body["runs"][0]
+        # Harness has always requested public metadata, even for managers.
+        # The notification/provenance panel remains the authorized detail read.
+        assert "local_error_detail" not in json.dumps(run["metadata"])
+        assert run["metadata"]["ordinary"] == "retained"
+    store = SQLiteBackgroundTaskStore()
+    try:
+        assert store.get_run("diagnostic-run")["metadata"] == metadata
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("stage", ["manifest_path", "manifest_cache", "manifest_package"])
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EMFILE])
+def test_manifest_stat_errors_survive_boolean_probe_suppression(tmp_path, monkeypatch, stage, code):
+    from pathlib import Path
+    from core import managed_runtime
+    from tests.test_managed_runtime import _fixture_runtime_manager, _write_fixture_runtime_release
+
+    manifest = tmp_path / "unused.json"
+    _write_fixture_runtime_release(tmp_path, manifest, label="stat-errno", version="1.0.0")
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest)
+    target = manifest
+    if stage == "manifest_cache":
+        manager.manifest_path = None
+        manager.manifest_url = manifest.as_uri()
+        manager.offline = True
+        target = manager._remote_manifest_cache_path()
+    elif stage == "manifest_package":
+        manager.manifest_path = None
+        monkeypatch.setattr(managed_runtime.package_resources, "files", lambda _package: tmp_path)
+    original_stat, original_is_file = Path.stat, Path.is_file
+
+    def stat(path, *args, **kwargs):
+        if path == target:
+            raise OSError(code, "private reason", "/private/凭证")
+        return original_stat(path, *args, **kwargs)
+
+    # Python 3.14's is_file returns False for every OSError. Emulate it on the
+    # CI interpreter so the required-input probe cannot silently lose errno.
+    def is_file(path):
+        return False if path == target else original_is_file(path)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "is_file", is_file)
+    result = manager.ensure()
+    assert not result["ok"]
+    assert result.get("os_errno") == code
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EMFILE])
+def test_recorded_engine_recovery_preserves_errno_after_record_write(tmp_path, monkeypatch, code):
+    import psutil
+    from core.process_isolation import fingerprint_process_marker
+    from tests.test_model_hub_runtime import _fixture_supervisor
+
+    supervisor, state = _fixture_supervisor(tmp_path)
+    record = state.root / "engine-process.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({
+        "engines": [{"worker_fingerprint": fingerprint_process_marker("recorded-engine")}],
+    }))
+
+    def fail(*_args, **_kwargs):
+        raise OSError(code, "private reason", "/private/凭证")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(psutil, "process_iter", fail)
+        with pytest.raises(EngineUnavailableError) as raised:
+            supervisor.ensure_running()
+        assert raised.value.reason == "previous_engine_alive"
+        assert local_error_detail(raised.value) == f"[Errno {code}] {os.strerror(code)}"
+        assert json.loads(record.read_text())["engines"]
+    # A later conclusive pass retires the record and its previous diagnostic.
+    monkeypatch.setattr(psutil, "process_iter", lambda *_args: iter(()))
+    assert supervisor._reap_recorded_engines_locked()
+    assert supervisor._record_os_errno is None
+
+
+@pytest.mark.parametrize("stage", ["create", "rollover", "seek", "read", "rewrite", "close"])
+@pytest.mark.parametrize("code", [errno.ENOSPC, errno.EMFILE])
+async def test_gateway_owned_buffer_failure_is_diagnostic_and_still_metered(tmp_path, monkeypatch, stage, code):
+    import tempfile
+    from core.handlers.model_hub import turn_gateway
+    from core.handlers.model_hub.adapter import RawOutcomeKind
+    from tests.test_model_hub_l3 import (
+        LiveInvokeHandle, _canonicalize_fixed_test_routes, _outcome, _prepared_gateway_request, _usage_of,
+    )
+
+    def fail(*_args, **_kwargs):
+        raise OSError(code, "private reason", "/private/凭证")
+
+    original_spool = tempfile.SpooledTemporaryFile
+
+    class FailingSpool(original_spool):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if stage == "create":
+                self.close()
+                fail()
+
+        def rollover(self):
+            if stage == "rollover":
+                fail()
+            return super().rollover()
+
+        def seek(self, *args, **kwargs):
+            if stage == "seek":
+                fail()
+            return super().seek(*args, **kwargs)
+
+        def read(self, *args, **kwargs):
+            if stage == "read":
+                fail()
+            return super().read(*args, **kwargs)
+
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            if stage == "close":
+                fail()
+
+    source = _source("src_buffer01", "Buffered response")
+    body = b'{"output":"ok"}'
+    if stage == "rollover":
+        body = b"x" * (512 * 1024)
+    service = _service(tmp_path, sources=[source], live_handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id), (body,)),
+    ])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    gateway = ModelHubTurnGateway(service, language_provider=lambda: "zh")
+    turn_id = "turn-local-buffer"
+    request = _prepared_gateway_request(
+        gateway, turn_id=turn_id, requested_model=model, source_id=source.id, stream=False,
+    )
+    monkeypatch.setattr(turn_gateway.tempfile, "SpooledTemporaryFile", FailingSpool)
+    if stage == "rewrite":
+        monkeypatch.setattr(turn_gateway, "rewrite_buffered_tool_names_file", fail)
+    try:
+        response = await gateway._handle_request(request)
+        assert response.status == 502
+        assert json.loads(response.body)["error"]["code"] == "engine_down"
+        assert _usage_of(service, source.id)["requests"] == 1
+        controller = SimpleNamespace(
+            config=SimpleNamespace(language="zh"), model_hub_turn_gateway=gateway,
+            emit_agent_message=AsyncMock(),
+        )
+        context = MessageContext(
+            user_id="U1", channel_id="C1", platform="avibe", platform_specific={"turn_token": turn_id},
+        )
+        await emit_backend_failure(controller, context, "codex", "API Error: 502 engine_down")
+        expected = f"[Errno {code}] {os.strerror(code)}"
+        notify = controller.emit_agent_message.call_args_list[0]
+        assert notify.kwargs["output"].metadata["local_error_detail"] == expected
+        gateway.correlation.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+        record = BoundedProvenanceStore(service.provenance.path).get(turn_id)
+        assert record["terminal_error"]["local_error_detail"] == expected
+        assert record["outcome"] == "failed_terminal"
+        assert record["served"] is None
+    finally:
+        await gateway.close()
+
+
+async def test_gateway_buffer_read_failure_after_headers_closes_truncated_response(tmp_path, monkeypatch):
+    import tempfile
+    from core.handlers.model_hub import turn_gateway
+    from core.handlers.model_hub.adapter import RawOutcomeKind
+    from tests.test_model_hub_l3 import LiveInvokeHandle, _outcome, _usage_of
+
+    original_spool = tempfile.SpooledTemporaryFile
+
+    class UnreadableSpool(original_spool):
+        def read(self, *_args, **_kwargs):
+            raise OSError(errno.EMFILE, "private reason", "/private/凭证")
+
+    source = _source("src_posthead1", "Large buffered response")
+    service = _service(tmp_path, sources=[source], live_handles=[
+        LiveInvokeHandle(
+            _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+            (b"x" * (512 * 1024),),
+        ),
+    ])
+    gateway = ModelHubTurnGateway(service)
+    turn_id = "turn-buffer-after-headers"
+    base_url, token = await gateway.endpoint(
+        "codex", process_scope="/repo", turn_id=turn_id,
+        requested_model_id="shared-model", resolved_model_id="shared-model", source_id=source.id,
+    )
+    monkeypatch.setattr(turn_gateway.tempfile, "SpooledTemporaryFile", UnreadableSpool)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3), trust_env=False) as client:
+            response = await client.post(
+                f"{base_url}/v1/responses", json={"model": "shared-model", "input": "ping"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status == 200  # Already committed; it cannot be rewritten.
+            with pytest.raises(aiohttp.ClientPayloadError):
+                await response.read()
+        assert _usage_of(service, source.id)["requests"] == 1
+        gateway.correlation.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+        record = BoundedProvenanceStore(service.provenance.path).get(turn_id)
+        assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"]["local_error_detail"] == f"[Errno {errno.EMFILE}] {os.strerror(errno.EMFILE)}"
+    finally:
+        await gateway.close()
+
+
 @pytest.mark.parametrize("stage", ["manifest_path", "manifest_cache", "manifest_package", "manifest_download", "archive"])
 @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EMFILE])
 def test_installer_helper_failures_keep_only_the_current_errno(tmp_path, monkeypatch, stage, code):

@@ -593,8 +593,15 @@ class EngineSupervisor:
         if records is None:
             return False
         survivors: list[_EngineRecord] = []
+        survivor_os_errno = None
         for record in records:
             outcomes = []
+            reap_os_errno = None
+
+            def capture_reap_error(error: BaseException) -> None:
+                nonlocal reap_os_errno
+                reap_os_errno = local_os_errno(error)
+
             if record.identity is not None:
                 outcomes.append(
                     reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=record.identity)
@@ -604,6 +611,7 @@ class EngineSupervisor:
                     logger,
                     "Model Hub engine",
                     worker_fingerprint=record.worker_fingerprint,
+                    on_error=capture_reap_error,
                 )
             )
             # The marker sweep is the authority: it sees every process of the tree,
@@ -611,6 +619,7 @@ class EngineSupervisor:
             # retires the record even when the narrower pid/group path could not.
             if outcomes[-1] == "unconfirmed":
                 survivors.append(record)
+                survivor_os_errno = survivor_os_errno or reap_os_errno
             elif "reaped" in outcomes:
                 logger.warning("Reaped a Model Hub engine left running by an earlier service")
         if survivors:
@@ -618,7 +627,13 @@ class EngineSupervisor:
                 "Could not confirm %d earlier Model Hub engine(s) exited; keeping them tracked",
                 len(survivors),
             )
-        return self._store_engine_records_locked(survivors) and not survivors
+        stored = self._store_engine_records_locked(survivors)
+        # A successful record rewrite must not erase why a tree remains
+        # unconfirmed. The authoritative marker sweep, not a recovered failure
+        # in the narrower pid/group probe, owns that diagnostic.
+        if survivors and self._record_os_errno is None:
+            self._record_os_errno = survivor_os_errno
+        return stored and not survivors
 
 def _serialize_engine_record(record: _EngineRecord) -> dict[str, Any]:
     if record.identity is not None:

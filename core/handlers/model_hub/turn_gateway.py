@@ -64,6 +64,7 @@ from .service import (
     ModelHubService,
     ResolvedInvocation,
 )
+from core.os_errors import local_error_detail
 
 
 _MAX_REQUEST_BYTES: Final = 128 * 1024 * 1024
@@ -206,6 +207,9 @@ class _TurnExecution:
     # The downstream event stream once its headers left before resolution
     # finished. From then on every ending of this turn travels inside it.
     stream_response: web.StreamResponse | None = None
+    # A large buffered JSON body whose headers have already left. A local disk
+    # failure can no longer replace its HTTP status or append an SSE ending.
+    buffered_response: web.StreamResponse | None = None
 
     @property
     def upstream_observation(self) -> ProtocolSSEState | None:
@@ -1113,70 +1117,43 @@ class ModelHubTurnGateway:
             )
 
         if not stream:
-            with tempfile.SpooledTemporaryFile(
-                max_size=_BUFFERED_RESPONSE_MEMORY_BYTES
-            ) as payload:
-                async for chunk in handle.stream:
-                    await run_owned_in_thread(payload.write, chunk)
-                execution.completed_at = self._now()
-                outcome, settlement, rendered = await self._settle_metered_turn(
+            try:
+                response, outcome, settlement = await self._buffered_response(
+                    request, handle, terminalizer=terminalizer, execution=execution,
+                )
+            except OSError as exc:
+                # The upstream result still owns usage and source health. Only
+                # this gateway's delivery failed; publish that failure after
+                # settling the real producer instead of rewriting its outcome.
+                await self._settle_turn_handle(
                     execution,
                     terminalizer,
                     termination_origin="upstream_terminal",
                 )
-                assert outcome is not None
-                assert settlement is not None
-                assert settlement.decision is not None
-                if settlement.decision.action != "return":
-                    return self._outcome_response(
-                        outcome,
-                        error_code=settlement.decision.error_code,
-                        status_override=settlement.decision.downstream_status,
-                        rendered=rendered,
-                    )
-                await run_owned_in_thread(payload.seek, 0)
-                rewritten_payload = await run_owned_in_thread(
-                    rewrite_buffered_tool_names_file,
-                    payload,
-                    execution.response_tool_aliases,
+                detail = local_error_detail(exc)
+                terminalizer.engine_down(local_error_detail=detail)
+                failure = self._terminal_error_response(
+                    execution, terminalizer, status=502, code="engine_down",
+                    turn_outcome=replace(ENGINE_DOWN_TURN_OUTCOME, local_error_detail=detail),
                 )
-                response_payload = rewritten_payload or payload
-                try:
-                    response_size = await run_owned_in_thread(
-                        _rewind_and_measure,
-                        response_payload,
-                    )
-                    if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
-                        body = await run_owned_in_thread(response_payload.read)
-                        return web.Response(
-                            status=200,
-                            body=body,
-                            content_type="application/json",
-                            headers={
-                                "Cache-Control": "no-store",
-                                "X-Content-Type-Options": "nosniff",
-                            },
-                        )
-                    response = web.StreamResponse(
-                        status=200,
-                        headers={
-                            "Cache-Control": "no-store",
-                            "Content-Length": str(response_size),
-                            "Content-Type": "application/json",
-                            "X-Content-Type-Options": "nosniff",
-                        },
-                    )
-                    await self._downstream_io(response.prepare(request))
-                    while chunk := await run_owned_in_thread(
-                        response_payload.read,
-                        _RESPONSE_CHUNK_BYTES,
-                    ):
-                        await self._downstream_io(response.write(chunk))
-                    await self._downstream_io(response.write_eof())
-                    return response
-                finally:
-                    if rewritten_payload is not None:
-                        await run_owned_in_thread(rewritten_payload.close)
+                if execution.buffered_response is not None:
+                    # Content-Length exposes the truncated JSON to the caller.
+                    # Do not send a second HTTP response after committed headers.
+                    execution.buffered_response.force_close()
+                    return execution.buffered_response
+                return failure
+            rendered = self._commit_and_render_handle_settlement(execution, terminalizer, settlement)
+            if response is None:
+                assert settlement.decision is not None
+                return self._outcome_response(
+                    outcome,
+                    error_code=settlement.decision.error_code,
+                    status_override=settlement.decision.downstream_status,
+                    rendered=rendered,
+                )
+            if response is execution.buffered_response:
+                await self._downstream_io(response.write_eof())
+            return response
 
         response = execution.stream_response
         if response is None:
@@ -1211,6 +1188,60 @@ class ModelHubTurnGateway:
         )
         await self._downstream_io(response.write_eof())
         return response
+
+    async def _buffered_response(
+        self,
+        request: web.Request,
+        handle: InvokeHandle,
+        *,
+        terminalizer: GatewayTurnTerminalizer,
+        execution: _TurnExecution,
+    ) -> tuple[web.StreamResponse | None, RawCallOutcome, HandleSettlement]:
+        """Prepare local bytes before committing the gateway's delivery result."""
+        assert handle.stream is not None
+        with tempfile.SpooledTemporaryFile(max_size=_BUFFERED_RESPONSE_MEMORY_BYTES) as payload:
+            async for chunk in handle.stream:
+                await run_owned_in_thread(payload.write, chunk)
+            execution.completed_at = self._now()
+            outcome, settlement = await self._settle_turn_handle(
+                execution, terminalizer, termination_origin="upstream_terminal",
+            )
+            assert outcome is not None
+            assert settlement.decision is not None
+            if settlement.decision.action != "return":
+                return None, outcome, settlement
+            await run_owned_in_thread(payload.seek, 0)
+            rewritten_payload = await run_owned_in_thread(
+                rewrite_buffered_tool_names_file, payload, execution.response_tool_aliases,
+            )
+            response_payload = rewritten_payload or payload
+            try:
+                response_size = await run_owned_in_thread(_rewind_and_measure, response_payload)
+                if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
+                    body = await run_owned_in_thread(response_payload.read)
+                    return (
+                        web.Response(
+                            status=200, body=body, content_type="application/json",
+                            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                        ),
+                        outcome,
+                        settlement,
+                    )
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Cache-Control": "no-store", "Content-Length": str(response_size),
+                        "Content-Type": "application/json", "X-Content-Type-Options": "nosniff",
+                    },
+                )
+                await self._downstream_io(response.prepare(request))
+                execution.buffered_response = response
+                while chunk := await run_owned_in_thread(response_payload.read, _RESPONSE_CHUNK_BYTES):
+                    await self._downstream_io(response.write(chunk))
+                return response, outcome, settlement
+            finally:
+                if rewritten_payload is not None:
+                    await run_owned_in_thread(rewritten_payload.close)
 
     async def _record_usage(self, execution: _TurnExecution) -> None:
         """Fold one forwarded upstream call into the usage ledger, best-effort.

@@ -866,6 +866,7 @@ def reap_marked_processes(
     *,
     worker_fingerprint: str,
     terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> ProcessReapOutcome:
     """Stop every process that inherited a managed tree's marker, wherever it is.
 
@@ -896,7 +897,9 @@ def reap_marked_processes(
         _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
         if not alive and not _processes_carrying_marker(worker_fingerprint):
             return "reaped"
-    except Exception:
+    except Exception as exc:
+        if on_error is not None:
+            on_error(exc)
         logger.warning("Could not confirm every %s process carrying its marker exited", label, exc_info=True)
     return "unconfirmed"
 

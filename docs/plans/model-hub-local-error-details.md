@@ -78,6 +78,19 @@ Preserve the current status operation's manifest failure when there is no
 installed pointer; an actual inspection failure replaces it. CI's existing Git
 runtime, Doctor localization, and interface-mirror checks cover those consumers.
 
+On `0586e6bcd`, boolean filesystem probes, marker recovery, and the gateway's
+own response spool erase local failures. The reported Harness exposure was
+disproved by real list/detail/bootstrap requests: `_harness_store` already
+requests public metadata, and `_enrich_runs` applies the recursive redactor.
+Keep that existing owner and add regressions rather than another filter. Use
+errno-preserving regular-file probes for required runtime inputs. Recovery's
+marker sweep remains the authority for retaining a record; retain its failed
+operation's errno across the subsequent record write, without changing reap
+policy. Keep upstream settlement/metering separate from a gateway buffer failure:
+the original call still owns usage and source health, while the gateway owns
+the failed local delivery and its Turn diagnostic. Do not commit buffered
+success before the local reads/rewrites needed to produce the response finish.
+
 ## Known by design
 
 - Historical errors cannot acquire diagnostics that were discarded before this

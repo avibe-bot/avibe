@@ -95,6 +95,14 @@ def _is_exclusive_regular_file(info: os.stat_result) -> bool:
     return not (reparse and attrs & reparse)
 
 
+def _is_regular_file(path: Path) -> bool:
+    """Absence is normal; an unreadable required input must retain its errno."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _is_reparse_point(info: os.stat_result) -> bool:
     attrs = getattr(info, "st_file_attributes", 0)
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -332,7 +340,7 @@ class ManagedRuntimeManager:
                 with tarfile.open(archive_path, "r:gz") as archive_file:
                     safe_extract_tar(archive_file, staging_dir)
                 staged_binary = staging_dir / archive.bin_path
-                if not staged_binary.is_file():
+                if not _is_regular_file(staged_binary):
                     return self._failure(
                         self._reason("install_missing_binary"),
                         manifest=manifest,
@@ -570,7 +578,7 @@ class ManagedRuntimeManager:
                 and all(metadata.get(field) == pointer.get(field) for field in digest_fields)
                 and metadata_bin_path == bin_path
                 and binary_integrity_valid
-                and binary.is_file()
+                and _is_regular_file(binary)
                 and (not self.spec.binary_artifact or os.access(binary, os.X_OK))
                 and self._record_matches_configured_source(metadata)
                 and self._record_install_dir_matches(install_dir, metadata)
@@ -1648,10 +1656,10 @@ class ManagedRuntimeManager:
         loaded_from: str
         cache_remote = False
         if self.manifest_path is not None:
-            if not self.manifest_path.is_file():
-                self._install_reason = self._reason("manifest_missing")
-                return None
             try:
+                if not _is_regular_file(self.manifest_path):
+                    self._install_reason = self._reason("manifest_missing")
+                    return None
                 payload = self.manifest_path.read_bytes()
             except OSError as exc:
                 self._set_install_failure(self._manifest_path_read_error_reason(), exc)
@@ -1660,10 +1668,10 @@ class ManagedRuntimeManager:
         elif self.manifest_url:
             cached_manifest = self._remote_manifest_cache_path()
             if self.offline or not allow_network:
-                if not cached_manifest.is_file():
-                    self._install_reason = self._reason("manifest_unavailable_offline")
-                    return None
                 try:
+                    if not _is_regular_file(cached_manifest):
+                        self._install_reason = self._reason("manifest_unavailable_offline")
+                        return None
                     payload = cached_manifest.read_bytes()
                 except OSError as exc:
                     self._set_install_failure(self._reason("manifest_unavailable_offline"), exc)
@@ -1693,10 +1701,12 @@ class ManagedRuntimeManager:
             except Exception as exc:  # noqa: BLE001
                 self._set_install_failure(self._reason("manifest_missing"), exc)
                 return None
-            if resource is None or not resource.is_file():
-                self._install_reason = self._reason("manifest_missing")
-                return None
             try:
+                if resource is None or not (
+                    _is_regular_file(resource) if isinstance(resource, Path) else resource.is_file()
+                ):
+                    self._install_reason = self._reason("manifest_missing")
+                    return None
                 payload = resource.read_bytes()
             except OSError as exc:
                 self._set_install_failure(self._reason("manifest_missing"), exc)
@@ -1815,7 +1825,7 @@ class ManagedRuntimeManager:
     def _resolve_manifest_archive(self, archive: ManagedRuntimeArchive) -> Path | None:
         self._install_reason = None
         cached = self.runtime_dir / "downloads" / self._archive_cache_name(archive)
-        if cached.is_file() and self._downloaded_archive_matches(cached, archive):
+        if _is_regular_file(cached) and self._downloaded_archive_matches(cached, archive):
             return cached
         if self.offline:
             self._install_reason = self._reason("archive_unavailable_offline")
@@ -1915,6 +1925,7 @@ class ManagedRuntimeManager:
         try:
             install_dir_resolved = install_dir.resolve(strict=True)
             binary = (install_dir_resolved / bin_path).resolve(strict=True)
+            regular_file = _is_regular_file(binary)
         except FileNotFoundError:
             return None
         except (OSError, RuntimeError) as exc:
@@ -1923,7 +1934,7 @@ class ManagedRuntimeManager:
         self._install_reason = None
         if (
             install_dir_resolved not in binary.parents
-            or not binary.is_file()
+            or not regular_file
             or self.spec.binary_artifact
             and not os.access(binary, os.X_OK)
         ):
