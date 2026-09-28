@@ -2592,12 +2592,15 @@ class DesktopRuntimeStopResult:
     ``refusal`` is set when nothing was signalled. ``remaining`` names the
     role processes still carrying the id after the stop, and ``left_running``
     the other programs carrying it, which the stop never signals.
+    ``foreign_service`` is set when, with no service of this Runtime left,
+    another holds the service lock, so the shared status is that service's.
     """
 
     refusal: str | None = None
     remaining: tuple[DesktopRuntimeProcess, ...] = ()
     left_running: tuple[DesktopRuntimeProcess, ...] = ()
     opencode_stopped: bool = False
+    foreign_service: bool = False
 
     @property
     def failure(self) -> str | None:
@@ -2618,10 +2621,27 @@ class DesktopRuntimeStopResult:
         return DesktopRuntimeStopOutcome.STOPPED
 
 
+# A scan classifies every process carrying the id, and an agent's command line
+# is arbitrary text, so each role is the exact argv shape Avibe launches it with.
+_UI_SERVER_PAYLOAD = "from vibe.ui_server import run_ui_server;"
+
+
+def _is_ui_server_argv(argv: list[str]) -> bool:
+    # `start_ui` and the UI restart run `<python> -c "from vibe.ui_server import run_ui_server; ..."`.
+    return (
+        len(argv) >= 3
+        and Path(argv[0]).name.lower().startswith("python")
+        and argv[1] == "-c"
+        and argv[2].startswith(_UI_SERVER_PAYLOAD)
+    )
+
+
 def _is_opencode_serve_argv(argv: list[str]) -> bool:
-    # Whole tokens: ``opencode-server-helper`` names neither.
-    programs = {Path(part).name.lower().removesuffix(".exe") for part in argv}
-    return "opencode" in programs and "serve" in argv
+    # The server manager runs `<opencode> serve ...`; an npm install's shim
+    # runs it as `node <opencode> serve ...`.
+    names = [Path(part).name.lower().removesuffix(".exe") for part in argv[:2]]
+    program = 1 if names[:1] in (["node"], ["bun"]) else 0
+    return len(argv) > program + 1 and names[program] == "opencode" and argv[program + 1] == "serve"
 
 
 def _is_desktop_service_command(command: str, cwd: str | None) -> bool:
@@ -2682,7 +2702,7 @@ def _desktop_process_role(process: psutil.Process) -> str | None:
         return _UNKNOWN_DESKTOP_ROLE
     if _is_desktop_service_command(command, _process_cwd(process)):
         return "service"
-    if _is_ui_server_command(command):
+    if _is_ui_server_argv(argv):
         return "ui"
     if _is_opencode_serve_argv(argv):
         return "opencode"
@@ -2811,8 +2831,12 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     _stop_desktop_processes(opencode)
 
     left = _scan_desktop_runtime(fingerprint, lineage)
+    remaining = tuple(entry.report for entry in left if entry.report.role is not None)
+    ours_may_hold_lock = any(process.role in ("service", _UNKNOWN_DESKTOP_ROLE) for process in remaining)
     return DesktopRuntimeStopResult(
-        remaining=tuple(entry.report for entry in left if entry.report.role is not None),
+        remaining=remaining,
         left_running=tuple(entry.report for entry in left if entry.report.role is None and not entry.lineage),
         opencode_stopped=any(_desktop_process_gone(process) for process in opencode),
+        foreign_service=not ours_may_hold_lock
+        and _desktop_service_lock_presence() is DesktopRuntimePresence.MISMATCH,
     )

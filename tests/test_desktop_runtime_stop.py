@@ -34,19 +34,37 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
 
 
 @pytest.fixture
-def argv_for(tmp_path):
-    vibe_dir = tmp_path / "bundle" / "vibe"
-    vibe_dir.mkdir(parents=True)
-    service_main = vibe_dir / "service_main.py"
-    service_main.write_text(SLEEP + "\n", encoding="utf-8")
+def bundle(tmp_path) -> Path:
+    """Files shaped like a desktop bundle, so each role runs with the argv Avibe launches it with."""
 
+    root = tmp_path / "bundle"
+    (root / "vibe").mkdir(parents=True)
+    (root / "vibe" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "vibe" / "service_main.py").write_text(SLEEP + "\n", encoding="utf-8")
+    (root / "vibe" / "ui_server.py").write_text(f"def run_ui_server(host, port):\n    {SLEEP}\n", encoding="utf-8")
+    # OpenCode runs natively, or through an npm install's `node` shim; here
+    # both are this interpreter under those names.
+    (root / "bin").mkdir()
+    (root / "bin" / "opencode").write_text(SLEEP + "\n", encoding="utf-8")
+    (root / "serve").write_text(SLEEP + "\n", encoding="utf-8")
+    for name in ("node", "opencode"):
+        (root / name).symlink_to(sys.executable)
+    return root
+
+
+@pytest.fixture
+def argv_for(bundle):
     def _argv_for(role: str | None) -> list[str]:
         return {
-            "service": [sys.executable, str(service_main)],
-            "ui": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
+            "service": [sys.executable, str(bundle / "vibe" / "service_main.py")],
+            "ui": [sys.executable, "-c", "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 0)"],
             # An installer is known by its environment, whatever it runs.
             "installer": [sys.executable, "-c", SLEEP, "npm-cli.js", "install"],
-            "opencode": [sys.executable, "-c", SLEEP, "opencode", "serve"],
+            "opencode": [str(bundle / "node"), str(bundle / "bin" / "opencode"), "serve", "--port=4096"],
+            "opencode-native": [str(bundle / "opencode"), "serve", "--port=4096"],
+            # Other programs whose command lines only mention a role.
+            "ui-lookalike": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
+            "opencode-lookalike": [sys.executable, "-c", SLEEP, "opencode", "serve"],
             "opencode-server-helper": [sys.executable, "-c", SLEEP, "opencode-server-helper"],
             None: [sys.executable, "-c", SLEEP, "agent-cli"],
         }[role]
@@ -64,13 +82,18 @@ def _child_env(runtime_id: str | None, role: str | None = None) -> dict[str, str
 
 
 @pytest.fixture
-def spawn(argv_for):
+def spawn(argv_for, bundle):
     children: list[subprocess.Popen] = []
 
     def _spawn(runtime_id: str | None, role: str | None = "service") -> subprocess.Popen:
         argv = argv_for(role)
         child = subprocess.Popen(
-            argv, env=_child_env(runtime_id, role), stdout=subprocess.PIPE, text=True, start_new_session=True
+            argv,
+            cwd=bundle,
+            env=_child_env(runtime_id, role),
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
         children.append(child)
         assert child.stdout.readline() == "ready\n"
@@ -150,10 +173,11 @@ def _assert_refused_untouched(stop_env, capsys, reason, *children):
     assert all(_alive(child) for child in children)
 
 
-def test_the_service_ui_installer_and_opencode_carrying_the_id_are_all_stopped(spawn, stop_env, tmp_path):
-    children = [spawn(RUNTIME_ID, role) for role in ("service", "ui", "installer", "opencode")]
+def test_the_service_ui_installer_and_opencode_carrying_the_id_are_all_stopped(spawn, stop_env, bundle):
+    roles = ("service", "ui", "installer", "opencode", "opencode-native")
+    children = [spawn(RUNTIME_ID, role) for role in roles]
     # An update may already have replaced or moved the files they started from.
-    shutil.rmtree(tmp_path / "bundle")
+    shutil.rmtree(bundle)
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
@@ -191,7 +215,7 @@ def test_a_garbage_opencode_pidfile_does_not_hide_the_opencode_server_carrying_t
     assert (opencode.pid, signal.SIGTERM) in stop_env["signals"]
 
 
-def test_the_stop_and_its_ancestors_are_never_signalled(spawn, tmp_path):
+def test_the_stop_and_its_ancestors_are_never_signalled(spawn, bundle, tmp_path):
     # The desktop host starts the stop, so the stop and every process above it
     # carry the id too. Here the parent even looks like this Runtime's UI.
     service, installer = spawn(RUNTIME_ID), spawn(RUNTIME_ID, "installer")
@@ -203,7 +227,8 @@ def test_the_stop_and_its_ancestors_are_never_signalled(spawn, tmp_path):
         f"open({str(result_path)!r}, 'w').write(json.dumps({{'code': stop.returncode, 'stderr': stop.stderr}}))\n"
     )
     parent = subprocess.Popen(
-        [sys.executable, "-c", script, "vibe.ui_server", "run_ui_server"],
+        [sys.executable, "-c", "from vibe.ui_server import run_ui_server; " + script],
+        cwd=bundle,
         env=_child_env(RUNTIME_ID),
         start_new_session=True,
     )
@@ -276,8 +301,8 @@ def test_a_pid_recycled_after_the_scan_is_not_signalled(spawn, stop_env, monkeyp
     assert _alive(service) and not _signalled(stop_env, service)
 
 
-# A helper is matched by whole argv tokens: its name only contains "opencode" and "serve".
-@pytest.mark.parametrize("program", [None, "opencode-server-helper"])
+# A role is the argv shape Avibe launches it with, not words its command line contains.
+@pytest.mark.parametrize("program", [None, "ui-lookalike", "opencode-lookalike", "opencode-server-helper"])
 def test_other_programs_carrying_the_id_are_reported_and_left_running(spawn, stop_env, capsys, program):
     service, agent = spawn(RUNTIME_ID), spawn(RUNTIME_ID, program)
 
@@ -300,6 +325,24 @@ def test_a_foreign_service_lock_holder_refuses_the_stop(spawn, stop_env, capsys)
         assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 3
 
     _assert_refused_untouched(stop_env, capsys, "service_runtime_id_mismatch", foreign)
+
+
+@pytest.mark.parametrize("late_role", [None, "installer"])
+def test_a_foreign_service_holding_the_lock_keeps_the_shared_status(spawn, stop_env, monkeypatch, late_role):
+    # A successor's service already holds the lock while this Runtime's UI is stopped.
+    ui = spawn(RUNTIME_ID, "ui")
+    late: list[subprocess.Popen] = []
+    if late_role is not None:
+        _after_first_scan(monkeypatch, lambda _found: late.append(spawn(RUNTIME_ID, late_role)))
+    lock_path = runtime.get_service_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("w", encoding="utf-8") as held:
+        assert runtime._try_lock_file(held)
+        assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == (0 if late_role is None else 2)
+
+    ui.wait(timeout=10)
+    assert stop_env["status"] == []
 
 
 def test_a_service_lock_that_cannot_be_probed_refuses_the_stop(stop_env, capsys):

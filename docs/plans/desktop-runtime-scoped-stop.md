@@ -22,14 +22,16 @@ starts inherits it. The flag is mutually exclusive with `--receipt`.
 `runtime.stop_desktop_runtime` scans this user's processes once, through
 `core.process_isolation.processes_carrying_marker`, for those whose inherited
 `AVIBE_DESKTOP_RUNTIME_ID` hashes to the expected id. Each one is classified by
-its environment, then its command line:
+its environment, then by the exact argv shape Avibe launches that role with.
+An agent's command line is arbitrary text, so words it merely contains, such as
+`rg vibe.ui_server run_ui_server` or `rg opencode serve`, name no role:
 
 | Role | Recognized by |
 | --- | --- |
 | `installer` | `AVIBE_DESKTOP_ROLE=installer` in its environment, whatever it runs |
 | `service` | runs `vibe/service_main.py` (argv only, so a bundle an update replaced or moved is still recognized), or the development `main.py` |
-| `ui` | `vibe.ui_server` and `run_ui_server` |
-| `opencode` | an argv token whose program name is `opencode`, and a `serve` token; `opencode-server-helper` is neither |
+| `ui` | `<python> -c "from vibe.ui_server import run_ui_server; …"`, the launch `start_ui` and the UI restart have always used |
+| `opencode` | `opencode serve …`, or `node <…>/opencode serve …` through an npm install's shim; `opencode-server-helper` is neither |
 | `unknown` | carries the id, but its command line cannot be read |
 | none | any other program: agent CLIs, the tunnel connector |
 
@@ -41,6 +43,8 @@ its environment, then its command line:
 - Each scan clears psutil's `process_iter` cache: the cached iteration skips,
   once, a pid it has flagged as reused, which would hide that pid's new holder
   from the rescan.
+- The scan asks psutil only for what the platform has: uids on POSIX, the
+  username on Windows, where psutil refuses to collect uids at all.
 
 ### Order and postcondition
 
@@ -73,6 +77,11 @@ The desktop host mirrors these as Mine, Absent, Foreign and Unknown.
 | Nothing carries the id, and the lock is free | 0 | none | status `stopped` |
 | Every role process carrying the id stopped | 0 | `{"left_running":[{"pid":…,"name":…}]}` when other programs carry the id | status `stopped` |
 | A role process carrying the id is left | 2 | localized error, then `{"failed":"<part>","remaining":[{"pid":…,"role":…}]}` | status `error` |
+
+The status file belongs to the service holding the service lock. When no
+service or unknown process of this Runtime is left and another holds the lock,
+for example a successor started before an earlier stop of this id finished,
+the stop leaves the status file to it, whether it succeeded or failed.
 
 `<part>` is the first of `service`, `ui`, `installer`, `opencode` and `unknown`
 that did not stop. Refusal happens before anything is signalled; installers

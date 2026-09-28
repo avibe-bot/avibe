@@ -13,6 +13,8 @@ invisible. On Windows it was a ``powershell`` launch, and that is why
 """
 
 import os
+import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import runtime
+from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV
 
 # Generous by design. A scan that only reads what psutil already collected
 # finishes in about a second on a CI runner, and the packaging probe allows the
@@ -141,3 +144,31 @@ def test_the_service_scan_finishes_promptly_on_a_real_windows_process_table():
         f"service_processes() did not finish within {budget:.1f}s over {visible} processes, "
         f"while the raw psutil walk of the same table took {walk_seconds:.2f}s"
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="POSIX runs this scan against real processes in test_desktop_runtime_stop")
+def test_the_marker_scan_finds_a_marked_child_on_a_real_windows_process_table():
+    """A scoped ``vibe stop`` finds its targets by this scan.
+
+    psutil refuses to collect an attribute its platform lacks, and a Windows
+    process has no uids, so only a Windows process table shows a scan that
+    raises before it looks at a single process.
+    """
+
+    runtime_id = secrets.token_hex(32)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+        env={**os.environ, DESKTOP_RUNTIME_ID_ENV: runtime_id},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline() == "ready\n"
+        found = runtime.processes_carrying_marker(
+            runtime.fingerprint_process_marker(runtime_id), marker_env=DESKTOP_RUNTIME_ID_ENV
+        )
+        assert child.pid in [process.pid for process in found]
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+        child.stdout.close()

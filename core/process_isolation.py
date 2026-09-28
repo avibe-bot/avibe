@@ -844,7 +844,8 @@ def processes_carrying_marker(
     # The cached iteration skips, once, a pid psutil has flagged as reused, so
     # a rescan could miss that pid's new holder. Each scan starts fresh.
     psutil.process_iter.cache_clear()
-    for process in psutil.process_iter(["uids", "username"]):
+    # psutil rejects an attribute its platform lacks, and Windows has no uids.
+    for process in psutil.process_iter(["uids"] if own_uid is not None else ["username"]):
         if process.pid == own_pid:
             continue
         if own_uid is not None:

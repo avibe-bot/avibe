@@ -13939,10 +13939,11 @@ _STOP_FAILURES = {
 }
 
 
-def _stop_failed(part: str) -> int:
+def _stop_failed(part: str, *, write_status: bool = True) -> int:
     key, detail = _STOP_FAILURES[part]
     print(i18n_t(key, _configured_cli_language()), file=sys.stderr)
-    _write_status("error", detail)
+    if write_status:
+        _write_status("error", detail)
     return 2
 
 
@@ -13963,15 +13964,19 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
         _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in result.left_running]})
     if result.opencode_stopped:
         _report_opencode_stopped()
+    # The service holding the lock owns the shared status, even when it is
+    # another Runtime's.
+    owns_status = not result.foreign_service
     # Unlike a full stop, an OpenCode server of this Runtime that survives
     # fails this stop: the desktop host replaces or removes the bundle it runs from.
     if result.outcome is runtime.DesktopRuntimeStopOutcome.FAILED:
-        status = _stop_failed(result.failure)
+        status = _stop_failed(result.failure, write_status=owns_status)
         remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
         _print_stop_json({"failed": result.failure, "remaining": remaining})
         return status
 
-    _write_status("stopped")
+    if owns_status:
+        _write_status("stopped")
     return 0
 
 
