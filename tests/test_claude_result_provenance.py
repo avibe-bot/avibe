@@ -16,7 +16,7 @@ from core.native_dispatch_phase import (
     prewrite_failure_evidence,
     set_dispatch_phase,
 )
-from modules.claude_sdk_compat import TextBlock, ToolUseBlock
+from modules.claude_sdk_compat import TextBlock, ToolUseBlock, UserMessage
 from modules.agents.claude_agent import ClaudeAgent
 
 from tests.test_claude_agent_initiated_turn import _build_agent, _dispatcher_owned_emit
@@ -126,6 +126,45 @@ def _failing_client(messages, error):
             return _iterate()
 
     return _Client()
+
+
+class _ToolcallFormatter:
+    @staticmethod
+    def format_assistant_message(parts):
+        return "\n".join(parts)
+
+    @staticmethod
+    def format_toolcall(name, input_data, **_kwargs):
+        return f"{name}({input_data['command']})"
+
+    @staticmethod
+    def format_toolcall_label(name, input_data, **_kwargs):
+        return f"{name}: {input_data['command']}"
+
+
+def _bash(tool_id: str, command: str):
+    return _block(ToolUseBlock, id=tool_id, name="Bash", input={"command": command})
+
+
+def _visible_emits(agent):
+    return [
+        (call.args[1], call.args[2])
+        for call in agent.controller.emit_agent_message.await_args_list
+        if len(call.args) > 2 and call.args[1] in {"assistant", "toolcall", "output"}
+    ]
+
+
+def _start_competing_activity(service, key: str) -> None:
+    """Start output that no pending human Turn owns, so its phase is contested."""
+
+    service.activities.start(
+        backend="claude",
+        runtime_key=key,
+        session_id="sess-competing",
+        activity_id="background-task",
+        kind="local_agent",
+        turn_id="background-turn",
+    )
 
 
 def _task_pair(task_id: str):
@@ -351,6 +390,210 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service.activities.has_completed_output("claude", key))
         self.assertEqual(agent.emit_result_message.await_count, 1)
         self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+
+    async def test_live_foreground_task_keeps_its_human_phase_streaming(self):
+        key = "session-live-foreground-task:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent._get_formatter = lambda _context: _ToolcallFormatter()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        before_result = {}
+
+        class _Client:
+            def receive_messages(self):
+                async def stream():
+                    yield AssistantMessage(_bash("live-tool", "sleep 60"))
+                    yield TaskStartedMessage("live-task", tool_use_id="live-tool")
+                    yield AssistantMessage(
+                        _block(TextBlock, text="progress while the task runs"),
+                        _bash("next-tool", "pwd"),
+                    )
+                    before_result["emitted"] = _visible_emits(agent)
+                    before_result["buffered"] = list(
+                        agent._buffered_assistant_messages.get(key) or ()
+                    )
+                    before_result["activities"] = (
+                        service.activities.active_for_runtime("claude", key)
+                    )
+                    yield TaskNotificationMessage("live-task", "live task finished")
+                    yield ResultMessage("human reply", origin={"kind": "human"})
+
+                return stream()
+
+        await agent._receive_messages(
+            _Client(),
+            "sess-live-foreground-task",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        # The task's parent tool was already emitted live for this human
+        # phase while nothing competed, so later frames stay live too.
+        self.assertEqual(
+            before_result["emitted"],
+            [("toolcall", "Bash(sleep 60)"), ("toolcall", "Bash(pwd)")],
+        )
+        self.assertEqual(before_result["buffered"], [])
+        [activity] = before_result["activities"]
+        self.assertEqual(activity.turn_id, "human-turn")
+        self.assertTrue(activity.metadata.get("provenance_human"))
+        self.assertFalse(activity.metadata.get("provenance_pending"))
+        self.assertNotIn(key, agent._activity_provenance_barriers)
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertFalse(service.activities.has_completed_output("claude", key))
+
+    async def test_live_foreground_task_stays_provisional_when_output_competes(self):
+        key = "session-live-foreground-competing:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent._get_formatter = lambda _context: _ToolcallFormatter()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        before_result = {}
+
+        class _Client:
+            def receive_messages(self):
+                async def stream():
+                    yield AssistantMessage(_bash("live-tool", "sleep 60"))
+                    # Output that is not bound to this Turn appears before the
+                    # task starts: ownership of later frames is contested again.
+                    _start_competing_activity(service, key)
+                    yield TaskStartedMessage("live-task", tool_use_id="live-tool")
+                    yield AssistantMessage(_bash("next-tool", "pwd"))
+                    before_result["emitted"] = _visible_emits(agent)
+                    before_result["activity"] = next(
+                        activity
+                        for activity in service.activities.active_for_runtime(
+                            "claude", key
+                        )
+                        if activity.id == "live-task"
+                    )
+                    yield ResultMessage("human reply", origin={"kind": "human"})
+
+                return stream()
+
+        await agent._receive_messages(
+            _Client(),
+            "sess-live-foreground-competing",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        self.assertEqual(before_result["emitted"], [("toolcall", "Bash(sleep 60)")])
+        self.assertTrue(before_result["activity"].metadata.get("provenance_pending"))
+        self.assertIsNone(before_result["activity"].turn_id)
+        self.assertIn(("toolcall", "Bash(pwd)"), _visible_emits(agent))
+        self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+
+    async def test_steer_boundary_keeps_buffered_frames_for_the_human_result(self):
+        key = "session-buffered-steer:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent._get_formatter = lambda _context: _ToolcallFormatter()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        _start_competing_activity(service, key)
+        receipt = agent._register_native_input(key, "steered prompt", kind="steer")
+        receipt.state = "accepted"
+        agent._advance_steering_generation(key)
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(
+                        _block(TextBlock, text="answer before steer"),
+                        _bash("pre-steer-tool", "pwd"),
+                    ),
+                    UserMessage("steered prompt"),
+                    AssistantMessage(
+                        _bash("post-steer-tool", "ls"),
+                        _block(TextBlock, text="answer after steer"),
+                    ),
+                    ResultMessage("answer after steer", origin={"kind": "human"}),
+                ]
+            ),
+            "sess-buffered-steer",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        # Same order and shape the live path emits: the pre-steer text closes
+        # its phase as a non-terminal output at the steer boundary.
+        self.assertEqual(
+            _visible_emits(agent),
+            [
+                ("toolcall", "Bash(pwd)"),
+                ("output", "answer before steer"),
+                ("toolcall", "Bash(ls)"),
+            ],
+        )
+        presteer_output = next(
+            call.kwargs["output"]
+            for call in agent.controller.emit_agent_message.await_args_list
+            if call.args[1] == "output"
+        )
+        self.assertFalse(presteer_output.completes_turn)
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            "answer after steer",
+        )
+        self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+        self.assertFalse(agent._has_pending_requests(key))
+        self.assertEqual(agent._buffered_assistant_messages.get(key), None)
+
+    async def test_steer_boundary_frames_follow_a_detached_result(self):
+        key = "session-buffered-steer-detached:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent._get_formatter = lambda _context: _ToolcallFormatter()
+        agent.emit_result_message = AsyncMock(return_value="message-id")
+        _start_competing_activity(service, key)
+        receipt = agent._register_native_input(key, "steered prompt", kind="steer")
+        receipt.state = "accepted"
+        agent._advance_steering_generation(key)
+
+        await agent._receive_messages(
+            _client(
+                [
+                    AssistantMessage(
+                        _block(TextBlock, text="detached before steer"),
+                        _bash("pre-steer-tool", "pwd"),
+                    ),
+                    UserMessage("steered prompt"),
+                    AssistantMessage(_block(TextBlock, text="detached after steer")),
+                    ResultMessage(
+                        "detached reply",
+                        origin={"kind": "task-notification"},
+                    ),
+                ]
+            ),
+            "sess-buffered-steer-detached",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        # The boundary marker never turns detached frames into human output.
+        self.assertEqual(_visible_emits(agent), [])
+        self.assertEqual(agent.emit_result_message.await_count, 1)
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1],
+            "detached after steer",
+        )
+        self.assertIsNone(agent.emit_result_message.await_args.kwargs.get("request"))
+        self.assertIs(agent._pending_requests[key][0], request)
 
     async def test_activity_flush_defers_until_buffered_phase_has_terminal_owner(self):
         key = "session-provenance-flush-race:/tmp/work"
@@ -645,6 +888,9 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                     settle_activity_runs=settle_activity,
                 )
                 agent.emit_result_message = AsyncMock(return_value="message-id")
+                # Competing output keeps this foreground task provisional
+                # until the human Result classifies its phase.
+                _start_competing_activity(service, key)
 
                 tool = _block(
                     ToolUseBlock,
@@ -677,8 +923,13 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                     composite_key=key,
                 )
 
-                settle_activity.assert_called_once()
-                settled = settle_activity.call_args.args[0]
+                # Receiver EOF also disconnects the competing Activity; only
+                # the classified task carries the human lineage.
+                [settled] = [
+                    call.args[0]
+                    for call in settle_activity.call_args_list
+                    if call.args[0].id == f"task-{status}"
+                ]
                 self.assertEqual(settled.run_id, "human-run")
                 self.assertEqual(settled.turn_id, "human-turn")
                 self.assertEqual(
@@ -1697,6 +1948,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         service.activities.classify_provisional_provenance = Mock(
             side_effect=RuntimeError("activity store unavailable")
         )
+        _start_competing_activity(service, key)
 
         await agent._receive_messages(
             _client(

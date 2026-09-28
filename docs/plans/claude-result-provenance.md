@@ -161,8 +161,10 @@ have a reachable drain/ack path.
 The managed worker rechecks the ledger after awaited delivery: a Result appended
 during a retry remains its responsibility even if the initial list was drained.
 There is no new generic queue, service, or per-output timer. Missing/unknown
-origin with competing Activity remains conservative; foreground execution mode
-and TaskStarted linkage are still not human-provenance evidence.
+origin with competing Activity remains conservative; while ownership is
+contested, foreground execution mode and TaskStarted linkage are still not
+human-provenance evidence. The uncontested live case is covered in the
+2026-09-28 section.
 
 Consumer coverage includes event-held native streams; old payload plus later
 failure and human phases; human and synthetic successor admission; Stop-first
@@ -283,3 +285,43 @@ human input queued behind the Turn indefinitely.
 - A silent-only detached reply settles its Activity claim without creating a
   Message. A missing receipt for such a reply is success, not a delivery
   failure, so it no longer retries forever ahead of every later record.
+
+## Uncontested live phases and steer boundaries (2026-09-28)
+
+A long foreground command made a human Turn look stuck. Take this stream:
+`Bash(sleep 600)` is emitted live, its `TaskStarted` arrives, and the model
+keeps working. Every `TaskStarted` opened the provenance barrier, so each later
+Assistant and tool frame of that Turn was buffered until the terminal Result.
+The Web UI showed nothing for the rest of the Turn. If a steer receipt arrived
+while frames were buffered, the receipt boundary cleared the buffer and its
+provisional facts without replaying them. Those frames were lost, and the
+pre-steer Activities stayed provisional snapshots that kept competing.
+
+- A live frame is emitted only when nothing competes with the pending human
+  request, so the receiver has already attributed it to that request. A
+  foreground task whose parent tool is such a frame inherits the frame's owner
+  when all of these hold: the tool is still recorded as a live foreground tool,
+  no frame is buffered, no competing Activity or output record exists, and the
+  pending request is a real human request. The Activity starts with that Turn,
+  Run, and delivery identity and `provenance_human`, so it does not compete, and
+  later frames of the phase stay live. If any condition fails, the task is
+  provisional as before.
+- Only foreground tools qualify. A foreground completion has no Activity output
+  that a Result could claim, and its terminal follows the existing
+  non-provisional foreground owner: the Turn's Result settles the Run. A
+  background tool's completion creates queued output, and the Activity flush can
+  complete a Turn from it. Background tools therefore stay provisional until the
+  Result classifies their phase, even when their frame was live.
+- When a steer receipt arrives while frames are buffered, no Result separates
+  those frames from the steer, so Claude consumed the steer within the same
+  turn. The receiver appends a steer-boundary marker and keeps the frames and
+  their provisional facts for the one terminal Result that classifies both
+  sides. A human Result replays the frames and emits the pre-steer text at the
+  marker as non-terminal primary output, the same shape as a live steer
+  boundary. A detached Result ignores the marker and keeps the pending request.
+  Without buffered frames, the existing live boundary behavior is unchanged.
+
+Consumer tests cover the uncontested live task, a competing Activity that
+appears before `TaskStarted`, and human or detached classification of buffered
+frames across a steer boundary. They are hermetic receiver tests, not native SDK
+or Web/IM end-to-end tests.
