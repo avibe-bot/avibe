@@ -233,8 +233,11 @@ The main window remembers its native position, size, and maximized state in the
 window-state plugin's app configuration store. Restore happens before showing
 the window; bootstrap and Runtime navigation only change its content. Open from
 the tray preserves the last shown frame, with off-screen recovery against the
-current display work areas. Fullscreen, Spaces, visibility, and routes are not
-restored. An absent or corrupt store uses the centered 1200×800 default.
+current display work areas: a frame keeps its place, even across displays, while
+a 24×24pt part of its title bar drag area is on screen, and otherwise moves just
+far enough onto the display it overlaps most, or the nearest. Fullscreen, Spaces,
+visibility, and routes are not restored. An absent or corrupt store uses the
+centered 1200×800 default.
 
 On macOS the main window uses an overlay title bar with a hidden title: the
 traffic lights float over the page and there is no separate title strip.

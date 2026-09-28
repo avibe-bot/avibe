@@ -49,6 +49,8 @@ pub const TITLE_BAR_INSET: f64 = 28.0;
 /// grow from there and keeps its whole top edge free, so the strip never
 /// reaches the main pane, whose headers therefore keep the window's full
 /// height. The traffic lights float over the sidebar, above the strip.
+/// Restoring the window keeps a grab handle inside this strip on screen
+/// (`window_frame` in the runtime-host crate); a narrower strip narrows it too.
 pub const TITLE_BAR_STRIP_WIDTH: f64 = 248.0;
 
 /// Publishes [`TITLE_BAR_INSET`] to the Workbench and the bootstrap page. User

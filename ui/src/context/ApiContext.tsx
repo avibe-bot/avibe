@@ -1885,6 +1885,12 @@ export type InstallResult = {
   reason?: string | null;
   action_class?: 'operator_only';
   download_error?: DependencyDownloadError | null;
+  /** Agent CLI failures: a stable recognition code (``install_failed`` when
+   *  nothing matched), its localized hint, and the installer's exit status. */
+  code?: string;
+  hint?: string | null;
+  hint_params?: Record<string, unknown>;
+  exit_code?: number;
 };
 
 export type DependencyDownloadError = {
@@ -3318,11 +3324,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return last;
       }
     }
+    // ``last`` is still the running job, whose message announces the start.
     return {
       ...last,
       ok: false,
       status: 'failed',
-      message: last?.message || t('backendLifecycle.upgradeFailed'),
+      message: t('backendLifecycle.upgradeFailed'),
     };
   };
 

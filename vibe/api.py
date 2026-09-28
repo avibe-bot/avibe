@@ -105,6 +105,7 @@ from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     agent_backend_catalog_payload,
     agent_backend_descriptors,
+    display_name_for_backend,
     is_agent_backend,
     latest_probe_for_backend,
     runtime_refresh_success_message,
@@ -7363,6 +7364,144 @@ def _curl_installer_command(url: str, consumer: str) -> list[str]:
     ]
 
 
+_AGENT_INSTALL_TIMEOUT_SECONDS = 300
+
+# Installer failures we can explain, recognized from what the installer printed.
+# Each shape comes from real npm 9/11, curl, and ``opencode upgrade`` output;
+# the fixtures in tests/test_agent_install_failures.py are those captures.
+_NPM_ERROR_PREFIX = r"npm (?:error|ERR!)"
+_NPM_ERROR_CODE_RE = re.compile(rf"^{_NPM_ERROR_PREFIX} code (?P<code>\S+)\s*$", re.MULTILINE)
+_NPM_ERROR_PATH_RE = re.compile(rf"^{_NPM_ERROR_PREFIX} path (?P<path>.+?)\s*$", re.MULTILINE)
+_NPM_ENOTEMPTY_RENAME_RE = re.compile(
+    r"ENOTEMPTY: directory not empty, rename '(?P<source>[^']+)' -> '(?P<dest>[^']+)'"
+)
+# Before moving a new version in, npm renames the installed package to
+# ``.<name>-<8 chars>`` beside it. The suffix is derived from the package path,
+# so a folder left there by an interrupted update fails every retry the same way.
+_NPM_RETIRED_PACKAGE_RE = re.compile(r"^\.(?P<package>.+)-[A-Za-z0-9_-]{8}$")
+_NPM_PERMISSION_CODES = frozenset({"EACCES", "EPERM"})
+_NPM_NETWORK_CODES = frozenset({"ENOTFOUND", "ECONNREFUSED", "ETIMEDOUT"})
+_NPM_REQUEST_URL_RE = re.compile(r"request to (?P<url>\S+) failed")
+_CURL_UNREACHABLE_RE = re.compile(
+    r"^curl: \((?:6\) Could not resolve host: (?P<dns_host>\S+)|(?:7|28)\) Failed to connect to (?P<connect_host>\S+) port)",
+    re.MULTILINE,
+)
+_GITHUB_API_FORBIDDEN_RE = re.compile(r"\b403\b.*\bapi\.github\.com\b|\bapi\.github\.com\b.*\b403\b")
+_GITHUB_RATE_LIMIT_URL = "https://api.github.com/rate_limit"
+_GITHUB_RATE_LIMIT_TIMEOUT_SECONDS = 3
+_INSTALL_FAILURE_HINT_KEYS = {
+    "npm_leftover_directory": "agentInstall.hint.npmLeftoverDirectory",
+    "permission_denied": "agentInstall.hint.permissionDenied",
+    "network_unreachable": "agentInstall.hint.networkUnreachable",
+    "install_timeout": "agentInstall.hint.timedOut",
+}
+
+
+def _github_rate_limit_reset() -> int | None:
+    """When this network's exhausted GitHub API quota resets, as epoch seconds.
+
+    ``GET /rate_limit`` does not spend the quota it reports, so it still answers
+    after the call that failed. Best effort: the hint is still useful without a
+    time, so any failure here only drops the time.
+    """
+    req = urllib.request.Request(
+        _GITHUB_RATE_LIMIT_URL,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": _BACKEND_RUNTIME_USER_AGENT},
+    )
+    try:
+        with _http_opener_for_best_effort_probe().open(  # noqa: S310 - fixed GitHub API URL
+            req, timeout=_GITHUB_RATE_LIMIT_TIMEOUT_SECONDS
+        ) as resp:
+            core = json.loads(resp.read().decode("utf-8"))["resources"]["core"]
+        remaining, reset_at = int(core["remaining"]), int(core["reset"])
+    except Exception as exc:
+        logger.debug("GitHub rate limit lookup failed: %s", exc)
+        return None
+    if remaining > 0 or reset_at <= time.time():
+        return None
+    return reset_at
+
+
+def _recognize_install_failure(output: str | None, *, timed_out: bool = False) -> tuple[str, dict[str, Any]]:
+    """Map a failed agent CLI install/upgrade to a stable hint code and params.
+
+    The code is always one of ``install_timeout``, ``npm_leftover_directory``,
+    ``permission_denied``, ``github_rate_limited``, ``network_unreachable`` or
+    ``install_failed`` (nothing recognized); the params are what its hint names.
+    """
+    if timed_out:
+        return "install_timeout", {"minutes": _AGENT_INSTALL_TIMEOUT_SECONDS // 60}
+    text = output or ""
+    rename = _NPM_ENOTEMPTY_RENAME_RE.search(text)
+    if rename and _NPM_RETIRED_PACKAGE_RE.match(re.split(r"[\\/]", rename.group("dest"))[-1]):
+        return "npm_leftover_directory", {"path": rename.group("dest")}
+    npm_code = _NPM_ERROR_CODE_RE.search(text)
+    npm_code = npm_code.group("code") if npm_code else None
+    if npm_code in _NPM_PERMISSION_CODES:
+        path = _NPM_ERROR_PATH_RE.search(text)
+        if path:
+            return "permission_denied", {"path": path.group("path")}
+    if _GITHUB_API_FORBIDDEN_RE.search(text):
+        return "github_rate_limited", {"reset_at": _github_rate_limit_reset()}
+    if npm_code in _NPM_NETWORK_CODES:
+        request = _NPM_REQUEST_URL_RE.search(text)
+        host = urllib.parse.urlsplit(request.group("url")).hostname if request else None
+        if host:
+            return "network_unreachable", {"host": host}
+    curl = _CURL_UNREACHABLE_RE.search(text)
+    if curl:
+        return "network_unreachable", {"host": curl.group("dns_host") or curl.group("connect_host")}
+    return "install_failed", {}
+
+
+def _install_failure_hint(code: str, params: dict[str, Any], language: str) -> str | None:
+    if code == "github_rate_limited":
+        reset_at = params.get("reset_at")
+        if reset_at is None:
+            return backend_t("agentInstall.hint.githubRateLimitedNoReset", language)
+        return backend_t(
+            "agentInstall.hint.githubRateLimited",
+            language,
+            # The runtime's local time; the minutes keep it usable from a browser
+            # in another time zone.
+            time=datetime.fromtimestamp(reset_at).strftime("%H:%M"),
+            minutes=max(1, (int(reset_at - time.time()) + 59) // 60),
+        )
+    key = _INSTALL_FAILURE_HINT_KEYS.get(code)
+    return backend_t(key, language, **params) if key else None
+
+
+def _install_failure_result(
+    name: str,
+    mode: str,
+    output: str,
+    truncate_output,
+    *,
+    timed_out: bool = False,
+    **details: Any,
+) -> dict:
+    """The one shape every failed ``_run_install_command`` returns.
+
+    The headline names what failed in the instance language; ``code``/``hint``
+    say why when the output is recognized; ``output`` keeps the installer's own
+    words for the details. Recognition reads the whole output rather than the
+    truncated tail, so an explanation printed before a long tail still counts.
+    """
+    code, params = _recognize_install_failure(output, timed_out=timed_out)
+    language = _configured_backend_language()
+    backend = display_name_for_backend(name) if is_agent_backend(name) else name
+    headline = "agentInstall.upgradeFailed" if mode == "upgrade" else "agentInstall.installFailed"
+    return {
+        "ok": False,
+        "message": backend_t(headline, language, backend=backend),
+        "code": code,
+        "hint": _install_failure_hint(code, params, language),
+        "hint_params": params,
+        **details,
+        "output": truncate_output(output) or None,
+    }
+
+
 def _run_install_command(
     name: str,
     cmd: list[str],
@@ -7392,23 +7531,30 @@ def _run_install_command(
             **isolated_subprocess_kwargs(),
         )
         try:
-            stdout, stderr = process.communicate(timeout=300)  # 5 minute timeout
+            stdout, stderr = process.communicate(timeout=_AGENT_INSTALL_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             logger.error("Agent %s %s timed out", name, mode)
             signal_process_tree(process, KILL_SIGNAL, logger, f"{name} {mode}")
             stdout, stderr = process.communicate(timeout=10)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
-            output = truncate_output(output.strip())
-            return {
-                "ok": False,
-                "message": f"{mode.capitalize()} timed out",
-                "reason": f"{name}_{mode}_timeout",
-                "timeout_seconds": 300,
-                "output": output or None,
-            }
+            # A killed installer can leave the CLI half-replaced; re-probe it.
+            _invalidate_version_cache(name)
+            return _install_failure_result(
+                name,
+                mode,
+                output.strip(),
+                truncate_output,
+                timed_out=True,
+                reason=f"{name}_{mode}_timeout",
+                timeout_seconds=_AGENT_INSTALL_TIMEOUT_SECONDS,
+            )
         result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
-        output = result.stdout + ("\n" + result.stderr if result.stderr else "")
-        output = truncate_output(output.strip())
+        raw_output = (result.stdout + ("\n" + result.stderr if result.stderr else "")).strip()
+        output = truncate_output(raw_output)
+        # Success or failure, the command may have replaced the CLI: the chip
+        # refreshes runtime right after this, and must read the new
+        # ``--version``, not the 30s-cached value.
+        _invalidate_version_cache(name)
         if result.returncode == 0:
             installed_path = resolve_cli_path(resolve_from or name)
             if installed_path:
@@ -7419,10 +7565,6 @@ def _run_install_command(
                     name,
                     mode,
                 )
-            # The chip refreshes runtime immediately after upgrade; drop the
-            # 30s version cache so it reads the new `--version` instead of the
-            # pre-upgrade value.
-            _invalidate_version_cache(name)
 
             # Persist real Agent backend CLI paths to V2Config so the next
             # ``get_backend_runtime`` reads them directly instead of relying
@@ -7439,22 +7581,25 @@ def _run_install_command(
                 "output": output,
             }
         logger.warning("Agent %s %s failed: %s", name, mode, output)
-        return {
-            "ok": False,
-            "message": f"{mode.capitalize()} failed (exit code {result.returncode})",
-            "reason": f"{name}_{mode}_failed",
-            "exit_code": result.returncode,
-            "output": output,
-        }
+        return _install_failure_result(
+            name,
+            mode,
+            raw_output,
+            truncate_output,
+            reason=f"{name}_{mode}_failed",
+            exit_code=result.returncode,
+        )
     except Exception as e:
         logger.error("Agent %s %s error: %s", name, mode, e)
-        return {
-            "ok": False,
-            "message": str(e),
-            "reason": f"{name}_{mode}_error",
-            "error": str(e),
-            "output": None,
-        }
+        # No installer output reached us; the error is the detail.
+        return _install_failure_result(
+            name,
+            mode,
+            str(e),
+            truncate_output,
+            reason=f"{name}_{mode}_error",
+            error=str(e),
+        )
 
 
 # =============================================================================

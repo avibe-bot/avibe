@@ -1214,7 +1214,7 @@
 }
 .onboarding-assistant-error { font-size: 12px; color: var(--destructive-ink); overflow-wrap: anywhere; margin-top: 8px; }
 .onboarding-assistant-error pre { margin-top: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
-.onboarding-assistant-error summary { margin-top: 8px; cursor: pointer; }
+.onboarding-assistant-error summary { margin-top: 8px; cursor: pointer; color: inherit; }
 /* "Open workspace and Back to introduction share a width and stack vertically." The
    full width is what makes that true: without it this column shrink-wraps its widest
    child, and the action's own `299/976` then resolves against that shrunken box and

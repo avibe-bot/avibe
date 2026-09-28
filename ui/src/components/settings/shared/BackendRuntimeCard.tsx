@@ -1,8 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ChevronDown,
-  ChevronUp,
   Download,
   RefreshCw,
   Save,
@@ -15,6 +13,7 @@ import { Button } from '../../ui/button';
 import { Card, CardContent } from '../../ui/card';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
+import { InstallOutcome } from '../../shared/InstallOutcome';
 import { BackendLifecycleChip } from '../BackendLifecycleChip';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import type { BackendRuntimeState, BackendId } from './useBackendRuntime';
@@ -106,6 +105,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               name={backend}
               enabled={runtime.enabled}
               cliStatus={runtime.cliStatus}
+              cliPath={runtime.cliPath}
               onChanged={runtime.handleLifecycleChanged}
               onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
             />
@@ -151,53 +151,23 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
         {runtime.cliStatus === 'missing' && (
           <div className="space-y-2 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
             <p className="text-[12px] text-cyan-ink">{t('agentDetection.installHint')}</p>
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                variant="brand-cyan"
-                size="xs"
-                onClick={() => void runtime.install()}
-                disabled={runtime.installing}
-              >
-                {runtime.installing ? (
-                  <RefreshCw className="size-3.5 animate-spin" />
-                ) : (
-                  <Download className="size-3.5" />
-                )}
-                {runtime.installing
-                  ? t('agentDetection.installing')
-                  : t('agentDetection.installAgent')}
-              </Button>
-              {runtime.installResult?.message && (
-                <span
-                  className={clsx(
-                    'text-[12px]',
-                    runtime.installResult.ok ? 'text-mint-ink' : 'text-destructive-ink',
-                  )}
-                >
-                  {runtime.installResult.message}
-                </span>
+            <Button
+              variant="brand-cyan"
+              size="xs"
+              onClick={() => void runtime.install()}
+              disabled={runtime.installing}
+            >
+              {runtime.installing ? (
+                <RefreshCw className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
               )}
-            </div>
-            {runtime.installResult?.output && (
-              <div>
-                <button
-                  type="button"
-                  onClick={() => runtime.setInstallOutputOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 text-[11px] text-cyan-ink transition hover:text-cyan-ink/80"
-                >
-                  {runtime.installOutputOpen ? (
-                    <ChevronUp size={12} />
-                  ) : (
-                    <ChevronDown size={12} />
-                  )}
-                  {t('agentDetection.showOutput')}
-                </button>
-                {runtime.installOutputOpen && (
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border bg-background px-3 py-2 font-mono text-[11px] text-muted">
-                    {runtime.installResult.output}
-                  </pre>
-                )}
-              </div>
+              {runtime.installing
+                ? t('agentDetection.installing')
+                : t('agentDetection.installAgent')}
+            </Button>
+            {runtime.installResult && (
+              <InstallOutcome result={runtime.installResult} className="text-[12px]" />
             )}
           </div>
         )}

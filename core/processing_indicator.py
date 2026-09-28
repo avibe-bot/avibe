@@ -64,6 +64,20 @@ _ADMISSION_ACK_REGISTRY_LIMIT = 1024
 # Registry marker for a message whose own turn has started. Kept so a receipt
 # still in flight when the turn began cannot decorate it afterwards.
 _ADMISSION_ACK_CONSUMED = "\x00turn-started"
+# Typing keepalive bounds. "<bot> is typing…" claims a turn is working on this
+# conversation right now, so the loop re-checks that claim on every tick instead
+# of trusting every exit path to cancel it (see _typing_keepalive_loop).
+TYPING_KEEPALIVE_INTERVAL_SECONDS = 5.0
+# Backstop only: the per-tick currency check already ends typing when its turn
+# ends. Agent turns have no product maximum (they may run for hours and the
+# OpenCode active-turn timeout is disabled by default), so this sits at the
+# longest default bound Avibe puts on unattended work, the 6 h command-task
+# timeout. Hitting it on a real turn only drops the typing hint; the turn, its
+# status and its result are unaffected.
+TYPING_KEEPALIVE_MAX_SECONDS = 6 * 60 * 60
+# A target that rejects this many sends in a row (deleted thread, revoked
+# access) will not recover within the turn.
+TYPING_KEEPALIVE_MAX_FAILURES = 3
 
 
 @dataclass
@@ -80,6 +94,13 @@ class ProcessingIndicatorHandle:
     terminal_reaction_message_id: Optional[str] = None
     typing_indicator_active: bool = False
     typing_indicator_task: Optional[asyncio.Task] = None
+    # Ownership of the typing keepalive: whoever starts it finishes it, unless it
+    # was handed off to the tracked turn. Before track_turn the owner is the task
+    # that started it; track_turn records the runtime turn it was handed to. Both
+    # are process-local and deliberately absent from the snapshot.
+    owner_task: Optional[asyncio.Task] = None
+    runtime_turn_key: Optional[str] = None
+    runtime_turn_token: Optional[str] = None
     # True when the reaction indicator is the selected mode for this turn. The
     # reaction itself is added at the runtime gate (queued 👌 → running 👀), not
     # here, so this flag tells the gate hooks whether to act. It is intentionally
@@ -88,6 +109,10 @@ class ProcessingIndicatorHandle:
     # finish() keys off ack_reaction_emoji directly, so the flag is not load-bearing
     # across a restore.
     reaction_indicator_selected: bool = False
+
+    @property
+    def handed_off(self) -> bool:
+        return bool(self.runtime_turn_token)
 
     def to_snapshot(self) -> dict[str, Any]:
         payload = self.context.platform_specific or {}
@@ -243,16 +268,69 @@ class ProcessingIndicatorService:
         lang = self.controller._get_lang() if hasattr(self.controller, "_get_lang") else getattr(self.config, "language", "en")
         return f"📨 {i18n_t('message.ack', lang, agent=agent_label)}"
 
-    async def _typing_keepalive_loop(self, context: MessageContext) -> None:
+    def _typing_turn_is_current(self, handle: ProcessingIndicatorHandle) -> bool:
+        """Whether the turn that owns this typing keepalive is still running.
+
+        After hand-off the runtime turn gate is the authority: a released or
+        superseded gate means the turn is over even if no cleanup reached this
+        handle (a dropped stale emit, a backend refresh). Before hand-off there is
+        no gate token yet, so the starting task stands in for the turn.
+        """
+
+        if handle.runtime_turn_key and handle.runtime_turn_token:
+            agent_service = getattr(self.controller, "agent_service", None)
+            is_current = getattr(agent_service, "runtime_turn_is_current", None)
+            if not callable(is_current):
+                return True
+            return bool(is_current(handle.runtime_turn_key, handle.runtime_turn_token))
+        owner = handle.owner_task
+        return owner is None or not owner.done()
+
+    async def _typing_keepalive_loop(self, handle: ProcessingIndicatorHandle) -> None:
+        context = handle.context
         im_client = self._get_im_client(context)
-        try:
-            while True:
-                await asyncio.sleep(5)
-                ok = await im_client.send_typing_indicator(context)
-                if not ok:
-                    logger.debug("Typing keepalive not applied for %s", context.user_id)
-        except asyncio.CancelledError:
-            raise
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TYPING_KEEPALIVE_MAX_SECONDS
+        failures = 0
+        while True:
+            await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL_SECONDS)
+            if not self._typing_turn_is_current(handle):
+                logger.debug("Typing keepalive stopped: turn ended for %s", context.channel_id)
+                break
+            if loop.time() >= deadline:
+                logger.warning(
+                    "Typing keepalive reached its %ss cap for %s channel=%s thread=%s; stopping",
+                    TYPING_KEEPALIVE_MAX_SECONDS,
+                    context.platform or "unknown",
+                    context.channel_id,
+                    context.thread_id,
+                )
+                break
+            try:
+                ok = bool(await im_client.send_typing_indicator(context))
+            except Exception as err:
+                logger.debug("Typing keepalive send failed: %s", err)
+                ok = False
+            if ok:
+                failures = 0
+                continue
+            failures += 1
+            if failures >= TYPING_KEEPALIVE_MAX_FAILURES:
+                logger.info(
+                    "Typing keepalive stopped after %d failed sends for %s channel=%s thread=%s",
+                    failures,
+                    context.platform or "unknown",
+                    context.channel_id,
+                    context.thread_id,
+                )
+                break
+        if handle.typing_indicator_active and self._should_clear_typing_indicator(handle):
+            # Platforms whose typing state persists until cancelled would keep
+            # showing it after the loop stops on its own.
+            try:
+                await im_client.clear_typing_indicator(context)
+            except Exception as err:
+                logger.debug("Failed to clear typing indicator: %s", err)
 
     def _admission_ack_registry(self) -> dict[str, str]:
         registry = getattr(self, "_admission_acks", None)
@@ -515,7 +593,8 @@ class ProcessingIndicatorService:
             return False
 
         handle.typing_indicator_active = True
-        handle.typing_indicator_task = asyncio.create_task(self._typing_keepalive_loop(context))
+        handle.owner_task = handle.owner_task or asyncio.current_task()
+        handle.typing_indicator_task = asyncio.create_task(self._typing_keepalive_loop(handle))
         return True
 
     async def _start_reaction_indicator(
@@ -724,8 +803,21 @@ class ProcessingIndicatorService:
         Backends still clean up explicitly with their request object. This registry
         is the outbound terminal fallback: a result emit can recover the original
         handle by turn token even when a backend terminal branch lost the request.
+
+        This is also the hand-off: from here the runtime turn, not the task that
+        started the indicator, owns its cleanup, and the typing keepalive follows
+        that turn's gate.
         """
 
+        handle = request_or_handle
+        if not isinstance(handle, ProcessingIndicatorHandle):
+            handle = getattr(request_or_handle, "processing_indicator", None)
+        payload = context.platform_specific or {}
+        runtime_key = str(payload.get("agent_runtime_turn_key") or "").strip()
+        runtime_token = str(payload.get("agent_runtime_turn_token") or "").strip()
+        if isinstance(handle, ProcessingIndicatorHandle) and runtime_key and runtime_token:
+            handle.runtime_turn_key = runtime_key
+            handle.runtime_turn_token = runtime_token
         for token in self._turn_tokens(context):
             self._indicators_by_turn_token[token] = request_or_handle
 
@@ -853,8 +945,7 @@ class ProcessingIndicatorService:
             request = request_or_handle
             handle = self.handle_from_request(request)
 
-        await self._delete_ack_message_for_handle(handle, request=request)
-
+        # Stop typing before any cleanup call that can hang on the network.
         typing_task = handle.typing_indicator_task
         if typing_task is not None:
             typing_task.cancel()
@@ -868,6 +959,8 @@ class ProcessingIndicatorService:
                 handle.typing_indicator_task = None
                 if request is not None:
                     request.typing_indicator_task = None
+
+        await self._delete_ack_message_for_handle(handle, request=request)
 
         if handle.typing_indicator_active and self._should_clear_typing_indicator(handle):
             try:

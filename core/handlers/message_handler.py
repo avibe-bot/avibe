@@ -862,6 +862,18 @@ class MessageHandler(BaseHandler):
             if not bool(getattr(request, "failure_handled", False)):
                 await self._emit_agent_dispatch_failure(context, request, e)
             return str(e)
+        except BaseException:
+            # Cancellation is not an Exception. Whoever starts the indicator
+            # finishes it unless it was handed off to the tracked turn, which then
+            # owns the cleanup (and the ⏹️/⚠️ receipt finishing here would pre-empt).
+            if processing_indicator is not None and not processing_indicator.handed_off:
+                try:
+                    await self.controller.processing_indicator.finish(
+                        request if request is not None else processing_indicator
+                    )
+                except Exception:
+                    logger.debug("Failed to finish processing indicator on cancel", exc_info=True)
+            raise
         finally:
             if attachment_lease is not None:
                 attachment_lease.release()

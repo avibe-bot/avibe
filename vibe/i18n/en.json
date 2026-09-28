@@ -844,6 +844,18 @@
     "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
     "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately."
   },
+  "agentInstall": {
+    "installFailed": "Could not install {backend}.",
+    "upgradeFailed": "Could not upgrade {backend}.",
+    "hint": {
+      "npmLeftoverDirectory": "npm left a temporary folder behind from an earlier interrupted update: {path}. Delete that folder, then try again.",
+      "permissionDenied": "The installer is not allowed to write to {path}. Make sure your user account can write to that folder, then try again.",
+      "githubRateLimited": "GitHub's API limit for this network is used up. It resets at {time} (in about {minutes} min); try again after that.",
+      "githubRateLimitedNoReset": "GitHub's API limit for this network is used up. It resets within an hour; try again later.",
+      "networkUnreachable": "Could not reach {host}. Check your network connection or proxy settings, then try again.",
+      "timedOut": "The installer did not finish within {minutes} minutes. Check your network connection, then try again."
+    }
+  },
   "desktopBackendInstall": {
     "success": "{backend} installed successfully.",
     "unknownBackend": "Unknown desktop backend: {backend}.",
