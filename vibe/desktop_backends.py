@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -42,6 +43,7 @@ from core.process_isolation import (
 )
 from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe.desktop_runtime import (
+    DESKTOP_INSTALLER_OWNER_ENV,
     DESKTOP_INSTALLER_ROLE,
     DESKTOP_ROLE_ENV,
     DESKTOP_RUNTIME_ID_ENV,
@@ -583,9 +585,10 @@ def _spawn_owned_installer(
     record_path = _installer_record_path(cwd)
     child_env = dict(env)
     child_env[PROCESS_IDENTITY_ENV] = marker
-    # Every member inherits both, so a process scan finds the whole tree
-    # without its record: the stops and the claim decide liveness by them.
+    # Every member inherits these, so a process scan finds the whole tree and
+    # its owner without its record: the stops and the claim decide by them.
     child_env[DESKTOP_ROLE_ENV] = DESKTOP_INSTALLER_ROLE
+    child_env[DESKTOP_INSTALLER_OWNER_ENV] = _installer_owner()
     runtime_id = desktop_runtime_id()
     if runtime_id is not None:
         child_env[DESKTOP_RUNTIME_ID_ENV] = runtime_id
@@ -833,41 +836,81 @@ def _clear_abandoned_install(record: _InstallerRecord) -> bool:
     return True
 
 
-def reap_abandoned_desktop_backend_installs() -> bool:
-    """Stop every installer tree of this Runtime that no live process owns.
+def _installer_owner() -> str:
+    from vibe import runtime
 
-    Installs run only in the UI process, which drains its own trees as it
-    exits; one killed first leaves its tree running. A process scan finds such
-    trees by the role and Runtime id every member inherits, so no record has
-    to name them. Under the registry lock no install of this process is
-    between its spawn and its registration, so a tree missing from the
-    registry has no live owner. Staging and records stay for the next claim
-    of their backend root. Returns False when a tree could not be shown gone.
+    started_at = runtime.process_create_time(os.getpid())
+    if started_at is None:
+        raise DesktopBackendError(
+            "Avibe could not identify itself as the owner of a desktop backend install.",
+            code="desktop_install_failed",
+        )
+    return f"{os.getpid()}:{started_at!r}"
+
+
+def _installer_owner_gone(owner: str) -> bool | None:
+    """Whether the process named by an installer's owner value has exited.
+
+    A pid that is no longer alive, or now belongs to a process started at
+    another time, is gone. ``None`` when the value is malformed or the owner
+    cannot be inspected.
     """
 
-    runtime_id = desktop_runtime_id()
+    from vibe import runtime
+
+    pid_text, _, started_text = owner.partition(":")
+    try:
+        pid, started_at = int(pid_text), float(started_text)
+    except ValueError:
+        return None
+    if pid <= 0 or not math.isfinite(started_at):
+        return None
+    if not runtime.pid_alive(pid):
+        return True
+    current = runtime.process_create_time(pid)
+    if current is None:
+        return None
+    return current != started_at
+
+
+def reap_abandoned_desktop_backend_installs(runtime_id: str | None = None) -> bool:
+    """Stop every installer tree of a Runtime whose owner has exited.
+
+    ``runtime_id`` defaults to this process's. Installs run only in the UI,
+    which drains its own trees as it exits; one killed first leaves its tree
+    running. A process scan finds such trees by the role and Runtime id every
+    member inherits, and each tree names its owner, so no record or pidfile
+    decides, whichever process asks. Staging and records stay for the next
+    claim of their backend root. Returns False when a tree could not be shown
+    gone, or its owner could not be told alive or gone.
+    """
+
+    if runtime_id is None:
+        runtime_id = desktop_runtime_id()
     abandoned: set[str] = set()
-    with _OWNED_INSTALLERS_LOCK:
-        for process in processes_carrying_marker(
-            fingerprint_process_marker(DESKTOP_INSTALLER_ROLE),
-            marker_env=DESKTOP_ROLE_ENV,
-        ):
-            try:
-                env = process.environ()
-            except psutil.NoSuchProcess:
-                continue
-            except (psutil.Error, OSError):
-                logger.error("Could not inspect the %s pid=%s", DESKTOP_BACKEND_INSTALL_LABEL, process.pid, exc_info=True)
-                return False
-            if desktop_runtime_id(env) != runtime_id:
-                continue
-            marker = env.get(PROCESS_IDENTITY_ENV, "")
-            if not marker or not marker.isascii():
-                logger.error("The %s pid=%s carries no identity marker", DESKTOP_BACKEND_INSTALL_LABEL, process.pid)
-                return False
-            fingerprint = fingerprint_process_marker(marker)
-            if fingerprint not in _OWNED_INSTALLERS:
-                abandoned.add(fingerprint)
+    for process in processes_carrying_marker(
+        fingerprint_process_marker(DESKTOP_INSTALLER_ROLE),
+        marker_env=DESKTOP_ROLE_ENV,
+    ):
+        try:
+            env = process.environ()
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.Error, OSError):
+            logger.error("Could not inspect the %s pid=%s", DESKTOP_BACKEND_INSTALL_LABEL, process.pid, exc_info=True)
+            return False
+        if desktop_runtime_id(env) != runtime_id:
+            continue
+        marker = env.get(PROCESS_IDENTITY_ENV, "")
+        if not marker or not marker.isascii():
+            logger.error("The %s pid=%s carries no identity marker", DESKTOP_BACKEND_INSTALL_LABEL, process.pid)
+            return False
+        gone = _installer_owner_gone(env.get(DESKTOP_INSTALLER_OWNER_ENV, ""))
+        if gone is None:
+            logger.error("Could not tell whether the owner of the %s pid=%s is alive", DESKTOP_BACKEND_INSTALL_LABEL, process.pid)
+            return False
+        if gone:
+            abandoned.add(fingerprint_process_marker(marker))
     # By its marker, which also finds members started since the scan.
     return all([_reap_installer_tree(fingerprint, None) for fingerprint in sorted(abandoned)])
 

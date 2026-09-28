@@ -72,12 +72,16 @@ def argv_for(bundle):
     return _argv_for
 
 
-def _child_env(runtime_id: str | None, role: str | None = None) -> dict[str, str]:
+def _child_env(runtime_id: str | None, role: str | None = None, owner_pid: int | None = None) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key != desktop_runtime.DESKTOP_RUNTIME_ID_ENV}
     if runtime_id is not None:
         env[desktop_runtime.DESKTOP_RUNTIME_ID_ENV] = runtime_id
     if role == "installer":
         env[desktop_runtime.DESKTOP_ROLE_ENV] = desktop_runtime.DESKTOP_INSTALLER_ROLE
+        env[desktop_backends.PROCESS_IDENTITY_ENV] = desktop_backends.new_process_identity_marker()
+        # Whoever started the tree owns it: this test, unless another process is named.
+        pid = os.getpid() if owner_pid is None else owner_pid
+        env[desktop_runtime.DESKTOP_INSTALLER_OWNER_ENV] = f"{pid}:{runtime.process_create_time(pid)!r}"
     return env
 
 
@@ -85,12 +89,14 @@ def _child_env(runtime_id: str | None, role: str | None = None) -> dict[str, str
 def spawn(argv_for, bundle):
     children: list[subprocess.Popen] = []
 
-    def _spawn(runtime_id: str | None, role: str | None = "service") -> subprocess.Popen:
+    def _spawn(
+        runtime_id: str | None, role: str | None = "service", owner: subprocess.Popen | None = None
+    ) -> subprocess.Popen:
         argv = argv_for(role)
         child = subprocess.Popen(
             argv,
             cwd=bundle,
-            env=_child_env(runtime_id, role),
+            env=_child_env(runtime_id, role, None if owner is None else owner.pid),
             stdout=subprocess.PIPE,
             text=True,
             start_new_session=True,
@@ -127,8 +133,14 @@ def stop_env(monkeypatch):
     monkeypatch.setattr(os, "kill", recording_kill)
     monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=5: effects["stop_pid"].append(pid) or False)
     monkeypatch.setattr(remote_access, "stop", lambda: effects["remote_access"].append(True) or {"ok": True})
-    # Only the full stop reaps installers this way; the host's must not be touched.
-    monkeypatch.setattr(desktop_backends, "reap_abandoned_desktop_backend_installs", lambda: True)
+    # The full stop reaps the installers of this process's own Runtime id,
+    # which here would be the host's; the scoped stop reaps those of its id.
+    reap = desktop_backends.reap_abandoned_desktop_backend_installs
+    monkeypatch.setattr(
+        desktop_backends,
+        "reap_abandoned_desktop_backend_installs",
+        lambda runtime_id=None: True if runtime_id is None else reap(runtime_id),
+    )
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: effects["status"].append(args))
     paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
     paths.get_logs_dir().mkdir(parents=True, exist_ok=True)
@@ -174,8 +186,10 @@ def _assert_refused_untouched(stop_env, capsys, reason, *children):
 
 
 def test_the_service_ui_installer_and_opencode_carrying_the_id_are_all_stopped(spawn, stop_env, bundle):
-    roles = ("service", "ui", "installer", "opencode", "opencode-native")
-    children = [spawn(RUNTIME_ID, role) for role in roles]
+    ui = spawn(RUNTIME_ID, "ui")
+    # Started by the UI, the installer tree is abandoned once the UI has stopped.
+    children = [ui, spawn(RUNTIME_ID, "installer", owner=ui)]
+    children += [spawn(RUNTIME_ID, role) for role in ("service", "opencode", "opencode-native")]
     # An update may already have replaced or moved the files they started from.
     shutil.rmtree(bundle)
 
@@ -250,7 +264,7 @@ def test_the_stop_and_its_ancestors_are_never_signalled(spawn, bundle, tmp_path)
         {"pid": parent.pid, "role": "ui"},
     ]
     service.wait(timeout=10)
-    # A UI of this Runtime that is still alive could start another installer.
+    # Its owner, this test, is still alive.
     assert _alive(installer)
 
 

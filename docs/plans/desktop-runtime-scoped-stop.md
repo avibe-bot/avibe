@@ -49,10 +49,10 @@ An agent's command line is arbitrary text, so words it merely contains, such as
 ### Order and postcondition
 
 1. Service processes, then UI processes: SIGTERM, then SIGKILL after 5 s.
-2. Backend installer processes, once no `ui` or `unknown` process of this
-   Runtime is alive: a live UI could start another tree after the scan. The UI
-   drains its own installs as it exits, so these are trees its owner left.
-   Their staging and records stay for the next claim of their backend root.
+2. Backend installer trees of this Runtime whose owning UI has exited, by the
+   owner each tree names (see below). A tree whose owner is still alive stays,
+   and the rescan reports it. Their staging and records stay for the next
+   claim of their backend root.
 3. The OpenCode server.
 4. A rescan decides the outcome. Any role process still carrying the id,
    including one started after the scan or one in the stop's own lineage,
@@ -104,15 +104,24 @@ with an unscoped stop. The tunnel connector is left for the successor to adopt.
   executable's `--version` probe start at one spawn point,
   `desktop_backends._spawn_owned_installer`: in their own process group, with a
   fresh `AVIBE_PROCESS_IDENTITY` marker, `AVIBE_DESKTOP_ROLE=installer`, the
-  UI's `AVIBE_DESKTOP_RUNTIME_ID`, and a durable record under
-  `<runtime dir>/desktop-backend-installs/`. Every member inherits the three
-  variables, so a process scan finds the whole tree.
+  UI's `AVIBE_DESKTOP_RUNTIME_ID`, `AVIBE_DESKTOP_INSTALLER_OWNER=<pid>:<create
+  time>` of the UI, and a durable record under
+  `<runtime dir>/desktop-backend-installs/`. Every member inherits the four
+  variables, so a process scan finds the whole tree and its owner.
 - The role variable exists because nothing else says "installer": watch
   workers, command runners and the Model Hub supervisor carry
   `AVIBE_PROCESS_IDENTITY` too. The spawn point sets the Runtime id itself
   because the installer environment is an allowlist without `AVIBE_*`.
-- Liveness comes from the scan. Records serve only the claim's cleanup of the
-  staging they name.
+- Ownership travels with the tree. A tree is abandoned exactly when no process
+  has its owner's pid, or the process with that pid started at another time
+  (the pid was reused), compared through `runtime.process_create_time` with
+  exact equality like the restart supervisor's checks. A missing or malformed
+  owner value, or an owner that cannot be inspected, fails closed: the reap
+  reports failure and stops nothing. One function,
+  `desktop_backends.reap_abandoned_desktop_backend_installs`, applies this for
+  every caller, so no caller's registry, pidfile or knowledge of the UI decides.
+  The owner registry serves only the owner's own drain.
+- Records serve only the claim's cleanup of the staging they name.
 - The record names the install's staging directory and lives exactly as long
   as the install: the install holds `.install.lock` from before the record is
   written until after it has removed its staging and then the record.
@@ -125,24 +134,24 @@ with an unscoped stop. The tunnel connector is left for the successor to adopt.
   then refuses new installs (`install_shutting_down`). The probe is an owned
   installer, so a drain during it stops it too.
 - Every acquisition of `.install.lock` goes through one function,
-  `desktop_backends._claim_backend_root`. Under the lock the claim first scans
-  for installer processes of its Runtime id whose marker the owner registry
-  does not hold, and reaps those trees by marker. The registry is read under
-  its own lock, so no install of this process is between spawn and
-  registration. Then every record of the root belongs to an owner that died:
-  the claim reaps its tree by marker, removes its staging, and then the record.
-  So a UI that replaces one killed mid-install reaps first, and never installs
+  `desktop_backends._claim_backend_root`. Under the lock the claim first reaps
+  every abandoned installer tree of its Runtime id. Its own trees, and those of
+  another live UI of the same id, have a live owner and stay. Then every record
+  of the root belongs to an install whose owner died holding the lock: the
+  claim reaps its tree by marker, removes its staging, and then the record. So
+  a UI that replaces one killed mid-install reaps first, and never installs
   over a tree that may still be writing.
 - The claim lists records with `os.scandir`. Any `OSError` on the directory or
   on a record makes the listing unknown: the claim removes nothing and refuses
   with `install_locked`. Only a missing directory reads as "no records", and a
   record gone mid-listing is skipped because its install finished. A tree that
   cannot be shown gone also refuses the claim.
-- The stops read no record. `vibe stop --expect-runtime-id` signals the
-  installer processes its scan found, once the UI is gone. `vibe stop` and the
-  restart supervisor stop the UI, then reap the installer trees of their own
-  Runtime id that no live process owns. A tree that cannot be shown gone fails
-  the stop (exit 2) or the restart. Staging and records stay for the next
+- The stops read no record. `vibe stop --expect-runtime-id` for the id it
+  names, and `vibe stop` and the restart supervisor for their own, stop the UI
+  and then reap the abandoned installer trees. A tree whose owner is alive,
+  such as the install of a UI a missing or corrupt pidfile hid from the full
+  stop, stays. A tree that cannot be shown gone, or whose owner cannot be told,
+  fails the stop (exit 2) or the restart. Staging and records stay for the next
   claim.
 - Removal is confined by the record's shape: only a normalized absolute path
   named `.staging-<32 hex>` directly inside a directory named after a backend
@@ -173,8 +182,10 @@ with an unscoped stop. The tunnel connector is left for the successor to adopt.
   id; from a terminal that means the ones without an id. A tree another
   Runtime id left, for example before an update, is stopped by the desktop
   host's scoped stop of that id, or reaped by the next claim of its backend
-  root through the record it left. Another id's tree is not the claim's to
-  judge by the scan: its UI may still be alive and draining it.
+  root through the record it left.
+- Plain `vibe stop` and the restart supervisor still find the UI by its
+  pidfile, as before this change. With that pidfile missing or corrupt the UI
+  keeps running; only its installs are no longer at risk.
 
 ## Known-by-design ledger
 
@@ -188,6 +199,11 @@ with an unscoped stop. The tunnel connector is left for the successor to adopt.
 - The scoped stop path reads no file: no pidfile, lock record or installer
   record. Installer trees are found by the scan like every other role; their
   staging and records wait for the next claim of their backend root.
+- A claim whose leftover staging cannot be removed still proceeds. The failure
+  is logged with the path, the record stays, and the next claim retries.
+  Refusing with `install_locked` would let one undeletable directory block that
+  backend for good; every install uses a fresh staging directory, so the
+  leftover costs only disk.
 - Full `vibe stop` keeps OpenCode non-fatal. The desktop host consumes the
   scoped result to replace or remove the bundle OpenCode runs from, so there a
   surviving OpenCode of this id fails the stop (exit 2). Plain `vibe stop` is

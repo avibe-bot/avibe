@@ -2788,11 +2788,11 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     Discovery is one scan of this user's processes for the id they inherited
     in ``AVIBE_DESKTOP_RUNTIME_ID``; no pidfile or record is read. This stop
     and its ancestors carry the id when the desktop host started it and are
-    never signalled. Service processes stop first, then the UI, then, once no
-    UI of this Runtime is left to start another, its backend installer
-    processes, then its OpenCode server, each through the handle the scan
-    returned. A rescan decides the outcome. Installer staging and records stay
-    for the next claim of their backend root.
+    never signalled. Service processes stop first, then the UI, each through
+    the handle the scan returned; then every backend installer tree of this
+    Runtime whose owning UI has exited; then its OpenCode server. A rescan
+    decides the outcome. Installer staging and records stay for the next
+    claim of their backend root.
 
     Other programs carrying the id, such as agent CLIs and the tunnel
     connector, are reported and left running. With no role process carrying
@@ -2820,13 +2820,10 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     with _SERVICE_LOCK:
         _stop_desktop_processes(targets("service"))
     _stop_desktop_processes(targets("ui"))
-    # The UI owns backend installs and drains them itself as it exits. One
-    # still alive could start a tree after the scan, so installers wait for none.
-    if not any(
-        entry.report.role in ("ui", _UNKNOWN_DESKTOP_ROLE) and not _desktop_process_gone(entry.process)
-        for entry in found
-    ):
-        _stop_desktop_processes(targets("installer"))
+    from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
+
+    # A tree whose owner is still alive stays, and the rescan reports it.
+    reap_abandoned_desktop_backend_installs(runtime_id)
     opencode = targets("opencode")
     _stop_desktop_processes(opencode)
 

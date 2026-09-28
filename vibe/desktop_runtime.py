@@ -27,6 +27,9 @@ DESKTOP_BACKENDS_ROOT_ENV = "AVIBE_DESKTOP_BACKENDS_ROOT"
 # an installer tree from the other programs that carry the Runtime id.
 DESKTOP_ROLE_ENV = "AVIBE_DESKTOP_ROLE"
 DESKTOP_INSTALLER_ROLE = "installer"
+# ``<pid>:<create time>`` of the process that started an installer tree, which
+# every member inherits: the tree is abandoned once that process is gone.
+DESKTOP_INSTALLER_OWNER_ENV = "AVIBE_DESKTOP_INSTALLER_OWNER"
 START_RECEIPT_PREFIX = "@avibe-start-receipt:"
 START_RECEIPT_TIME_TOLERANCE_MS = 2.0
 

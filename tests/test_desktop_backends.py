@@ -351,23 +351,46 @@ def owner_runtime_id(monkeypatch):
 
 
 @pytest.fixture
-def installer_tree(tmp_path, owner_runtime_id):
-    pids_path = tmp_path / "installer-pids.json"
+def installer_trees(tmp_path, owner_runtime_id):
+    """Makes install environments, each with its own backend root and npm tree."""
+
     started: list[int] = []
 
-    def wait_for_tree() -> list[int]:
-        deadline = time.monotonic() + 15
-        while not pids_path.exists():
-            assert time.monotonic() < deadline, "installer tree did not start"
-            time.sleep(0.05)
-        started.extend(json.loads(pids_path.read_text(encoding="utf-8")))
-        return list(started)
+    def make(name: str):
+        pids_path = tmp_path / name / "installer-pids.json"
 
-    env = _installer_env(tmp_path, _INSTALLER_TREE_SCRIPT.format(pids=str(pids_path)))
-    yield env, wait_for_tree
+        def wait_for_tree() -> list[int]:
+            deadline = time.monotonic() + 15
+            while not pids_path.exists():
+                assert time.monotonic() < deadline, "installer tree did not start"
+                time.sleep(0.05)
+            pids = json.loads(pids_path.read_text(encoding="utf-8"))
+            started.extend(pids)
+            return pids
+
+        return _installer_env(tmp_path / name, _INSTALLER_TREE_SCRIPT.format(pids=str(pids_path))), wait_for_tree
+
+    yield make
     for pid in started:
         if pid_alive(pid):
             os.kill(pid, signal.SIGKILL)
+
+
+@pytest.fixture
+def installer_tree(installer_trees):
+    return installer_trees("tree")
+
+
+@pytest.fixture
+def children():
+    """Processes a test starts, killed and reaped when it ends."""
+
+    started: list[subprocess.Popen] = []
+    yield started
+    for child in started:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
 
 
 def _running(pids: list[int]) -> list[int]:
@@ -396,6 +419,30 @@ def _stagings(env: dict[str, str]) -> list[Path]:
     return sorted((Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude").glob(".staging-*"))
 
 
+def _start_owner(children: list[subprocess.Popen], env: dict[str, str], wait_for_tree) -> list[int]:
+    """A live stand-in for the UI: it installs with ``env`` and owns the tree that starts."""
+
+    children.append(subprocess.Popen([sys.executable, "-c", _INSTALL_OWNER_SCRIPT, json.dumps(env)], cwd=_REPO_ROOT))
+    pids = wait_for_tree()
+    assert _running(pids) == pids
+    return pids
+
+
+def _start_tree_naming(children: list[subprocess.Popen], env: dict[str, str], wait_for_tree, owner: str | None):
+    """An installer tree of this Runtime that names ``owner``, or no owner at all."""
+
+    tree_env = {
+        **os.environ,
+        desktop_backends.DESKTOP_ROLE_ENV: desktop_backends.DESKTOP_INSTALLER_ROLE,
+        desktop_backends.PROCESS_IDENTITY_ENV: desktop_backends.new_process_identity_marker(),
+    }
+    if owner is not None:
+        tree_env[desktop_backends.DESKTOP_INSTALLER_OWNER_ENV] = owner
+    npm = Path(env["AVIBE_DESKTOP_NPM_CLI"]).read_text(encoding="utf-8")
+    children.append(subprocess.Popen([sys.executable, "-c", npm], env=tree_env))
+    return wait_for_tree()
+
+
 def _start_killed_owner(env: dict[str, str], wait_for_tree) -> list[int]:
     """An owner that dies (SIGKILL) mid-install, before it can drain its tree."""
 
@@ -418,10 +465,10 @@ def _start_killed_owner(env: dict[str, str], wait_for_tree) -> list[int]:
 def quiet_stop(monkeypatch):
     from vibe import cli, remote_access, runtime
 
-    # The full stop's service and UI halves scan live processes; nothing of
-    # this test runs there, and the real host must not be touched.
+    # The full stop's service half scans live processes; nothing of this test
+    # runs there, and the real host must not be touched. The UI half reads
+    # only this test's UI pidfile.
     monkeypatch.setattr(runtime, "stop_service", lambda: False)
-    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: None)
     monkeypatch.setattr(remote_access, "stop", lambda: {"ok": True})
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
@@ -484,6 +531,108 @@ def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(monkeypatch, 
     desktop_backends.install_desktop_backend("claude", base_env=env)
     assert _stagings(env) == []
     assert _install_records() == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("ui_pidfile", [None, "not-a-pid"], ids=["missing", "corrupt"])
+@pytest.mark.parametrize("caller", ["stop", "restart"])
+def test_the_tree_of_a_live_owner_stays_whatever_the_ui_pidfile_says(
+    monkeypatch, installer_tree, quiet_stop, children, ui_pidfile, caller
+):
+    from vibe import restart_supervisor
+
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    pids = _start_owner(children, env, wait_for_tree)
+    config_paths.ensure_data_dirs()
+    if ui_pidfile is not None:
+        config_paths.get_runtime_ui_pid_path().write_text(ui_pidfile, encoding="utf-8")
+
+    if caller == "stop":
+        assert cli.cmd_stop() == 0
+        assert statuses == [("stopped",)]
+    else:
+        seen_at_start: list[list[int]] = []
+
+        def start(start_ui=True):
+            seen_at_start.append(_running(pids))
+            raise RuntimeError("no Runtime starts in this test")
+
+        monkeypatch.setattr(restart_supervisor, "_stop_service_for_restart", lambda: (True, 0.0))
+        monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+        monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
+
+        restart_supervisor._run_restart_job(job_id="jobliveowner", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
+
+        # The reap let the restart go on to start the successor.
+        assert seen_at_start == [pids]
+    assert _running(pids) == pids
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(installer_tree, quiet_stop, children):
+    from vibe import runtime
+
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    # The owner exited and its pid now belongs to a process started later: this test.
+    reused = f"{os.getpid()}:{runtime.process_create_time(os.getpid()) - 1.0!r}"
+    pids = _start_tree_naming(children, env, wait_for_tree, reused)
+
+    assert cli.cmd_stop() == 0
+
+    assert _running(pids) == []
+    assert statuses == [("stopped",)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("owner", ["missing", "malformed", "uninspectable"])
+@pytest.mark.parametrize("scoped", [False, True], ids=["full", "scoped"])
+def test_a_tree_whose_owner_cannot_be_told_fails_every_caller_closed(
+    monkeypatch, installer_tree, quiet_stop, children, capsys, owner, scoped
+):
+    from vibe import runtime
+
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    named = {"missing": None, "malformed": "not-an-owner"}.get(owner)
+    if owner == "uninspectable":
+        live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        children.append(live)
+        named = f"{live.pid}:{runtime.process_create_time(live.pid)!r}"
+        real_create_time = runtime.process_create_time
+        monkeypatch.setattr(
+            runtime, "process_create_time", lambda pid: None if pid == live.pid else real_create_time(pid)
+        )
+    pids = _start_tree_naming(children, env, wait_for_tree, named)
+    npm_runs: list[bool] = []
+    _patch_fake_install(monkeypatch, before=lambda: npm_runs.append(True))
+
+    assert (cli.cmd_stop(expect_runtime_id=_TREE_RUNTIME_ID) if scoped else cli.cmd_stop()) == 2
+
+    assert statuses == [("error", "desktop backend install drain failed")]
+    if scoped:
+        reported = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+        assert reported["failed"] == "installer"
+        assert sorted(item["pid"] for item in reported["remaining"]) == sorted(pids)
+    assert _running(pids) == pids
+    with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+        desktop_backends.install_desktop_backend("claude", base_env=env)
+    assert refused.value.code == "install_locked"
+    assert npm_runs == []
+    assert _running(pids) == pids
+    assert _install_lock_is_free(env)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_two_uis_of_one_runtime_each_keep_their_own_tree(installer_trees, children):
+    # Each installs into its own root, so neither waits on the other's lock,
+    # and the second one's claim sees the first one's tree by the Runtime id.
+    first = _start_owner(children, *installer_trees("first"))
+    second = _start_owner(children, *installer_trees("second"))
+
+    assert _running(first) == first
+    assert _running(second) == second
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX file permissions")
