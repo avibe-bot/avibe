@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -53,6 +54,9 @@ def _fake_npm_install(
     spec = desktop_backends.BACKEND_SPECS[backend]
 
     def fake_run(command, *, cwd, env, timeout_seconds):
+        if "--prefix" not in command:
+            # The installed executable's ``--version`` probe.
+            return subprocess.CompletedProcess(command, 0, f"{backend} 1.2.3", "")
         staging = Path(command[command.index("--prefix") + 1])
         package_dir = staging / "node_modules" / Path(*spec.package_path)
         package_dir.mkdir(parents=True)
@@ -116,11 +120,6 @@ def test_install_publishes_verified_native_backend(monkeypatch, tmp_path, backen
     env["OPENAI_API_KEY"] = "fixture-key"
     calls: list[tuple[list[str], dict[str, str], Path]] = []
     monkeypatch.setattr(desktop_backends, "_run_command", _fake_npm_install(backend, calls=calls))
-    monkeypatch.setattr(
-        desktop_backends.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, f"{backend} 1.2.3", ""),
-    )
     activated: list[str] = []
 
     result = desktop_backends.install_desktop_backend(
@@ -169,11 +168,6 @@ def test_codex_accepts_nested_target_package(monkeypatch, tmp_path):
         desktop_backends,
         "_run_command",
         _fake_npm_install("codex", codex_layout="nested"),
-    )
-    monkeypatch.setattr(
-        desktop_backends.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "codex-cli 1.2.3", ""),
     )
 
     result = desktop_backends.install_desktop_backend("codex", base_env=env)
@@ -231,11 +225,6 @@ def test_failed_install_keeps_current_descriptor_and_removes_staging(monkeypatch
 def test_descriptor_publication_failure_does_not_activate_config(monkeypatch, tmp_path):
     env = _desktop_env(tmp_path)
     monkeypatch.setattr(desktop_backends, "_run_command", _fake_npm_install("opencode"))
-    monkeypatch.setattr(
-        desktop_backends.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "opencode 1.2.3", ""),
-    )
     state = {"path": "opencode"}
 
     def activate(path):
@@ -270,11 +259,6 @@ def test_descriptor_is_published_before_activation_and_restored_on_failure(monke
     backend_root.mkdir(parents=True, exist_ok=True)
     (backend_root / "current.json").write_text(json.dumps(old_descriptor), encoding="utf-8")
     monkeypatch.setattr(desktop_backends, "_run_command", _fake_npm_install("claude"))
-    monkeypatch.setattr(
-        desktop_backends.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "claude 1.2.3", ""),
-    )
 
     def fail_activation(new_path):
         assert desktop_backends.resolve_published_desktop_backend("claude", env) == new_path
@@ -327,7 +311,8 @@ def test_resolver_rejects_descriptor_traversal_and_non_native_file(tmp_path):
 # --- The installer tree is owned by the process that started it (#2131) ---
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_TREE_RUNTIME_ID = "a" * 64
+# Random, so no process another test file started is ever in scope.
+_TREE_RUNTIME_ID = secrets.token_hex(32)
 # npm-shaped: the leader starts one child in its group and one that leaves it
 # (and ignores SIGTERM), then works until stopped.
 _INSTALLER_TREE_SCRIPT = """
@@ -359,7 +344,14 @@ def _installer_env(tmp_path: Path, npm_script: str) -> dict[str, str]:
 
 
 @pytest.fixture
-def installer_tree(tmp_path):
+def owner_runtime_id(monkeypatch):
+    # The install owner's Runtime id, which every installer it starts inherits.
+    monkeypatch.setenv(desktop_backends.DESKTOP_RUNTIME_ID_ENV, _TREE_RUNTIME_ID)
+    return _TREE_RUNTIME_ID
+
+
+@pytest.fixture
+def installer_tree(tmp_path, owner_runtime_id):
     pids_path = tmp_path / "installer-pids.json"
     started: list[int] = []
 
@@ -407,11 +399,9 @@ def _stagings(env: dict[str, str]) -> list[Path]:
 def _start_killed_owner(env: dict[str, str], wait_for_tree) -> list[int]:
     """An owner that dies (SIGKILL) mid-install, before it can drain its tree."""
 
-    owner_env = dict(os.environ, AVIBE_DESKTOP_RUNTIME_ID=_TREE_RUNTIME_ID)
     owner = subprocess.Popen(
         [sys.executable, "-c", _INSTALL_OWNER_SCRIPT, json.dumps(env)],
         cwd=_REPO_ROOT,
-        env=owner_env,
     )
     try:
         pids = wait_for_tree()
@@ -475,20 +465,111 @@ def test_ui_shutdown_signal_drains_the_installer_tree_before_returning(monkeypat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
-@pytest.mark.parametrize("expect_runtime_id", [None, _TREE_RUNTIME_ID])
-def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(installer_tree, quiet_stop, expect_runtime_id):
+@pytest.mark.parametrize("scoped", [False, True], ids=["full", "scoped"])
+def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(monkeypatch, installer_tree, quiet_stop, scoped):
     env, wait_for_tree = installer_tree
     cli, statuses = quiet_stop
     pids = _start_killed_owner(env, wait_for_tree)
 
-    exit_code = cli.cmd_stop() if expect_runtime_id is None else cli.cmd_stop(expect_runtime_id=expect_runtime_id)
+    exit_code = cli.cmd_stop(expect_runtime_id=_TREE_RUNTIME_ID) if scoped else cli.cmd_stop()
 
     assert exit_code == 0
     assert _running(pids) == []
-    assert _stagings(env) == []
-    assert _install_records() == []
     assert _install_lock_is_free(env)
     assert statuses == [("stopped",)]
+    # The stop reads no record; its staging and record wait for the next claim.
+    assert len(_stagings(env)) == 1
+    assert len(_install_records()) == 1
+    _patch_fake_install(monkeypatch)
+    desktop_backends.install_desktop_backend("claude", base_env=env)
+    assert _stagings(env) == []
+    assert _install_records() == []
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX file permissions")
+def test_an_unreadable_records_directory_hides_no_tree_and_authorises_no_cleanup(
+    monkeypatch, installer_tree, quiet_stop
+):
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    pids = _start_killed_owner(env, wait_for_tree)
+    records = _install_records()
+    records[0].parent.chmod(0)
+    npm_runs: list[bool] = []
+    _patch_fake_install(monkeypatch, before=lambda: npm_runs.append(True))
+    try:
+        # The scan finds the tree; no listing is asked whether one exists.
+        assert cli.cmd_stop(expect_runtime_id=_TREE_RUNTIME_ID) == 0
+        assert _running(pids) == []
+        # An empty or failed listing never reads as "nothing to clean up".
+        with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+            desktop_backends.install_desktop_backend("claude", base_env=env)
+    finally:
+        records[0].parent.chmod(0o700)
+
+    assert refused.value.code == "install_locked"
+    assert npm_runs == []
+    assert _install_records() == records
+    assert len(_stagings(env)) == 1
+    assert _install_lock_is_free(env)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_a_drain_during_the_version_probe_does_not_return_while_the_probe_runs(
+    monkeypatch, tmp_path, owner_runtime_id
+):
+    env = _desktop_env(tmp_path)
+    monkeypatch.setattr(desktop_backends, "_INSTALLERS_CLOSED", False)
+    # The installed executable is a script that answers no probe until stopped.
+    monkeypatch.setattr(desktop_backends, "_has_native_magic", lambda _path: True)
+    probe = tmp_path / "probe"
+    fake_npm = _fake_npm_install("claude")
+    real_run = desktop_backends._run_command
+
+    def run(command, **kwargs):
+        if "--prefix" not in command:
+            return real_run(command, **kwargs)
+        completed = fake_npm(command, **kwargs)
+        staging = Path(command[command.index("--prefix") + 1])
+        next(staging.glob("node_modules/@anthropic-ai/*/claude")).write_text(
+            "#!/bin/sh\n"
+            f'echo "$$ $AVIBE_DESKTOP_ROLE $AVIBE_DESKTOP_RUNTIME_ID" > "{probe}.tmp"\n'
+            f'/bin/mv "{probe}.tmp" "{probe}"\n'
+            "exec /bin/sleep 120\n",
+            encoding="utf-8",
+        )
+        return completed
+
+    monkeypatch.setattr(desktop_backends, "_run_command", run)
+    outcome: dict[str, str] = {}
+
+    def install() -> None:
+        try:
+            desktop_backends.install_desktop_backend("claude", base_env=env)
+        except desktop_backends.DesktopBackendError as exc:
+            outcome["code"] = exc.code
+
+    worker = threading.Thread(target=install)
+    worker.start()
+    deadline = time.monotonic() + 15
+    while not probe.exists():
+        assert time.monotonic() < deadline, "the probe did not start"
+        time.sleep(0.05)
+    pid, *inherited = probe.read_text(encoding="utf-8").split()
+    try:
+        drained = desktop_backends.drain_desktop_backend_installs()
+        assert not pid_alive(int(pid))
+        assert drained
+    finally:
+        if pid_alive(int(pid)):
+            os.kill(int(pid), signal.SIGKILL)
+        worker.join(timeout=30)
+
+    # The probe is an installer of this Runtime, which the scoped stop's scan also finds.
+    assert inherited == [desktop_backends.DESKTOP_INSTALLER_ROLE, owner_runtime_id]
+    assert outcome == {"code": "executable_probe_failed"}
+    assert _install_records() == []
+    assert _install_lock_is_free(env)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
@@ -534,16 +615,11 @@ def _patch_fake_install(monkeypatch, *, before=None):
     fake_npm = _fake_npm_install("claude")
 
     def run(command, **kwargs):
-        if before is not None:
+        if before is not None and "--prefix" in command:
             before()
         return fake_npm(command, **kwargs)
 
     monkeypatch.setattr(desktop_backends, "_run_command", run)
-    monkeypatch.setattr(
-        desktop_backends.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "claude 1.2.3", ""),
-    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
@@ -585,7 +661,6 @@ def test_install_is_refused_while_an_abandoned_installer_cannot_be_shown_gone(mo
     assert len(_stagings(env)) == 1
 
 
-@pytest.mark.parametrize("entry", ["install", "stop"])
 @pytest.mark.parametrize(
     "recorded",
     [
@@ -596,9 +671,7 @@ def test_install_is_refused_while_an_abandoned_installer_cannot_be_shown_gone(mo
     ],
     ids=["release", "not-in-a-backend-root", "traversal", "relative"],
 )
-def test_a_recorded_path_outside_a_staging_directory_is_never_removed(
-    monkeypatch, tmp_path, quiet_stop, entry, recorded
-):
+def test_a_recorded_path_outside_a_staging_directory_is_never_removed(monkeypatch, tmp_path, recorded):
     env = _desktop_env(tmp_path)
     backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude"
     monkeypatch.chdir(tmp_path)
@@ -613,13 +686,9 @@ def test_a_recorded_path_outside_a_staging_directory_is_never_removed(
         identity=None,
         staging=path,
     )
-    cli, _statuses = quiet_stop
+    _patch_fake_install(monkeypatch)
 
-    if entry == "install":
-        _patch_fake_install(monkeypatch)
-        desktop_backends.install_desktop_backend("claude", base_env=env)
-    else:
-        assert cli.cmd_stop() == 0
+    desktop_backends.install_desktop_backend("claude", base_env=env)
 
     # The record was read, and rejected: it names nothing an install made.
     assert not record.exists()
@@ -627,8 +696,7 @@ def test_a_recorded_path_outside_a_staging_directory_is_never_removed(
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX file permissions")
-@pytest.mark.parametrize("entry", ["install", "stop"])
-def test_an_installer_record_that_cannot_be_read_is_unknown_and_kept(monkeypatch, tmp_path, quiet_stop, entry):
+def test_an_installer_record_that_cannot_be_read_is_unknown_and_kept(monkeypatch, tmp_path):
     # Only a record whose content was read and proven invalid is discarded; one
     # that cannot be read may still name a running installer tree.
     env = _desktop_env(tmp_path)
@@ -644,15 +712,10 @@ def test_an_installer_record_that_cannot_be_read_is_unknown_and_kept(monkeypatch
         staging=backend_root / f".staging-{'c' * 32}",
     )
     record.chmod(0)
-    cli, statuses = quiet_stop
+    _patch_fake_install(monkeypatch)
 
-    if entry == "install":
-        _patch_fake_install(monkeypatch)
-        with pytest.raises(desktop_backends.DesktopBackendError) as refused:
-            desktop_backends.install_desktop_backend("claude", base_env=env)
-        assert refused.value.code == "install_locked"
-    else:
-        assert cli.cmd_stop() == 2
-        assert statuses == [("error", "desktop backend install drain failed")]
+    with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+        desktop_backends.install_desktop_backend("claude", base_env=env)
 
+    assert refused.value.code == "install_locked"
     assert record.exists()

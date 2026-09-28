@@ -23,6 +23,10 @@ DESKTOP_RUNTIME_ROOT_ENV = "AVIBE_DESKTOP_RUNTIME_ROOT"
 DESKTOP_NODE_BIN_ENV = "VIBE_SHOW_RUNTIME_NODE_BIN"
 DESKTOP_NPM_CLI_ENV = "AVIBE_DESKTOP_NPM_CLI"
 DESKTOP_BACKENDS_ROOT_ENV = "AVIBE_DESKTOP_BACKENDS_ROOT"
+# Every process a backend install starts carries this, so a process scan tells
+# an installer tree from the other programs that carry the Runtime id.
+DESKTOP_ROLE_ENV = "AVIBE_DESKTOP_ROLE"
+DESKTOP_INSTALLER_ROLE = "installer"
 START_RECEIPT_PREFIX = "@avibe-start-receipt:"
 START_RECEIPT_TIME_TOLERANCE_MS = 2.0
 

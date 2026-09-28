@@ -2536,12 +2536,12 @@ def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_acces
 class DesktopRuntimePresence(Enum):
     """Whether the desktop Runtime a scoped stop names is running.
 
-    ``MATCH`` comes from the process scan: a service, UI or OpenCode server
-    carrying the id is running. With none running, the service lock decides
-    without its record being read: free is ``ABSENT``, held is ``MISMATCH``
-    (the holder is not a service of this Runtime), and a lock that cannot be
-    probed is ``UNKNOWN``. The desktop host mirrors these as Mine, Absent,
-    Foreign and Unknown.
+    ``MATCH`` comes from the process scan: a service, UI, backend installer
+    or OpenCode server carrying the id is running. With none running, the
+    service lock decides without its record being read: free is ``ABSENT``,
+    held is ``MISMATCH`` (the holder is not a service of this Runtime), and a
+    lock that cannot be probed is ``UNKNOWN``. The desktop host mirrors these
+    as Mine, Absent, Foreign and Unknown.
     """
 
     ABSENT = "absent"
@@ -2569,8 +2569,8 @@ _UNKNOWN_DESKTOP_ROLE = "unknown"
 
 @dataclass(frozen=True)
 class DesktopRuntimeProcess:
-    """A process carrying the id: ``role`` is ``service``, ``ui``, ``opencode``,
-    ``unknown``, or ``None`` for any other program."""
+    """A process carrying the id: ``role`` is ``service``, ``ui``, ``installer``,
+    ``opencode``, ``unknown``, or ``None`` for any other program."""
 
     pid: int
     role: str | None
@@ -2597,20 +2597,14 @@ class DesktopRuntimeStopResult:
     refusal: str | None = None
     remaining: tuple[DesktopRuntimeProcess, ...] = ()
     left_running: tuple[DesktopRuntimeProcess, ...] = ()
-    installs_drained: bool = True
     opencode_stopped: bool = False
 
     @property
     def failure(self) -> str | None:
-        """The first part that did not stop: ``service``, ``ui``, ``installs``, ``opencode`` or ``unknown``."""
+        """The first part that did not stop: ``service``, ``ui``, ``installer``, ``opencode`` or ``unknown``."""
 
         roles = {process.role for process in self.remaining}
-        for part in ("service", "ui"):
-            if part in roles:
-                return part
-        if not self.installs_drained:
-            return "installs"
-        for part in ("opencode", _UNKNOWN_DESKTOP_ROLE):
+        for part in ("service", "ui", "installer", "opencode", _UNKNOWN_DESKTOP_ROLE):
             if part in roles:
                 return part
         return None
@@ -2624,8 +2618,10 @@ class DesktopRuntimeStopResult:
         return DesktopRuntimeStopOutcome.STOPPED
 
 
-def _is_opencode_serve_command(command: str) -> bool:
-    return "opencode" in command and "serve" in command
+def _is_opencode_serve_argv(argv: list[str]) -> bool:
+    # Whole tokens: ``opencode-server-helper`` names neither.
+    programs = {Path(part).name.lower().removesuffix(".exe") for part in argv}
+    return "opencode" in programs and "serve" in argv
 
 
 def _is_desktop_service_command(command: str, cwd: str | None) -> bool:
@@ -2667,12 +2663,19 @@ def _desktop_process_gone(process: psutil.Process) -> bool:
 def _desktop_process_role(process: psutil.Process) -> str | None:
     """Raises ``psutil.NoSuchProcess`` for a process that has exited."""
 
+    from vibe.desktop_runtime import DESKTOP_INSTALLER_ROLE, DESKTOP_ROLE_ENV
+
     try:
-        command = shlex.join(str(part) for part in process.cmdline())
+        # Every member of a backend install tree inherits the role, whatever
+        # program it runs.
+        if process.environ().get(DESKTOP_ROLE_ENV) == DESKTOP_INSTALLER_ROLE:
+            return "installer"
+        argv = [str(part) for part in process.cmdline()]
     except psutil.NoSuchProcess:
         raise
     except (psutil.Error, OSError):
-        command = ""
+        argv = []
+    command = shlex.join(argv)
     if not command:
         if _desktop_process_gone(process):
             raise psutil.NoSuchProcess(process.pid)
@@ -2681,7 +2684,7 @@ def _desktop_process_role(process: psutil.Process) -> str | None:
         return "service"
     if _is_ui_server_command(command):
         return "ui"
-    if _is_opencode_serve_command(command):
+    if _is_opencode_serve_argv(argv):
         return "opencode"
     return None
 
@@ -2763,12 +2766,13 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     """Stop only what the desktop Runtime ``runtime_id`` started.
 
     Discovery is one scan of this user's processes for the id they inherited
-    in ``AVIBE_DESKTOP_RUNTIME_ID``; no pidfile or lock record is read. This
-    stop and its ancestors carry the id when the desktop host started it and
-    are never signalled. Service processes stop first, then the UI, then, once
-    no UI of this Runtime is left, its abandoned backend installs, then its
-    OpenCode server, each through the handle the scan returned. A rescan
-    decides the outcome.
+    in ``AVIBE_DESKTOP_RUNTIME_ID``; no pidfile or record is read. This stop
+    and its ancestors carry the id when the desktop host started it and are
+    never signalled. Service processes stop first, then the UI, then, once no
+    UI of this Runtime is left to start another, its backend installer
+    processes, then its OpenCode server, each through the handle the scan
+    returned. A rescan decides the outcome. Installer staging and records stay
+    for the next claim of their backend root.
 
     Other programs carrying the id, such as agent CLIs and the tunnel
     connector, are reported and left running. With no role process carrying
@@ -2796,15 +2800,13 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     with _SERVICE_LOCK:
         _stop_desktop_processes(targets("service"))
     _stop_desktop_processes(targets("ui"))
-    installs_drained = True
-    # The UI owns backend installs and drains them itself as it exits.
+    # The UI owns backend installs and drains them itself as it exits. One
+    # still alive could start a tree after the scan, so installers wait for none.
     if not any(
         entry.report.role in ("ui", _UNKNOWN_DESKTOP_ROLE) and not _desktop_process_gone(entry.process)
         for entry in found
     ):
-        from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
-
-        installs_drained = reap_abandoned_desktop_backend_installs(runtime_id=runtime_id)
+        _stop_desktop_processes(targets("installer"))
     opencode = targets("opencode")
     _stop_desktop_processes(opencode)
 
@@ -2812,6 +2814,5 @@ def stop_desktop_runtime(runtime_id: str) -> DesktopRuntimeStopResult:
     return DesktopRuntimeStopResult(
         remaining=tuple(entry.report for entry in left if entry.report.role is not None),
         left_running=tuple(entry.report for entry in left if entry.report.role is None and not entry.lineage),
-        installs_drained=installs_drained,
         opencode_stopped=any(_desktop_process_gone(process) for process in opencode),
     )

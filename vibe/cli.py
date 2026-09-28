@@ -13933,7 +13933,7 @@ def _stop_receipt_refusal(receipt_json: str) -> str | None:
 _STOP_FAILURES = {
     "service": ("runtime.stop.serviceFailed", "service stop failed"),
     "ui": ("runtime.stop.uiFailed", "ui stop failed"),
-    "installs": ("runtime.stop.installsFailed", "desktop backend install drain failed"),
+    "installer": ("runtime.stop.installerFailed", "desktop backend install drain failed"),
     "opencode": ("runtime.stop.opencodeFailed", "opencode stop failed"),
     "unknown": ("runtime.stop.unknownFailed", "unidentified runtime process left running"),
 }
@@ -14000,7 +14000,7 @@ def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     if not reap_abandoned_desktop_backend_installs():
-        return _stop_failed("installs")
+        return _stop_failed("installer")
 
     _write_status("stopped")
     return 0

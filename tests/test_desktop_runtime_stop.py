@@ -1,8 +1,9 @@
 """``vibe stop --expect-runtime-id``: a stop that signals only the Runtime it scanned.
 
 Targets are real child processes whose environment does or does not carry
-``AVIBE_DESKTOP_RUNTIME_ID`` and whose command line names the program they
-stand for. Discovery is never substituted: the stop finds them by scanning.
+``AVIBE_DESKTOP_RUNTIME_ID`` and whose command line, or for a backend
+installer whose environment, names the role they stand for. Discovery is
+never substituted: the stop finds them by scanning.
 """
 
 from __future__ import annotations
@@ -43,17 +44,22 @@ def argv_for(tmp_path):
         return {
             "service": [sys.executable, str(service_main)],
             "ui": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
+            # An installer is known by its environment, whatever it runs.
+            "installer": [sys.executable, "-c", SLEEP, "npm-cli.js", "install"],
             "opencode": [sys.executable, "-c", SLEEP, "opencode", "serve"],
+            "opencode-server-helper": [sys.executable, "-c", SLEEP, "opencode-server-helper"],
             None: [sys.executable, "-c", SLEEP, "agent-cli"],
         }[role]
 
     return _argv_for
 
 
-def _child_env(runtime_id: str | None) -> dict[str, str]:
+def _child_env(runtime_id: str | None, role: str | None = None) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key != desktop_runtime.DESKTOP_RUNTIME_ID_ENV}
     if runtime_id is not None:
         env[desktop_runtime.DESKTOP_RUNTIME_ID_ENV] = runtime_id
+    if role == "installer":
+        env[desktop_runtime.DESKTOP_ROLE_ENV] = desktop_runtime.DESKTOP_INSTALLER_ROLE
     return env
 
 
@@ -64,7 +70,7 @@ def spawn(argv_for):
     def _spawn(runtime_id: str | None, role: str | None = "service") -> subprocess.Popen:
         argv = argv_for(role)
         child = subprocess.Popen(
-            argv, env=_child_env(runtime_id), stdout=subprocess.PIPE, text=True, start_new_session=True
+            argv, env=_child_env(runtime_id, role), stdout=subprocess.PIPE, text=True, start_new_session=True
         )
         children.append(child)
         assert child.stdout.readline() == "ready\n"
@@ -87,7 +93,7 @@ def _alive(child: subprocess.Popen) -> bool:
 def stop_env(monkeypatch):
     """Record every side effect a stop may have."""
 
-    effects: dict[str, list] = {"signals": [], "stop_pid": [], "remote_access": [], "reaps": [], "status": []}
+    effects: dict[str, list] = {"signals": [], "stop_pid": [], "remote_access": [], "status": []}
     real_kill = os.kill
 
     def recording_kill(pid, sig):
@@ -98,19 +104,29 @@ def stop_env(monkeypatch):
     monkeypatch.setattr(os, "kill", recording_kill)
     monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=5: effects["stop_pid"].append(pid) or False)
     monkeypatch.setattr(remote_access, "stop", lambda: effects["remote_access"].append(True) or {"ok": True})
-    effects["reap_hook"] = []
-
-    def reap(*, runtime_id=None):
-        effects["reaps"].append(runtime_id)
-        for hook in effects["reap_hook"]:
-            hook()
-        return True
-
-    monkeypatch.setattr(desktop_backends, "reap_abandoned_desktop_backend_installs", reap)
+    # Only the full stop reaps installers this way; the host's must not be touched.
+    monkeypatch.setattr(desktop_backends, "reap_abandoned_desktop_backend_installs", lambda: True)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: effects["status"].append(args))
     paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
     paths.get_logs_dir().mkdir(parents=True, exist_ok=True)
     return effects
+
+
+def _after_first_scan(monkeypatch, hook) -> list[int]:
+    """Run ``hook`` on the processes the stop's first scan found; returns each scan's size."""
+
+    real_scan = runtime.processes_carrying_marker
+    scans: list[int] = []
+
+    def scan(fingerprint, **kwargs):
+        found = real_scan(fingerprint, **kwargs)
+        scans.append(len(found))
+        if len(scans) == 1:
+            hook(found)
+        return found
+
+    monkeypatch.setattr(runtime, "processes_carrying_marker", scan)
+    return scans
 
 
 def _signalled(effects, child: subprocess.Popen) -> bool:
@@ -130,31 +146,29 @@ def _assert_refused_untouched(stop_env, capsys, reason, *children):
     assert stop_env["signals"] == []
     assert stop_env["stop_pid"] == []
     assert stop_env["remote_access"] == []
-    assert stop_env["reaps"] == []
     assert stop_env["status"] == []
     assert all(_alive(child) for child in children)
 
 
-def test_the_service_ui_and_opencode_carrying_the_id_are_all_stopped(spawn, stop_env, tmp_path):
-    service, ui, opencode = spawn(RUNTIME_ID), spawn(RUNTIME_ID, "ui"), spawn(RUNTIME_ID, "opencode")
+def test_the_service_ui_installer_and_opencode_carrying_the_id_are_all_stopped(spawn, stop_env, tmp_path):
+    children = [spawn(RUNTIME_ID, role) for role in ("service", "ui", "installer", "opencode")]
     # An update may already have replaced or moved the files they started from.
     shutil.rmtree(tmp_path / "bundle")
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
-    for child in (service, ui, opencode):
+    for child in children:
         child.wait(timeout=10)
         assert (child.pid, signal.SIGTERM) in stop_env["signals"]
     # The tunnel is not stopped through the connector's files; see the ledger.
     assert stop_env["remote_access"] == []
-    assert stop_env["reaps"] == [RUNTIME_ID]
     assert stop_env["status"] == [("stopped",)]
 
 
 @pytest.mark.parametrize("foreign_id", [OTHER_ID, None])
 def test_processes_without_the_id_are_left_running_whatever_the_pidfiles_say(spawn, stop_env, foreign_id):
     service = spawn(RUNTIME_ID)
-    foreign = {role: spawn(foreign_id, role) for role in ("service", "ui", "opencode")}
+    foreign = {role: spawn(foreign_id, role) for role in ("service", "ui", "installer", "opencode")}
     paths.get_runtime_pid_path().write_text(str(foreign["service"].pid), encoding="utf-8")
     paths.get_runtime_ui_pid_path().write_text(str(foreign["ui"].pid), encoding="utf-8")
     _opencode_pid_path().write_text(json.dumps({"pid": foreign["opencode"].pid, "port": 4096}), encoding="utf-8")
@@ -180,7 +194,7 @@ def test_a_garbage_opencode_pidfile_does_not_hide_the_opencode_server_carrying_t
 def test_the_stop_and_its_ancestors_are_never_signalled(spawn, tmp_path):
     # The desktop host starts the stop, so the stop and every process above it
     # carry the id too. Here the parent even looks like this Runtime's UI.
-    service = spawn(RUNTIME_ID)
+    service, installer = spawn(RUNTIME_ID), spawn(RUNTIME_ID, "installer")
     result_path = tmp_path / "stop-result.json"
     script = (
         "import json, subprocess, sys\n"
@@ -204,28 +218,33 @@ def test_the_stop_and_its_ancestors_are_never_signalled(spawn, tmp_path):
     assert parent.returncode == 0
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["code"] == 2
-    assert json.loads(result["stderr"].strip().splitlines()[-1]) == {
-        "failed": "ui",
-        "remaining": [{"pid": parent.pid, "role": "ui"}],
-    }
+    reported = json.loads(result["stderr"].strip().splitlines()[-1])
+    assert reported["failed"] == "ui"
+    assert sorted(reported["remaining"], key=lambda item: item["role"]) == [
+        {"pid": installer.pid, "role": "installer"},
+        {"pid": parent.pid, "role": "ui"},
+    ]
     service.wait(timeout=10)
+    # A UI of this Runtime that is still alive could start another installer.
+    assert _alive(installer)
 
 
 @pytest.mark.parametrize(
     ("role", "failure", "language", "diagnostic"),
     [
         ("service", "service", None, "ERROR: Avibe service did not stop; preserving pidfile and aborting."),
+        ("installer", "installer", None, "ERROR: Desktop backend installer processes did not stop."),
         ("opencode", "opencode", None, "ERROR: The OpenCode server this Runtime started did not stop."),
         ("opencode", "opencode", "zh", "错误：此 Runtime 启动的 OpenCode 服务未能停止。"),
     ],
 )
 def test_a_role_process_carrying_the_id_at_the_rescan_fails_the_stop(
-    spawn, stop_env, capsys, role, failure, language, diagnostic
+    spawn, stop_env, capsys, monkeypatch, role, failure, language, diagnostic
 ):
     ui = spawn(RUNTIME_ID, "ui")
     late: list[subprocess.Popen] = []
     # Started after the scan, it is never signalled; the rescan still sees it.
-    stop_env["reap_hook"].append(lambda: late.append(spawn(RUNTIME_ID, role)))
+    _after_first_scan(monkeypatch, lambda _found: late.append(spawn(RUNTIME_ID, role)))
     if language is not None:
         paths.get_config_path().parent.mkdir(parents=True, exist_ok=True)
         paths.get_config_path().write_text(json.dumps({"language": language}), encoding="utf-8")
@@ -242,20 +261,14 @@ def test_a_role_process_carrying_the_id_at_the_rescan_fails_the_stop(
 
 def test_a_pid_recycled_after_the_scan_is_not_signalled(spawn, stop_env, monkeypatch):
     service = spawn(RUNTIME_ID)
-    real_scan = runtime.processes_carrying_marker
-    scans: list[int] = []
 
-    def scan(fingerprint, **kwargs):
-        found = real_scan(fingerprint, **kwargs)
-        scans.append(len(found))
-        if len(scans) == 1:
-            for process in found:
-                if process.pid == service.pid:
-                    # The scanned process was an earlier holder of this pid.
-                    process._ident = (process.pid, process.create_time() - 60)
-        return found
+    def recycle(found):
+        for process in found:
+            if process.pid == service.pid:
+                # The scanned process was an earlier holder of this pid.
+                process._ident = (process.pid, process.create_time() - 60)
 
-    monkeypatch.setattr(runtime, "processes_carrying_marker", scan)
+    scans = _after_first_scan(monkeypatch, recycle)
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 2
 
@@ -263,8 +276,10 @@ def test_a_pid_recycled_after_the_scan_is_not_signalled(spawn, stop_env, monkeyp
     assert _alive(service) and not _signalled(stop_env, service)
 
 
-def test_other_programs_carrying_the_id_are_reported_and_left_running(spawn, stop_env, capsys):
-    service, agent = spawn(RUNTIME_ID), spawn(RUNTIME_ID, None)
+# A helper is matched by whole argv tokens: its name only contains "opencode" and "serve".
+@pytest.mark.parametrize("program", [None, "opencode-server-helper"])
+def test_other_programs_carrying_the_id_are_reported_and_left_running(spawn, stop_env, capsys, program):
+    service, agent = spawn(RUNTIME_ID), spawn(RUNTIME_ID, program)
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
@@ -305,7 +320,6 @@ def test_with_nothing_running_and_a_free_lock_the_stop_succeeds(stop_env):
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
     assert stop_env["signals"] == []
-    assert stop_env["reaps"] == [RUNTIME_ID]
     assert stop_env["status"] == [("stopped",)]
 
 

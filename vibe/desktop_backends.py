@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import psutil
+
 from config import paths
 from config.atomic_io import write_atomic
 from core.process_isolation import (
@@ -31,6 +33,7 @@ from core.process_isolation import (
     isolated_subprocess_kwargs,
     new_process_identity_marker,
     process_group_exists,
+    processes_carrying_marker,
     process_identity_from_payload,
     reap_marked_processes,
     reap_orphaned_process_tree,
@@ -39,6 +42,8 @@ from core.process_isolation import (
 )
 from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe.desktop_runtime import (
+    DESKTOP_INSTALLER_ROLE,
+    DESKTOP_ROLE_ENV,
     DESKTOP_RUNTIME_ID_ENV,
     desktop_runtime_id,
     private_desktop_backends_root,
@@ -54,8 +59,6 @@ MAX_DESCRIPTOR_BYTES = 16 * 1024
 MAX_INSTALL_OUTPUT_CHARS = 8192
 NPM_REGISTRY = "https://registry.npmjs.org/"
 DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS = 30.0
-# How long a stop waits for a backend root that another process is claiming.
-DESKTOP_BACKEND_STOP_LOCK_TIMEOUT_SECONDS = 10.0
 DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS = 300.0
 DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS = 15.0
 DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS = 10.0
@@ -295,6 +298,7 @@ def install_desktop_backend(
             f"--registry={NPM_REGISTRY}",
             spec.package,
         ]
+        logger.info("Installing desktop backend package %s", spec.package)
         completed = _run_command(
             command,
             cwd=staging,
@@ -489,7 +493,6 @@ def _run_command(
     env: Mapping[str, str],
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
-    logger.info("Installing desktop backend package %s", command[-1])
     owned = _spawn_owned_installer(command, cwd=cwd, env=env)
     process = owned.process
     try:
@@ -554,7 +557,6 @@ def _write_installer_record(
     payload = {
         "schema_version": INSTALL_RECORD_SCHEMA_VERSION,
         "worker_fingerprint": worker_fingerprint,
-        "desktop_runtime_id": desktop_runtime_id(),
         "identity": None if identity is None else serialize_process_identity(identity),
         "staging": str(staging),
     }
@@ -581,6 +583,12 @@ def _spawn_owned_installer(
     record_path = _installer_record_path(cwd)
     child_env = dict(env)
     child_env[PROCESS_IDENTITY_ENV] = marker
+    # Every member inherits both, so a process scan finds the whole tree
+    # without its record: the stops and the claim decide liveness by them.
+    child_env[DESKTOP_ROLE_ENV] = DESKTOP_INSTALLER_ROLE
+    runtime_id = desktop_runtime_id()
+    if runtime_id is not None:
+        child_env[DESKTOP_RUNTIME_ID_ENV] = runtime_id
     with _OWNED_INSTALLERS_LOCK:
         if _INSTALLERS_CLOSED:
             raise DesktopBackendError(
@@ -702,7 +710,7 @@ def drain_desktop_backend_installs() -> bool:
     For the owning process's shutdown: after this call it starts no new
     installer. Returns False when a tree could not be shown gone. Its durable
     record stays either way until the install removes its staging; one left
-    behind is reaped by the next claim of its backend root.
+    behind is cleared by the next claim of its backend root.
     """
 
     global _INSTALLERS_CLOSED
@@ -719,7 +727,6 @@ def drain_desktop_backend_installs() -> bool:
 class _InstallerRecord:
     path: Path
     worker_fingerprint: str
-    owner_runtime_id: str | None
     identity: PersistedProcessIdentity | None
     staging: Path
 
@@ -759,15 +766,9 @@ def _read_installer_record(record_path: Path) -> _InstallerRecord | None:
     if not isinstance(payload, dict) or payload.get("schema_version") != INSTALL_RECORD_SCHEMA_VERSION:
         return None
     worker_fingerprint = payload.get("worker_fingerprint")
-    owner_runtime_id = payload.get("desktop_runtime_id")
     raw_identity = payload.get("identity")
     staging = _recorded_staging(payload.get("staging"))
     if not is_valid_worker_fingerprint(worker_fingerprint) or staging is None:
-        return None
-    if owner_runtime_id is not None and (
-        not isinstance(owner_runtime_id, str)
-        or desktop_runtime_id({DESKTOP_RUNTIME_ID_ENV: owner_runtime_id}) is None
-    ):
         return None
     identity = None
     if raw_identity is not None:
@@ -777,25 +778,39 @@ def _read_installer_record(record_path: Path) -> _InstallerRecord | None:
         )
         if identity is None or identity.worker_fingerprint != worker_fingerprint:
             return None
-    return _InstallerRecord(record_path, worker_fingerprint, owner_runtime_id, identity, staging)
+    return _InstallerRecord(record_path, worker_fingerprint, identity, staging)
 
 
 def _installer_records() -> list[_InstallerRecord]:
-    """Every installer record. Raises ``OSError`` when one cannot be listed or read."""
+    """Every valid installer record, for a claim to clear the staging it names.
 
-    records = []
-    for record_path in sorted(_installer_records_dir().glob("*.json")):
+    Raises ``OSError`` when the directory or a record in it cannot be read:
+    the listing is then unknown and nothing is discarded. A record proven
+    invalid is discarded only once every record has been read.
+    """
+
+    try:
+        with os.scandir(_installer_records_dir()) as entries:
+            record_paths = sorted(Path(entry.path) for entry in entries if entry.name.endswith(".json"))
+    except FileNotFoundError:
+        # No install has recorded anything yet.
+        return []
+    records: list[_InstallerRecord] = []
+    invalid: list[Path] = []
+    for record_path in record_paths:
         try:
             record = _read_installer_record(record_path)
         except FileNotFoundError:
             # Its install finished after the listing.
             continue
         if record is None:
-            # Nothing in it can identify a process, so it authorises nothing.
-            logger.warning("Discarding invalid %s record %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
-            _forget_installer_record(record_path)
-            continue
-        records.append(record)
+            invalid.append(record_path)
+        else:
+            records.append(record)
+    for record_path in invalid:
+        # Nothing in it can identify a process, so it authorises nothing.
+        logger.warning("Discarding invalid %s record %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
+        _forget_installer_record(record_path)
     return records
 
 
@@ -818,24 +833,57 @@ def _clear_abandoned_install(record: _InstallerRecord) -> bool:
     return True
 
 
-def _claim_backend_root(
-    backend_root: Path,
-    *,
-    timeout_seconds: float,
-    runtime_id: str | None = None,
-) -> MigrationFileLock:
+def reap_abandoned_desktop_backend_installs() -> bool:
+    """Stop every installer tree of this Runtime that no live process owns.
+
+    Installs run only in the UI process, which drains its own trees as it
+    exits; one killed first leaves its tree running. A process scan finds such
+    trees by the role and Runtime id every member inherits, so no record has
+    to name them. Under the registry lock no install of this process is
+    between its spawn and its registration, so a tree missing from the
+    registry has no live owner. Staging and records stay for the next claim
+    of their backend root. Returns False when a tree could not be shown gone.
+    """
+
+    runtime_id = desktop_runtime_id()
+    abandoned: set[str] = set()
+    with _OWNED_INSTALLERS_LOCK:
+        for process in processes_carrying_marker(
+            fingerprint_process_marker(DESKTOP_INSTALLER_ROLE),
+            marker_env=DESKTOP_ROLE_ENV,
+        ):
+            try:
+                env = process.environ()
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.Error, OSError):
+                logger.error("Could not inspect the %s pid=%s", DESKTOP_BACKEND_INSTALL_LABEL, process.pid, exc_info=True)
+                return False
+            if desktop_runtime_id(env) != runtime_id:
+                continue
+            marker = env.get(PROCESS_IDENTITY_ENV, "")
+            if not marker or not marker.isascii():
+                logger.error("The %s pid=%s carries no identity marker", DESKTOP_BACKEND_INSTALL_LABEL, process.pid)
+                return False
+            fingerprint = fingerprint_process_marker(marker)
+            if fingerprint not in _OWNED_INSTALLERS:
+                abandoned.add(fingerprint)
+    # By its marker, which also finds members started since the scan.
+    return all([_reap_installer_tree(fingerprint, None) for fingerprint in sorted(abandoned)])
+
+
+def _claim_backend_root(backend_root: Path, *, timeout_seconds: float) -> MigrationFileLock:
     """Take ``backend_root``'s install lock, with no abandoned installer left in it.
 
-    Every acquisition of ``.install.lock`` goes through here. An install holds
-    the lock from before its record exists until after it has removed its
-    staging and then its record, so a record for this root seen under the lock
-    names an installer whose owner died first. Its tree is reaped and its
-    staging removed before the lock is used. When a tree cannot be shown gone
-    the lock is released and ``install_locked`` raised: something may still be
-    writing into this root.
-
-    ``runtime_id`` limits the claim to installs a desktop Runtime with that id
-    started, for its scoped stop; an install claims every record of its root.
+    Every acquisition of ``.install.lock`` goes through here. Liveness comes
+    from the process scan: every abandoned installer tree of this Runtime is
+    reaped first. An install holds the lock from before its record exists
+    until after it has removed its staging and then its record, so a record
+    for this root seen under the lock names an install whose owner died
+    first; its tree is reaped by its marker and its staging removed. When the
+    records cannot be listed or read, nothing is removed; then, or when a
+    tree cannot be shown gone, the lock is released and ``install_locked``
+    raised.
     """
 
     lock = MigrationFileLock(backend_root / ".install.lock", timeout_seconds=timeout_seconds)
@@ -847,12 +895,10 @@ def _claim_backend_root(
             code="install_locked",
         ) from exc
     try:
-        abandoned = [
-            record
-            for record in _installer_records()
-            if record.backend_root == backend_root and runtime_id in (None, record.owner_runtime_id)
-        ]
-        undrained = [record for record in abandoned if not _clear_abandoned_install(record)]
+        records = [record for record in _installer_records() if record.backend_root == backend_root]
+        settled = reap_abandoned_desktop_backend_installs() and all(
+            [_clear_abandoned_install(record) for record in records]
+        )
     except OSError as exc:
         lock.release()
         raise DesktopBackendError(
@@ -862,50 +908,13 @@ def _claim_backend_root(
     except BaseException:
         lock.release()
         raise
-    if undrained:
+    if not settled:
         lock.release()
         raise DesktopBackendError(
             f"A previous {backend_root.name} install could not be shown to have stopped.",
             code="install_locked",
         )
     return lock
-
-
-def reap_abandoned_desktop_backend_installs(*, runtime_id: str | None = None) -> bool:
-    """Leave no abandoned installer tree, or its staging, behind a stop.
-
-    For a stop, once the UI process that owns installs has exited: an owner
-    killed before its own drain finished leaves its tree running and its record
-    behind. Every backend root such a record names is claimed as an install
-    claims it. ``runtime_id`` limits the pass to installs a desktop Runtime with
-    that id started; ``None`` is the full stop. Returns False when a tree in
-    scope could not be shown gone or its root could not be claimed; its record
-    stays for the next pass.
-    """
-
-    try:
-        records = [record for record in _installer_records() if runtime_id in (None, record.owner_runtime_id)]
-    except OSError:
-        logger.warning("Could not list %s records", DESKTOP_BACKEND_INSTALL_LABEL, exc_info=True)
-        return False
-    drained = True
-    for backend_root in sorted({record.backend_root for record in records}):
-        if not backend_root.is_dir():
-            # Its staging went with it, and locking it would create it again.
-            for record in records:
-                if record.backend_root == backend_root:
-                    drained = _clear_abandoned_install(record) and drained
-            continue
-        try:
-            _claim_backend_root(
-                backend_root,
-                timeout_seconds=DESKTOP_BACKEND_STOP_LOCK_TIMEOUT_SECONDS,
-                runtime_id=runtime_id,
-            ).release()
-        except (DesktopBackendError, OSError):
-            logger.error("Could not claim %s to reap its abandoned installs", backend_root, exc_info=True)
-            drained = False
-    return drained
 
 
 def _installed_package_version(package_dir: Path, expected_package: str) -> str:
@@ -1034,16 +1043,24 @@ def _verify_backend_executable(
             f"Installed {backend} executable failed validation.",
             code="invalid_executable",
         )
+    # Spawned as an installer, so the probe is owned, recorded and scanned
+    # like the npm tree before it: no stop or drain can miss it.
     try:
-        result = subprocess.run(
+        result = _run_command(
             [str(executable), "--version"],
             cwd=root,
-            env=dict(env),
-            capture_output=True,
-            text=True,
-            timeout=DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS,
+            env=env,
+            timeout_seconds=DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except DesktopBackendError as exc:
+        if exc.code != "install_timeout":
+            raise
+        raise DesktopBackendError(
+            f"Installed {backend} executable did not report a version in time.",
+            code="executable_probe_failed",
+            output=exc.output,
+        ) from exc
+    except OSError as exc:
         raise DesktopBackendError(
             f"Installed {backend} executable could not be started.",
             code="executable_probe_failed",

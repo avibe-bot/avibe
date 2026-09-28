@@ -1655,7 +1655,7 @@ def _left(role):
     [
         (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), False),
         (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), False),
-        (cli.runtime.DesktopRuntimeStopResult(installs_drained=False), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), False),
         (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), False),
         (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), False),
         # Stopped, but a UI of some other Runtime still holds the pidfile.
