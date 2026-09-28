@@ -613,6 +613,7 @@ def test_recorded_engine_recovery_preserves_errno_after_record_write(tmp_path, m
     def fail(*_args, **_kwargs):
         raise OSError(code, "private reason", "/private/凭证")
 
+    fail.cache_clear = lambda: None
     with monkeypatch.context() as patch:
         patch.setattr(psutil, "process_iter", fail)
         with pytest.raises(EngineUnavailableError) as raised:
@@ -621,7 +622,11 @@ def test_recorded_engine_recovery_preserves_errno_after_record_write(tmp_path, m
         assert local_error_detail(raised.value) == f"[Errno {code}] {os.strerror(code)}"
         assert json.loads(record.read_text())["engines"]
     # A later conclusive pass retires the record and its previous diagnostic.
-    monkeypatch.setattr(psutil, "process_iter", lambda *_args: iter(()))
+    def nothing_running(*_args):
+        return iter(())
+
+    nothing_running.cache_clear = lambda: None
+    monkeypatch.setattr(psutil, "process_iter", nothing_running)
     assert supervisor._reap_recorded_engines_locked()
     assert supervisor._record_os_errno is None
 
