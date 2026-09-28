@@ -16,7 +16,7 @@ from core.native_dispatch_phase import (
     prewrite_failure_evidence,
     set_dispatch_phase,
 )
-from modules.claude_sdk_compat import TextBlock, ToolUseBlock, UserMessage
+from modules.claude_sdk_compat import TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
 from modules.agents.claude_agent import ClaudeAgent
 
 from tests.test_claude_agent_initiated_turn import _build_agent, _dispatcher_owned_emit
@@ -348,6 +348,140 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.emit_result_message.await_count, 1)
         self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
         self.assertFalse(service.activities.has_completed_output("claude", key))
+
+    async def test_replayed_human_input_proves_turn_owner_before_result(self):
+        # A task an earlier Turn started (a dev server) keeps running, so it
+        # competes with every later human Turn. Claude runs one turn at a time
+        # and replays the input that starts a human turn before any Assistant
+        # frame of it; only that first frame proves who the turn answers.
+        human = {"kind": "human"}
+        notification = {"kind": "task-notification"}
+        progress = [("assistant", "progress"), ("toolcall", "Bash(pwd)")]
+        cases = [
+            (
+                "human replay starts the turn",
+                [UserMessage(content="check the build", origin=human)],
+                progress,
+            ),
+            (
+                "lingering task finishes inside the human turn",
+                [
+                    UserMessage(content="check the build", origin=human),
+                    TaskNotificationMessage("dev-server", "dev server exited"),
+                    UserMessage(content="<task-notification>", origin=notification),
+                ],
+                progress,
+            ),
+            (
+                "injected input starts the turn",
+                [UserMessage(content="<task-notification>", origin=notification)],
+                [],
+            ),
+            (
+                "human input drained after Assistant output",
+                [
+                    AssistantMessage(_block(TextBlock, text="notification reply")),
+                    UserMessage(content="check the build", origin=human),
+                ],
+                [],
+            ),
+            (
+                "receiver joins a turn after it started",
+                [
+                    UserMessage(
+                        content=[
+                            _block(
+                                ToolResultBlock,
+                                tool_use_id="tool-earlier",
+                                content="ok",
+                                is_error=False,
+                            )
+                        ]
+                    ),
+                    UserMessage(content="check the build", origin=human),
+                ],
+                [],
+            ),
+        ]
+
+        class _Formatter:
+            @staticmethod
+            def format_assistant_message(parts):
+                return "\n".join(parts)
+
+            @staticmethod
+            def format_toolcall(name, input_data, **_kwargs):
+                return f"{name}({input_data['command']})"
+
+            @staticmethod
+            def format_toolcall_label(name, input_data, **_kwargs):
+                return f"{name}: {input_data['command']}"
+
+        for label, turn_start, live_before_result in cases:
+            with self.subTest(label):
+                key = "session-proven-human-turn:/tmp/work"
+                agent, service = _build_agent()
+                context = _context(key)
+                request = _pending_request(key)
+                agent._pending_requests[key] = [request]
+                agent.emit_result_message = AsyncMock(return_value="message-id")
+                agent._get_formatter = lambda _context: _Formatter()
+                service.activities.start(
+                    backend="claude",
+                    runtime_key=key,
+                    session_id="sess-proven-human-turn",
+                    activity_id="dev-server",
+                    kind="local_bash",
+                    turn_id="earlier-turn",
+                )
+
+                def visible():
+                    return [
+                        (call.args[1], call.args[2])
+                        for call in agent.controller.emit_agent_message.await_args_list
+                        if len(call.args) > 2 and call.args[1] in {"assistant", "toolcall"}
+                    ]
+
+                before_result = []
+
+                class _Client:
+                    def receive_messages(self):
+                        async def stream():
+                            for message in turn_start:
+                                yield message
+                            yield AssistantMessage(_block(TextBlock, text="progress"))
+                            yield AssistantMessage(
+                                _block(
+                                    ToolUseBlock,
+                                    id="tool-pwd",
+                                    name="Bash",
+                                    input={"command": "pwd"},
+                                ),
+                                _block(TextBlock, text="final"),
+                            )
+                            before_result.extend(visible())
+                            yield ResultMessage("final", origin=human)
+
+                        return stream()
+
+                await agent._receive_messages(
+                    _Client(),
+                    "sess-proven-human-turn",
+                    "/tmp/work",
+                    context,
+                    composite_key=key,
+                )
+                for task in list(agent._activity_flush_tasks.values()):
+                    task.cancel()
+
+                self.assertEqual(before_result, live_before_result)
+                # Held or live, the human Result shows each frame exactly once.
+                self.assertEqual(visible()[-2:], progress)
+                self.assertEqual(visible().count(progress[0]), 1)
+                self.assertEqual(agent.emit_result_message.await_count, 1)
+                self.assertIs(agent.emit_result_message.await_args.kwargs["request"], request)
+                # The task's own output is never merged into the human reply.
+                self.assertEqual(request.output_activities, [])
 
     async def test_buffered_foreground_tool_is_owned_before_task_started(self):
         key = "session-buffered-foreground-tool:/tmp/work"

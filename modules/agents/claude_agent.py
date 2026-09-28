@@ -1989,6 +1989,12 @@ class ClaudeAgent(BaseAgent):
             )
 
             message_stream = client.receive_messages().__aiter__()
+            # Claude runs one turn at a time and replays the input that starts
+            # a human turn before any Assistant frame of it. The first content
+            # frame after a Result therefore names what started the turn: an
+            # input origin kind, or "" when anything else comes first, such as
+            # Assistant output from a task notification. ``None`` means unseen.
+            turn_origin: str | None = None
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
@@ -2089,7 +2095,16 @@ class ClaudeAgent(BaseAgent):
                     message_type = self._detect_message_type(message)
                     if message_type not in {"assistant", "result", "system"}:
                         terminal_steering_generation = None
+                    if message_type == "result":
+                        turn_origin = None
+                    elif message_type == "assistant" and turn_origin is None:
+                        turn_origin = ""
                     if message_type == "user":
+                        if turn_origin is None:
+                            # A frame without origin, such as a tool result,
+                            # means this receiver joined the turn after it
+                            # started, so its owner is unproven.
+                            turn_origin = self._result_origin_kind(message) or ""
                         async with self._steering_lock(composite_key):
                             receipt = self._observe_native_user_input(
                                 composite_key,
@@ -2146,10 +2161,18 @@ class ClaudeAgent(BaseAgent):
                                 owner=result_owner,
                                 terminal_message=message,
                             )
-                    if (
+                    buffer_assistant = (
                         message_type == "assistant"
                         and self._should_buffer_assistant_message(composite_key)
-                    ):
+                    )
+                    # A proven human turn takes the path its human Result would
+                    # replay it on, only earlier: attributed to the pending
+                    # request and never claiming Activity output.
+                    proven_human_frame = (
+                        buffer_assistant
+                        and self._turn_answers_pending_human(composite_key, turn_origin)
+                    )
+                    if buffer_assistant and not proven_human_frame:
                         # TaskStarted can legally arrive before the terminal
                         # Result. Record foreground tool ownership now, while
                         # the visible assistant/toolcall output remains buffered
@@ -2172,7 +2195,10 @@ class ClaudeAgent(BaseAgent):
                             composite_key,
                         )
                         continue
-                    if message_type in ("assistant", "result") or model_refusal_fallback_notice is not None:
+                    if (
+                        message_type in ("assistant", "result")
+                        or model_refusal_fallback_notice is not None
+                    ) and not proven_human_frame:
                         output_mode = await self._maybe_begin_agent_initiated_turn(
                             context,
                             composite_key,
@@ -4445,6 +4471,29 @@ class ClaudeAgent(BaseAgent):
         return (
             composite_key in self._activity_provenance_barriers
             or self._has_competing_activity(composite_key)
+        )
+
+    def _turn_answers_pending_human(
+        self,
+        composite_key: str,
+        turn_origin: str | None,
+    ) -> bool:
+        """Whether Claude's replay proved this turn answers the pending human.
+
+        A turn that starts with a replayed human input ends with a human
+        Result, so its frames need not wait for that Result. Held frames and
+        unsettled detached output are earlier, so they are never overtaken.
+        """
+
+        if turn_origin != "human":
+            return False
+        if self._buffered_assistant_messages.get(composite_key):
+            return False
+        if self._output_records_for_runtime(composite_key):
+            return False
+        pending = self._pending_requests.get(composite_key) or []
+        return bool(
+            pending and not getattr(pending[0], "_claude_synthetic_owner", False)
         )
 
     def _result_owner(self, composite_key: str, message) -> str:

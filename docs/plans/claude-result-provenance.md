@@ -4,8 +4,9 @@
 
 Claude Code keeps one streaming SDK connection per runtime. A detached background
 Activity can produce Assistant and Result frames while a newer Avibe human Turn is
-waiting to write. The SDK's terminal `ResultMessage.origin` is the only reliable
+waiting to write. The SDK's terminal `ResultMessage.origin` is the reliable
 owner signal in this interleaved stream; Assistant frames do not carry that field.
+The only earlier signal is the replayed input that starts a human turn.
 
 ## Contract
 
@@ -19,6 +20,14 @@ owner signal in this interleaved stream; Assistant frames do not carry that fiel
   replay them only after the terminal Result identifies the phase. Grace-period
   Activity flushes defer while that phase is buffered, and replay failures do not
   prevent terminal settlement.
+- Stream a turn whose first content frame is a replayed human input
+  (`UserMessage.origin.kind == "human"`) without waiting for its Result, even
+  while an Activity competes. Such a turn ends with a human Result (see Measured
+  turn shape), so its frames take the human replay path early: they attach to
+  the pending human request and never claim Activity output. Any other first
+  frame, a human input drained into a running turn, held frames, and unsettled
+  detached output keep the Result-owned path; a later frame never overtakes
+  earlier held output.
 - Treat a missing or unknown origin as foreground only when no competing Activity
   evidence exists; otherwise preserve it as detached output and leave the pending
   human request untouched.
@@ -98,6 +107,36 @@ for metadata eligibility, Turn constraints, retries, and persisted local-only
 output batches. A metadata predicate can select a candidate, but it cannot
 create a second batching path or absorb a previously bound receipt.
 
+## Measured turn shape (Claude CLI 2.1.280, 2026-09-28)
+
+A hermetic probe (Claude Agent SDK 0.2.158 and its bundled CLI, with
+`--replay-user-messages`, against a scripted local Messages mock) established:
+
+1. Turns are serialized. Each turn is `system init`, an optional replayed input,
+   its frames, and one Result; turns never interleave.
+2. A human turn's first content frame is its replayed input (`isReplay`,
+   `origin: human`), always before any Assistant frame. A task-notification turn
+   has no replay: it starts with Assistant output, and its Result carries
+   `origin: task-notification`.
+3. A human input sent while a notification turn runs without a tool becomes its
+   own human turn after that Result. A notification and a human input both
+   queued behind a turn run as separate FIFO turns.
+4. A notification drained into a running human turn appears mid-turn as a
+   replayed input with `origin: task-notification`; the Result stays human.
+5. A human input sent while a notification turn runs a tool is drained into that
+   turn: its replay appears mid-turn, the model answers it inside the
+   notification turn, and no human Result follows.
+6. Human inputs queued before a turn starts are merged into one replayed input.
+
+Facts 1 and 2 make a turn's first content frame the earliest proof of its owner;
+facts 4 and 5 are why only the first frame counts. Turns started by a scheduled
+wakeup were not measured; the rule assumes that, like notifications, they do not
+replay a human-origin input.
+
+Open follow-ups outside this rule: under fact 5 the answered human request never
+receives a human Result, and under fact 6 exact-text native input receipts miss
+merged inputs. Both predate it and need their own decisions.
+
 ## Validation
 
 Consumer tests cover both terminal result orders, notification-before-human-result,
@@ -105,7 +144,11 @@ multiple Activity completion aggregation, Assistant buffering, flush-vs-Result
 races, retained Activity text during a long-lived receiver retry, receiver
 error recovery ownership, failed/stopped/killed/completed provisional terminal
 lineage, buffered replay failure, unknown origin, client replacement and Stop
-races, exactly-once output, and durable unsent-input recovery. A hermetic Claude
+races, exactly-once output, durable unsent-input recovery, and a replay-proven
+human turn streaming past a lingering Activity, including one that finishes
+mid-turn, without claiming its output, while notification-started turns, human
+inputs drained after Assistant output, and turns the receiver joined after their
+start stay held. A hermetic Claude
 Agent SDK 0.2.158 plus bundled CLI probe verifies the outgoing origin shape and
 real Result provenance against the local mock upstream.
 
