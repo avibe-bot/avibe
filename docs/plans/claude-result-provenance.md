@@ -136,7 +136,7 @@ and native-input receipts, not a second human terminal state machine.
 | External acceptance but failed local settlement without durable Message evidence | Keep the claim and original payload; refine only the record's retry policy to the dispatcher's existing local-settlement-only path. Never resend externally. |
 | Durable delivery and local settlement | Retire that record and only its captured synthetic Request/token. An unrelated current synthetic or human owner is untouched. |
 | EOF/error/Stop/replacement | Retire exactly the dead client. Frozen records survive; provisional detached records from that generation are conservatively frozen without borrowing replacement provenance. |
-| Activity classification | Update lineage and notify the Run owner without deleting awaiting/claimed output receipts. |
+| Activity classification | Update lineage and notify the Run owner of background terminals without deleting awaiting/claimed output receipts; a foreground terminal only acknowledges its snapshot (2026-09-28). |
 | Terminal-snapshot acknowledgement | Delete only an indexed terminal snapshot, after Run-owner acceptance. Force-ended snapshots remain indexed until acknowledgement. |
 
 The existing admission fence is consulted before Result classification/replay,
@@ -311,17 +311,39 @@ pre-steer Activities stayed provisional snapshots that kept competing.
   non-provisional foreground owner: the Turn's Result settles the Run. A
   background tool's completion creates queued output, and the Activity flush can
   complete a Turn from it. Background tools therefore stay provisional until the
-  Result classifies their phase, even when their frame was live.
+  Result classifies their phase, even when their frame was live. Foreground
+  follows each tool's real default through the shared tool policy
+  (`runs_in_background`): an `Agent` call without `run_in_background` is a
+  background subagent, while a `Bash` call without it is foreground.
+- A foreground task is one step of its Turn, and the agent can recover from a
+  failed step. Its terminal never settles the Run on either path: the Turn's
+  Result owns the Run outcome. Previously a foreground task that stayed
+  provisional behind competing output was handed to the Run owner once the
+  human Result classified it, so a failed, stopped, or killed step made the Run
+  fail or cancel immediately and stickily, even when the Turn then succeeded.
+  The same stream settled differently depending on whether unrelated output
+  happened to compete. Classification now only acknowledges such a foreground
+  terminal snapshot; classified background terminals still notify the Run
+  owner, which `Activity classification` below describes.
 - When a steer receipt arrives while frames are buffered, no Result separates
   those frames from the steer, so Claude consumed the steer within the same
   turn. The receiver appends a steer-boundary marker and keeps the frames and
   their provisional facts for the one terminal Result that classifies both
   sides. A human Result replays the frames and emits the pre-steer text at the
   marker as non-terminal primary output, the same shape as a live steer
-  boundary. A detached Result ignores the marker and keeps the pending request.
+  boundary. Foreground-tool evidence is phase-local there too: the marker
+  retires the pre-steer evidence, so a post-steer Result without its own
+  Assistant text keeps its result text instead of the silent tool-only
+  sentinel. A detached Result ignores the marker and keeps the pending request.
   Without buffered frames, the existing live boundary behavior is unchanged.
+- Replay is ordered. Once a phase has a buffered frame, every later frame of
+  that phase is buffered too, even if the competing output finishes first. A
+  later frame therefore cannot overtake earlier held frames, and replay after
+  the marker re-derives exactly the evidence that belongs after the boundary.
 
 Consumer tests cover the uncontested live task, a competing Activity that
-appears before `TaskStarted`, and human or detached classification of buffered
-frames across a steer boundary. They are hermetic receiver tests, not native SDK
-or Web/IM end-to-end tests.
+appears before `TaskStarted`, a default-background `Agent` task, and human or
+detached classification of buffered frames across a steer boundary, including a
+post-steer Result with no Assistant frame and competition that ends after the
+steer. They are hermetic receiver tests, not native SDK or Web/IM end-to-end
+tests.

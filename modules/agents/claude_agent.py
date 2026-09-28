@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
+from core.agent_tool_policy import runs_in_background as tool_runs_in_background
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
 from core.handlers.session_handler import ClaudeInputNotSentError, ClaudeSessionNotFoundError
 from core.message_dispatcher import ActivityOutputDeliveryError
@@ -3873,8 +3874,11 @@ class ClaudeAgent(BaseAgent):
 
         service = getattr(self.controller, "agent_service", None)
         notify = getattr(service, "on_activity_terminal", None)
-        if not callable(notify):
-            return
+        ack_terminal = getattr(
+            self._activity_registry(),
+            "ack_recovered_terminal",
+            None,
+        )
         for activity in activities:
             status = str(getattr(activity, "status", "") or "").strip().lower()
             if status not in {
@@ -3887,7 +3891,23 @@ class ClaudeAgent(BaseAgent):
                 continue
             if getattr(activity, "completed_at", None) is None:
                 continue
-            notify(activity)
+            if getattr(activity, "foreground", False):
+                # A foreground task is one step of its Turn, and the agent can
+                # recover from a failed step. As on the live path, the Turn's
+                # Result owns the Run outcome; only the provenance snapshot the
+                # task kept until that Result arrived is retired here.
+                if callable(ack_terminal):
+                    try:
+                        ack_terminal(activity)
+                    except Exception:
+                        logger.warning(
+                            "Failed to retire classified foreground Activity %s",
+                            getattr(activity, "id", ""),
+                            exc_info=True,
+                        )
+                continue
+            if callable(notify):
+                notify(activity)
 
     def _attach_request_activities(
         self,
@@ -4103,15 +4123,12 @@ class ClaudeAgent(BaseAgent):
         tool_use_id = str(getattr(block, "id", "") or "").strip()
         if not tool_use_id:
             return
-        tool_input = getattr(block, "input", None)
-        # Deliberately not the same test as ``core/agent_tool_policy.py``, which
-        # treats an omitted flag on an ``Agent`` call as background because that
-        # is the tool's documented default. This helper is generic over every
-        # tool, and for the dominant case -- ``Bash`` -- an omitted flag means
-        # foreground. Misjudging a frame here only mislabels a task frame, so it
-        # stays with the majority reading instead of special-casing per tool.
-        runs_in_background = bool(
-            isinstance(tool_input, dict) and tool_input.get("run_in_background") is True
+        # Foreground evidence decides live Activity ownership, so it follows
+        # each tool's real default: an ``Agent`` call with no flag runs in the
+        # background even though a ``Bash`` call with no flag does not.
+        runs_in_background = tool_runs_in_background(
+            str(getattr(block, "name", "") or ""),
+            getattr(block, "input", None),
         )
         if provisional:
             self._provisional_tool_use_ids.setdefault(
@@ -4415,6 +4432,11 @@ class ClaudeAgent(BaseAgent):
     def _should_buffer_assistant_message(self, composite_key: str) -> bool:
         """Hold an origin-less Assistant frame while Activity ownership is open."""
 
+        if self._buffered_assistant_messages.get(composite_key):
+            # Replay is ordered: once a phase's frames are held, the rest of
+            # that phase is held with them, even if competing output has since
+            # finished. A later frame must not overtake the earlier ones.
+            return True
         records = self._output_records_for_runtime(composite_key)
         if records:
             pending = self._pending_requests.get(composite_key) or []
@@ -4496,6 +4518,12 @@ class ClaudeAgent(BaseAgent):
                         )
                         self._last_assistant_text.pop(composite_key, None)
                         self._pending_assistant_message.pop(composite_key, None)
+                        # Foreground-tool evidence is phase-local, as on the
+                        # live steer path. Every later frame of this phase is
+                        # buffered, so replaying them re-derives exactly the
+                        # evidence that belongs after the boundary.
+                        self._foreground_tool_use_ids.pop(composite_key, None)
+                        self._turns_with_foreground_tools.discard(composite_key)
                     continue
                 assistant_text = self._extract_text_blocks(message, context)
                 context_tokens = self._extract_context_tokens(message)
