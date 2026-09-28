@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
+from core.agent_tool_policy import runs_in_background as tool_runs_in_background
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
 from core.handlers.session_handler import ClaudeInputNotSentError, ClaudeSessionNotFoundError
 from core.message_dispatcher import ActivityOutputDeliveryError
@@ -58,6 +59,11 @@ from modules.agents.base import (
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
+
+# Position of a native steer receipt inside buffered Assistant frames. The
+# frames on both sides share one terminal Result, which decides whether the
+# boundary closes a human primary phase or is ignored with detached output.
+_STEER_BOUNDARY = object()
 
 
 @dataclass
@@ -1983,6 +1989,17 @@ class ClaudeAgent(BaseAgent):
             )
 
             message_stream = client.receive_messages().__aiter__()
+            # Claude runs one turn at a time and replays the input that starts
+            # a human turn before any Assistant frame of it. The first content
+            # frame after a Result therefore names what started the turn: an
+            # input origin kind, or "" when anything else comes first, such as
+            # Assistant output from a task notification. ``None`` means unseen.
+            # A client's first receiver starts before its first turn. A later
+            # receiver may start inside a turn it cannot see the start of, so
+            # no frame before its first Result proves an owner.
+            joined_running_client = getattr(client, "_vibe_receiver_attached", False)
+            setattr(client, "_vibe_receiver_attached", True)
+            turn_origin: str | None = "" if joined_running_client else None
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
@@ -2083,7 +2100,16 @@ class ClaudeAgent(BaseAgent):
                     message_type = self._detect_message_type(message)
                     if message_type not in {"assistant", "result", "system"}:
                         terminal_steering_generation = None
+                    if message_type == "result":
+                        turn_origin = None
+                    elif message_type == "assistant" and turn_origin is None:
+                        turn_origin = ""
                     if message_type == "user":
+                        if turn_origin is None:
+                            # A frame without origin, such as a tool result,
+                            # means this receiver joined the turn after it
+                            # started, so its owner is unproven.
+                            turn_origin = self._result_origin_kind(message) or ""
                         async with self._steering_lock(composite_key):
                             receipt = self._observe_native_user_input(
                                 composite_key,
@@ -2140,10 +2166,18 @@ class ClaudeAgent(BaseAgent):
                                 owner=result_owner,
                                 terminal_message=message,
                             )
-                    if (
+                    buffer_assistant = (
                         message_type == "assistant"
                         and self._should_buffer_assistant_message(composite_key)
-                    ):
+                    )
+                    # A proven human turn takes the path its human Result would
+                    # replay it on, only earlier: attributed to the pending
+                    # request and never claiming Activity output.
+                    proven_human_frame = (
+                        buffer_assistant
+                        and self._turn_answers_pending_human(composite_key, turn_origin)
+                    )
+                    if buffer_assistant and not proven_human_frame:
                         # TaskStarted can legally arrive before the terminal
                         # Result. Record foreground tool ownership now, while
                         # the visible assistant/toolcall output remains buffered
@@ -2166,7 +2200,10 @@ class ClaudeAgent(BaseAgent):
                             composite_key,
                         )
                         continue
-                    if message_type in ("assistant", "result") or model_refusal_fallback_notice is not None:
+                    if (
+                        message_type in ("assistant", "result")
+                        or model_refusal_fallback_notice is not None
+                    ) and not proven_human_frame:
                         output_mode = await self._maybe_begin_agent_initiated_turn(
                             context,
                             composite_key,
@@ -2929,6 +2966,8 @@ class ClaudeAgent(BaseAgent):
             return None
 
         for message, frame_steering_generation in messages:
+            if message is _STEER_BOUNDARY:
+                continue
             try:
                 text = self._extract_text_blocks(message, context)
             except Exception:
@@ -3866,8 +3905,11 @@ class ClaudeAgent(BaseAgent):
 
         service = getattr(self.controller, "agent_service", None)
         notify = getattr(service, "on_activity_terminal", None)
-        if not callable(notify):
-            return
+        ack_terminal = getattr(
+            self._activity_registry(),
+            "ack_recovered_terminal",
+            None,
+        )
         for activity in activities:
             status = str(getattr(activity, "status", "") or "").strip().lower()
             if status not in {
@@ -3880,7 +3922,23 @@ class ClaudeAgent(BaseAgent):
                 continue
             if getattr(activity, "completed_at", None) is None:
                 continue
-            notify(activity)
+            if getattr(activity, "foreground", False):
+                # A foreground task is one step of its Turn, and the agent can
+                # recover from a failed step. As on the live path, the Turn's
+                # Result owns the Run outcome; only the provenance snapshot the
+                # task kept until that Result arrived is retired here.
+                if callable(ack_terminal):
+                    try:
+                        ack_terminal(activity)
+                    except Exception:
+                        logger.warning(
+                            "Failed to retire classified foreground Activity %s",
+                            getattr(activity, "id", ""),
+                            exc_info=True,
+                        )
+                continue
+            if callable(notify):
+                notify(activity)
 
     def _attach_request_activities(
         self,
@@ -4096,15 +4154,12 @@ class ClaudeAgent(BaseAgent):
         tool_use_id = str(getattr(block, "id", "") or "").strip()
         if not tool_use_id:
             return
-        tool_input = getattr(block, "input", None)
-        # Deliberately not the same test as ``core/agent_tool_policy.py``, which
-        # treats an omitted flag on an ``Agent`` call as background because that
-        # is the tool's documented default. This helper is generic over every
-        # tool, and for the dominant case -- ``Bash`` -- an omitted flag means
-        # foreground. Misjudging a frame here only mislabels a task frame, so it
-        # stays with the majority reading instead of special-casing per tool.
-        runs_in_background = bool(
-            isinstance(tool_input, dict) and tool_input.get("run_in_background") is True
+        # Foreground evidence decides live Activity ownership, so it follows
+        # each tool's real default: an ``Agent`` call with no flag runs in the
+        # background even though a ``Bash`` call with no flag does not.
+        runs_in_background = tool_runs_in_background(
+            str(getattr(block, "name", "") or ""),
+            getattr(block, "input", None),
         )
         if provisional:
             self._provisional_tool_use_ids.setdefault(
@@ -4408,6 +4463,11 @@ class ClaudeAgent(BaseAgent):
     def _should_buffer_assistant_message(self, composite_key: str) -> bool:
         """Hold an origin-less Assistant frame while Activity ownership is open."""
 
+        if self._buffered_assistant_messages.get(composite_key):
+            # Replay is ordered: once a phase's frames are held, the rest of
+            # that phase is held with them, even if competing output has since
+            # finished. A later frame must not overtake the earlier ones.
+            return True
         records = self._output_records_for_runtime(composite_key)
         if records:
             pending = self._pending_requests.get(composite_key) or []
@@ -4416,6 +4476,32 @@ class ClaudeAgent(BaseAgent):
         return (
             composite_key in self._activity_provenance_barriers
             or self._has_competing_activity(composite_key)
+        )
+
+    def _turn_answers_pending_human(
+        self,
+        composite_key: str,
+        turn_origin: str | None,
+    ) -> bool:
+        """Whether Claude's replay proved this turn answers the pending human.
+
+        A turn that starts with a replayed human input ends with a human
+        Result, so its frames need not wait for that Result. Held frames and
+        detached or claimed Activity output that is not yet delivered are
+        earlier, so they are never overtaken. Queued completed Activity output
+        follows the human Result either way: the Activity flush defers while a
+        human request is pending.
+        """
+
+        if turn_origin != "human":
+            return False
+        if self._buffered_assistant_messages.get(composite_key):
+            return False
+        if self._output_records_for_runtime(composite_key):
+            return False
+        pending = self._pending_requests.get(composite_key) or []
+        return bool(
+            pending and not getattr(pending[0], "_claude_synthetic_owner", False)
         )
 
     def _result_owner(self, composite_key: str, message) -> str:
@@ -4476,6 +4562,26 @@ class ClaudeAgent(BaseAgent):
             )
         for message, frame_steering_generation in messages:
             try:
+                if message is _STEER_BOUNDARY:
+                    if not detached:
+                        # Mirror the live steer boundary: the text before it
+                        # closes the primary phase without closing the Turn.
+                        await self._emit_steered_primary_output(
+                            context,
+                            composite_key,
+                            str(
+                                self._last_assistant_text.get(composite_key) or ""
+                            ).strip(),
+                        )
+                        self._last_assistant_text.pop(composite_key, None)
+                        self._pending_assistant_message.pop(composite_key, None)
+                        # Foreground-tool evidence is phase-local, as on the
+                        # live steer path. Every later frame of this phase is
+                        # buffered, so replaying them re-derives exactly the
+                        # evidence that belongs after the boundary.
+                        self._foreground_tool_use_ids.pop(composite_key, None)
+                        self._turns_with_foreground_tools.discard(composite_key)
+                    continue
                 assistant_text = self._extract_text_blocks(message, context)
                 context_tokens = self._extract_context_tokens(message)
                 if context_tokens:
@@ -4661,18 +4767,41 @@ class ClaudeAgent(BaseAgent):
     ) -> None:
         """Close all response-local primary state at the native input boundary."""
 
-        if not await self._emit_buffered_primary_phase(context, composite_key):
-            pending = self._pending_requests.get(composite_key) or []
-            primary_request = pending[0] if pending else None
-            primary_text = self._select_terminal_text(composite_key, None)
-            if primary_text or self._request_activities(primary_request):
-                self._adopt_pending_turn_token(context, primary_request)
-                await self._emit_primary_phase_output(
-                    context,
-                    primary_request,
-                    primary_text,
-                )
+        emitted_primary = await self._emit_buffered_primary_phase(
+            context,
+            composite_key,
+        )
+        buffered = self._buffered_assistant_messages.get(composite_key)
+        if buffered:
+            # No Result separates these origin-less frames from the steer, so
+            # Claude consumed it inside the same turn: one terminal Result
+            # classifies both sides. Keep the frames and their provisional
+            # facts for it; human replay closes the primary phase here.
+            buffered.append((_STEER_BOUNDARY, None))
+            return
+        if not emitted_primary:
+            await self._emit_steered_primary_output(
+                context,
+                composite_key,
+                self._select_terminal_text(composite_key, None),
+            )
         self._clear_result_phase_state(composite_key)
+
+    async def _emit_steered_primary_output(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        primary_text: str,
+    ) -> None:
+        pending = self._pending_requests.get(composite_key) or []
+        primary_request = pending[0] if pending else None
+        if primary_text or self._request_activities(primary_request):
+            self._adopt_pending_turn_token(context, primary_request)
+            await self._emit_primary_phase_output(
+                context,
+                primary_request,
+                primary_text,
+            )
 
     def _select_buffered_terminal_text(self, composite_key: str, buffered) -> str:
         """Render a buffered pre-steer result without using newer assistant text."""
@@ -4817,11 +4946,26 @@ class ClaudeAgent(BaseAgent):
         )
         pending = self._pending_requests.get(composite_key) or []
         # A pending human request is not enough to prove that this Activity
-        # belongs to it. Keep all newly-created Activities provisional until
-        # Result.origin classifies the phase, even when a buffered foreground
-        # ToolUseBlock already supplied an operational foreground hint.
+        # belongs to it: an interleaved detached phase may have started it.
+        # Keep newly-created Activities provisional until Result.origin
+        # classifies the phase, even when a buffered foreground ToolUseBlock
+        # already supplied an operational foreground hint. The exception is a
+        # foreground task whose parent tool frame was emitted live for that
+        # human request: that frame was attributed because nothing competed,
+        # and it still does not, so the task inherits the frame's owner. A
+        # foreground completion carries no Activity output for a terminal
+        # Result to claim; background tools stay provisional.
+        live_human_activity = bool(
+            pending
+            and existing_activity is None
+            and tool_use_id
+            and tool_use_id in provisional_foreground_tool_ids
+            and not getattr(pending[0], "_claude_synthetic_owner", False)
+            and not self._buffered_assistant_messages.get(composite_key)
+            and not self._has_competing_activity(composite_key)
+        )
         provenance_pending = bool(
-            (pending and existing_activity is None)
+            (pending and existing_activity is None and not live_human_activity)
             or (
                 existing_activity is not None
                 and existing_activity.metadata.get("provenance_pending")
@@ -4910,6 +5054,8 @@ class ClaudeAgent(BaseAgent):
                 ).strip()
                 if delivery_key:
                     metadata["delivery_key_external"] = delivery_key
+                if live_human_activity:
+                    metadata["provenance_human"] = True
                 run_ids = self._activity_run_ids(composite_key, context)
                 turn_id = self._current_turn_id(composite_key, context)
         else:

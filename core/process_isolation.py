@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import psutil
 
@@ -72,12 +72,18 @@ def process_identity_subprocess_env(marker: str) -> dict[str, str]:
 def capture_spawned_process_identity(
     pid: int,
     marker: str,
+    *,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> PersistedProcessIdentity | None:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
         create_time = float(psutil.Process(pid).create_time())
-    except (psutil.Error, OSError, TypeError, ValueError, OverflowError):
+    except (psutil.Error, OSError, TypeError, ValueError, OverflowError) as exc:
+        # Callers may retain a safe diagnostic without changing the fail-closed
+        # identity result or gaining authority to signal an unverified pid.
+        if on_error is not None:
+            on_error(exc)
         return None
     if not math.isfinite(create_time) or create_time <= 0:
         return None
@@ -875,6 +881,7 @@ def reap_marked_processes(
     *,
     worker_fingerprint: str,
     terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> ProcessReapOutcome:
     """Stop every process that inherited a managed tree's marker, wherever it is.
 
@@ -905,7 +912,9 @@ def reap_marked_processes(
         _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
         if not alive and not _processes_carrying_marker(worker_fingerprint):
             return "reaped"
-    except Exception:
+    except Exception as exc:
+        if on_error is not None:
+            on_error(exc)
         logger.warning("Could not confirm every %s process carrying its marker exited", label, exc_info=True)
     return "unconfirmed"
 

@@ -11,7 +11,7 @@ import tempfile
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
 
@@ -41,7 +41,7 @@ from .provenance import (
     project_turn_outcome_copy,
     render_turn_outcome_copy,
 )
-from .request import ModelHubRequest
+from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
@@ -64,6 +64,7 @@ from .service import (
     ModelHubService,
     ResolvedInvocation,
 )
+from core.os_errors import local_error_detail
 
 
 _MAX_REQUEST_BYTES: Final = 128 * 1024 * 1024
@@ -112,14 +113,6 @@ def _rewind_and_measure(payload: BinaryIO) -> int:
     payload.seek(0)
     return size
 
-
-_PROTOCOL_HEADERS: Final = frozenset(
-    {
-        "anthropic-beta",
-        "anthropic-version",
-        "openai-beta",
-    }
-)
 
 _CODEX_TURN_METADATA: Final = "x-codex-turn-metadata"
 _CODEX_ROUTE_FIELDS: Final = ("avibe_route_id", "avibe_turn_id")
@@ -206,6 +199,9 @@ class _TurnExecution:
     # The downstream event stream once its headers left before resolution
     # finished. From then on every ending of this turn travels inside it.
     stream_response: web.StreamResponse | None = None
+    # A large buffered JSON body whose headers have already left. A local disk
+    # failure can no longer replace its HTTP status or append an SSE ending.
+    buffered_response: web.StreamResponse | None = None
 
     @property
     def upstream_observation(self) -> ProtocolSSEState | None:
@@ -929,8 +925,8 @@ class ModelHubTurnGateway:
 
         protocol = _REQUEST_PROTOCOLS[endpoint]
         try:
-            protocol_headers = {
-                name.lower(): value for name, value in request.headers.items() if name.lower() in _PROTOCOL_HEADERS
+            caller_headers = {
+                name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
             }
             if backend == "opencode" and protocol == "openai_chat":
                 translation = translate_opencode_tool_names(payload)
@@ -943,7 +939,7 @@ class ModelHubTurnGateway:
                     request=ModelHubRequest(
                         payload,
                         protocol=protocol,
-                        headers=protocol_headers,
+                        headers=caller_headers,
                     ),
                     stream=stream,
                     supply_channel="hub",
@@ -961,7 +957,8 @@ class ModelHubTurnGateway:
             if turn_outcome is None and exc.code == "engine_down":
                 turn_outcome = ENGINE_DOWN_TURN_OUTCOME
             if turn_outcome is not None and turn_outcome.discriminator == "engine_down":
-                terminalizer.engine_down()
+                turn_outcome = replace(turn_outcome, local_error_detail=exc.local_error_detail)
+                terminalizer.engine_down(local_error_detail=exc.local_error_detail)
             elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
             if exc.code == RECOVERY_EXHAUSTED_CODE:
@@ -1112,70 +1109,82 @@ class ModelHubTurnGateway:
             )
 
         if not stream:
-            with tempfile.SpooledTemporaryFile(
-                max_size=_BUFFERED_RESPONSE_MEMORY_BYTES
-            ) as payload:
-                async for chunk in handle.stream:
-                    await run_owned_in_thread(payload.write, chunk)
-                execution.completed_at = self._now()
-                outcome, settlement, rendered = await self._settle_metered_turn(
+            try:
+                response = None
+                with tempfile.SpooledTemporaryFile(max_size=_BUFFERED_RESPONSE_MEMORY_BYTES) as payload:
+                    async for chunk in handle.stream:
+                        await run_owned_in_thread(payload.write, chunk)
+                    execution.completed_at = self._now()
+                    outcome, settlement, _rendered = await self._settle_metered_turn(
+                        execution, terminalizer, termination_origin="upstream_terminal",
+                        defer_projection=True,
+                    )
+                    assert outcome is not None
+                    assert settlement is not None
+                    assert settlement.decision is not None
+                    if settlement.decision.action == "return":
+                        await run_owned_in_thread(payload.seek, 0)
+                        rewritten_payload = await run_owned_in_thread(
+                            rewrite_buffered_tool_names_file, payload, execution.response_tool_aliases,
+                        )
+                        response_payload = rewritten_payload or payload
+                        try:
+                            response_size = await run_owned_in_thread(_rewind_and_measure, response_payload)
+                            if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
+                                body = await run_owned_in_thread(response_payload.read)
+                                response = web.Response(
+                                    status=200, body=body, content_type="application/json",
+                                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                                )
+                            else:
+                                response = web.StreamResponse(
+                                    status=200,
+                                    headers={
+                                        "Cache-Control": "no-store", "Content-Length": str(response_size),
+                                        "Content-Type": "application/json", "X-Content-Type-Options": "nosniff",
+                                    },
+                                )
+                                await self._downstream_io(response.prepare(request))
+                                execution.buffered_response = response
+                                while chunk := await run_owned_in_thread(response_payload.read, _RESPONSE_CHUNK_BYTES):
+                                    await self._downstream_io(response.write(chunk))
+                        finally:
+                            if rewritten_payload is not None:
+                                await run_owned_in_thread(rewritten_payload.close)
+            except OSError as exc:
+                # The upstream result still owns usage and source health. Only
+                # this gateway's delivery failed; publish that failure after
+                # settling the real producer instead of rewriting its outcome.
+                _outcome, _settlement, _rendered = await self._settle_metered_turn(
                     execution,
                     terminalizer,
                     termination_origin="upstream_terminal",
+                    defer_projection=True,
                 )
-                assert outcome is not None
-                assert settlement is not None
+                detail = local_error_detail(exc)
+                terminalizer.engine_down(local_error_detail=detail)
+                failure = self._terminal_error_response(
+                    execution, terminalizer, status=502, code="engine_down",
+                    turn_outcome=replace(ENGINE_DOWN_TURN_OUTCOME, local_error_detail=detail),
+                )
+                if execution.buffered_response is not None:
+                    # Content-Length exposes the truncated JSON to the caller.
+                    # Do not send a second HTTP response after committed headers.
+                    execution.buffered_response.force_close()
+                    return execution.buffered_response
+                return failure
+            rendered = self._commit_and_render_handle_settlement(execution, terminalizer, settlement)
+            if response is None:
                 assert settlement.decision is not None
-                if settlement.decision.action != "return":
-                    return self._outcome_response(
-                        outcome,
-                        error_code=settlement.decision.error_code,
-                        status_override=settlement.decision.downstream_status,
-                        rendered=rendered,
-                    )
-                await run_owned_in_thread(payload.seek, 0)
-                rewritten_payload = await run_owned_in_thread(
-                    rewrite_buffered_tool_names_file,
-                    payload,
-                    execution.response_tool_aliases,
+                return self._outcome_response(
+                    outcome,
+                    error_code=settlement.decision.error_code,
+                    status_override=settlement.decision.downstream_status,
+                    rendered=rendered,
                 )
-                response_payload = rewritten_payload or payload
-                try:
-                    response_size = await run_owned_in_thread(
-                        _rewind_and_measure,
-                        response_payload,
-                    )
-                    if response_size <= _BUFFERED_RESPONSE_MEMORY_BYTES:
-                        body = await run_owned_in_thread(response_payload.read)
-                        return web.Response(
-                            status=200,
-                            body=body,
-                            content_type="application/json",
-                            headers={
-                                "Cache-Control": "no-store",
-                                "X-Content-Type-Options": "nosniff",
-                            },
-                        )
-                    response = web.StreamResponse(
-                        status=200,
-                        headers={
-                            "Cache-Control": "no-store",
-                            "Content-Length": str(response_size),
-                            "Content-Type": "application/json",
-                            "X-Content-Type-Options": "nosniff",
-                        },
-                    )
-                    await self._downstream_io(response.prepare(request))
-                    while chunk := await run_owned_in_thread(
-                        response_payload.read,
-                        _RESPONSE_CHUNK_BYTES,
-                    ):
-                        await self._downstream_io(response.write(chunk))
-                    await self._downstream_io(response.write_eof())
-                    return response
-                finally:
-                    if rewritten_payload is not None:
-                        await run_owned_in_thread(rewritten_payload.close)
+            if response is execution.buffered_response:
+                await self._downstream_io(response.write_eof())
+            return response
 
         response = execution.stream_response
         if response is None:
@@ -1323,6 +1332,7 @@ class ModelHubTurnGateway:
         terminalizer: GatewayTurnTerminalizer,
         *,
         termination_origin: HandleTerminationOrigin,
+        defer_projection: bool = False,
     ) -> tuple[RawCallOutcome | None, HandleSettlement | None, _RenderedTurnOutcome | None]:
         """End one turn: meter the call, then settle it, then commit what it was.
 
@@ -1344,6 +1354,10 @@ class ModelHubTurnGateway:
         without settling a second time. An ending that arrives after the turn was
         already committed gets the committed rendering and no settlement, which is
         the same thing the projection choke would have handed it.
+
+        A buffered response settles the producer before reading or rewriting its
+        local bytes, but defers the Turn projection until those operations finish.
+        It uses this same owner for metering and settlement, including failures.
         """
 
         if execution.settlement_recorded:
@@ -1355,6 +1369,8 @@ class ModelHubTurnGateway:
             terminalizer,
             termination_origin=termination_origin,
         )
+        if defer_projection:
+            return outcome, settlement, None
         rendered = self._commit_and_render_handle_settlement(
             execution,
             terminalizer,

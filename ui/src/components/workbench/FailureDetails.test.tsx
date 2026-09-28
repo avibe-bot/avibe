@@ -8,6 +8,7 @@ import type { WorkbenchMessage } from '../../context/ApiContext';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
 import { DENIED_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import zh from '../../i18n/zh.json';
 import { ApiCallError, modelsApi } from '../settings/models/modelsApi';
 import type { TurnProvenance } from '../settings/models/types';
@@ -74,9 +75,60 @@ describe('failed-turn upstream details', () => {
 
   it('does not read Model Hub provenance for a chat-only role', () => {
     const read = vi.spyOn(modelsApi, 'getTurnProvenance');
-    mount(notice, false);
+    mount({
+      ...notice, metadata: { ...notice.metadata, local_error_detail: '[Errno 28] No space left on device' },
+    } as WorkbenchMessage, false);
     expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('shows a local diagnostic after a failed record read and after remounting', async () => {
+    vi.spyOn(modelsApi, 'getTurnProvenance')
+      .mockRejectedValue(new ApiCallError('provenance_unavailable', 'not found'));
+    const diagnostic = '[Errno 28] No space left on device';
+    const message = {
+      ...notice, metadata: { ...notice.metadata, local_error_detail: diagnostic },
+    } as WorkbenchMessage;
+    for (let mountCount = 0; mountCount < 2; mountCount += 1) {
+      mount(JSON.parse(JSON.stringify(message)));
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.queryByText(diagnostic)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
+      expect(screen.getByText('本地错误')).toBeTruthy();
+      expect(screen.getByText(diagnostic)).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: '收起详情' }));
+      expect(screen.queryByText(diagnostic)).toBeNull();
+      cleanup();
+      resetFailureDetailsCache();
+    }
+  });
+
+  it('reads the local diagnostic from history when the notice has no snapshot', async () => {
+    const diagnostic = '[Errno 13] Permission denied';
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
+      ...record,
+      terminal_error: { ...record.terminal_error, reason: 'engine_down', local_error_detail: diagnostic },
+    } as TurnProvenance);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
+    expect(screen.getByText(diagnostic)).toBeTruthy();
+  });
+
+  it.each([null, 'original-turn'])('shows detached replay details without provenance or Retry (%s)', (turnId) => {
+    const read = vi.spyOn(modelsApi, 'getTurnProvenance');
+    const diagnostic = '[Errno 28] No space left on device';
+    const message = {
+      ...notice,
+      metadata: {
+        ...notice.metadata, turn_id: turnId, detached: true, replayed: true,
+        local_error_detail: diagnostic,
+      },
+    } as WorkbenchMessage;
+    mount(message);
+    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
+    expect(screen.getByText(diagnostic)).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+    expect(isRetryableFailureNotice(message)).toBe(false);
   });
 
   it('shares one Sources read across the notices of a transcript', async () => {

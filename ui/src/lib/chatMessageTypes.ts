@@ -59,9 +59,7 @@ export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean =>
 
 type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
 
-// This is action eligibility, not transcript visibility. The server additionally
-// rechecks the durable failed-Turn boundary and current Session authority.
-export function isRetryableFailureNotice(
+export function isBackendFailureNotice(
   message: TerminalAgentMessageCandidate & { source?: string | null },
 ): boolean {
   const metadata = message.metadata;
@@ -70,8 +68,17 @@ export function isRetryableFailureNotice(
     && message.source === 'agent'
     && metadata?.event === 'backend_failure'
     && typeof metadata.failure_id === 'string'
-    && !!metadata.failure_id
-    && typeof metadata.turn_id === 'string'
+    && !!metadata.failure_id;
+}
+
+// This is action eligibility, not transcript visibility. The server additionally
+// rechecks the durable failed-Turn boundary and current Session authority.
+export function isRetryableFailureNotice(
+  message: TerminalAgentMessageCandidate & { source?: string | null },
+): boolean {
+  const metadata = message.metadata;
+  return isBackendFailureNotice(message)
+    && typeof metadata?.turn_id === 'string'
     && !!metadata.turn_id
     && !metadata.detached;
 }

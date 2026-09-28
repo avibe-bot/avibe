@@ -11688,7 +11688,9 @@ async def sessions_messages_create(session_id: str):
         with engine.connect() as conn:
             current = message_deliveries.get_delivery(conn, str(message["id"]))
             retry_notice = (
-                messages_service.get_message(conn, retry_for, session_id=session_id)
+                messages_service.get_message(
+                    conn, retry_for, session_id=session_id, include_local_error_detail=True,
+                )
                 if retry_for else None
             )
         if current is None:
@@ -11699,7 +11701,15 @@ async def sessions_messages_create(session_id: str):
         if retry_notice is not None:
             from vibe.sse_broker import broker
 
-            payload["retry_notice"] = retry_notice
+            payload["retry_notice"] = {
+                **retry_notice,
+                "metadata": message_deliveries.public_message_metadata(
+                    retry_notice.get("metadata"),
+                    include_local_error_detail=_has_runtime_management_access(
+                        getattr(g, "authorization_context", None),
+                    ),
+                ),
+            }
             # An upsert of an existing notice is not new user communication.
             broker.publish("message.updated", retry_notice)
         if current["state"] == "queued":
@@ -12160,6 +12170,32 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     """
     from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS
 
+    if event_type in {"message.new", "message.updated"}:
+        from storage.message_deliveries import public_message_metadata
+
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), dict):
+            return None
+        data = envelope["data"]
+        if "metadata" not in data:
+            return payload
+        return json.dumps(
+            {
+                **envelope,
+                "data": {
+                    **data,
+                    "metadata": public_message_metadata(
+                        data.get("metadata"),
+                        include_local_error_detail=_has_runtime_management_access(context),
+                    ),
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if event_type in INSTANCE_SCOPED_REFETCH_EVENTS and not _has_runtime_management_access(context):
         # Below runtime management the frame is a bare signal: consumers refetch
         # and ignore the body, while publishers attach identifiers (session ids,

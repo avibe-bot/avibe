@@ -208,7 +208,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         install_state = self.install_state()
         if install_state and install_state.get("state") == "not_installed":
             reason = install_state.get("reason")
-            if isinstance(reason, str) and reason:
+            if isinstance(reason, str) and reason and not managed.get("reason"):
                 managed["status"] = "error"
                 managed["reason"] = reason
         return managed
@@ -620,7 +620,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 env=engine_subprocess_environment(),
                 **isolated_subprocess_kwargs(),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            self._set_install_failure(self._reason("binary_not_runnable"), exc)
             return None
         match = _ENGINE_VERSION_RE.search(f"{result.stdout}\n{result.stderr}")
         if match is None:

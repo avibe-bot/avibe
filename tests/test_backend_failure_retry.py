@@ -193,6 +193,44 @@ def _retry_notice(tmp_path, *, backend="claude", not_written=False, content=None
     return session_id, notice, turn, inputs
 
 
+@pytest.mark.parametrize("can_manage", [True, False])
+def test_retry_notice_preserves_authorized_local_details(isolated_state, tmp_path, monkeypatch, can_manage):
+    # Retry replaces the existing UI row from its POST reply/event. A default
+    # public reload used to erase the only snapshot when provenance is absent.
+    from types import SimpleNamespace
+    from vibe import ui_server
+    from vibe.sse_broker import broker
+
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path)
+    detail = "[Errno 28] No space left on device"
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(
+            update(messages).where(messages.c.id == notice["id"]).values(
+                metadata_json=json.dumps({**notice["metadata"], "local_error_detail": detail}),
+            )
+        )
+    monkeypatch.setattr(ui_server, "_has_runtime_management_access", lambda _context: can_manage)
+    published = []
+    monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
+    client = ui_server.app.test_client()
+    with patch("vibe.internal_client.dispatch_async", _accepted_dispatch(session_id)):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", headers=csrf_headers(client),
+            json={"retry_for": notice["id"]},
+        )
+    assert response.status_code == 201
+    returned = response.get_json()["retry_notice"]
+    assert ("local_error_detail" in returned["metadata"]) is can_manage
+    if can_manage:
+        assert returned["metadata"]["local_error_detail"] == detail
+    event, internal = next((event, data) for event, data in published if event == "message.updated")
+    assert internal["metadata"]["local_error_detail"] == detail
+    projected = ui_server._workbench_event_payload_for_context(
+        SimpleNamespace(), event, json.dumps({"type": event, "data": internal}),
+    )
+    assert ("local_error_detail" in json.loads(projected)["data"]["metadata"]) is can_manage
+
+
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 def test_failure_retry_canonical_continue_and_draft(isolated_state, tmp_path, backend):
     from vibe.ui_server import app

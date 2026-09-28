@@ -5,7 +5,7 @@ import logging
 import shutil
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,13 @@ from config.v2_sessions import (
     migrate_session_state_mappings,
 )
 from config.v2_settings import SettingsState, load_settings_state_from_json
-from storage.backups import BACKUP_MANIFEST_VERSION, next_backup_sequence, prune_state_backups
+from storage.backups import (
+    BACKUP_MANIFEST_VERSION,
+    begin_sqlite_backup_validation,
+    complete_sqlite_backup_validation,
+    next_backup_sequence,
+    prune_state_backups,
+)
 from storage.db import create_sqlite_engine
 from storage.lock import MigrationFileLock, migration_lock_path_for
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
@@ -53,10 +59,23 @@ class MigrationImportReport:
     imported: bool
     backup_path: Path | None = None
     counts: dict[str, int] = field(default_factory=dict)
+    backup_attempt_id: str | None = None
 
 
 _ensured_lock = threading.Lock()
 _ensured_targets: dict[tuple[Path, Path], MigrationImportReport] = {}
+
+
+def validated_sqlite_backup_attempt(db_path: Path) -> str | None:
+    """The exact backup attempt this process validated, never one guessed from disk."""
+    target = db_path.expanduser().resolve()
+    with _ensured_lock:
+        attempts = {
+            report.backup_attempt_id
+            for (database, _state_dir), report in _ensured_targets.items()
+            if database == target and report.backup_attempt_id is not None
+        }
+    return attempts.pop() if len(attempts) == 1 else None
 
 
 def reset_ensured_sqlite_state() -> None:
@@ -109,6 +128,11 @@ def ensure_sqlite_state(
     # it in between.
     with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
         run_migrations(target_db, prune_backups_after_upgrade=False)
+        try:
+            backup_attempt = begin_sqlite_backup_validation(target_db)
+        except OSError:
+            logger.warning("Could not track SQLite backup validation; retaining backups", exc_info=True)
+            backup_attempt = None
         engine = create_sqlite_engine(target_db)
         report: MigrationImportReport | None = None
         try:
@@ -169,6 +193,12 @@ def ensure_sqlite_state(
             engine.dispose()
         if report is None:
             raise RuntimeError("SQLite state initialization completed without a report")
+        try:
+            complete_sqlite_backup_validation(target_db, backup_attempt)
+        except OSError:
+            logger.warning("SQLite state validated without expiry evidence; retaining backups", exc_info=True)
+        else:
+            report = replace(report, backup_attempt_id=backup_attempt)
         prune_state_backups(target_state_dir / "backups")
         with _ensured_lock:
             _ensured_targets[ensured_key] = report

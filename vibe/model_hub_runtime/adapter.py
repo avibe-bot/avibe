@@ -47,6 +47,7 @@ from core.handlers.model_hub.quota import (
     parse_subscription_quota,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
+from core.os_errors import local_os_errno
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
     EngineClient,
@@ -1656,10 +1657,10 @@ class CLIProxyEngineAdapter:
         return "model_hub_engine_install_failed"
 
     @staticmethod
-    def _install_failure(reason: str) -> Exception:
+    def _install_failure(reason: str, *, os_errno: int | None = None) -> Exception:
         if reason == INSTALL_PLATFORM_UNSUPPORTED_REASON:
             return RuntimePlatformUnsupportedError()
-        return EngineUnavailableError("models.engine.install_failed", reason=reason)
+        return EngineUnavailableError("models.engine.install_failed", reason=reason, os_errno=os_errno)
 
     async def ensure_installed(
         self,
@@ -1692,7 +1693,7 @@ class CLIProxyEngineAdapter:
                 )
             if not install.get("ok"):
                 reason = str(install.get("reason") or "engine_install_failed")
-                raise self._install_failure(reason)
+                raise self._install_failure(reason, os_errno=install.get("os_errno"))
             if install.get("changed"):
                 await self._transports_idle.wait()
                 await run_owned_in_thread(self.supervisor.restart_if_running)
@@ -2793,7 +2794,7 @@ class CLIProxyEngineAdapter:
                 raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
             try:
                 client = await asyncio.to_thread(self.supervisor.client)
-            except EngineUnavailableError:
+            except EngineUnavailableError as exc:
                 return completed_handle(
                     RawCallOutcome(
                         kind=RawOutcomeKind.NETWORK_ERROR,
@@ -2803,6 +2804,7 @@ class CLIProxyEngineAdapter:
                         stream_started=False,
                         model_id=model_id,
                         source_id=source_id,
+                        os_errno=local_os_errno(exc),
                     )
                 )
             release = self._acquire_transport()

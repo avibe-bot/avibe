@@ -13,7 +13,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from config import paths
-from storage.backups import create_sqlite_migration_backup, prune_state_backups
+from storage.backups import (
+    begin_sqlite_backup_migration,
+    complete_sqlite_backup_migration,
+    create_sqlite_migration_backup,
+    prune_state_backups,
+)
 from storage.db import create_sqlite_engine, sqlite_url
 from storage.lock import MigrationFileLock, migration_lock_path_for
 
@@ -297,14 +302,21 @@ def _run_migrations_locked(
 ) -> None:
     cfg = alembic_config(target_db)
     backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
+    backup_attempt: str | None = None
     if backup_revisions is not None:
         _current_revisions, target_revisions = backup_revisions
         backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        backup_attempt = begin_sqlite_backup_migration(target_db, backup_path)
         logger.info("Pre-migration SQLite rollback point at %s", backup_path)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
     command.upgrade(cfg, revision)
+    if backup_attempt is not None:
+        try:
+            complete_sqlite_backup_migration(target_db, backup_attempt)
+        except OSError:
+            logger.warning("SQLite migration completed without expiry evidence; retaining backups", exc_info=True)
     if prune_backups_after_upgrade:
         prune_state_backups(target_db.parent / "backups", json_retention=None)
 

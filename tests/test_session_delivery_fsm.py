@@ -1924,6 +1924,7 @@ def test_legacy_delivery_hydration_preserves_admitted_author(managers, user):
 def test_public_metadata_recursively_redacts_legacy_identity_without_mutating_rows():
     private = {"delegated_memory_owner": {"user_id": "private"}, "_memory_user_id": "private",
                "_memory_arbitrary": True, "_web_push_user_key": "private",
+               "local_error_detail": "[Errno 28] No space left on device",
                "resource_user_context": {"sub": "private"}, "visible": "keep"}
     metadata = {**private, "scheduled_provenance": {"platform_specific": {
         "message_metadata": private}}, "items": [{"nested": private}]}

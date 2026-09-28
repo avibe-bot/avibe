@@ -80,9 +80,10 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   body-level (S3): with the engine flags
   `disable-claude-cloak-mode: true`, credential `cloak.mode: never`, and
   `rebuild-mid-system-message: false`, an Anthropic-frontend body reaches an `anthropic`
-  upstream byte-identical; the engine's transport headers remain its own (a Claude-CLI
-  fingerprint: `User-Agent`, `Anthropic-Beta`, `X-Stainless-*`, session id) and upstream auth
-  is the engine's Bearer form. A Responses-frontend body reaching a `codex-api-key` upstream
+  upstream byte-identical. The Gateway forwards only the caller's `User-Agent` and protocol
+  capability headers (`FORWARDED_CALLER_HEADERS`); the engine passes that `User-Agent` upstream
+  unchanged (measured on CLIProxyAPI v7.3.16, which otherwise sends `CLIProxyAPI/<version>`),
+  so an upstream sees the calling agent's identity. Upstream auth is the engine's Bearer form. A Responses-frontend body reaching a `codex-api-key` upstream
   is rewritten by the engine's Codex executor regardless of flags (`max_output_tokens`
   dropped; `parallel_tool_calls: true`, `instructions: ""`, and an `image_generation` tool
   added) — a known engine limitation the implementation verifies against each real

@@ -1276,6 +1276,19 @@ land as standalone prose.
 never written to resolution events, probes, or persisted provenance, and lives only on
 the in-memory turn projection that renders this turn's reply.
 
+For `turn.engine_down`, an optional `local_error_detail` carries the numeric OS
+errno and its system message, such as `[Errno 28] No space left on device`.
+It does not change summary copy or classification. The exact Turn retains it
+in `terminal_error.local_error_detail` and the failure notification's metadata.
+The existing collapsed notification details display it even when the provenance
+read is unavailable. Only recognized OS errno values produce this field; paths,
+arbitrary exception strings, request bodies, and credentials are excluded.
+Existing provenance attribution and details authorization rules still apply.
+Installation, installed-runtime inspection, and invocation preserve the code,
+including process-record/health failures and local response-buffer errors.
+Invocation outcomes carry optional numeric `os_errno` without changing the
+existing completed-handle, stream settlement, or Source-health contracts.
+
 `source_transition_persisted` is an optional backend projection fact whose presence is
 required only for `turn.streamed_fallback`. UI consumers deliberately do not consume it:
 the selected copy key already carries the complete user-visible truth, following the

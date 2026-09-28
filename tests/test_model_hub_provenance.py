@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,7 +39,10 @@ def _live_registry(tmp_path, callback=None):
 ])
 def test_live_terminal_projection_requires_exact_unfrozen_owner(tmp_path, guard):
     registry = _live_registry(tmp_path)
-    projection = produce_turn_outcome("turn.engine_down")
+    projection = replace(
+        produce_turn_outcome("turn.engine_down"),
+        local_error_detail="[Errno 28] No space left on device",
+    )
     registry.record_turn_outcome("turn-live", projection)
     if guard == "pending":
         registry.begin_attempt(

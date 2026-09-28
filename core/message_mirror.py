@@ -112,7 +112,9 @@ def _append_quietly(conn, **kwargs) -> Optional[dict]:
     the realtime ``message.new`` publish for a row that didn't materialize.
     """
     try:
-        return messages_service.append(conn, **kwargs)
+        # Internal publication retains this snapshot; each browser recipient is
+        # projected by the SSE boundary, independently of transcript reads.
+        return messages_service.append(conn, include_local_error_detail=True, **kwargs)
     except IntegrityError:
         logger.debug(
             "mirror: skipped duplicate native_message_id %s on platform %s",
@@ -459,6 +461,7 @@ def persist_agent_message(
                         text=text,
                         content=content,
                         metadata=metadata,
+                        include_local_error_detail=True,
                     )
                 # Recompute the session's inbox row so the realtime event can patch
                 # the browser without a refetch. avibe-only: the workbench inbox is

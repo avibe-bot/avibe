@@ -624,6 +624,7 @@ export type TurnProvenance = {
     stream_started: boolean;
     http_status?: number | null;
     upstream_error_code?: string | null;
+    local_error_detail?: string;
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];
   } | null;

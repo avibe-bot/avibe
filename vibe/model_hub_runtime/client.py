@@ -36,7 +36,9 @@ from core.handlers.model_hub.json_wire import (
     JSONScope,
     project_json_reader,
 )
+from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS
 from core.message_output import plain_untrusted_text
+from core.os_errors import local_os_errno
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
@@ -59,7 +61,6 @@ _ERROR_OBSERVATION_BYTES = 256 * 1024
 # its own budget so the client's connection budget never limits it.
 _LOCAL_PROJECTION_TIMEOUT_SECONDS = ENGINE_TRANSPORT_TIMEOUT_SECONDS
 _OFFICIAL_BASE_URLS = official_api_key_base_urls()
-_PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
 
@@ -85,12 +86,14 @@ class EngineClientError(RuntimeError):
         error_type: str | None = None,
         error_code: str | None = None,
         error_candidates: tuple[str, ...] = (),
+        os_errno: int | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
         self.error_code = error_code
         self.error_candidates = error_candidates
+        self.os_errno = os_errno
 
 
 class _StreamPrelude:
@@ -244,6 +247,7 @@ class EngineHealthFailure:
     reason: Literal["timeout", "http_error", "invalid_response", "unavailable"]
     elapsed_seconds: float
     http_status: int | None = None
+    os_errno: int | None = None
 
 
 class EngineInvokeHandle:
@@ -329,6 +333,7 @@ class EngineClient:
                 )
                 self.health_failure = EngineHealthFailure(
                     path, reason, time.monotonic() - started_at, exc.status_code,
+                    os_errno=local_os_errno(exc),
                 )
                 return False
             if not valid:
@@ -427,7 +432,7 @@ class EngineClient:
         body["model"] = routed_model
         body["stream"] = stream
         headers = {
-            key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in _PROTOCOL_HEADERS
+            key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in FORWARDED_CALLER_HEADERS
         }
         headers.update(
             {
@@ -700,6 +705,7 @@ class EngineClient:
                     source=source,
                     model_id=model_id,
                     error_code="engine_down",
+                    os_errno=local_os_errno(exc),
                     http_status=response.status if response is not None and first_received else None,
                     message=(
                         "local response replay failed"
@@ -801,6 +807,7 @@ class EngineClient:
                 raise EngineClientError(
                     "engine API is unavailable",
                     error_type=type(read_error).__name__,
+                    os_errno=local_os_errno(read_error),
                 ) from None
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
@@ -816,7 +823,10 @@ class EngineClient:
             socket.timeout,
             OSError,
         ) as exc:
-            raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
+            raise EngineClientError(
+                "engine API is unavailable", error_type=type(exc).__name__,
+                os_errno=local_os_errno(exc),
+            ) from None
 
     def _url(self, path: str, *, query: Mapping[str, str] | None = None) -> str:
         url = f"{self.connection.base_url.rstrip('/')}{path}"
@@ -1465,7 +1475,7 @@ async def _response_stream(
                 message="upstream response timed out after streaming started",
                 stream_started=wire_state.model_output_started,
             )
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, OSError) as exc:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
             source,
@@ -1481,6 +1491,7 @@ async def _response_stream(
                 model_id=model_id,
                 http_status=response.status,
                 error_code="engine_down",
+                os_errno=local_os_errno(exc),
                 message="upstream response failed after streaming started",
                 stream_started=wire_state.model_output_started,
             )
@@ -1665,6 +1676,7 @@ def _outcome(
     usage: ProtocolUsageReport | None = None,
     recovery_verified: bool = False,
     upstream_detail: str | None = None,
+    os_errno: int | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1679,6 +1691,7 @@ def _outcome(
         usage=usage,
         recovery_verified=recovery_verified,
         upstream_detail=upstream_detail,
+        os_errno=os_errno,
     )
 
 

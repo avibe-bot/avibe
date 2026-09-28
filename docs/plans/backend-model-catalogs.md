@@ -549,8 +549,9 @@ display names, no protocol chatter.
   `disable-claude-cloak-mode: true`, credential `cloak.mode: never`, and
   `rebuild-mid-system-message: false` (S3), so a same-protocol Anthropic request body is
   forwarded unchanged apart from the mandatory `model` rewrite to the stored hop's model id
-  (user-configured substitutions stay authoritative, `model-hub.md` §4.5); transport headers
-  and upstream auth are the engine's own. Responses bodies toward a `codex-api-key` upstream
+  (user-configured substitutions stay authoritative, `model-hub.md` §4.5). The caller's
+  `User-Agent` reaches the upstream unchanged; other transport headers and upstream auth are
+  the engine's own. Responses bodies toward a `codex-api-key` upstream
   are rewritten by the engine (S3): the implementation verifies each real `openai_responses`
   Source still serves such requests and files the engine follow-up. A Hub-held Claude
   subscription (OAuth credential) keeps the engine's cloaking: the vendor accepts those tokens

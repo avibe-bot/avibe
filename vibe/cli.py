@@ -240,6 +240,7 @@ DOCTOR_DISPLAY_PROJECTIONS = {
         "candidate_validation_failed": "doctor.repair.dependencyCandidateValidationFailed",
         "install_missing_binary": "doctor.repair.dependencyInstallMissingBinary",
         "install_failed": "doctor.repair.installError",
+        "install_inspection_failed": "doctor.repair.dependencyInstallInspectionFailed",
         "install_lock_failed": "doctor.repair.dependencyInstallLockFailed",
         "install_claim_failed": "doctor.repair.dependencyInstallClaimFailed",
         "install_target_changed": "doctor.repair.dependencyInstallTargetChanged",

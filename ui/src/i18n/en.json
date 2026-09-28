@@ -4699,6 +4699,7 @@
       }
     },
     "failureDetails": {
+      "localError": "Local error",
       "show": "Show details",
       "hide": "Hide details",
       "outcome": {

@@ -134,9 +134,9 @@ def _controller_language(controller: Any) -> str:
     return str(getattr(getattr(controller, "config", None), "language", "en") or "en")
 
 
-def _model_hub_failure_text(
+def _model_hub_failure(
     controller: Any, context: Any, request: Any, backend: str
-) -> str | None:
+) -> tuple[str | None, str | None] | None:
     """Render exact live Hub evidence, never parse a native exception wrapper.
 
     The registry owns ambiguity, pending-request, and Stop guards. Without that
@@ -162,7 +162,10 @@ def _model_hub_failure_text(
         projection = project(turn_id.strip(), backend=backend)
         if not isinstance(projection, TurnOutcomeProjectionInput):
             continue
-        return render_turn_outcome_copy(projection, _controller_language(controller))
+        return (
+            render_turn_outcome_copy(projection, _controller_language(controller)),
+            projection.local_error_detail,
+        )
     return None
 
 
@@ -239,6 +242,11 @@ def terminal_backend_failure_output(
     metadata = dict(terminal.metadata)
     existing = metadata.get("turn_failure_notification")
     existing_notification = dict(existing) if isinstance(existing, dict) else {}
+    local_detail = metadata.pop("local_error_detail", None)
+    if local_detail:
+        # The failure-delivery contract is already carried through immediate,
+        # deferred, and late-attached Run settlement. Keep its snapshot there.
+        existing_notification["local_error_detail"] = local_detail
     identity = str(existing_notification.get("failure_id") or "").strip()
     if not identity:
         identity = _failure_identity(context, request, failure_id)
@@ -272,6 +280,7 @@ async def emit_replayed_backend_failure(
     *,
     failure_id: str,
     turn_id: str | None = None,
+    local_error_detail: str | None = None,
     display_text: str | None = None,
     delivery: DeliveryEvidence | None = None,
 ) -> None:
@@ -328,7 +337,11 @@ async def emit_replayed_backend_failure(
         failure_id=failure_id,
         failure_id_authoritative=True,
         output=MessageOutput(
-            metadata={"turn_id": str(turn_id or "").strip() or None, "replayed": True},
+            metadata={
+                "turn_id": str(turn_id or "").strip() or None,
+                "replayed": True,
+                **({"local_error_detail": local_error_detail} if local_error_detail else {}),
+            },
         ),
     )
     # ``delivery`` is passed ONLY when a caller asked for it: controller-like objects
@@ -374,10 +387,14 @@ async def emit_backend_failure(
 
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
-    hub_visible = _model_hub_failure_text(controller, context, request, backend_name)
-    if hub_visible is not None:
-        visible = hub_visible
+    hub_failure = _model_hub_failure(controller, context, request, backend_name)
+    if hub_failure is not None and hub_failure[0] is not None:
+        visible = hub_failure[0]
     terminal = _terminal_output(request, output)
+    if hub_failure is not None and hub_failure[1] and not getattr(controller, "shutdown_requested", False):
+        terminal = replace(
+            terminal, metadata={**terminal.metadata, "local_error_detail": hub_failure[1]},
+        )
     harness_run_id = _harness_run_identity(context, request)
     owns_failure_contract = bool(
         _turn_failure_identity(context, request) or harness_run_id

@@ -4,8 +4,9 @@
 
 Claude Code keeps one streaming SDK connection per runtime. A detached background
 Activity can produce Assistant and Result frames while a newer Avibe human Turn is
-waiting to write. The SDK's terminal `ResultMessage.origin` is the only reliable
+waiting to write. The SDK's terminal `ResultMessage.origin` is the reliable
 owner signal in this interleaved stream; Assistant frames do not carry that field.
+The only earlier signal is the replayed input that starts a human turn.
 
 ## Contract
 
@@ -19,6 +20,20 @@ owner signal in this interleaved stream; Assistant frames do not carry that fiel
   replay them only after the terminal Result identifies the phase. Grace-period
   Activity flushes defer while that phase is buffered, and replay failures do not
   prevent terminal settlement.
+- Stream a turn whose first content frame is a replayed human input
+  (`UserMessage.origin.kind == "human"`) without waiting for its Result, even
+  while an Activity competes. Such a turn ends with a human Result (see Measured
+  turn shape), so its frames take the human replay path early: they attach to
+  the pending human request and never claim Activity output. Any other first
+  frame, a human input drained into a running turn, held frames, and detached
+  or claimed Activity output that is not yet delivered keep the Result-owned
+  path; a later frame never overtakes earlier held output. A generic receiver
+  error keeps the client, so the receiver that the next input starts may join a
+  running turn whose start it never sees; that receiver streams early only from
+  the turn after its first Result. Completed Activity output that is still
+  queued follows the human Result on both paths, because the Activity flush
+  defers while a human request is pending; streaming earlier does not change
+  that order.
 - Treat a missing or unknown origin as foreground only when no competing Activity
   evidence exists; otherwise preserve it as detached output and leave the pending
   human request untouched.
@@ -98,6 +113,36 @@ for metadata eligibility, Turn constraints, retries, and persisted local-only
 output batches. A metadata predicate can select a candidate, but it cannot
 create a second batching path or absorb a previously bound receipt.
 
+## Measured turn shape (Claude CLI 2.1.280, 2026-09-28)
+
+A hermetic probe (Claude Agent SDK 0.2.158 and its bundled CLI, with
+`--replay-user-messages`, against a scripted local Messages mock) established:
+
+1. Turns are serialized. Each turn is `system init`, an optional replayed input,
+   its frames, and one Result; turns never interleave.
+2. A human turn's first content frame is its replayed input (`isReplay`,
+   `origin: human`), always before any Assistant frame. A task-notification turn
+   has no replay: it starts with Assistant output, and its Result carries
+   `origin: task-notification`.
+3. A human input sent while a notification turn runs without a tool becomes its
+   own human turn after that Result. A notification and a human input both
+   queued behind a turn run as separate FIFO turns.
+4. A notification drained into a running human turn appears mid-turn as a
+   replayed input with `origin: task-notification`; the Result stays human.
+5. A human input sent while a notification turn runs a tool is drained into that
+   turn: its replay appears mid-turn, the model answers it inside the
+   notification turn, and no human Result follows.
+6. Human inputs queued before a turn starts are merged into one replayed input.
+
+Facts 1 and 2 make a turn's first content frame the earliest proof of its owner;
+facts 4 and 5 are why only the first frame counts. Turns started by a scheduled
+wakeup were not measured; the rule assumes that, like notifications, they do not
+replay a human-origin input.
+
+Open follow-ups outside this rule: under fact 5 the answered human request never
+receives a human Result, and under fact 6 exact-text native input receipts miss
+merged inputs. Both predate it and need their own decisions.
+
 ## Validation
 
 Consumer tests cover both terminal result orders, notification-before-human-result,
@@ -105,9 +150,13 @@ multiple Activity completion aggregation, Assistant buffering, flush-vs-Result
 races, retained Activity text during a long-lived receiver retry, receiver
 error recovery ownership, failed/stopped/killed/completed provisional terminal
 lineage, buffered replay failure, unknown origin, client replacement and Stop
-races, exactly-once output, and durable unsent-input recovery. A hermetic Claude
-Agent SDK 0.2.158 plus bundled CLI probe verifies the outgoing origin shape and
-real Result provenance against the local mock upstream.
+races, exactly-once output, durable unsent-input recovery, and a replay-proven
+human turn streaming past a lingering Activity, including one that finishes
+mid-turn, without claiming its output, while notification-started turns, human
+inputs drained after Assistant output, and turns the receiver joined after their
+start, including a replacement receiver that first sees a task event, stay held.
+A hermetic Claude Agent SDK 0.2.158 plus bundled CLI probe verifies the outgoing
+origin shape and real Result provenance against the local mock upstream.
 
 The current implementation scope is the Claude receiver and existing Activity,
 dispatcher, receipt, steering, and generation owners only. It does not add a
@@ -136,7 +185,7 @@ and native-input receipts, not a second human terminal state machine.
 | External acceptance but failed local settlement without durable Message evidence | Keep the claim and original payload; refine only the record's retry policy to the dispatcher's existing local-settlement-only path. Never resend externally. |
 | Durable delivery and local settlement | Retire that record and only its captured synthetic Request/token. An unrelated current synthetic or human owner is untouched. |
 | EOF/error/Stop/replacement | Retire exactly the dead client. Frozen records survive; provisional detached records from that generation are conservatively frozen without borrowing replacement provenance. |
-| Activity classification | Update lineage and notify the Run owner without deleting awaiting/claimed output receipts. |
+| Activity classification | Update lineage and notify the Run owner of background terminals without deleting awaiting/claimed output receipts; a foreground terminal only acknowledges its snapshot (2026-09-28). |
 | Terminal-snapshot acknowledgement | Delete only an indexed terminal snapshot, after Run-owner acceptance. Force-ended snapshots remain indexed until acknowledgement. |
 
 The existing admission fence is consulted before Result classification/replay,
@@ -161,8 +210,10 @@ have a reachable drain/ack path.
 The managed worker rechecks the ledger after awaited delivery: a Result appended
 during a retry remains its responsibility even if the initial list was drained.
 There is no new generic queue, service, or per-output timer. Missing/unknown
-origin with competing Activity remains conservative; foreground execution mode
-and TaskStarted linkage are still not human-provenance evidence.
+origin with competing Activity remains conservative; while ownership is
+contested, foreground execution mode and TaskStarted linkage are still not
+human-provenance evidence. The uncontested live case is covered in the
+2026-09-28 section.
 
 Consumer coverage includes event-held native streams; old payload plus later
 failure and human phases; human and synthetic successor admission; Stop-first
@@ -283,3 +334,65 @@ human input queued behind the Turn indefinitely.
 - A silent-only detached reply settles its Activity claim without creating a
   Message. A missing receipt for such a reply is success, not a delivery
   failure, so it no longer retries forever ahead of every later record.
+
+## Uncontested live phases and steer boundaries (2026-09-28)
+
+A long foreground command made a human Turn look stuck. Take this stream:
+`Bash(sleep 600)` is emitted live, its `TaskStarted` arrives, and the model
+keeps working. Every `TaskStarted` opened the provenance barrier, so each later
+Assistant and tool frame of that Turn was buffered until the terminal Result.
+The Web UI showed nothing for the rest of the Turn. If a steer receipt arrived
+while frames were buffered, the receipt boundary cleared the buffer and its
+provisional facts without replaying them. Those frames were lost, and the
+pre-steer Activities stayed provisional snapshots that kept competing.
+
+- A live frame is emitted only when nothing competes with the pending human
+  request, so the receiver has already attributed it to that request. A
+  foreground task whose parent tool is such a frame inherits the frame's owner
+  when all of these hold: the tool is still recorded as a live foreground tool,
+  no frame is buffered, no competing Activity or output record exists, and the
+  pending request is a real human request. The Activity starts with that Turn,
+  Run, and delivery identity and `provenance_human`, so it does not compete, and
+  later frames of the phase stay live. If any condition fails, the task is
+  provisional as before.
+- Only foreground tools qualify. A foreground completion has no Activity output
+  that a Result could claim, and its terminal follows the existing
+  non-provisional foreground owner: the Turn's Result settles the Run. A
+  background tool's completion creates queued output, and the Activity flush can
+  complete a Turn from it. Background tools therefore stay provisional until the
+  Result classifies their phase, even when their frame was live. Foreground
+  follows each tool's real default through the shared tool policy
+  (`runs_in_background`): an `Agent` call without `run_in_background` is a
+  background subagent, while a `Bash` call without it is foreground.
+- A foreground task is one step of its Turn, and the agent can recover from a
+  failed step. Its terminal never settles the Run on either path: the Turn's
+  Result owns the Run outcome. Previously a foreground task that stayed
+  provisional behind competing output was handed to the Run owner once the
+  human Result classified it, so a failed, stopped, or killed step made the Run
+  fail or cancel immediately and stickily, even when the Turn then succeeded.
+  The same stream settled differently depending on whether unrelated output
+  happened to compete. Classification now only acknowledges such a foreground
+  terminal snapshot; classified background terminals still notify the Run
+  owner, which `Activity classification` below describes.
+- When a steer receipt arrives while frames are buffered, no Result separates
+  those frames from the steer, so Claude consumed the steer within the same
+  turn. The receiver appends a steer-boundary marker and keeps the frames and
+  their provisional facts for the one terminal Result that classifies both
+  sides. A human Result replays the frames and emits the pre-steer text at the
+  marker as non-terminal primary output, the same shape as a live steer
+  boundary. Foreground-tool evidence is phase-local there too: the marker
+  retires the pre-steer evidence, so a post-steer Result without its own
+  Assistant text keeps its result text instead of the silent tool-only
+  sentinel. A detached Result ignores the marker and keeps the pending request.
+  Without buffered frames, the existing live boundary behavior is unchanged.
+- Replay is ordered. Once a phase has a buffered frame, every later frame of
+  that phase is buffered too, even if the competing output finishes first. A
+  later frame therefore cannot overtake earlier held frames, and replay after
+  the marker re-derives exactly the evidence that belongs after the boundary.
+
+Consumer tests cover the uncontested live task, a competing Activity that
+appears before `TaskStarted`, a default-background `Agent` task, and human or
+detached classification of buffered frames across a steer boundary, including a
+post-steer Result with no Assistant frame and competition that ends after the
+steer. They are hermetic receiver tests, not native SDK or Web/IM end-to-end
+tests.

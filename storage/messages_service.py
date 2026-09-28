@@ -92,6 +92,7 @@ def _row_to_payload(
     row: dict[str, Any],
     *,
     include_private_metadata: bool = False,
+    include_local_error_detail: bool = False,
     conn: Connection | None = None,
 ) -> dict[str, Any]:
     try:
@@ -120,7 +121,7 @@ def _row_to_payload(
     elif not include_private_metadata:
         from storage.message_deliveries import public_message_metadata
 
-        metadata = public_message_metadata(metadata)
+        metadata = public_message_metadata(metadata, include_local_error_detail=include_local_error_detail)
     return {
         "id": row["id"],
         "scope_id": row.get("scope_id"),
@@ -575,6 +576,7 @@ def append(
     parent_native_message_id: Optional[str] = None,
     delivered_at: Optional[str] = None,
     read_at: Optional[str] = None,
+    include_local_error_detail: bool = False,
 ) -> dict[str, Any]:
     """Insert a new message row and return its payload.
 
@@ -622,7 +624,7 @@ def append(
         "read_at": read_at,
     }
     conn.execute(messages.insert().values(**payload))
-    return _row_to_payload(payload)
+    return _row_to_payload(payload, include_local_error_detail=include_local_error_detail)
 
 
 def get_message(
@@ -630,6 +632,7 @@ def get_message(
     message_id: str,
     *,
     session_id: Optional[str] = None,
+    include_local_error_detail: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Load one message by id, optionally requiring its owning session."""
 
@@ -642,7 +645,7 @@ def get_message(
     # The ``message.new`` publisher loads the live row through here, so the
     # sender resolved on delivery is the one the following reload shows.
     return attach_sender_labels(
-        conn, [_row_to_payload(dict(row), conn=conn)]
+        conn, [_row_to_payload(dict(row), conn=conn, include_local_error_detail=include_local_error_detail)]
     )[0]
 
 
@@ -671,6 +674,7 @@ def get_native_message(
     platform: str,
     scope_id: str | None,
     native_message_id: str,
+    include_local_error_detail: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Load one accepted Message by its conversation-scoped native identity."""
 
@@ -690,7 +694,7 @@ def get_native_message(
         .where(messages.c.native_message_id == native_message_id)
         .limit(1)
     ).mappings().first()
-    return _row_to_payload(dict(row)) if row else None
+    return _row_to_payload(dict(row), include_local_error_detail=include_local_error_detail) if row else None
 
 
 def promote_suppressed_native_message(
@@ -704,6 +708,7 @@ def promote_suppressed_native_message(
     text: str,
     content: Optional[dict[str, Any]] = None,
     metadata: Optional[dict[str, Any]] = None,
+    include_local_error_detail: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Turn local-only history into a receipt after outward delivery succeeds.
 
@@ -754,6 +759,7 @@ def promote_suppressed_native_message(
         platform=platform,
         scope_id=scope_id,
         native_message_id=native_message_id,
+        include_local_error_detail=include_local_error_detail,
     )
 
 
@@ -860,6 +866,10 @@ def list_session_messages(
     and returns no forward cursor.
     """
 
+    include_local_error_detail = (
+        authorization_context is not None
+        and require_instance_role(authorization_context, "viewer").can_manage_instance
+    )
     query = select(messages).where(messages.c.session_id == session_id)
     if types is not None:
         query = query.where(messages.c.type.in_(list(types)))
@@ -951,7 +961,8 @@ def list_session_messages(
         )
         older = [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata, conn=conn
+                dict(row), include_private_metadata=include_private_metadata,
+                include_local_error_detail=include_local_error_detail, conn=conn,
             )
             for row in conn.execute(older_q).mappings().all()
         ]
@@ -961,7 +972,8 @@ def list_session_messages(
 
         anchor_rows = [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata, conn=conn
+                dict(row), include_private_metadata=include_private_metadata,
+                include_local_error_detail=include_local_error_detail, conn=conn,
             )
             for row in conn.execute(query.where(messages.c.id == anchor_id)).mappings().all()
         ]
@@ -978,7 +990,8 @@ def list_session_messages(
         )
         newer = [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata, conn=conn
+                dict(row), include_private_metadata=include_private_metadata,
+                include_local_error_detail=include_local_error_detail, conn=conn,
             )
             for row in conn.execute(newer_q).mappings().all()
         ]
@@ -1006,7 +1019,8 @@ def list_session_messages(
             conn,
             [
                 _row_to_payload(
-                    dict(row), include_private_metadata=include_private_metadata, conn=conn
+                    dict(row), include_private_metadata=include_private_metadata,
+                    include_local_error_detail=include_local_error_detail, conn=conn,
                 )
                 for row in conn.execute(query).mappings().all()
             ],
@@ -1039,7 +1053,8 @@ def list_session_messages(
             conn,
             [
                 _row_to_payload(
-                    dict(row), include_private_metadata=include_private_metadata, conn=conn
+                    dict(row), include_private_metadata=include_private_metadata,
+                    include_local_error_detail=include_local_error_detail, conn=conn,
                 )
                 for row in conn.execute(query).mappings().all()
             ],
@@ -1073,7 +1088,8 @@ def list_session_messages(
         conn,
         [
             _row_to_payload(
-                dict(row), include_private_metadata=include_private_metadata, conn=conn
+                dict(row), include_private_metadata=include_private_metadata,
+                include_local_error_detail=include_local_error_detail, conn=conn,
             )
             for row in conn.execute(query).mappings().all()
         ],

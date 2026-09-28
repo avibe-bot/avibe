@@ -69,6 +69,21 @@ OpenCode are intentionally not part of the application payload: Avibe detects
 an existing installation first and otherwise installs the selected backend into
 its private application-data directory when the user clicks Install.
 
+Agents inherit a PATH led by the Runtime's dedicated `bin` directory. It provides
+`vibe` (`vibe.cmd` on Windows), which runs the bundled Python with `-I -B -m vibe`.
+The entry point is generated when building the bundle, covered by its manifest,
+and works after relocation, including installation paths containing spaces.
+The private Python directory is not added to PATH, so the user's `python3` and
+`pip` remain available. Build-machine Python console scripts are removed.
+
+**Login-shell limitation:** a user profile that prepends a new global CLI
+directory or replaces PATH can override the bundled `vibe`. Profiles that
+preserve its precedence continue to use the private Runtime. Desktop does not
+modify user profiles or force shell startup options. If a profile overrides it,
+put `$AVIBE_DESKTOP_RUNTIME_ROOT/bin` first after your PATH changes when that
+variable is set. Codex's caller-context `BASH_ENV` injection does not run in zsh
+and is not a fallback for this case.
+
 The first launch verifies the embedded Runtime archive and installs it
 atomically below the operating system's application-data directory. Installs
 are versioned and content-addressed, so application updates never replace files

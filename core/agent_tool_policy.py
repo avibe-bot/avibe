@@ -73,9 +73,27 @@ def _advise(advice: str) -> ToolPolicyDecision:
     return ToolPolicyDecision(allowed=True, advice=advice)
 
 
+def runs_in_background(
+    tool_name: str,
+    tool_input: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Whether one tool call detaches from the turn that issued it.
+
+    ``Agent`` runs in the background by default, so only an explicit false is
+    synchronous; ``Workflow`` always runs in the background; every other tool
+    is foreground unless the call explicitly asks for background.
+    """
+
+    flag = tool_input.get("run_in_background") if isinstance(tool_input, dict) else None
+    if tool_name == "Workflow":
+        return True
+    if tool_name == "Agent":
+        return flag is not False
+    return flag is True
+
+
 def _check_agent(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
-    # Background is the tool's default, so only an explicit false is synchronous.
-    if tool_input.get("run_in_background") is False:
+    if not runs_in_background("Agent", tool_input):
         return ALLOWED
     return _deny(
         "A background subagent dies with this agent process and its result is "
@@ -129,7 +147,7 @@ def _check_bash(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
     # overwhelmingly used for work that finishes inside the turn (a build, a
     # push, a test run). Denying all of it would cost more than the occasional
     # lost result, so this advises instead of blocking.
-    if tool_input.get("run_in_background") is not True:
+    if not runs_in_background("Bash", tool_input):
         return ALLOWED
     return _advise(
         "This background shell is session-only: it dies with the agent process, "

@@ -536,11 +536,14 @@ impl RuntimeCommand {
         inherited_path: Option<&OsStr>,
     ) -> Self {
         let tools_dir = node.parent().expect("validated private Node has a parent");
-        let mut path_entries = vec![tools_dir.to_owned()];
+        // The builder includes a relocatable vibe entry point in bin. Expose
+        // only that directory, never python/bin (which would shadow user tools).
+        let cli_dir = runtime_root.join("bin");
+        let mut path_entries = vec![cli_dir.clone(), tools_dir.to_owned()];
         if let Some(path) = inherited_path {
             path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
         }
-        let private_path = env::join_paths(path_entries).unwrap_or_else(|_| tools_dir.as_os_str().to_owned());
+        let private_path = env::join_paths(path_entries).unwrap_or_else(|_| cli_dir.into_os_string());
         Self {
             executable: python,
             // Isolated mode excludes the user site and PYTHONPATH. The Avibe
@@ -2165,8 +2168,14 @@ mod tests {
         let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
         let path_entries: Vec<_> =
             env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH")).collect();
-        assert_eq!(path_entries.first().map(PathBuf::as_path), node.parent());
-        assert_eq!(path_entries.get(1).map(PathBuf::as_path), Some(Path::new("/usr/bin")));
+        assert_eq!(
+            path_entries,
+            [
+                runtime_root.join("bin"),
+                node.parent().unwrap().to_owned(),
+                PathBuf::from("/usr/bin")
+            ]
+        );
         assert_eq!(
             environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),
             Some(&expected_node)

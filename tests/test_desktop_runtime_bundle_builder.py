@@ -3,6 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
+import shutil
+import stat
 import subprocess
 import zipfile
 from pathlib import Path
@@ -26,15 +29,109 @@ def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp
     probe_home = tmp_path / "probe"
     node = tmp_path / "payload" / "tools" / "bin" / "node"
     npm_cli = tmp_path / "payload" / "tools" / "npm" / "bin" / "npm-cli.js"
-    environment = builder.private_probe_environment(probe_home, node, npm_cli)
+    payload = tmp_path / "payload"
+    environment = builder.private_probe_environment(probe_home, node, npm_cli, payload)
 
     assert "OPENAI_API_KEY" not in environment
     assert "ANTHROPIC_AUTH_TOKEN" not in environment
     assert environment["HOME"] == str(probe_home)
     assert environment["CODEX_HOME"] == str(probe_home / "codex")
-    assert environment["PATH"].split(builder.os.pathsep)[0] == str(node.parent)
+    assert environment["PATH"].split(builder.os.pathsep)[:2] == [str(payload / "bin"), str(node.parent)]
+    assert str(payload / "python" / "bin") not in environment["PATH"].split(builder.os.pathsep)
+    assert environment["ZDOTDIR"] == str(probe_home)
     assert environment["AVIBE_DESKTOP_NPM_CLI"] == str(npm_cli)
     assert environment["AVIBE_DESKTOP_BACKENDS_ROOT"] == str(probe_home / "backends")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shells")
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash", "/bin/zsh"])
+@pytest.mark.parametrize("global_cli", [False, True])
+def test_packaged_cli_survives_relocation_and_preserves_user_python(tmp_path, shell, global_cli):
+    if not Path(shell).is_file():
+        pytest.skip(f"{shell} is not installed")
+    payload = tmp_path / "build" / "payload"
+    payload.mkdir(parents=True)
+    builder.install_runtime_cli({"os": "macos", "python_entrypoint": "python/bin/python3"}, payload)
+    # This consumer records the invocation and exit status across the shell
+    # boundary. The packaging probe separately runs the real installed module.
+    python = payload / "python" / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$0" "$@"\nexit 23\n', encoding="utf-8")
+    python.chmod(0o755)
+    archive = tmp_path / "runtime.zip"
+    builder.create_runtime_zip(payload, archive)
+    installed = tmp_path / "Application Support" / "runtime" / "generation-repair"
+    with zipfile.ZipFile(archive) as source:
+        source.extractall(installed)
+        for member in source.infolist():
+            (installed / member.filename).chmod(stat.S_IMODE(member.external_attr >> 16))
+    shutil.rmtree(payload.parent)
+
+    user_bin = tmp_path / "user-bin"
+    user_bin.mkdir()
+    for name in ("python3", "pip", *(["vibe"] if global_cli else [])):
+        executable = user_bin / name
+        executable.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        executable.chmod(0o755)
+    probe_home = tmp_path / "home"
+    probe_home.mkdir()
+    # Typical profiles and macOS path_helper may reconstruct PATH, but must
+    # preserve private CLI precedence when appending user directories.
+    (probe_home / ".zprofile").write_text('export PATH="$PATH:/profile-appended"\n', encoding="utf-8")
+    cwd = tmp_path / "unrelated working directory"
+    cwd.mkdir()
+    env = {
+        "HOME": str(probe_home),
+        "ZDOTDIR": str(probe_home),
+        "PATH": f"{installed / 'bin'}:{user_bin}:/usr/bin:/bin",
+    }
+    ordinary_tools = subprocess.run(
+        [shell, "-lc", "command -v python3; command -v pip"],
+        cwd=cwd, env={**env, "PATH": f"{user_bin}:/usr/bin:/bin"},
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    resolved = subprocess.run(
+        [shell, "-lc", "command -v vibe; command -v python3; command -v pip"],
+        cwd=cwd, env=env, check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert Path(resolved[0]) == installed / "bin" / "vibe"
+    assert resolved[1:] == ordinary_tools
+    args = ["skill", "load", "--", "name with 空格", "literal $HOME;*'\"", ""]
+    result = subprocess.run(
+        [shell, "-lc", shlex.join(["vibe", *args])],
+        cwd=cwd, env=env, check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == 23, result.stderr
+    interpreter, *actual_args = result.stdout.splitlines()
+    assert Path(interpreter).resolve() == (installed / "python" / "bin" / "python3").resolve()
+    assert actual_args == ["-I", "-B", "-m", "vibe", *args]
+
+
+def test_runtime_cli_removes_console_scripts_and_is_in_archive_digest(tmp_path):
+    payload = tmp_path / "payload"
+    scripts = payload / "python" / "bin"
+    scripts.mkdir(parents=True)
+    python = scripts / "python3"
+    python.write_bytes(b"binary interpreter")
+    (scripts / "vibe").write_text(f"#!{python}\nimport vibe\n", encoding="utf-8")
+    (scripts / "pip").write_text(f'#!/bin/sh\nexec "{python}" "$@"\n', encoding="utf-8")
+    windows_scripts = payload / "python" / "Scripts"
+    windows_scripts.mkdir()
+    (windows_scripts / "vibe.exe").write_bytes(b"MZ build-bound launcher")
+    (windows_scripts / "vibe-script.py").write_text("import vibe\n", encoding="utf-8")
+
+    builder.install_runtime_cli({"os": "windows", "python_entrypoint": "python/python.exe"}, payload)
+
+    assert list(scripts.iterdir()) == [python]
+    assert not list(windows_scripts.iterdir())
+    cli = payload / "bin" / "vibe.cmd"
+    assert cli.read_bytes() == b'@echo off\r\n"%~dp0..\\python\\python.exe" -I -B -m vibe %*\r\n'
+    archive = tmp_path / "runtime.zip"
+    _, _, digest = builder.create_runtime_zip(payload, archive)
+    with zipfile.ZipFile(archive) as source:
+        assert source.read("bin/vibe.cmd") == cli.read_bytes()
+    cli.write_bytes(cli.read_bytes() + b"rem changed\r\n")
+    assert builder.create_runtime_zip(payload, archive)[2] != digest
 
 
 def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
