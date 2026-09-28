@@ -373,18 +373,26 @@ def _describe_pid(pid: int) -> str:
 class _ForeignSignalGuard:
     """One test's record of the processes it may signal.
 
-    A process is the test's own when it descends from this pytest process, or
-    when the test already owned it or the founder of its process group or
-    session: the test's ``subprocess.Popen`` children, and any process it has
-    signalled as its own. That keeps an orphan in a spawned child's group
-    signalable after reparenting hides it from ancestry. A process whose
-    command line names this test's own ``tmp_path`` is owned too: a detached
-    grandchild keeps nothing else that ties it to the test, and it is the proof
-    harnesses such as the Model Hub e2e driver already clean up by.
-    This pytest process is refused: it is what a fake pid killed on a CI
-    runner. A pid that names no process gets the ESRCH the real call would
-    raise, delivered to nothing, because a descendant the test collected may
-    exit before it is signalled. Signal 0 is a liveness probe and passes.
+    The contract: refuse any signal that could reach a process outside this
+    pytest run. That is this pytest process, its process group, ``-1``, and any
+    process that neither descends from this pytest process, nor sits in a
+    process group or session founded by a process the test owns, nor names this
+    test's own ``tmp_path`` in its command line -- so pytest's ancestors, the CI
+    runner and a developer's live Avibe service are all refused. It does not
+    isolate tests in the same run from each other: a process started by a
+    module- or session-scoped fixture, or left running by an earlier test,
+    descends from this pytest process and stays signalable.
+
+    The test owns its ``subprocess.Popen`` children and any process it has
+    signalled as its own; the founder rule keeps an orphan in a spawned child's
+    group signalable after reparenting hides it from ancestry. The ``tmp_path``
+    rule covers a detached grandchild, which keeps nothing else that ties it to
+    the test and is what harnesses such as the Model Hub e2e driver clean up by.
+    It is the only grant over processes outside the tree, so it names this
+    test's directory, never the shared temp root. A pid that names no process
+    gets the ESRCH the real call would raise, delivered to nothing, because a
+    descendant the test collected may exit before it is signalled. Signal 0 is
+    a liveness probe and passes.
     """
 
     def __init__(self, test_temp: Path) -> None:
@@ -426,17 +434,20 @@ class _ForeignSignalGuard:
             return True
         return False
 
+    @staticmethod
+    def _in_group(pid: int, pgid: int) -> bool:
+        try:
+            return _REAL_OS_GETPGID(pid) == pgid
+        except OSError:
+            return False
+
     def _group_reason(self, pgid: int) -> str | None:
         if pgid == _REAL_OS_GETPGRP():
             return f"process group {pgid} is this pytest process's own"
-        members = []
-        for pid in _REAL_PSUTIL_PIDS():
-            try:
-                if _REAL_OS_GETPGID(pid) == pgid:
-                    members.append(pid)
-            except OSError:
-                continue
-        foreign = [pid for pid in members if not self._owns(pid)]
+        members = [pid for pid in _REAL_PSUTIL_PIDS() if self._in_group(pid, pgid)]
+        # A member can exit between the listing and its ownership check, as the
+        # short-lived commands a shell group runs do; only one still there is foreign.
+        foreign = [pid for pid in members if not self._owns(pid) and self._in_group(pid, pgid)]
         if foreign:
             return f"process group {pgid} holds processes this test did not start: " + ", ".join(
                 _describe_pid(pid) for pid in foreign

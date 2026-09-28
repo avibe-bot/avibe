@@ -178,6 +178,23 @@ def test_an_orphan_left_in_a_group_the_test_started_stays_signalable(stop):
             _REAL_OS_KILL(orphan, signal.SIGKILL)
 
 
+def test_a_group_member_that_exits_during_the_check_is_not_foreign():
+    # Like the Docker entrypoint's shell, the group keeps starting commands that
+    # exit at once, so a member listed for the check can be gone when asked about.
+    churn = subprocess.Popen(
+        ["/bin/sh", "-c", "for _ in 1 2 3 4 5 6 7 8; do (while :; do /bin/true; done) & done; wait"],
+        start_new_session=True,
+    )
+    try:
+        time.sleep(0.2)
+        for _ in range(1000):
+            # Ignored by default, so every round reaches the whole group harmlessly.
+            os.killpg(churn.pid, signal.SIGURG)
+    finally:
+        os.killpg(churn.pid, signal.SIGKILL)
+        churn.wait(timeout=10)
+
+
 @pytest.mark.parametrize(
     "stop",
     [
