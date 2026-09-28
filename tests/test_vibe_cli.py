@@ -1650,8 +1650,9 @@ def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
     "result",
     [
         cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"),
-        cli.runtime.DesktopRuntimeStopResult(service_stopped=False),
+        cli.runtime.DesktopRuntimeStopResult(service=cli.runtime.DesktopSlotOutcome.FAILED),
         cli.runtime.DesktopRuntimeStopResult(installs_drained=False),
+        cli.runtime.DesktopRuntimeStopResult(opencode=cli.runtime.DesktopSlotOutcome.FAILED),
     ],
 )
 def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result):

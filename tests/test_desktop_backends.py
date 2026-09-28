@@ -400,6 +400,10 @@ def _install_lock_is_free(env: dict[str, str]) -> bool:
     return True
 
 
+def _stagings(env: dict[str, str]) -> list[Path]:
+    return sorted((Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude").glob(".staging-*"))
+
+
 def _start_killed_owner(env: dict[str, str], wait_for_tree) -> list[int]:
     """An owner that dies (SIGKILL) mid-install, before it can drain its tree."""
 
@@ -416,6 +420,7 @@ def _start_killed_owner(env: dict[str, str], wait_for_tree) -> list[int]:
         owner.wait(timeout=10)
     assert _running(pids) == pids
     assert len(_install_records()) == 1
+    assert len(_stagings(env)) == 1
     return pids
 
 
@@ -458,9 +463,10 @@ def test_ui_shutdown_signal_drains_the_installer_tree_before_returning(monkeypat
     ui_server._create_ui_server(uvicorn.Config(ui_server.app)).handle_exit(signal.SIGTERM, None)
 
     assert _running(pids) == []
-    assert _install_records() == []
     worker.join(timeout=30)
     assert outcome == {"code": "npm_install_failed"}
+    # The install's own cleanup removes its staging, then its record.
+    assert _install_records() == []
     assert _install_lock_is_free(env)
     # A drained owner starts no installer that could outlive it.
     with pytest.raises(desktop_backends.DesktopBackendError) as refused:
@@ -479,6 +485,7 @@ def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(installer_tre
 
     assert exit_code == 0
     assert _running(pids) == []
+    assert _stagings(env) == []
     assert _install_records() == []
     assert _install_lock_is_free(env)
     assert statuses == [("stopped",)]
@@ -497,6 +504,7 @@ def test_stop_fails_and_keeps_the_record_when_the_tree_cannot_be_shown_gone(
 
     assert statuses == [("error", "desktop backend install drain failed")]
     assert len(_install_records()) == 1
+    assert len(_stagings(env)) == 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
@@ -520,3 +528,99 @@ def test_install_keeps_its_lock_and_staging_while_its_tree_is_not_shown_gone(mon
     assert not _install_lock_is_free(env)
     assert list(backend_root.glob(".staging-*"))
     assert len(_install_records()) == 1
+
+
+def _patch_fake_install(monkeypatch, *, before=None):
+    fake_npm = _fake_npm_install("claude")
+
+    def run(command, **kwargs):
+        if before is not None:
+            before()
+        return fake_npm(command, **kwargs)
+
+    monkeypatch.setattr(desktop_backends, "_run_command", run)
+    monkeypatch.setattr(
+        desktop_backends.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "claude 1.2.3", ""),
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_install_reaps_an_abandoned_installer_and_its_staging_before_it_proceeds(monkeypatch, installer_tree):
+    # A UI killed mid-install leaves its tree writing into its staging; the
+    # UI that replaces it must not install on top of that.
+    env, wait_for_tree = installer_tree
+    pids = _start_killed_owner(env, wait_for_tree)
+    seen_by_npm: list[tuple] = []
+    _patch_fake_install(
+        monkeypatch,
+        before=lambda: seen_by_npm.append((_running(pids), len(_stagings(env)), _install_records())),
+    )
+
+    result = desktop_backends.install_desktop_backend("claude", base_env=env)
+
+    # Only the new install's own staging exists when npm runs.
+    assert seen_by_npm == [([], 1, [])]
+    assert result.version == "1.2.3"
+    assert _stagings(env) == []
+    assert _install_lock_is_free(env)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_install_is_refused_while_an_abandoned_installer_cannot_be_shown_gone(monkeypatch, installer_tree):
+    env, wait_for_tree = installer_tree
+    _start_killed_owner(env, wait_for_tree)
+    monkeypatch.setattr(desktop_backends, "reap_marked_processes", lambda *args, **kwargs: "unconfirmed")
+    npm_runs: list[bool] = []
+    _patch_fake_install(monkeypatch, before=lambda: npm_runs.append(True))
+
+    with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+        desktop_backends.install_desktop_backend("claude", base_env=env)
+
+    assert refused.value.code == "install_locked"
+    assert npm_runs == []
+    assert _install_lock_is_free(env)
+    assert len(_install_records()) == 1
+    assert len(_stagings(env)) == 1
+
+
+@pytest.mark.parametrize("entry", ["install", "stop"])
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        lambda root, name: str(root / "releases" / name.removeprefix(".staging-")),
+        lambda root, name: str(root / "releases" / name),
+        lambda root, name: os.path.join(str(root), "..", "..", "outside", "claude", name),
+        lambda root, name: os.path.join("claude", name),
+    ],
+    ids=["release", "not-in-a-backend-root", "traversal", "relative"],
+)
+def test_a_recorded_path_outside_a_staging_directory_is_never_removed(
+    monkeypatch, tmp_path, quiet_stop, entry, recorded
+):
+    env = _desktop_env(tmp_path)
+    backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude"
+    monkeypatch.chdir(tmp_path)
+    path = Path(recorded(backend_root, f".staging-{'b' * 32}"))
+    (path / "keep").mkdir(parents=True)
+    records = config_paths.get_runtime_dir() / "desktop-backend-installs"
+    records.mkdir(parents=True, exist_ok=True)
+    record = records / f"{'b' * 32}.json"
+    desktop_backends._write_installer_record(
+        record,
+        worker_fingerprint=desktop_backends.fingerprint_process_marker(desktop_backends.new_process_identity_marker()),
+        identity=None,
+        staging=path,
+    )
+    cli, _statuses = quiet_stop
+
+    if entry == "install":
+        _patch_fake_install(monkeypatch)
+        desktop_backends.install_desktop_backend("claude", base_env=env)
+    else:
+        assert cli.cmd_stop() == 0
+
+    # The record was read, and rejected: it names nothing an install made.
+    assert not record.exists()
+    assert (path / "keep").is_dir()

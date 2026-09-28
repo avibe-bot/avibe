@@ -13655,12 +13655,8 @@ def _handover_superseded_desktop_runtime() -> None:
     result = runtime.stop_desktop_runtime(actual_runtime_id, stop_remote_access=False)
     if result.refusal is not None:
         raise RuntimeError(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}")
-    if not result.service_stopped:
-        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe service")
-    if not result.ui_stopped:
-        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe UI")
-    if not result.installs_drained:
-        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe backend installs")
+    if result.failure is not None:
+        raise RuntimeError(f"Failed to stop the superseded desktop-managed Avibe Runtime: {result.failure}")
 
 
 def cmd_start(*, open_browser: bool | None = None):
@@ -13927,6 +13923,27 @@ def _stop_receipt_refusal(receipt_json: str) -> str | None:
     return None
 
 
+# The part of a stop that did not stop: its localized diagnostic and the
+# status detail, which stays English for machine readers.
+_STOP_FAILURES = {
+    "service": ("runtime.stop.serviceFailed", "service stop failed"),
+    "ui": ("runtime.stop.uiFailed", "ui stop failed"),
+    "installs": ("runtime.stop.installsFailed", "desktop backend install drain failed"),
+    "opencode": ("runtime.stop.opencodeFailed", "opencode stop failed"),
+}
+
+
+def _stop_failed(part: str) -> int:
+    key, detail = _STOP_FAILURES[part]
+    print(i18n_t(key, _configured_cli_language()), file=sys.stderr)
+    _write_status("error", detail)
+    return 2
+
+
+def _report_opencode_stopped() -> None:
+    print(i18n_t("runtime.stop.opencodeStopped", _configured_cli_language()))
+
+
 def _stop_expected_desktop_runtime(runtime_id: str) -> int:
     result = runtime.stop_desktop_runtime(runtime_id)
     if result.refusal is not None:
@@ -13934,21 +13951,12 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
         return 3
     if result.ui_skipped is not None:
         print(json.dumps({"skipped": "ui", "reason": result.ui_skipped}, separators=(",", ":")), file=sys.stderr)
-    if result.opencode_stopped:
-        print("OpenCode server stopped")
-
-    if not result.service_stopped:
-        print("ERROR: Avibe service did not stop; preserving pidfile and aborting.", file=sys.stderr)
-        _write_status("error", "service stop failed")
-        return 2
-    if not result.ui_stopped:
-        print("ERROR: Avibe UI did not stop; preserving pidfile and aborting.", file=sys.stderr)
-        _write_status("error", "ui stop failed")
-        return 2
-    if not result.installs_drained:
-        print("ERROR: Desktop backend installer processes did not stop.", file=sys.stderr)
-        _write_status("error", "desktop backend install drain failed")
-        return 2
+    if result.opencode is runtime.DesktopSlotOutcome.STOPPED:
+        _report_opencode_stopped()
+    # Unlike a full stop, a verified OpenCode server that survives fails this
+    # stop: the desktop host replaces or removes the bundle it runs from.
+    if result.failure is not None:
+        return _stop_failed(result.failure)
 
     _write_status("stopped")
     return 0
@@ -13970,22 +13978,16 @@ def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None
 
     # Also terminate OpenCode server on full stop
     if _stop_opencode_server():
-        print("OpenCode server stopped")
+        _report_opencode_stopped()
 
     if service_was_running and service_stopped is False:
-        print("ERROR: Avibe service did not stop; preserving pidfile and aborting.", file=sys.stderr)
-        _write_status("error", "service stop failed")
-        return 2
+        return _stop_failed("service")
     if ui_was_running and ui_stopped is False:
-        print("ERROR: Avibe UI did not stop; preserving pidfile and aborting.", file=sys.stderr)
-        _write_status("error", "ui stop failed")
-        return 2
+        return _stop_failed("ui")
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     if not reap_abandoned_desktop_backend_installs():
-        print("ERROR: Desktop backend installer processes did not stop.", file=sys.stderr)
-        _write_status("error", "desktop backend install drain failed")
-        return 2
+        return _stop_failed("installs")
 
     _write_status("stopped")
     return 0

@@ -1061,6 +1061,13 @@
       "repairExplicitCommandFailed": "The Show Runtime command from VIBE_SHOW_RUNTIME_BIN could not start: {reason}. Fix or remove the override, then rerun Doctor.",
       "repairPrepareFailed": "Show Runtime preparation failed: {detail}",
       "repairLegacyArchiveUnavailable": "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides."
+    },
+    "stop": {
+      "opencodeStopped": "OpenCode server stopped",
+      "serviceFailed": "ERROR: Avibe service did not stop; preserving pidfile and aborting.",
+      "uiFailed": "ERROR: Avibe UI did not stop; preserving pidfile and aborting.",
+      "installsFailed": "ERROR: Desktop backend installer processes did not stop.",
+      "opencodeFailed": "ERROR: The OpenCode server this Runtime started did not stop."
     }
   },
   "doctor": {

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -53,6 +54,8 @@ MAX_DESCRIPTOR_BYTES = 16 * 1024
 MAX_INSTALL_OUTPUT_CHARS = 8192
 NPM_REGISTRY = "https://registry.npmjs.org/"
 DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS = 30.0
+# How long a stop waits for a backend root that another process is claiming.
+DESKTOP_BACKEND_STOP_LOCK_TIMEOUT_SECONDS = 10.0
 DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS = 300.0
 DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS = 15.0
 DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS = 10.0
@@ -264,17 +267,7 @@ def install_desktop_backend(
 
     backend_root = toolchain.backends_root / backend
     _prepare_backend_root(toolchain.backends_root, backend_root)
-    lock = MigrationFileLock(
-        backend_root / ".install.lock",
-        timeout_seconds=DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS,
-    )
-    try:
-        lock.acquire()
-    except MigrationLockTimeout as exc:
-        raise DesktopBackendError(
-            f"Another {backend} install is already running.",
-            code="install_locked",
-        ) from exc
+    lock = _claim_backend_root(backend_root, timeout_seconds=DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS)
 
     staging = backend_root / f".staging-{uuid.uuid4().hex}"
     # The lock says "no installer is working in this root". An installer tree
@@ -389,7 +382,9 @@ def install_desktop_backend(
                 DESKTOP_BACKEND_INSTALL_LABEL,
             )
         else:
-            _remove_staging_directory(staging, backend_root)
+            # The record goes only with its staging, and both before the lock.
+            if _remove_staging_directory(staging, backend_root):
+                _forget_installer_record(_installer_record_path(staging))
             lock.release()
 
 
@@ -528,7 +523,6 @@ class _OwnedInstaller:
     process: subprocess.Popen[str]
     worker_fingerprint: str
     identity: PersistedProcessIdentity | None
-    record_path: Path
     settled: bool = False
 
 
@@ -539,8 +533,15 @@ _OWNED_INSTALLERS_LOCK = threading.RLock()
 _INSTALLERS_CLOSED = False
 
 
+_STAGING_NAME = re.compile(r"\.staging-[0-9a-f]{32}")
+
+
 def _installer_records_dir() -> Path:
     return paths.get_runtime_dir() / "desktop-backend-installs"
+
+
+def _installer_record_path(staging: Path) -> Path:
+    return _installer_records_dir() / f"{staging.name.removeprefix('.staging-')}.json"
 
 
 def _write_installer_record(
@@ -548,14 +549,23 @@ def _write_installer_record(
     *,
     worker_fingerprint: str,
     identity: PersistedProcessIdentity | None,
+    staging: Path,
 ) -> None:
     payload = {
         "schema_version": INSTALL_RECORD_SCHEMA_VERSION,
         "worker_fingerprint": worker_fingerprint,
         "desktop_runtime_id": desktop_runtime_id(),
         "identity": None if identity is None else serialize_process_identity(identity),
+        "staging": str(staging),
     }
     write_atomic(record_path, json.dumps(payload, separators=(",", ":")))
+
+
+def _forget_installer_record(record_path: Path) -> None:
+    try:
+        record_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove %s record %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path, exc_info=True)
 
 
 def _spawn_owned_installer(
@@ -564,9 +574,11 @@ def _spawn_owned_installer(
     cwd: Path,
     env: Mapping[str, str],
 ) -> _OwnedInstaller:
+    # ``cwd`` is the install's staging directory. Its record names it, and goes
+    # only with it: the install removes both, or a claim of the root does.
     marker = new_process_identity_marker()
     worker_fingerprint = fingerprint_process_marker(marker)
-    record_path = _installer_records_dir() / f"{worker_fingerprint.removeprefix('sha256:')}.json"
+    record_path = _installer_record_path(cwd)
     child_env = dict(env)
     child_env[PROCESS_IDENTITY_ENV] = marker
     with _OWNED_INSTALLERS_LOCK:
@@ -577,26 +589,24 @@ def _spawn_owned_installer(
             )
         # Recorded before the spawn, so a stopper can find the tree by its
         # marker even if this process dies before it learns the pid.
-        _write_installer_record(record_path, worker_fingerprint=worker_fingerprint, identity=None)
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                env=child_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                **isolated_subprocess_kwargs(),
-            )
-        except BaseException:
-            record_path.unlink(missing_ok=True)
-            raise
+        _write_installer_record(record_path, worker_fingerprint=worker_fingerprint, identity=None, staging=cwd)
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **isolated_subprocess_kwargs(),
+        )
         identity = capture_spawned_process_identity(process.pid, marker)
-        owned = _OwnedInstaller(process, worker_fingerprint, identity, record_path)
+        owned = _OwnedInstaller(process, worker_fingerprint, identity)
         _OWNED_INSTALLERS[worker_fingerprint] = owned
         if identity is not None:
             try:
-                _write_installer_record(record_path, worker_fingerprint=worker_fingerprint, identity=identity)
+                _write_installer_record(
+                    record_path, worker_fingerprint=worker_fingerprint, identity=identity, staging=cwd
+                )
             except OSError:
                 # The marker alone still finds the tree; only the pid is lost.
                 logger.warning("Could not record the %s pid=%s", DESKTOP_BACKEND_INSTALL_LABEL, process.pid, exc_info=True)
@@ -683,7 +693,6 @@ def _settle_owned_installer(owned: _OwnedInstaller) -> bool:
             return False
         owned.settled = True
         _OWNED_INSTALLERS.pop(owned.worker_fingerprint, None)
-        owned.record_path.unlink(missing_ok=True)
         return True
 
 
@@ -691,8 +700,9 @@ def drain_desktop_backend_installs() -> bool:
     """Stop every installer tree this process started, before it exits.
 
     For the owning process's shutdown: after this call it starts no new
-    installer. Returns False when a tree could not be shown gone; its durable
-    record then stays for the stop that follows to reap.
+    installer. Returns False when a tree could not be shown gone. Its durable
+    record stays either way until the install removes its staging; one left
+    behind is reaped by the next claim of its backend root.
     """
 
     global _INSTALLERS_CLOSED
@@ -705,9 +715,36 @@ def drain_desktop_backend_installs() -> bool:
     return drained
 
 
-def _read_installer_record(
-    record_path: Path,
-) -> tuple[str, str | None, PersistedProcessIdentity | None] | None:
+@dataclass(frozen=True)
+class _InstallerRecord:
+    path: Path
+    worker_fingerprint: str
+    owner_runtime_id: str | None
+    identity: PersistedProcessIdentity | None
+    staging: Path
+
+    @property
+    def backend_root(self) -> Path:
+        return self.staging.parent
+
+
+def _recorded_staging(value: Any) -> Path | None:
+    """The staging directory a record names, if an install could have made it.
+
+    Only ``<backends root>/<backend>/.staging-<hex>`` qualifies, so removing a
+    recorded staging directory can never reach a release, a descriptor or
+    anything outside a backend root.
+    """
+
+    if not isinstance(value, str) or os.path.normpath(value) != value:
+        return None
+    staging = Path(value)
+    if not staging.is_absolute() or not _STAGING_NAME.fullmatch(staging.name):
+        return None
+    return staging if staging.parent.name in BACKEND_SPECS else None
+
+
+def _read_installer_record(record_path: Path) -> _InstallerRecord | None:
     try:
         payload = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -717,7 +754,8 @@ def _read_installer_record(
     worker_fingerprint = payload.get("worker_fingerprint")
     owner_runtime_id = payload.get("desktop_runtime_id")
     raw_identity = payload.get("identity")
-    if not is_valid_worker_fingerprint(worker_fingerprint):
+    staging = _recorded_staging(payload.get("staging"))
+    if not is_valid_worker_fingerprint(worker_fingerprint) or staging is None:
         return None
     if owner_runtime_id is not None and (
         not isinstance(owner_runtime_id, str)
@@ -732,44 +770,129 @@ def _read_installer_record(
         )
         if identity is None or identity.worker_fingerprint != worker_fingerprint:
             return None
-    return worker_fingerprint, owner_runtime_id, identity
+    return _InstallerRecord(record_path, worker_fingerprint, owner_runtime_id, identity, staging)
 
 
-def reap_abandoned_desktop_backend_installs(*, runtime_id: str | None = None) -> bool:
-    """Stop installer trees whose owning process is gone, from their records.
+def _installer_records() -> list[_InstallerRecord]:
+    """Every readable installer record. Raises ``OSError`` when they cannot be listed."""
 
-    For a stop, once the UI process that owns installs has exited: an owner
-    killed before its own drain finished leaves its tree running and its record
-    behind. ``runtime_id`` limits the pass to installs a desktop Runtime with
-    that id started; ``None`` is the full stop. Returns False when a tree in
-    scope could not be shown gone; its record stays for the next pass.
-    """
-
-    try:
-        record_paths = sorted(_installer_records_dir().glob("*.json"))
-    except OSError:
-        logger.warning("Could not list %s records", DESKTOP_BACKEND_INSTALL_LABEL, exc_info=True)
-        return False
-    drained = True
-    for record_path in record_paths:
+    records = []
+    for record_path in sorted(_installer_records_dir().glob("*.json")):
         record = _read_installer_record(record_path)
         if record is None:
             # Nothing in it can identify a process, so it authorises nothing.
             logger.warning("Discarding unreadable %s record %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
-            record_path.unlink(missing_ok=True)
+            _forget_installer_record(record_path)
             continue
-        worker_fingerprint, owner_runtime_id, identity = record
-        if runtime_id is not None and owner_runtime_id != runtime_id:
+        records.append(record)
+    return records
+
+
+def _clear_abandoned_install(record: _InstallerRecord) -> bool:
+    """Reap a recorded installer tree, then remove its staging and its record.
+
+    True once the tree is shown gone. The record stays until its staging is.
+    """
+
+    try:
+        gone = _reap_installer_tree(record.worker_fingerprint, record.identity)
+    except Exception:
+        logger.exception("Unexpected error stopping the %s recorded in %s", DESKTOP_BACKEND_INSTALL_LABEL, record.path)
+        gone = False
+    if not gone:
+        logger.error("Could not stop the %s recorded in %s", DESKTOP_BACKEND_INSTALL_LABEL, record.path)
+        return False
+    if _remove_staging_directory(record.staging, record.backend_root):
+        _forget_installer_record(record.path)
+    return True
+
+
+def _claim_backend_root(
+    backend_root: Path,
+    *,
+    timeout_seconds: float,
+    runtime_id: str | None = None,
+) -> MigrationFileLock:
+    """Take ``backend_root``'s install lock, with no abandoned installer left in it.
+
+    Every acquisition of ``.install.lock`` goes through here. An install holds
+    the lock from before its record exists until after it has removed its
+    staging and then its record, so a record for this root seen under the lock
+    names an installer whose owner died first. Its tree is reaped and its
+    staging removed before the lock is used. When a tree cannot be shown gone
+    the lock is released and ``install_locked`` raised: something may still be
+    writing into this root.
+
+    ``runtime_id`` limits the claim to installs a desktop Runtime with that id
+    started, for its scoped stop; an install claims every record of its root.
+    """
+
+    lock = MigrationFileLock(backend_root / ".install.lock", timeout_seconds=timeout_seconds)
+    try:
+        lock.acquire()
+    except MigrationLockTimeout as exc:
+        raise DesktopBackendError(
+            f"Another {backend_root.name} install is already running.",
+            code="install_locked",
+        ) from exc
+    try:
+        abandoned = [
+            record
+            for record in _installer_records()
+            if record.backend_root == backend_root and runtime_id in (None, record.owner_runtime_id)
+        ]
+        undrained = [record for record in abandoned if not _clear_abandoned_install(record)]
+    except OSError as exc:
+        lock.release()
+        raise DesktopBackendError(
+            f"The {backend_root.name} install records could not be read.",
+            code="install_locked",
+        ) from exc
+    except BaseException:
+        lock.release()
+        raise
+    if undrained:
+        lock.release()
+        raise DesktopBackendError(
+            f"A previous {backend_root.name} install could not be shown to have stopped.",
+            code="install_locked",
+        )
+    return lock
+
+
+def reap_abandoned_desktop_backend_installs(*, runtime_id: str | None = None) -> bool:
+    """Leave no abandoned installer tree, or its staging, behind a stop.
+
+    For a stop, once the UI process that owns installs has exited: an owner
+    killed before its own drain finished leaves its tree running and its record
+    behind. Every backend root such a record names is claimed as an install
+    claims it. ``runtime_id`` limits the pass to installs a desktop Runtime with
+    that id started; ``None`` is the full stop. Returns False when a tree in
+    scope could not be shown gone or its root could not be claimed; its record
+    stays for the next pass.
+    """
+
+    try:
+        records = [record for record in _installer_records() if runtime_id in (None, record.owner_runtime_id)]
+    except OSError:
+        logger.warning("Could not list %s records", DESKTOP_BACKEND_INSTALL_LABEL, exc_info=True)
+        return False
+    drained = True
+    for backend_root in sorted({record.backend_root for record in records}):
+        if not backend_root.is_dir():
+            # Its staging went with it, and locking it would create it again.
+            for record in records:
+                if record.backend_root == backend_root:
+                    drained = _clear_abandoned_install(record) and drained
             continue
         try:
-            gone = _reap_installer_tree(worker_fingerprint, identity)
-        except Exception:
-            logger.exception("Unexpected error stopping the %s recorded in %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
-            gone = False
-        if gone:
-            record_path.unlink(missing_ok=True)
-        else:
-            logger.error("Could not stop the %s recorded in %s", DESKTOP_BACKEND_INSTALL_LABEL, record_path)
+            _claim_backend_root(
+                backend_root,
+                timeout_seconds=DESKTOP_BACKEND_STOP_LOCK_TIMEOUT_SECONDS,
+                runtime_id=runtime_id,
+            ).release()
+        except (DesktopBackendError, OSError):
+            logger.error("Could not claim %s to reap its abandoned installs", backend_root, exc_info=True)
             drained = False
     return drained
 
@@ -1051,11 +1174,13 @@ def _write_descriptor_bytes(path: Path, encoded: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _remove_staging_directory(staging: Path, backend_root: Path) -> None:
+def _remove_staging_directory(staging: Path, backend_root: Path) -> bool:
+    """Remove ``staging`` if it lies under ``backend_root``; True once it is gone."""
+
     try:
         staging.relative_to(backend_root)
     except ValueError:
-        return
+        return False
     try:
         if staging.is_symlink():
             staging.unlink(missing_ok=True)
@@ -1063,6 +1188,7 @@ def _remove_staging_directory(staging: Path, backend_root: Path) -> None:
             shutil.rmtree(staging)
     except OSError:
         logger.warning("Failed to remove desktop backend staging directory %s", staging)
+    return not os.path.lexists(staging)
 
 
 def _remove_internal_directory(path: Path, root: Path) -> None:

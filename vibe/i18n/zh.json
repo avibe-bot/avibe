@@ -1061,6 +1061,13 @@
       "repairPostVerificationFailed": "Show Runtime 准备已完成，但无法验证是否可启动：{detail}",
       "repairPrepareFailed": "Show Runtime 准备失败：{detail}",
       "repairLegacyArchiveUnavailable": "打包的 Show Runtime 清单不可用，旧版上游归档地址也没有发布资产。请升级或重新安装官方 Avibe 软件包，或移除过期的 runtime 来源覆盖配置。"
+    },
+    "stop": {
+      "opencodeStopped": "OpenCode 服务已停止",
+      "serviceFailed": "错误：Avibe 服务未能停止；已保留 pidfile 并中止。",
+      "uiFailed": "错误：Avibe UI 未能停止；已保留 pidfile 并中止。",
+      "installsFailed": "错误：桌面后端安装进程未能停止。",
+      "opencodeFailed": "错误：此 Runtime 启动的 OpenCode 服务未能停止。"
     }
   },
   "doctor": {
