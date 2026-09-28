@@ -362,6 +362,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 "human replay starts the turn",
                 [UserMessage(content="check the build", origin=human)],
                 progress,
+                False,
             ),
             (
                 "lingering task finishes inside the human turn",
@@ -371,11 +372,13 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                     UserMessage(content="<task-notification>", origin=notification),
                 ],
                 progress,
+                False,
             ),
             (
                 "injected input starts the turn",
                 [UserMessage(content="<task-notification>", origin=notification)],
                 [],
+                False,
             ),
             (
                 "human input drained after Assistant output",
@@ -384,6 +387,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                     UserMessage(content="check the build", origin=human),
                 ],
                 [],
+                False,
             ),
             (
                 "receiver joins a turn after it started",
@@ -401,6 +405,16 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                     UserMessage(content="check the build", origin=human),
                 ],
                 [],
+                False,
+            ),
+            (
+                "replacement receiver joins a running turn",
+                [
+                    TaskStartedMessage("notification-tool"),
+                    UserMessage(content="check the build", origin=human),
+                ],
+                [],
+                True,
             ),
         ]
 
@@ -417,23 +431,13 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             def format_toolcall_label(name, input_data, **_kwargs):
                 return f"{name}: {input_data['command']}"
 
-        for label, turn_start, live_before_result in cases:
+        for label, turn_start, live_before_result, replaces_receiver in cases:
             with self.subTest(label):
                 key = "session-proven-human-turn:/tmp/work"
                 agent, service = _build_agent()
                 context = _context(key)
-                request = _pending_request(key)
-                agent._pending_requests[key] = [request]
                 agent.emit_result_message = AsyncMock(return_value="message-id")
                 agent._get_formatter = lambda _context: _Formatter()
-                service.activities.start(
-                    backend="claude",
-                    runtime_key=key,
-                    session_id="sess-proven-human-turn",
-                    activity_id="dev-server",
-                    kind="local_bash",
-                    turn_id="earlier-turn",
-                )
 
                 def visible():
                     return [
@@ -445,7 +449,15 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 before_result = []
 
                 class _Client:
+                    receivers = 0
+
                     def receive_messages(self):
+                        self.receivers += 1
+
+                        async def failed():
+                            raise RuntimeError("receiver failed")
+                            yield
+
                         async def stream():
                             for message in turn_start:
                                 yield message
@@ -462,15 +474,40 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                             before_result.extend(visible())
                             yield ResultMessage("final", origin=human)
 
-                        return stream()
+                        return failed() if replaces_receiver and self.receivers == 1 else stream()
 
-                await agent._receive_messages(
-                    _Client(),
-                    "sess-proven-human-turn",
-                    "/tmp/work",
-                    context,
-                    composite_key=key,
+                client = _Client()
+
+
+                async def receive():
+                    await agent._receive_messages(
+                        client,
+                        "sess-proven-human-turn",
+                        "/tmp/work",
+                        context,
+                        composite_key=key,
+                    )
+
+                if replaces_receiver:
+                    # A generic receiver error keeps the client, so the receiver
+                    # that the next human input starts may join a running turn.
+                    agent.record_model_hub_native_failure = AsyncMock()
+                    agent.controller.agent_auth_service = SimpleNamespace(
+                        maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
+                    )
+                    agent.session_handler.handle_session_error = AsyncMock(return_value=False)
+                    await receive()
+                request = _pending_request(key)
+                agent._pending_requests[key] = [request]
+                service.activities.start(
+                    backend="claude",
+                    runtime_key=key,
+                    session_id="sess-proven-human-turn",
+                    activity_id="dev-server",
+                    kind="local_bash",
+                    turn_id="earlier-turn",
                 )
+                await receive()
                 for task in list(agent._activity_flush_tasks.values()):
                     task.cancel()
 

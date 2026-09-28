@@ -27,10 +27,13 @@ The only earlier signal is the replayed input that starts a human turn.
   the pending human request and never claim Activity output. Any other first
   frame, a human input drained into a running turn, held frames, and detached
   or claimed Activity output that is not yet delivered keep the Result-owned
-  path; a later frame never overtakes earlier held output. Completed Activity
-  output that is still queued follows the human Result on both paths, because
-  the Activity flush defers while a human request is pending; streaming earlier
-  does not change that order.
+  path; a later frame never overtakes earlier held output. A generic receiver
+  error keeps the client, so the receiver that the next input starts may join a
+  running turn whose start it never sees; that receiver streams early only from
+  the turn after its first Result. Completed Activity output that is still
+  queued follows the human Result on both paths, because the Activity flush
+  defers while a human request is pending; streaming earlier does not change
+  that order.
 - Treat a missing or unknown origin as foreground only when no competing Activity
   evidence exists; otherwise preserve it as detached output and leave the pending
   human request untouched.
@@ -151,9 +154,9 @@ races, exactly-once output, durable unsent-input recovery, and a replay-proven
 human turn streaming past a lingering Activity, including one that finishes
 mid-turn, without claiming its output, while notification-started turns, human
 inputs drained after Assistant output, and turns the receiver joined after their
-start stay held. A hermetic Claude
-Agent SDK 0.2.158 plus bundled CLI probe verifies the outgoing origin shape and
-real Result provenance against the local mock upstream.
+start, including a replacement receiver that first sees a task event, stay held.
+A hermetic Claude Agent SDK 0.2.158 plus bundled CLI probe verifies the outgoing
+origin shape and real Result provenance against the local mock upstream.
 
 The current implementation scope is the Claude receiver and existing Activity,
 dispatcher, receipt, steering, and generation owners only. It does not add a

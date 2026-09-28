@@ -1994,7 +1994,12 @@ class ClaudeAgent(BaseAgent):
             # frame after a Result therefore names what started the turn: an
             # input origin kind, or "" when anything else comes first, such as
             # Assistant output from a task notification. ``None`` means unseen.
-            turn_origin: str | None = None
+            # A client's first receiver starts before its first turn. A later
+            # receiver may start inside a turn it cannot see the start of, so
+            # no frame before its first Result proves an owner.
+            joined_running_client = getattr(client, "_vibe_receiver_attached", False)
+            setattr(client, "_vibe_receiver_attached", True)
+            turn_origin: str | None = "" if joined_running_client else None
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
