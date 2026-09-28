@@ -34,6 +34,7 @@ from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
+from vibe.desktop_runtime import DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV
 from vibe.opencode_config import (
     OPENCODE_REASONING_VARIANTS,
     OpenCodeRuntimeConfigInvalidError,
@@ -1938,6 +1939,7 @@ class OpenCodeServerManager:
         logger.info(f"Starting OpenCode server: {' '.join(cmd)}")
 
         env = os.environ.copy()
+        env[DESKTOP_ROLE_ENV] = DESKTOP_OPENCODE_ROLE
         env["OPENCODE_ENABLE_EXA"] = "1"
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
         env.update(server_environment())

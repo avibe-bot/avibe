@@ -2632,7 +2632,8 @@ def _is_ui_server_argv(argv: list[str]) -> bool:
 
 def _is_opencode_serve_argv(argv: list[str]) -> bool:
     # The server manager runs `<agents.opencode.cli_path> serve --hostname=... --port=...`;
-    # a shim or wrapper runs it with its own program in front.
+    # a shim or wrapper runs it with its own program in front. Those arguments
+    # are common to servers, so they decide only for a process the manager stamped.
     return (
         len(argv) >= 4
         and argv[-3] == "serve"
@@ -2680,17 +2681,19 @@ def _desktop_process_gone(process: psutil.Process) -> bool:
 def _desktop_process_role(process: psutil.Process) -> str | None:
     """Raises ``psutil.NoSuchProcess`` for a process that has exited."""
 
-    from vibe.desktop_runtime import DESKTOP_INSTALLER_ROLE, DESKTOP_ROLE_ENV
+    from vibe.desktop_runtime import DESKTOP_INSTALLER_ROLE, DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV
 
     try:
+        stamped_role = process.environ().get(DESKTOP_ROLE_ENV)
         # Every member of a backend install tree inherits the role, whatever
         # program it runs.
-        if process.environ().get(DESKTOP_ROLE_ENV) == DESKTOP_INSTALLER_ROLE:
+        if stamped_role == DESKTOP_INSTALLER_ROLE:
             return "installer"
         argv = [str(part) for part in process.cmdline()]
     except psutil.NoSuchProcess:
         raise
     except (psutil.Error, OSError):
+        stamped_role = None
         argv = []
     command = shlex.join(argv)
     if not command:
@@ -2701,7 +2704,7 @@ def _desktop_process_role(process: psutil.Process) -> str | None:
         return "service"
     if _is_ui_server_argv(argv):
         return "ui"
-    if _is_opencode_serve_argv(argv):
+    if stamped_role == DESKTOP_OPENCODE_ROLE and _is_opencode_serve_argv(argv):
         return "opencode"
     return None
 

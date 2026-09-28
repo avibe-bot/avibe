@@ -33,7 +33,7 @@ arbitrary text, so words it merely contains, such as
 | `installer` | `AVIBE_DESKTOP_ROLE=installer` in its environment, whatever it runs |
 | `service` | runs `vibe/service_main.py` (argv only, so a bundle an update replaced or moved is still recognized), or the development `main.py` |
 | `ui` | `<interpreter> -c "from vibe.ui_server import run_ui_server; …"`, the launch `start_ui` and the UI restart have always used |
-| `opencode` | ends with `serve --hostname=… --port=…`, the arguments the server manager appends to `agents.opencode.cli_path`, whether that runs natively, through an npm install's `node` shim or as a wrapper; `opencode-server-helper` is not |
+| `opencode` | `AVIBE_DESKTOP_ROLE=opencode`, which the server manager stamps on the server, and argv ending with `serve --hostname=… --port=…`, the arguments it appends to `agents.opencode.cli_path`, whether that runs natively, through an npm install's `node` shim or as a wrapper. The agent work the server runs inherits the stamp, and those arguments are common to servers, so neither decides alone |
 | `unknown` | carries the id, but its command line cannot be read |
 | none | any other program: agent CLIs, the tunnel connector |
 
@@ -182,6 +182,12 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
   one written wins.
 - An OpenCode server a successor adopted still carries the old id and is
   stopped with it, as before.
+- An OpenCode server started by a release before the stamp is listed in
+  `left_running` and not signalled. The handover of those releases never
+  stopped OpenCode either.
+- Agent work an OpenCode server runs inherits the stamp, so one of its
+  programs whose argv ends with `serve --hostname=… --port=…` is taken for an
+  OpenCode server.
 - An owner killed between creating its staging directory and writing its record
   leaves an almost empty staging directory that no record names.
 - `vibe stop` and a claim scan only for installer trees of their own Runtime

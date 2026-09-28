@@ -234,6 +234,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             create_process.await_args.kwargs["env"]["OPENCODE_DISABLE_EXTERNAL_SKILLS"],
             "1",
         )
+        # A desktop Runtime's scoped stop knows the server by this stamp.
+        self.assertEqual(create_process.await_args.kwargs["env"]["AVIBE_DESKTOP_ROLE"], "opencode")
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

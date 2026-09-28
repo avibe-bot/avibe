@@ -32,6 +32,8 @@ SLEEP = "import time; print('ready', flush=True); time.sleep(120)"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The arguments the OpenCode server manager appends to the configured executable.
 OPENCODE_SERVE = ["serve", "--hostname=127.0.0.1", "--port=4096"]
+# Programs that carry the manager's stamp: the server, and the agent work it runs.
+OPENCODE_STAMPED = {"opencode", "opencode-native", "opencode-configured", "opencode-agent-work"}
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
 
@@ -70,6 +72,8 @@ def argv_for(bundle):
             # Other programs whose command lines only mention a role.
             "ui-lookalike": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
             "opencode-lookalike": [sys.executable, "-c", SLEEP, "opencode", "serve"],
+            "server-lookalike": [sys.executable, "-c", SLEEP, "app.py", *OPENCODE_SERVE],
+            "opencode-agent-work": [sys.executable, "-c", SLEEP, "agent-tool"],
             "opencode-server-helper": [sys.executable, "-c", SLEEP, "opencode-server-helper"],
             None: [sys.executable, "-c", SLEEP, "agent-cli"],
         }[role]
@@ -78,9 +82,12 @@ def argv_for(bundle):
 
 
 def _child_env(runtime_id: str | None, role: str | None = None, owner_pid: int | None = None) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key != desktop_runtime.DESKTOP_RUNTIME_ID_ENV}
+    inherited = (desktop_runtime.DESKTOP_RUNTIME_ID_ENV, desktop_runtime.DESKTOP_ROLE_ENV)
+    env = {key: value for key, value in os.environ.items() if key not in inherited}
     if runtime_id is not None:
         env[desktop_runtime.DESKTOP_RUNTIME_ID_ENV] = runtime_id
+    if role in OPENCODE_STAMPED:
+        env[desktop_runtime.DESKTOP_ROLE_ENV] = desktop_runtime.DESKTOP_OPENCODE_ROLE
     if role == "installer":
         env[desktop_runtime.DESKTOP_ROLE_ENV] = desktop_runtime.DESKTOP_INSTALLER_ROLE
         env[desktop_backends.PROCESS_IDENTITY_ENV] = desktop_backends.new_process_identity_marker()
@@ -321,7 +328,12 @@ def test_a_pid_recycled_after_the_scan_is_not_signalled(spawn, stop_env, monkeyp
 
 
 # A role is the argv shape Avibe launches it with, not words its command line contains.
-@pytest.mark.parametrize("program", [None, "ui-lookalike", "opencode-lookalike", "opencode-server-helper"])
+# An OpenCode server's arguments decide only with the manager's stamp, which
+# alone decides nothing.
+@pytest.mark.parametrize(
+    "program",
+    [None, "ui-lookalike", "opencode-lookalike", "opencode-server-helper", "server-lookalike", "opencode-agent-work"],
+)
 def test_other_programs_carrying_the_id_are_reported_and_left_running(spawn, stop_env, capsys, program):
     service, agent = spawn(RUNTIME_ID), spawn(RUNTIME_ID, program)
 
