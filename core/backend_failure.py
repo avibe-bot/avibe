@@ -242,6 +242,11 @@ def terminal_backend_failure_output(
     metadata = dict(terminal.metadata)
     existing = metadata.get("turn_failure_notification")
     existing_notification = dict(existing) if isinstance(existing, dict) else {}
+    local_detail = metadata.pop("local_error_detail", None)
+    if local_detail:
+        # The failure-delivery contract is already carried through immediate,
+        # deferred, and late-attached Run settlement. Keep its snapshot there.
+        existing_notification["local_error_detail"] = local_detail
     identity = str(existing_notification.get("failure_id") or "").strip()
     if not identity:
         identity = _failure_identity(context, request, failure_id)
@@ -275,6 +280,7 @@ async def emit_replayed_backend_failure(
     *,
     failure_id: str,
     turn_id: str | None = None,
+    local_error_detail: str | None = None,
     display_text: str | None = None,
     delivery: DeliveryEvidence | None = None,
 ) -> None:
@@ -331,7 +337,11 @@ async def emit_replayed_backend_failure(
         failure_id=failure_id,
         failure_id_authoritative=True,
         output=MessageOutput(
-            metadata={"turn_id": str(turn_id or "").strip() or None, "replayed": True},
+            metadata={
+                "turn_id": str(turn_id or "").strip() or None,
+                "replayed": True,
+                **({"local_error_detail": local_error_detail} if local_error_detail else {}),
+            },
         ),
     )
     # ``delivery`` is passed ONLY when a caller asked for it: controller-like objects

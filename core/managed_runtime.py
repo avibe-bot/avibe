@@ -235,6 +235,7 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                         message=str(exc),
+                        error=exc,
                     )
 
             install_dir = self._manifest_install_dir(manifest, archive)
@@ -262,20 +263,23 @@ class ManagedRuntimeManager:
                     existing = candidate
                     break
             if existing is not None and not force:
+                validation_error = None
                 try:
                     validation_reason = validate_candidate(existing) if validate_candidate else None
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Managed %s runtime candidate validation failed",
                         self.spec.runtime_id,
                         exc_info=True,
                     )
                     validation_reason = self._reason("candidate_validation_failed")
+                    validation_error = exc
                 if validation_reason:
                     return self._failure(
                         validation_reason,
                         manifest=manifest,
                         archive=archive,
+                        error=validation_error,
                     )
                 return self._reuse_existing_install(
                     existing,
@@ -370,24 +374,27 @@ class ManagedRuntimeManager:
                     archive,
                     binary_sha256=binary_sha256,
                 )
+                validation_error = None
                 try:
                     validation_reason = (
                         validate_candidate(installed_binary)
                         if validate_candidate is not None
                         else None
                     )
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Managed %s runtime candidate validation failed",
                         self.spec.runtime_id,
                         exc_info=True,
                     )
                     validation_reason = self._reason("candidate_validation_failed")
+                    validation_error = exc
                 if validation_reason:
                     return self._failure(
                         validation_reason,
                         manifest=manifest,
                         archive=archive,
+                        error=validation_error,
                     )
                 self._write_current_pointer(install_dir, manifest, archive)
                 candidate_install_dir = None
@@ -2056,6 +2063,7 @@ class ManagedRuntimeManager:
                     manifest=manifest,
                     archive=archive,
                     message=str(exc),
+                    error=exc,
                 )
         payload = self._success_payload(binary, install_dir, manifest, archive, changed=False)
         if reason:

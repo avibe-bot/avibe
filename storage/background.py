@@ -2046,6 +2046,11 @@ def _owed_failure_notice_for_transition(
         "turn_id": turn_id,
         "turn_notification_delivered": bool(turn_notification.get("delivered")),
         "turn_notification_ack_evidence": turn_notification.get("ack_evidence"),
+        **(
+            {"local_error_detail": turn_notification["local_error_detail"]}
+            if isinstance(turn_notification.get("local_error_detail"), str)
+            else {}
+        ),
         "turn_fallback_run_id": fallback_run_id or None,
         TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_run_ids if turn_id else [],
         # Optional, and only ever a copy selector. The lane a notice belongs to is

@@ -12160,6 +12160,30 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     """
     from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS
 
+    if event_type == "message.new":
+        from storage.message_deliveries import public_message_metadata
+
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), dict):
+            return None
+        data = envelope["data"]
+        return json.dumps(
+            {
+                **envelope,
+                "data": {
+                    **data,
+                    "metadata": public_message_metadata(
+                        data.get("metadata"),
+                        include_local_error_detail=_has_runtime_management_access(context),
+                    ),
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if event_type in INSTANCE_SCOPED_REFETCH_EVENTS and not _has_runtime_management_access(context):
         # Below runtime management the frame is a bare signal: consumers refetch
         # and ignore the body, while publishers attach identifiers (session ids,

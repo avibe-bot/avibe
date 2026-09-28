@@ -555,14 +555,17 @@ def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
     return result
 
 
-def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Hide execution identity in both queued and accepted public messages."""
+def public_message_metadata(
+    metadata: dict[str, Any], *, include_local_error_detail: bool = False,
+) -> dict[str, Any]:
+    """Hide execution identity and management-only diagnostics on public reads."""
     def without_private_fields(value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 key: without_private_fields(item) for key, item in value.items()
                 if key not in {"resource_user_context", "delegated_memory_owner"}
                 and not str(key).startswith(("_web_push_", "_memory_"))
+                and (include_local_error_detail or key != "local_error_detail")
             }
         if isinstance(value, list):
             return [without_private_fields(item) for item in value]

@@ -1277,6 +1277,8 @@ there is no `success` field or envelope exception.
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
 errno and system message. Failure notifications snapshot the same field in their
 metadata so the collapsed details remain available if the provenance read fails.
+The snapshot is management-only: transcript and live-event responses remove it
+for chat-only readers. Durable owed notices retain and replay the same snapshot.
 It never contains exception filenames, arbitrary exception text, or upstream
 payloads; it does not change summary copy, classification, or authorization.
 

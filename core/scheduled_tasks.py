@@ -6543,6 +6543,7 @@ class ScheduledTaskService:
                             if session_id and session_id == run.get("session_id")
                             else None
                         ),
+                        local_error_detail=notice.get("local_error_detail"),
                         delivery=rung,
                     )
                 except Exception as exc:
