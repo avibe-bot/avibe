@@ -457,7 +457,7 @@ def test_a_tunnel_connector_that_does_not_stop_fails_the_stop(spawn, stop_env, c
     assert stop_env["status"] == [("error", cli._STOP_FAILURES["remote_access"][1])]
 
 
-def test_quit_takes_the_tunnel_down_and_the_next_ui_start_brings_it_back(spawn, monkeypatch):
+def test_quit_takes_the_tunnel_down_and_the_next_ui_start_brings_it_back(spawn, monkeypatch, capsys):
     # Quit and uninstall end with this stop. It stops the connector through its
     # own files and leaves remote access enabled, so the UI of the next launch
     # reconciles the tunnel back.
@@ -474,6 +474,8 @@ def test_quit_takes_the_tunnel_down_and_the_next_ui_start_brings_it_back(spawn, 
     ui.wait(timeout=10)
     connector.wait(timeout=10)
     assert not remote_access._pid_path().exists()
+    # Started by the UI, the connector carries its id, and is gone on return.
+    assert not [line for line in _stderr_lines(capsys) if "left_running" in line]
     relaunched = V2Config.load()
     assert relaunched.remote_access.vibe_cloud.enabled
     starts: list[V2Config] = []

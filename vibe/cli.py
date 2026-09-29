@@ -13980,26 +13980,41 @@ def _print_stop_json(payload: dict) -> None:
     print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
 
 
+def _print_left_running(result: runtime.DesktopRuntimeStopResult) -> None:
+    # A tunnel connector started by a desktop UI inherits its Runtime id, so
+    # the scan may list it; what is reported is what still runs on return.
+    left_running = [item for item in result.left_running if runtime.pid_alive(item.pid)]
+    if left_running:
+        _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in left_running]})
+
+
 def _stop_expected_desktop_runtime(runtime_id: str, *, keep_remote_access: bool = False) -> int:
     result = runtime.stop_desktop_runtime(runtime_id)
     if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
         _print_stop_json({"reason": result.refusal})
         return 3
-    if result.left_running:
-        _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in result.left_running]})
     if result.opencode_stopped:
         _report_opencode_stopped()
     # Unlike a full stop, an OpenCode server of this Runtime that survives
     # fails this stop: the desktop host replaces or removes the bundle it runs from.
     if result.outcome is runtime.DesktopRuntimeStopOutcome.FAILED:
+        _print_left_running(result)
         status = _stop_failed(result.failure, _write_status_unless_a_service_holds_the_lock)
         remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
         _print_stop_json({"failed": result.failure, "remaining": remaining})
         return status
     if keep_remote_access:
         _write_status_unless_a_service_holds_the_lock("stopped")
-        return 0
+        status = 0
+    else:
+        status = _stop_the_home_s_connector()
+    _print_left_running(result)
+    if status:
+        _print_stop_json({"failed": "remote_access", "remaining": []})
+    return status
 
+
+def _stop_the_home_s_connector() -> int:
     # The tunnel connector serves this home's Web UI, whichever Runtime
     # started it. It stops only while this stop holds the free service lock,
     # so no service can run, and no UI of this home is left to serve it.
@@ -14019,7 +14034,6 @@ def _stop_expected_desktop_runtime(runtime_id: str, *, keep_remote_access: bool 
     if not outcome:
         # No free lock showed that no service still needs the connector.
         outcome.append(_stop_failed("remote_access", _write_status_unless_a_service_holds_the_lock))
-    _print_stop_json({"failed": "remote_access", "remaining": []})
     return outcome[0]
 
 
