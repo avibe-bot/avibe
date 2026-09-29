@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import core.agent_auth_service as agent_auth_service_module
 import core.handlers.session_handler as session_handler_module
 from config.v2_compat import to_app_config
 from config.v2_config import (
@@ -27,6 +28,7 @@ from config.v2_config import (
 )
 from config.v2_settings import RoutingSettings
 from core import git_runtime as git_runtime_module
+from core.agent_auth_service import AgentAuthService
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
@@ -162,6 +164,50 @@ def test_to_app_config_preserves_claude_cli_path() -> None:
     compat = to_app_config(v2)
 
     assert compat.claude.cli_path == "/usr/local/bin/claude-proxy"
+
+
+@pytest.mark.asyncio
+async def test_web_auth_uses_configured_claude_cli_path_without_session_handler(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    class _Governor:
+        @staticmethod
+        def apply_to_pid(_pid, label="agent"):
+            captured["governor_label"] = label
+
+    monkeypatch.setattr(agent_auth_service_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(agent_auth_service_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(agent_auth_service_module, "get_claude_client_pid", lambda _client: None)
+    monkeypatch.setattr(agent_auth_service_module, "governor_from_controller", lambda _controller: _Governor())
+
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            agents=SimpleNamespace(
+                claude=SimpleNamespace(
+                    cli_path="/usr/local/bin/claude-new",
+                    auth_mode="oauth",
+                    api_key=None,
+                    base_url=None,
+                )
+            )
+        )
+    )
+    service = object.__new__(AgentAuthService)
+    service.controller = controller
+
+    await service._create_claude_control_client()
+
+    assert captured["connected"] is True
+    assert captured["options"].cli_path == "/usr/local/bin/claude-new"
 
 
 def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp_path: Path) -> None:

@@ -1591,6 +1591,14 @@ class AgentAuthService:
 
         get_cli_override = getattr(session_handler, "_get_claude_cli_path_override", None)
         cli_override = get_cli_override() if callable(get_cli_override) else None
+        if not cli_override:
+            # Web-initiated flows use the web controller stub, which has no
+            # session handler. Fall back to the configured backend binary so
+            # OAuth uses the same Claude Code version as normal Agent turns
+            # instead of silently selecting the SDK's bundled CLI.
+            configured_cli = self._get_cli_binary("claude")
+            if configured_cli != "claude":
+                cli_override = os.path.expanduser(configured_cli)
         if cli_override:
             option_kwargs["cli_path"] = cli_override
 
