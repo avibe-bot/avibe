@@ -282,6 +282,9 @@ def _start_runtime_processes(
 
     from core.services import settings as settings_service
 
+    # Before the first status write, as `vibe start` claims: a successor that
+    # would reuse another Runtime's process is refused with nothing announced.
+    runtime.claim_desktop_runtime_start(include_ui=start_ui)
     paths.ensure_data_dirs()
     config = settings_service.load_config(default_factory=settings_service.default_config)
     # Service-only restart: the UI process was never stopped, so carry its
@@ -499,16 +502,12 @@ def _run_restart_job(
         start_runtime_started_at = time.monotonic()
         service_start = runtime.ProcessStartInfo()
         ui_start = runtime.ProcessStartInfo()
-        previous_status = runtime.read_json(paths.get_runtime_status_path())
 
         def refuse_start(exc: runtime.DesktopRuntimeClaimRefused) -> int:
             # The successor claims exactly as `vibe start` does: a process of
             # another Runtime is neither adopted nor recorded as this one, and
-            # what this start created and announced is undone.
-            left_running = runtime.roll_back_start(service_start, ui_start)
-            if left_running is not None:
-                write(f"left running after the refused start: {left_running}")
-            runtime.restore_status_after_refused_start(previous_status)
+            # only what this start created is stopped.
+            runtime.roll_back_start(service_start, ui_start)
             return fail(f"restart refused: {exc}", 3, started_at=restart_started_at)
 
         try:
@@ -547,7 +546,7 @@ def _run_restart_job(
                 started_at=restart_started_at,
             )
         try:
-            runtime.claim_ready_service(resolved_pid, started_pid=new_pid, start_info=service_start)
+            runtime.claim_ready_service(resolved_pid, started_pid=new_pid)
         except runtime.DesktopRuntimeClaimRefused as exc:
             mark_duration("wait_service_lock_seconds", wait_lock_started_at)
             return refuse_start(exc)

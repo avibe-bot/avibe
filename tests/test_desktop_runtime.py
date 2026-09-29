@@ -221,13 +221,42 @@ def test_a_caller_outside_any_tree_has_only_its_env_provenance(desktop_tree, mon
     assert desktop_caller_provenance() == {desktop_tree.runtime_id}
 
 
-def test_a_marker_above_the_tree_root_names_no_tree(desktop_tree, monkeypatch):
+# Every interpreter layout a desktop bundle ships, from the bundle's own sources.
+_BUNDLE_PYTHON_ENTRYPOINTS = sorted(
+    {
+        target["python_entrypoint"]
+        for target in json.loads(
+            (Path(__file__).resolve().parents[1] / "desktop" / "runtime-sources.json").read_text(encoding="utf-8")
+        )["targets"].values()
+    }
+)
+
+
+@pytest.fixture(params=_BUNDLE_PYTHON_ENTRYPOINTS)
+def bundle_tree(request, tmp_path):
+    """A private tree with the interpreter where one of the bundle targets puts it."""
+
+    runtime_id = "e" * 64
+    root = tmp_path / "install" / "3.0.0-test" / runtime_id[:16]
+    interpreter = root / request.param
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"")
+    _write_marker(root / ".avibe-runtime.json", {**_host_marker(runtime_id), "python_entrypoint": request.param})
+    return SimpleNamespace(root=root, interpreter=interpreter, entrypoint=request.param, runtime_id=runtime_id)
+
+
+def test_every_bundle_interpreter_acts_for_its_tree(bundle_tree, monkeypatch):
+    monkeypatch.setattr(sys, "executable", str(bundle_tree.interpreter))
+
+    assert desktop_caller_provenance() == {bundle_tree.runtime_id}
+
+
+def test_a_marker_above_the_tree_root_names_no_tree(bundle_tree, monkeypatch):
     # Its entrypoint does lead to this interpreter, but from above the root.
-    (desktop_tree.root / ".avibe-runtime.json").unlink()
-    stray = _host_marker("f" * 64)
-    stray["python_entrypoint"] = f"{desktop_tree.root.name}/python/bin/python3"
-    _write_marker(desktop_tree.root.parent / ".avibe-runtime.json", stray)
-    monkeypatch.setattr(sys, "executable", str(desktop_tree.interpreter))
+    (bundle_tree.root / ".avibe-runtime.json").unlink()
+    stray = {**_host_marker("f" * 64), "python_entrypoint": f"{bundle_tree.root.name}/{bundle_tree.entrypoint}"}
+    _write_marker(bundle_tree.root.parent / ".avibe-runtime.json", stray)
+    monkeypatch.setattr(sys, "executable", str(bundle_tree.interpreter))
 
     assert desktop_caller_provenance() == frozenset()
 

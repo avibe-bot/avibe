@@ -13682,6 +13682,14 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
     handover_status = _handover_superseded_desktop_runtime(allowed=hand_over)
     if handover_status:
         return handover_status
+    # Before anything is announced: a start refused here leaves the status, and
+    # everything running, as it found them. The start below claims again what
+    # it reuses and ends up with.
+    try:
+        runtime.claim_desktop_runtime_start()
+    except runtime.DesktopRuntimeClaimRefused as refusal:
+        _print_provenance_refusal("desktopRuntime.claimRefused", refusal)
+        return 3
 
     has_configured_platform_credentials = getattr(config, "has_configured_platform_credentials", None)
     if callable(has_configured_platform_credentials):
@@ -13689,7 +13697,6 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
     else:
         ready = bool(getattr(getattr(config, "slack", None), "bot_token", ""))
 
-    previous_status = runtime.read_json(paths.get_runtime_status_path())
     if not ready:
         _write_status("setup", "missing platform credentials")
     else:
@@ -13762,7 +13769,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         )
         service_ready = resolved_pid is not None
         if resolved_pid is not None:
-            runtime.claim_ready_service(resolved_pid, started_pid=service_pid, start_info=service_start)
+            runtime.claim_ready_service(resolved_pid, started_pid=service_pid)
             service_pid = resolved_pid
         if service_ready:
             runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
@@ -13805,12 +13812,13 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         # the undo runs in reverse order of creation -- the UI, then the service
         # it was pointed at.
         #
-        # Both undos find their process through its pid record rather than the
-        # captured pid, and that is sound by construction, not by luck: the
-        # spawn primitives write the record and then capture the child, both
-        # inside the region that kills the child if either step fails. So every
-        # live process this sees as created has a record naming it, and no
-        # child that missed the capture is still alive.
+        # Without a desktop Runtime id, both undos find their process through
+        # its pid record rather than the captured pid, and that is sound by
+        # construction, not by luck: the spawn primitives write the record and
+        # then capture the child, both inside the region that kills the child
+        # if either step fails. So every live process this sees as created has
+        # a record naming it, and no child that missed the capture is still
+        # alive.
         #
         # The UI stop leaves the tunnel alone: `vibe start` never brings a
         # tunnel up. `remote_access.start()` is reached only from the UI's
@@ -13823,13 +13831,10 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         # one this command has then changed nothing to undo. stop_service()
         # logs any pid it could not stop, so a rollback that itself fails still
         # leaves evidence; either way the start has failed. Under a desktop
-        # Runtime id a process another Runtime started meanwhile is refused,
-        # not stopped.
-        left_running = runtime.roll_back_start(service_start, ui_start)
-        if left_running is not None:
-            logger.warning("A failed start left another Runtime's process running: %s", left_running)
+        # Runtime id only the processes this start created are stopped, so one
+        # another Runtime started meanwhile is left running.
+        runtime.roll_back_start(service_start, ui_start)
         if isinstance(exc, runtime.DesktopRuntimeClaimRefused):
-            runtime.restore_status_after_refused_start(previous_status)
             _print_provenance_refusal("desktopRuntime.claimRefused", exc)
             return 3
         raise
@@ -13875,8 +13880,11 @@ def cmd_vibe():
     return cmd_start()
 
 
-def _stop_opencode_server():
-    """Terminate the OpenCode server if running."""
+def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
+    """Terminate the OpenCode server if running; with ``runtime_ids``, only that Runtime's.
+
+    A server of another Runtime is left running, as the scoped stop leaves it.
+    """
     pid_file = paths.get_logs_dir() / "opencode_server.json"
     if not pid_file.exists():
         return False
@@ -13898,6 +13906,11 @@ def _stop_opencode_server():
         logger.debug("Failed to verify OpenCode process (pid=%s): command not available", pid)
         return False
     if "opencode" not in cmd or "serve" not in cmd:
+        return False
+    try:
+        runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
+    except runtime.DesktopRuntimeClaimRefused as refusal:
+        logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
         return False
 
     if runtime.stop_pid(pid, timeout=5):
@@ -14038,9 +14051,10 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
 
     if expect_runtime_id is not None:
         return _stop_expected_desktop_runtime(expect_runtime_id)
-    # Asked of everything first, so a refusal stops nothing; asked again by
-    # each stop of the processes it is about to signal, so a Runtime that took
-    # over in between is refused too.
+    # The service and UI are asked first, so a refusal stops nothing, and
+    # again by each stop of the processes it is about to signal, so a Runtime
+    # that took over in between is refused too. An OpenCode server of another
+    # Runtime is left running.
     provenance = desktop_caller_provenance()
     if _desktop_provenance_refused("desktopRuntime.stopRefused", runtime_ids=provenance):
         return 3
@@ -14060,7 +14074,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
     installers_reaped = reap_abandoned_desktop_backend_installs()
 
     # Also terminate OpenCode server on full stop
-    if _stop_opencode_server():
+    if _stop_opencode_server(provenance):
         _report_opencode_stopped()
 
     if service_was_running and service_stopped is False:

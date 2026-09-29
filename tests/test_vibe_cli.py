@@ -1084,7 +1084,7 @@ def test_cmd_stop_ignores_absent_services(monkeypatch):
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
     monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
-    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
 
     assert cli.cmd_stop() == 0
@@ -1098,7 +1098,7 @@ def test_cmd_stop_fails_when_live_service_survives(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: path == service_pid)
     monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
-    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
 
     assert cli.cmd_stop() == 2
@@ -1113,7 +1113,7 @@ def test_cmd_stop_fails_when_lock_owner_survives_without_pidfile(monkeypatch, ca
     monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
     monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
-    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
 
     assert cli.cmd_stop() == 2
@@ -1899,7 +1899,7 @@ def test_cmd_start_rolls_back_when_an_interrupt_arrives_before_the_start_finishe
     )
     # A tunnel is never brought up by `vibe start`, so one alive here predates
     # the command and is not this rollback's to tear down.
-    assert started.stop_ui_kwargs == [{"stop_remote_access": False, "runtime_ids": frozenset()}], (
+    assert started.stop_ui_kwargs == [{"stop_remote_access": False}], (
         f"the rollback destroyed a remote URL it did not create: {started.stop_ui_kwargs}"
     )
 
@@ -2175,7 +2175,7 @@ def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypat
 
     def stop_ui(**kwargs):
         started.calls.append("stop_ui")
-        assert kwargs == {"stop_remote_access": False, "runtime_ids": frozenset()}, kwargs
+        assert kwargs == {"stop_remote_access": False}, kwargs
         return _REAL_STOP_UI(**kwargs)
 
     monkeypatch.setattr(cli.runtime, "stop_ui", stop_ui)

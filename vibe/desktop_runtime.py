@@ -27,9 +27,10 @@ DESKTOP_RUNTIME_ROOT_ENV = "AVIBE_DESKTOP_RUNTIME_ROOT"
 # tree-relative interpreter the launcher runs.
 DESKTOP_RUNTIME_MARKER_NAME = ".avibe-runtime.json"
 _DESKTOP_RUNTIME_MARKER_MAX_BYTES = 32 * 1024
-# The entrypoint is `python/bin/python3` or `python/python.exe`, so the tree
-# root is at most three directories above the interpreter.
-_DESKTOP_RUNTIME_MARKER_SEARCH_DEPTH = 3
+# The directories between a tree root and its interpreter, one per
+# `python_entrypoint` in desktop/runtime-sources.json: `python/bin/python3` and
+# `python/python.exe`.
+_DESKTOP_INTERPRETER_DIRS = (("python", "bin"), ("python",))
 DESKTOP_NODE_BIN_ENV = "VIBE_SHOW_RUNTIME_NODE_BIN"
 DESKTOP_NPM_CLI_ENV = "AVIBE_DESKTOP_NPM_CLI"
 DESKTOP_BACKENDS_ROOT_ENV = "AVIBE_DESKTOP_BACKENDS_ROOT"
@@ -73,10 +74,11 @@ def desktop_runtime_id(base_env: Mapping[str, str] | None = None) -> str | None:
 def _desktop_tree_runtime_id(executable: str | os.PathLike[str] | None) -> str | None:
     """The id of the private tree whose interpreter *executable* is, or None.
 
-    Only the marker at the root of that tree counts: the nearest one above the
-    interpreter, holding a valid `archive_sha256`, whose `python_entrypoint`
-    leads back to this very interpreter. A marker further up says nothing about
-    who is running, and neither does one that fails any of these.
+    Only the marker at the root of that tree counts: the directory the
+    interpreter's own layout puts the root at, holding a valid
+    `archive_sha256`, whose `python_entrypoint` leads back to this very
+    interpreter. A marker anywhere else says nothing about who is running, and
+    neither does one that fails any of these.
     """
 
     if not executable:
@@ -85,7 +87,11 @@ def _desktop_tree_runtime_id(executable: str | os.PathLike[str] | None) -> str |
         interpreter = Path(executable).resolve(strict=True)
     except (OSError, RuntimeError):
         return None
-    for root in interpreter.parents[:_DESKTOP_RUNTIME_MARKER_SEARCH_DEPTH]:
+    parents = interpreter.parents
+    for dirs in _DESKTOP_INTERPRETER_DIRS:
+        if len(parents) <= len(dirs) or tuple(parent.name for parent in parents[: len(dirs)]) != dirs[::-1]:
+            continue
+        root = parents[len(dirs)]
         marker = root / DESKTOP_RUNTIME_MARKER_NAME
         if os.path.lexists(marker):
             return _desktop_marker_runtime_id(root, marker, interpreter)

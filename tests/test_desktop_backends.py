@@ -502,7 +502,7 @@ def quiet_stop(monkeypatch):
     monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: None)
     monkeypatch.setattr(remote_access, "stop", lambda: {"ok": True})
-    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     statuses: list[tuple] = []
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: statuses.append(args))
     return cli, statuses

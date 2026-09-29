@@ -1486,7 +1486,7 @@ def stop_process(pid_path, timeout=5, *, runtime_ids: frozenset[str] = frozenset
     if not pid_alive(pid):
         pid_path.unlink(missing_ok=True)
         return False
-    _refuse_foreign_desktop_process(pid, part, runtime_ids)
+    refuse_foreign_desktop_process(pid, part, runtime_ids)
     stopped = stop_pid(pid, timeout=timeout)
     if stopped:
         pid_path.unlink(missing_ok=True)
@@ -2069,7 +2069,7 @@ def start_service(
     ready_pid = wait_for_service_ready(pid, timeout=max(0.0, deadline - time.monotonic()))
     if ready_pid is None:
         _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
-    claim_ready_service(ready_pid, started_pid=pid, start_info=start_info)
+    claim_ready_service(ready_pid, started_pid=pid)
     if start_info is not None:
         start_info.capture(ready_pid, reused=start_info.reused)
     from vibe.install_generations import collect_install_generations
@@ -2093,6 +2093,7 @@ def _resolve_service_pid(
     """
 
     from storage.migrations import guard_source_checkout_default_state_bootstrap
+    from vibe.desktop_runtime import desktop_runtime_id
 
     def result(pid: int, *, reused: bool) -> int:
         # A process this call did not start is reused only when it is the
@@ -2100,6 +2101,17 @@ def _resolve_service_pid(
         if reused:
             claim_desktop_runtime_process(pid, "service")
         return start_info.capture(pid, reused=reused) if start_info is not None else pid
+
+    def already_running(*holder_pids: int | None) -> ServiceAlreadyRunningError:
+        # A desktop start that finds a service it may not reuse says whose it
+        # is not, as a reuse does; one nothing can name is nobody's to claim.
+        if desktop_runtime_id() is not None:
+            live = [pid for pid in holder_pids if pid and pid_alive(pid)]
+            if not live:
+                raise DesktopRuntimeClaimRefused("service", "identity_unavailable")
+            for pid in live:
+                claim_desktop_runtime_process(pid, "service")
+        return ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=holder_pids[0])
 
     guard_source_checkout_default_state_bootstrap()
     with _SERVICE_LOCK:
@@ -2135,8 +2147,7 @@ def _resolve_service_pid(
                                 existing_pid,
                             )
                             return result(lock_holder_pid, reused=True)
-                        raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
-                    raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
+                    raise already_running(lock_holder_pid)
                 logger.warning(
                     "Ignoring stale service pid file pid=%s because it does not match the Vibe service",
                     existing_pid,
@@ -2147,11 +2158,11 @@ def _resolve_service_pid(
         if not lock_available:
             if lock_holder_pid and lock_holder_pid == existing_pid and pid_alive(lock_holder_pid):
                 return result(lock_holder_pid, reused=True)
-            raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
+            raise already_running(lock_holder_pid)
 
         extra_pids = extra_service_process_pids()
         if extra_pids:
-            raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=extra_pids[0])
+            raise already_running(*extra_pids)
 
         launcher = launcher or current_service_launcher()
         scope_prefix = maybe_systemd_scope_prefix()
@@ -2190,7 +2201,7 @@ def _resolve_service_pid(
                 initial_ready_timeout=initial_ready_timeout,
                 wait_for_ready=wait_for_ready,
             )
-            claim_ready_service(resolved_pid, started_pid=pid, start_info=start_info)
+            claim_ready_service(resolved_pid, started_pid=pid)
             return result(resolved_pid, reused=False)
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
@@ -2434,15 +2445,7 @@ def start_ui(
         except Exception:
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
-            from vibe.desktop_runtime import desktop_runtime_id
-
-            is_ui_server = _pid_matches_ui_server(existing_pid)
-            if not is_ui_server and desktop_runtime_id() is not None and not get_process_command(existing_pid):
-                # A desktop start cannot tell whose this is, so it neither
-                # reuses it nor starts a UI over it.
-                raise DesktopRuntimeClaimRefused("ui", "identity_unavailable")
-            if is_ui_server:
-                claim_desktop_runtime_process(existing_pid, "ui")
+            is_ui_server = _claim_recorded_ui(existing_pid)
             if is_ui_server and _ui_server_compatible(host, port):
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
@@ -2520,7 +2523,7 @@ def stop_service(*, runtime_ids: frozenset[str] = frozenset()):
                 pid_path.unlink(missing_ok=True)
             return False
         for pid in target_pids:
-            _refuse_foreign_desktop_process(pid, "service", runtime_ids)
+            refuse_foreign_desktop_process(pid, "service", runtime_ids)
 
         stopped_all = True
         for pid in target_pids:
@@ -2575,7 +2578,7 @@ def stop_ui(
     if stop_remote_access and runtime_ids:
         recorded_pid = _read_pid_file(ui_pid_path)
         if recorded_pid and pid_alive(recorded_pid):
-            _refuse_foreign_desktop_process(recorded_pid, "ui", runtime_ids)
+            refuse_foreign_desktop_process(recorded_pid, "ui", runtime_ids)
     if stop_remote_access:
         remote_access_started_at = time.monotonic()
         remote_access_stopped = stop_remote_access_connector()
@@ -2834,10 +2837,10 @@ def claim_desktop_runtime_process(pid: int, part: str) -> None:
 
     runtime_id = desktop_runtime_id()
     if runtime_id is not None:
-        _refuse_foreign_desktop_process(pid, part, frozenset({runtime_id}))
+        refuse_foreign_desktop_process(pid, part, frozenset({runtime_id}))
 
 
-def _refuse_foreign_desktop_process(pid: int, part: str, runtime_ids: frozenset[str]) -> None:
+def refuse_foreign_desktop_process(pid: int, part: str, runtime_ids: frozenset[str]) -> None:
     """Raise ``DesktopRuntimeClaimRefused`` unless a caller acting for ``runtime_ids`` may act on ``pid``.
 
     No ids is a caller with no desktop provenance, which acts on anything.
@@ -2850,49 +2853,103 @@ def _refuse_foreign_desktop_process(pid: int, part: str, runtime_ids: frozenset[
         raise DesktopRuntimeClaimRefused(part, reason)
 
 
-def claim_ready_service(ready_pid: int, *, started_pid: int, start_info: ProcessStartInfo | None) -> None:
+def claim_ready_service(ready_pid: int, *, started_pid: int) -> None:
     """Claim the lock holder a start ended up with when it is not the process it asked about.
 
-    A service of another Runtime can take the lock first. It is not this
-    start's to undo, so it is recorded as reused before the refusal.
+    A service of another Runtime can take the lock first. The start's own
+    record still names the process it created, which is what a rollback stops.
     """
 
-    if ready_pid == started_pid:
-        return
-    try:
+    if ready_pid != started_pid:
         claim_desktop_runtime_process(ready_pid, "service")
-    except DesktopRuntimeClaimRefused:
-        if start_info is not None:
-            start_info.capture(ready_pid, reused=True)
-        raise
 
 
-def roll_back_start(service_start: ProcessStartInfo, ui_start: ProcessStartInfo) -> DesktopRuntimeClaimRefused | None:
-    """Stop what a start that did not finish created, the UI and then its service.
+def _claim_recorded_ui(pid: int) -> bool:
+    """Whether the live ``pid`` the UI record names is a UI server a start may reuse or replace.
 
-    Created is what the start infos record as not reused. The UI stop leaves the
-    tunnel connector alone: a start never brings one up, so any connector alive
-    predates it. Under a desktop Runtime id both stops act only on that
-    Runtime's processes, so one another Runtime started meanwhile is left
-    running; the refusal that left it is returned.
+    A record naming another program is stale. Under a desktop Runtime id a UI
+    server must be that Runtime's, and a pid whose command line cannot be read
+    is refused: nothing can tell whose it is.
+    """
+
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    is_ui_server = _pid_matches_ui_server(pid)
+    if not is_ui_server and desktop_runtime_id() is not None and not get_process_command(pid):
+        raise DesktopRuntimeClaimRefused("ui", "identity_unavailable")
+    if is_ui_server:
+        claim_desktop_runtime_process(pid, "ui")
+    return is_ui_server
+
+
+def claim_desktop_runtime_start(*, include_ui: bool = True) -> None:
+    """Raise ``DesktopRuntimeClaimRefused`` unless what a desktop start would reuse or replace is its Runtime's.
+
+    Asked before the start announces anything, so a refused start leaves the
+    status as it found it. Every service process must carry the start's id, a
+    service lock held by a process nothing names is refused, and with
+    ``include_ui`` the recorded UI is judged as ``start_ui`` judges it. A start
+    without a desktop Runtime id claims as it always has.
     """
 
     from vibe.desktop_runtime import desktop_runtime_id
 
     runtime_id = desktop_runtime_id()
-    runtime_ids = frozenset() if runtime_id is None else frozenset({runtime_id})
-    left_running = None
-    if ui_start.pid is not None and not ui_start.reused:
-        try:
-            stop_ui(stop_remote_access=False, runtime_ids=runtime_ids)
-        except DesktopRuntimeClaimRefused as refusal:
-            left_running = refusal
-    if service_start.pid is not None and not service_start.reused:
-        try:
-            stop_service(runtime_ids=runtime_ids)
-        except DesktopRuntimeClaimRefused as refusal:
-            left_running = left_running or refusal
-    return left_running
+    if runtime_id is None:
+        return
+    refusal = desktop_provenance_refusal(include_ui=False, runtime_ids=frozenset({runtime_id}))
+    if refusal is not None:
+        raise refusal
+    if resolve_service_owner_pid() is None and not service_instance_lock_available()[0]:
+        raise DesktopRuntimeClaimRefused("service", "identity_unavailable")
+    ui_pid = _read_pid_file(paths.get_runtime_ui_pid_path())
+    if include_ui and ui_pid and pid_alive(ui_pid):
+        _claim_recorded_ui(ui_pid)
+
+
+def _stop_created_process(pid: int, runtime_ids: frozenset[str]) -> bool:
+    """Stop ``pid``, created by a start that did not finish, while it is that Runtime's; True once it is gone."""
+
+    if not pid_alive(pid):
+        return True
+    reason = _desktop_runtime_mismatch(pid, runtime_ids)
+    if reason is not None:
+        logger.warning("A failed start leaves pid=%s running (%s)", pid, reason)
+        return False
+    if stop_pid(pid):
+        return True
+    logger.error("Failed to stop pid=%s, created by a failed start", pid)
+    return False
+
+
+def roll_back_start(service_start: ProcessStartInfo, ui_start: ProcessStartInfo) -> None:
+    """Stop what a start that did not finish created, the UI and then its service.
+
+    Created is what the start infos record as not reused. The UI stop leaves the
+    tunnel connector alone: a start never brings one up, so any connector alive
+    predates it. Under a desktop Runtime id the rollback stops exactly the
+    processes the start created, and only while they carry that id: what the
+    records name by then may be another Runtime's.
+    """
+
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    runtime_id = desktop_runtime_id()
+    ui_created = ui_start.pid is not None and not ui_start.reused
+    service_created = service_start.pid is not None and not service_start.reused
+    if runtime_id is None:
+        if ui_created:
+            stop_ui(stop_remote_access=False)
+        if service_created:
+            stop_service()
+        return
+    runtime_ids = frozenset({runtime_id})
+    if ui_created and _stop_created_process(ui_start.pid, runtime_ids):
+        _forget_pid_record(paths.get_runtime_ui_pid_path(), ui_start.pid)
+    if service_created:
+        with _SERVICE_LOCK:
+            if _stop_created_process(service_start.pid, runtime_ids):
+                _clear_service_pid_reservation(service_start.pid)
 
 
 def desktop_provenance_refusal(
@@ -2979,25 +3036,6 @@ def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None
         finally:
             _unlock_file(lock_file)
     return DesktopRuntimePresence.ABSENT
-
-
-def restore_status_after_refused_start(previous: dict | None) -> None:
-    """Put back the status record a start replaced before it was refused.
-
-    A refused start leaves the Avibe here as it found it, and that includes the
-    ``starting`` it announced, which a status reader would otherwise believe
-    until the start deadline passed. A service holding the lock owns the
-    status, even another Runtime's, so then the record is left to it.
-    """
-
-    def restore() -> None:
-        status_path = paths.get_runtime_status_path()
-        if previous is None:
-            status_path.unlink(missing_ok=True)
-        else:
-            write_json(status_path, previous)
-
-    desktop_service_lock_presence(while_absent=restore)
 
 
 def _stop_desktop_processes(processes: list[psutil.Process], timeout: float = 5) -> None:

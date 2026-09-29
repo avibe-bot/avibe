@@ -67,6 +67,18 @@ REAL_USER_HOME = Path.home()
 _SQLITE_DEFAULT_STATE_MODULES: dict[Path, bool] = {}
 
 
+def pytest_configure(config):
+    # A desktop caller is also whoever runs from a private tree's interpreter,
+    # which no environment clearing undoes: every stop and restart under test
+    # would act as that live Runtime.
+    from vibe.desktop_runtime import _desktop_tree_runtime_id
+
+    if _desktop_tree_runtime_id(sys.executable) is not None:
+        raise pytest.UsageError(
+            f"{sys.executable} is a desktop Runtime's private interpreter; run the tests with another Python"
+        )
+
+
 def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:
     """Avoid creating a migration template for tests that never use SQLite state."""
 
