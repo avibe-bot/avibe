@@ -1597,7 +1597,7 @@ class ModelHubService:
         """Recover credential custody, then resume a runtime the user left enabled.
 
         Only custody recovery gates service readiness. Resuming may first
-        download the engine, so it runs in the background, owned by `stop()`;
+        download the engine, so it runs in the background, retired by `stop()`;
         every consumer prepares the engine on demand in the meantime.
         """
 
@@ -1617,11 +1617,20 @@ class ModelHubService:
 
     async def _resume_runtime_intent(self) -> None:
         try:
+            await self.reconcile_runtime_installation()
+            if not self.store.load().enabled:
+                return
+            # Preparing may download the engine. Like every demand path, it
+            # holds no lifecycle lock, so an explicit start or stop is served
+            # meanwhile instead of after the download.
+            await self._prepare_engine_for_demand()
             async with self._runtime_lifecycle_lock:
-                await self.reconcile_runtime_installation()
+                # An explicit stop clears the intent; `stop()` retires this
+                # resume. Either way it must not start the engine.
+                if self._runtime_resume_task is not asyncio.current_task():
+                    return
                 if not self.store.load().enabled:
                     return
-                await self._prepare_engine_for_demand()
                 await self._engine_call(self.adapter.start())
         except Exception:
             logger.exception("Model Hub runtime resume failed; the engine is prepared on demand")
@@ -1648,12 +1657,12 @@ class ModelHubService:
                 await await_owned_task(task)
             except Exception:
                 logger.warning("Native takeover remains pending during shutdown")
-        resume = self._runtime_resume_task
+        resume, self._runtime_resume_task = self._runtime_resume_task, None
         if resume is not None and not resume.done():
-            # A resume may still be downloading the engine. Shutdown does not
-            # wait for the network; the next start resumes again.
-            resume.cancel()
-            await asyncio.gather(resume, return_exceptions=True)
+            # Drain rather than cancel: the installer runs in a worker thread
+            # that cancellation cannot stop, and the adapter must not stop
+            # beneath it. A retired resume never starts the engine.
+            await await_owned_task(resume)
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 

@@ -547,7 +547,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_injection.py::test_claude_hub_waits_out_resolution_as_one_streaming_request
   - id: MH-RUNTIME-011
-    name: Avibe readiness never waits for the engine download; stop cancels the pending resume
+    name: Avibe readiness never waits for the engine download; an explicit stop is served during it and shutdown drains it
     status: covered
     kind: lifecycle
     layer: unit
