@@ -6,7 +6,7 @@
 
 ### Avibe 是本地优先的 Agent OS——你的 AI 伙伴，住在你自己的机器上。
 
-**所有 Agent，所有订阅，跑在你自己的机器上，揣在你的口袋里。**
+**所有 Agent，所有订阅，随时随地调用，始终跑在你自己的机器上。**
 
 [![GitHub Stars](https://img.shields.io/github/stars/avibe-bot/avibe?color=ffcb47&labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/stargazers)
 [![Release](https://img.shields.io/github/v/release/avibe-bot/avibe?labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/releases/latest)
