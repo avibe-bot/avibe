@@ -276,6 +276,9 @@ def test_auth_service_projects_only_raw_backend_selectors(monkeypatch, tmp_path:
     # A live controller's AppCompatConfig is already projected; keep it as-is.
     assert live_service._get_cli_binary("claude") == "claude"
 
+    web_service.controller.config.agents.claude.cli_path = "  claude  "
+    assert web_service._get_cli_binary("claude") == str(installed)
+
 
 def test_to_app_config_keeps_missing_private_backend_selectors_off_path(monkeypatch, tmp_path: Path) -> None:
     from vibe.cli_paths import resolve_cli_path

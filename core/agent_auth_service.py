@@ -718,6 +718,13 @@ class AgentAuthService:
             return cli_path or backend
         from config.v2_compat import runtime_agent_cli_path
 
+        if backend == "claude":
+            # Normalize the raw V2 selector before desktop resolution. A
+            # copied ``"  claude  "`` must resolve as the default executable,
+            # rather than as a literal filename that the resolver cannot find.
+            from vibe.claude_config import normalize_claude_cli_path
+
+            cli_path = normalize_claude_cli_path(cli_path)
         return runtime_agent_cli_path(cli_path, backend, resolve_agent_paths=True)
 
     def _resolve_backend_probe_cwd(self, backend: str, *, prepare: bool = False) -> str:

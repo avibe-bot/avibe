@@ -961,7 +961,10 @@ def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_pat
     )
 
 
-@pytest.mark.parametrize("selector_case", ["padded_path", "desktop_default"])
+@pytest.mark.parametrize(
+    "selector_case",
+    ["padded_path", "desktop_default", "desktop_padded_default"],
+)
 def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path, selector_case):
     """Scenario: AUTH-SETUP-911"""
     import core.agent_auth_service as auth_module
@@ -980,7 +983,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path,
         configured_cli.parent.mkdir(parents=True)
         configured_cli.write_text("#!/bin/sh\n", encoding="utf-8")
         configured_cli.chmod(0o755)
-        persisted_selector = "claude"
+        persisted_selector = "  claude  " if selector_case == "desktop_padded_default" else "claude"
         monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
         monkeypatch.setenv("PATH", "")
         monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
