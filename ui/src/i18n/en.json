@@ -2036,7 +2036,7 @@
         },
         "applying": "Migrating…",
         "errors": {
-          "nativeBusy": "Close the CLI or finish its tasks, then retry.",
+          "nativeBusy": "Quit the running CLI, including terminal sessions, IDE extensions and desktop apps, or let its tasks finish, then retry.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
           "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",

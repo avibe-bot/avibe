@@ -4598,7 +4598,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
 
 
 @asynccontextmanager
-async def _idle_mode_guard(backends):
+async def _idle_mode_guard(backends, *, external_processes=True):
     async def verify_idle():
         pass
     yield verify_idle

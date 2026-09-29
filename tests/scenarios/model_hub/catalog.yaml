@@ -54,6 +54,7 @@ capability:
     - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
     - tests/test_model_hub_persisted_migration.py
+    - tests/test_native_process_inventory.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py
     - tests/e2e/test_model_hub_guards.py
@@ -1247,6 +1248,17 @@ scenarios:
     kind: migration
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_007_default_apply_copies_api_keys_and_withdraws_only_subscriptions
+  - id: MH-MIG-008
+    name: Migration is optional, so switching to the gateway neither imports native auth nor waits for external CLIs
+    status: covered
+    kind: migration
+    layer: unit
+    test: tests/test_native_process_inventory.py::test_running_cli_does_not_block_a_mode_only_switch
+    related_tests:
+      - tests/test_model_hub_native_takeover.py::test_mode_only_adoption_never_imports_native_auth
+      - tests/test_native_takeover_lifecycle.py::test_same_user_setuid_program_does_not_block_inventory
+      - ui/src/components/settings/models/BackendSupplyModeCard.test.tsx
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered

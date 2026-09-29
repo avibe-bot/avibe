@@ -1007,6 +1007,26 @@ export const SettingsModelsPage: React.FC = () => {
       }
     });
   };
+  const enterGateway = async (backend: AgentBackend) => {
+    const echoed = await modelsApi.setAgentMode(backend, 'hub');
+    setSwitchFailures((previous) => {
+      const next = new Set(previous);
+      next.delete(backend);
+      return next;
+    });
+    await agentSaved(echoed);
+  };
+  // Migration is optional: declining it still switches the backend it was
+  // offered for, which keeps its native login beside the gateway.
+  const declineMigration = (backend: AgentBackend) => {
+    void agentWriteRegistry.track(backend, async () => {
+      try {
+        await enterGateway(backend);
+      } catch {
+        setSwitchFailures((previous) => new Set(previous).add(backend));
+      }
+    });
+  };
   const switchToGateway = (agent: AgentSupply) => {
     if (agentWrites.has(agent.backend)) return;
     setAdoptAgent(agent);
@@ -1028,13 +1048,7 @@ export const SettingsModelsPage: React.FC = () => {
           setMigrationOpen(true);
           return;
         }
-        const echoed = await modelsApi.setAgentMode(agent.backend, 'hub');
-        setSwitchFailures((previous) => {
-          const next = new Set(previous);
-          next.delete(agent.backend);
-          return next;
-        });
-        await agentSaved(echoed);
+        await enterGateway(agent.backend);
       } catch {
         setSwitchFailures((previous) => new Set(previous).add(agent.backend));
       } finally {
@@ -1850,6 +1864,7 @@ export const SettingsModelsPage: React.FC = () => {
           eligible={migrationBackend
             ? (item) => item.backend === migrationBackend
             : undefined}
+          onDecline={migrationBackend ? () => declineMigration(migrationBackend) : undefined}
           onClose={() => {
             setMigrationOpen(false);
             setMigrationBackend(null);

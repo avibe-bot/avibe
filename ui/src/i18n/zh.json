@@ -2036,7 +2036,7 @@
         },
         "applying": "迁移中…",
         "errors": {
-          "nativeBusy": "请先关闭 CLI 或完成任务，再重试。",
+          "nativeBusy": "请先退出正在运行的 CLI（包括终端、IDE 插件和桌面应用），或等待任务完成，再重试。",
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
           "itemConflict": "无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。",
