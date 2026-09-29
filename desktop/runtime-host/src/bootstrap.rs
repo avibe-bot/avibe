@@ -171,13 +171,19 @@ struct LaunchState {
     /// it is this shell's.
     runtime_may_be_running: bool,
     stopping: bool,
+    /// Advances when a bootstrap run begins and when a stop or removal ends. A
+    /// probe records what it saw only while the epoch it was sent in is still
+    /// current, so one that a new run or a stop overtook cannot rewrite who
+    /// owns the origin.
+    epoch: u64,
 }
 
 impl LaunchState {
-    /// Records who serves the origin now. An unprovable probe keeps the last
-    /// owner: a slow `/ready` is not evidence that the Runtime changed hands.
-    fn observe(&mut self, presence: &Presence, launcher: Option<&Arc<dyn ResolvedRuntimeLauncher>>) {
-        if self.stopping {
+    /// Records who serves the origin now, for a probe sent in `epoch`. An
+    /// unprovable probe keeps the last owner: a slow `/ready` is not evidence
+    /// that the Runtime changed hands.
+    fn observe(&mut self, epoch: u64, presence: &Presence, launcher: Option<&Arc<dyn ResolvedRuntimeLauncher>>) {
+        if self.stopping || self.epoch != epoch {
             return;
         }
         match presence {
@@ -192,6 +198,32 @@ impl LaunchState {
 
     fn launch_pending(&self) -> bool {
         self.attempt.as_ref().is_some_and(|attempt| attempt.watch.pending())
+    }
+
+    /// Starts a bootstrap run: the last adoption no longer stands, and no probe
+    /// sent before now may record what it saw. Returns the run's epoch.
+    fn begin_run(&mut self) -> u64 {
+        self.adoption = None;
+        self.epoch += 1;
+        self.epoch
+    }
+
+    /// Forgets the Runtime a stop or removal ended. The fence stays up until
+    /// the caller finishes, and the epoch is kept so no earlier probe can
+    /// match it again.
+    fn forget(&mut self) {
+        *self = LaunchState {
+            stopping: self.stopping,
+            epoch: self.epoch,
+            ..LaunchState::default()
+        };
+    }
+
+    /// Ends a stop or removal. A probe still in flight saw the Runtime from
+    /// before it, so it may no longer record what it saw.
+    fn finish_stopping(&mut self) {
+        self.stopping = false;
+        self.epoch += 1;
     }
 
     fn retain_completed_attempt_liveness(&mut self) {
@@ -260,7 +292,7 @@ impl RuntimeHost {
             });
         let mut state = self.launched_runtime();
         match &outcome {
-            CliOutcome::Completed => *state = LaunchState::default(),
+            CliOutcome::Completed => state.forget(),
             CliOutcome::Refused { .. } => {
                 // The service now carries another identity. That revokes stop
                 // authority but does not prove this shell's Runtime is gone, so
@@ -268,21 +300,26 @@ impl RuntimeHost {
                 state.retain_completed_attempt_liveness();
                 state.attempt = None;
                 state.owner = None;
-                state.stopping = false;
             }
-            CliOutcome::Failed { .. } | CliOutcome::Unrunnable => state.stopping = false,
+            CliOutcome::Failed { .. } | CliOutcome::Unrunnable => {}
         }
+        state.finish_stopping();
         outcome
     }
 
     /// Whether the origin is still served by the Runtime the last bootstrap
     /// adopted, judged by the same presence contract. Every probe also records
-    /// who owns the origin now.
+    /// who owns the origin now, unless a bootstrap run began or a stop or
+    /// removal ended while it was in flight.
     pub async fn is_serving(&self, origin: &LoopbackOrigin) -> bool {
-        let Some(adoption) = self.launched_runtime().adoption.clone() else {
-            return false;
+        let (adoption, epoch) = {
+            let state = self.launched_runtime();
+            let Some(adoption) = state.adoption.clone() else {
+                return false;
+            };
+            (adoption, state.epoch)
         };
-        let presence = self.observe_presence(origin, adoption.launcher.as_ref()).await;
+        let presence = self.observe_presence(epoch, origin, adoption.launcher.as_ref()).await;
         presence == adoption.presence
     }
 
@@ -352,7 +389,7 @@ impl RuntimeHost {
 
     /// Runs the state machine once and returns its terminal status.
     pub async fn bootstrap(&self, sink: &dyn StatusSink, trigger: BootstrapTrigger) -> BootstrapStatus {
-        self.launched_runtime().adoption = None;
+        let run = self.launched_runtime().begin_run();
         let (origin, resolved_launcher) = match self.resolve_origin().await {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -372,7 +409,7 @@ impl RuntimeHost {
         // This app's Runtime and any Runtime that is not a desktop predecessor
         // are adopted. A predecessor with another desktop identity is replaced
         // only by this app's `vibe start`, and only when this run may hand over.
-        let presence = self.observe_presence(&origin, resolved_launcher.as_ref()).await;
+        let presence = self.observe_presence(run, &origin, resolved_launcher.as_ref()).await;
         match presence {
             Presence::Mine { ready: true } | Presence::Unmanaged => {
                 return self
@@ -454,7 +491,7 @@ impl RuntimeHost {
             // Read before the probe, so a predecessor judged below was seen
             // after this app's helper had exited.
             let settled = !self.launched_runtime().launch_pending();
-            let presence = self.observe_presence(&origin, Some(&launcher)).await;
+            let presence = self.observe_presence(run, &origin, Some(&launcher)).await;
             match presence {
                 Presence::Mine { ready: true } => {
                     return self
@@ -542,14 +579,17 @@ impl RuntimeHost {
         .map_err(|_| LaunchError::EndpointOutput)?
     }
 
+    /// Probes the origin, and records the answer only if `epoch`, read when
+    /// the probe was sent, is still current.
     async fn observe_presence(
         &self,
+        epoch: u64,
         origin: &LoopbackOrigin,
         launcher: Option<&Arc<dyn ResolvedRuntimeLauncher>>,
     ) -> Presence {
         let expected = launcher.and_then(|launcher| launcher.expected_runtime_id());
         let presence = self.probe.presence(origin, expected).await;
-        self.launched_runtime().observe(&presence, launcher);
+        self.launched_runtime().observe(epoch, &presence, launcher);
         presence
     }
 
@@ -587,10 +627,9 @@ impl RuntimeHost {
     fn finish_removal(&self, outcome: RemovalOutcome) {
         let mut state = self.launched_runtime();
         if outcome == RemovalOutcome::Removed {
-            *state = LaunchState::default();
-        } else {
-            state.stopping = false;
+            state.forget();
         }
+        state.finish_stopping();
     }
 
     async fn remove_verified(&self, active_origin: Option<&LoopbackOrigin>) -> RemovalOutcome {
@@ -610,10 +649,7 @@ impl RuntimeHost {
             CliOutcome::Unrunnable if presence == Presence::Absent => return RemovalOutcome::Unverified,
             _ => return RemovalOutcome::Kept,
         }
-        *self.launched_runtime() = LaunchState {
-            stopping: true,
-            ..LaunchState::default()
-        };
+        self.launched_runtime().forget();
         match run_blocking(move || resolved.remove_backends()).await {
             CliOutcome::Completed => {}
             CliOutcome::Refused { .. } => return RemovalOutcome::Kept,
@@ -824,7 +860,8 @@ mod tests {
 
         let origin = LoopbackOrigin::parse(ORIGIN).expect("test origin");
         host.launched_runtime().owner = None;
-        host.observe_presence(&origin, Some(&resolved)).await;
+        let epoch = host.launched_runtime().epoch;
+        host.observe_presence(epoch, &origin, Some(&resolved)).await;
         assert!(
             !host.has_owned_runtime(),
             "a probe during a stop must not restore stop authority"

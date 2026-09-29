@@ -1061,9 +1061,10 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 break;
             }
             let ready = host.is_serving(&origin).await;
-            // Window recreation can transfer ownership while the network probe
-            // is pending. The superseded monitor must not mutate the new
-            // bootstrap run's launch ownership after the await point.
+            // Window recreation or a stop can take over while the probe is
+            // pending. The host has already dropped the probe's observation;
+            // the superseded monitor must not touch the tray or start a
+            // recovery either.
             if activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR
                 || generation.load(Ordering::SeqCst) != observed_generation
             {

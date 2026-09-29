@@ -21,6 +21,7 @@ use avibe_runtime_host::{
     CliOutcome, HealthProbe, LaunchError, LaunchExit, LaunchWatch, LaunchedRuntime, LoopbackOrigin, Presence,
     RemovalOutcome, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
 };
+use tokio::sync::Notify;
 
 use BootstrapTrigger::{Launch, Recovery, Retry};
 
@@ -103,6 +104,39 @@ impl HealthProbe for FakeProbe {
             Served::Ready(Some(runtime_id)) => classify(runtime_id, true),
             Served::UiMismatch(runtime_id) => classify(runtime_id, false),
         }
+    }
+}
+
+/// Answers like `inner`, except that probe call `held` answers only once the
+/// test releases it: a probe still in flight while the host moves on.
+struct HeldProbe {
+    inner: Arc<FakeProbe>,
+    held: usize,
+    in_flight: Notify,
+    release: Notify,
+}
+
+impl HeldProbe {
+    fn holding(held: usize, script: impl IntoIterator<Item = Served>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: FakeProbe::serving(script),
+            held,
+            in_flight: Notify::new(),
+            release: Notify::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl HealthProbe for HeldProbe {
+    async fn presence(&self, origin: &LoopbackOrigin, expected: Option<&str>) -> Presence {
+        let call = self.inner.calls();
+        let presence = self.inner.presence(origin, expected).await;
+        if call == self.held {
+            self.in_flight.notify_one();
+            self.release.notified().await;
+        }
+        presence
     }
 }
 
@@ -749,6 +783,59 @@ async fn the_monitor_serves_only_the_adopted_presence_and_rereads_the_owner_on_e
     assert!(!host.is_serving(&origin()).await);
     assert!(host.has_owned_runtime());
     assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
+    assert_eq!(launcher.stops(), [bundle_id()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_monitor_probe_overtaken_by_a_new_run_or_a_stop_never_rewrites_ownership() {
+    // Window recreation: the monitor's probe found nothing, and a new run
+    // adopted this app's Runtime before that answer landed.
+    let launcher = FakeLauncher::bundled();
+    let probe = HeldProbe::holding(
+        1,
+        [
+            Served::Ready(Some(bundle_id())),
+            Served::Nothing,
+            Served::Ready(Some(bundle_id())),
+        ],
+    );
+    let host = Arc::new(RuntimeHost::new(probe.clone(), launcher.clone(), fast_settings()));
+    boot(&host, Launch).await;
+    let monitor = tokio::spawn({
+        let host = host.clone();
+        async move { host.is_serving(&origin()).await }
+    });
+    probe.in_flight.notified().await;
+    assert_eq!(boot(&host, Recovery).await.notice.code, BootstrapNoticeCode::Adopted);
+    probe.release.notify_one();
+    monitor.await.expect("monitor probe");
+    assert!(
+        host.has_owned_runtime(),
+        "a stale Absent must not revoke the new run's stop authority"
+    );
+
+    // Stop: the monitor's probe found this app's Runtime serving, and the stop
+    // completed before that answer landed.
+    let launcher = FakeLauncher::bundled();
+    let probe = HeldProbe::holding(1, [Served::Ready(Some(bundle_id()))]);
+    let host = Arc::new(RuntimeHost::new(probe.clone(), launcher.clone(), fast_settings()));
+    boot(&host, Launch).await;
+    let monitor = tokio::spawn({
+        let host = host.clone();
+        async move { host.is_serving(&origin()).await }
+    });
+    probe.in_flight.notified().await;
+    assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
+    probe.release.notify_one();
+    monitor.await.expect("monitor probe");
+    assert!(
+        !host.has_owned_runtime(),
+        "a stale Mine must not restore stop authority over a stopped Runtime"
+    );
+    // Nor the evidence that a Runtime may still live: with no origin to ask,
+    // uninstall leaves the choice to the user instead of keeping every file.
+    launcher.stop_resolving();
+    assert_eq!(host.remove_private_runtime(None).await, RemovalOutcome::Unverified);
     assert_eq!(launcher.stops(), [bundle_id()]);
 }
 
