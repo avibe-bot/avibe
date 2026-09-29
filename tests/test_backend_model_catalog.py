@@ -1345,13 +1345,13 @@ def test_fetch_remote_catalog_rejects_unknown_backend(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("position", "model", "label"),
+    ("position", "model", "label", "expected_efforts"),
     [
-        (0, "gpt-6-astra", "GPT-6-Astra"),
-        (1, "gpt-6.1-sol", "GPT-6.1-Sol"),
+        (0, "gpt-6-astra", "GPT-6-Astra", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        (1, "gpt-6.1-sol", "GPT-6.1-Sol", ["low", "medium", "high", "xhigh", "max"]),
     ],
 )
-def test_bundled_codex_leading_models_have_native_reasoning_efforts(position, model, label):
+def test_bundled_codex_leading_models_have_declared_reasoning_efforts(position, model, label, expected_efforts):
     snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
 
     assert snapshot["models"][position] == model
@@ -1359,7 +1359,7 @@ def test_bundled_codex_leading_models_have_native_reasoning_efforts(position, mo
     assert [
         entry["value"]
         for entry in snapshot["reasoning_options"][model]
-    ] == ["__default__", "low", "medium", "high", "xhigh", "max", "ultra"]
+    ] == ["__default__", *expected_efforts]
 
 
 def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):
