@@ -28,9 +28,10 @@ pointer ownership that is released only by those terminal events, so a withheld
 
 - Remove pointer capture and the `activePointerId` lifetime state. Keep only a
   matching primary-button press record. New pointerdown, changed selection
-  text, scrolling, action dismissal, component teardown, and a 700ms expiry
-  clear the record; an unchanged selectionchange can preserve it briefly so a
-  valid tap is not lost.
+  text, scrolling, action dismissal, and component teardown clear the record.
+  A selectionchange during a press cancels any queued debounce, preserves the
+  rendered snapshot briefly, and either releases normally or is re-computed
+  when the bounded 700ms grace period expires.
 - Track the first and last client rects of the selection instead of only the
   aggregate range rect.
 - Place the touch toolbar above the first line or below the last line with a

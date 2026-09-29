@@ -150,6 +150,8 @@ export const SelectionQuoteToolbar: React.FC<{
         // Keep the rendered snapshot alive for a short time so a browser
         // selectionchange between pointerdown and pointerup cannot cancel a
         // valid tap. The expiry still releases missing terminal events.
+        window.clearTimeout(timer);
+        timer = 0;
         press.deferred = true;
         armPressExpiry();
         return;
@@ -235,7 +237,7 @@ export const SelectionQuoteToolbar: React.FC<{
   };
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>, run: () => void) => {
     const press = pressRef.current;
-    const matchesPress = (
+    const mismatch = (
       !press
       || !e.isPrimary
       || e.button !== 0
@@ -244,13 +246,13 @@ export const SelectionQuoteToolbar: React.FC<{
     );
     const rect = e.currentTarget.getBoundingClientRect();
     const releasedInside = (
-      !matchesPress
+      !mismatch
       && e.clientX >= rect.left
       && e.clientX <= rect.right
       && e.clientY >= rect.top
       && e.clientY <= rect.bottom
     );
-    clearPress(releasedInside ? false : true);
+    clearPress(!releasedInside);
     if (!releasedInside) {
       return;
     }
@@ -273,8 +275,11 @@ export const SelectionQuoteToolbar: React.FC<{
   const preferredBelowTop = clampTop(sel.last.bottom + placementGap);
   // Clamp by the on-screen (capped) width so a toolbar wider than the viewport
   // centers + scrolls internally instead of pushing an edge off-screen.
-  const half = Math.min(width, window.innerWidth - 2 * EDGE) / 2;
-  const left = Math.min(Math.max(sel.left, EDGE + half), window.innerWidth - EDGE - half);
+  const leftHalf = Math.min(width, window.innerWidth - 2 * EDGE) / 2;
+  const left = Math.min(
+    Math.max(sel.left, EDGE + leftHalf),
+    window.innerWidth - EDGE - leftHalf,
+  );
 
   let top: number;
   if (!isTouch) {
@@ -288,9 +293,9 @@ export const SelectionQuoteToolbar: React.FC<{
     // the first line nor the area below the last line may fit, while the
     // middle band between those two regions still can.
     const measuredWidth = width || Math.max(0, window.innerWidth - 2 * EDGE);
-    const half = Math.min(measuredWidth, window.innerWidth - 2 * EDGE) / 2;
-    const toolbarLeft = left - half;
-    const toolbarRight = left + half;
+    const measuredHalf = Math.min(measuredWidth, window.innerWidth - 2 * EDGE) / 2;
+    const toolbarLeft = left - measuredHalf;
+    const toolbarRight = left + measuredHalf;
     const safeRects = [sel.first, sel.last].map((rect) => ({
       top: rect.top - SELECTION_HANDLE_GAP,
       bottom: rect.bottom + SELECTION_HANDLE_GAP,
@@ -328,8 +333,6 @@ export const SelectionQuoteToolbar: React.FC<{
       overlapArea(candidateTop) < overlapArea(best) ? candidateTop : best
     ));
   }
-  // Keep the toolbar on-screen vertically too, so it stays visible (and the
-  // user can still act) when the selection is scrolled near a viewport edge.
 
   const itemClass = 'h-9 gap-1.5 rounded-none px-3 text-[13px] font-medium';
 

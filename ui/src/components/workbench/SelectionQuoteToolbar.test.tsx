@@ -222,6 +222,24 @@ describe('chat selection action gesture lifetime', () => {
     expect(quote).toHaveBeenCalledExactlyOnceWith(TEXT);
   });
 
+  it('cancels a pending recompute when a press defers selection clearing', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    fireEvent(document, new Event('selectionchange'));
+    act(() => vi.advanceTimersByTime(50));
+    fireEvent.pointerDown(button, press);
+    window.getSelection()!.removeAllRanges();
+    fireEvent(document, new Event('selectionchange'));
+
+    act(() => vi.advanceTimersByTime(100));
+    expect(screen.queryByRole('toolbar')).not.toBeNull();
+
+    fireEvent.pointerUp(button, press);
+
+    expect(quote).toHaveBeenCalledExactlyOnceWith(TEXT);
+  });
+
   it.each([
     ['secondary button', { ...press, button: 2, isPrimary: false }],
     ['without a matching press', null],
