@@ -70,8 +70,8 @@ Files, editor, and terminal open as windows beside your chat, all in one browser
 
 Sign in each subscription and add each API key once — official vendors, relays, aggregators, self-hosted endpoints, all welcome. Switch an agent to gateway mode and Avibe's local gateway routes its models through them in the order you set.
 
-- **Set up once, use it in every agent.** One sign-in or key feeds Claude Code, Codex, and OpenCode at the same time — no copying credentials into three configs.
-- **Mix and match models.** GPT inside Claude Code, Claude inside Codex — put any source's models on any agent's list, and the gateway translates between protocols.
+- **Set up once, use it in every agent.** One gateway-held sign-in or key feeds Claude Code, Codex, and OpenCode at the same time — no copying credentials into three configs. (A subscription you leave to its own CLI serves only that CLI.)
+- **Mix and match models.** GPT inside Claude Code, Claude inside Codex — put any gateway-held source's models on any agent's list, and the gateway translates between protocols.
 - **Plan runs dry? The next one picks it up.** If a source hits a quota, rate limit, or network failure before it starts answering, the next source in your route takes the request — no retry, no babysitting. Once your first choice recovers, the next turn goes back to it.
 - **Route it your way.** Give each agent a default source order, then pin any single model to its own route chain.
 - **Move in with one click.** Already signed in to a supported CLI? Bring that login over with your explicit OK. Credentials and routes stay on your machine.
@@ -144,7 +144,7 @@ Add an API key or token once — or let an Agent request a missing one for you t
 |---|---|
 | **Local-first, actually yours** | Your AI partner, its execution, your keys, and your code stay on your machine. `avibe.bot` issues identity and a secure tunnel; it never proxies your workspace. |
 | **Every first-party agent, one home** | Drive the *official* Claude Code, Codex, and OpenCode. Switch per task, per project, or per channel — no vendor silo. |
-| **Every subscription, one team** | Model Hub pools your plans and keys for all three agents, lets them mix models freely, fails over on its own, and shows what each one is really worth. |
+| **Every subscription, one team** | Model Hub pools your plans and keys behind one gateway, lets agents mix models, fails over on its own, and shows what each one is really worth. |
 | **Browser and chat, both first-class** | Workbench, phone, Slack, Discord, Telegram, WeChat, and Lark / Feishu — same agents, same machine. |
 | **No middleman tax** | No extra reasoning loop sits between you and your agent. Every token goes straight to the agent you chose. |
 
