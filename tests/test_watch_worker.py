@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import suppress
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -295,6 +296,43 @@ def test_posix_watch_worker_leaves_identity_anchor_if_supervisor_is_killed(
             pass
         if process.poll() is None:
             process.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX identity anchor")
+def test_posix_identity_anchor_writes_no_bytecode_into_its_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A desktop Runtime verifies its installed tree byte for byte, so one .pyc
+    # written by a helper makes the next launch repair it. The anchor's
+    # environment is replaced by the marker alone, so it cannot inherit the
+    # caller's PYTHONDONTWRITEBYTECODE. Run it from a scratch tree whose own
+    # psutil stub stands in for the modules it would cache next to itself.
+    tree = tmp_path / "runtime"
+    tree.mkdir()
+    script = tree / "watch_worker.py"
+    shutil.copyfile(watch_worker.__file__, script)
+    imported = tree / "imported"
+    (tree / "psutil.py").write_text(
+        f"from pathlib import Path\nPath({str(imported)!r}).write_text('imported')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watch_worker, "__file__", str(script))
+    monkeypatch.setenv(PROCESS_IDENTITY_ENV, "bytecode-free-anchor")
+
+    anchor = watch_worker._start_posix_identity_anchor()
+    try:
+        assert anchor is not None
+        deadline = time.monotonic() + 10
+        while not imported.exists() and time.monotonic() < deadline:
+            assert anchor.poll() is None
+            time.sleep(0.05)
+        # Bytecode is cached before a module runs, so the stub's side effect
+        # proves any write would already have happened.
+        assert imported.exists()
+        assert not (tree / "__pycache__").exists()
+    finally:
+        watch_worker._stop_posix_identity_anchor(anchor)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object contract")
