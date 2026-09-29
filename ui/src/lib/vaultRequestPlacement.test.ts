@@ -98,17 +98,17 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect(placed.byMessageId.get('agent-later')?.map((item) => item.id)).toEqual(['p']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
-  it('keeps an unresolved explicit reply id unanchored', () => {
+  it('keeps an unresolved explicit reply id out of the transcript', () => {
     const placed = placeVaultProvisionRequests(
       [message('unrelated-reply', '2026-07-30T10:01:00Z')],
       [request('missing-reply', 'provision', '2026-07-30T10:00:00Z', 'trimmed-reply')],
     );
 
     expect(placed.byMessageId).toEqual(new Map());
-    expect(placed.unanchored.map((item) => item.id)).toEqual(['missing-reply']);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('anchors legacy requests to the first Agent reply after creation', () => {
@@ -129,7 +129,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect(placed.byMessageId.get(output.id)?.map((item) => item.id)).toEqual(['p']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('skips interim narration when inferring the request owner', () => {
@@ -181,7 +181,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect(placed.byMessageId.get(detached.id)?.map((item) => item.id)).toEqual(['p']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('uses the message id clock when the reply shares the request second', () => {
@@ -194,7 +194,7 @@ describe('placeVaultProvisionRequests', () => {
     ]);
 
     expect(placed.byMessageId.get(sameSecondMessages[1].id)?.map((item) => item.id)).toEqual(['p']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('does not round a request back onto an earlier reply in the same millisecond', () => {
@@ -207,7 +207,7 @@ describe('placeVaultProvisionRequests', () => {
 
     expect(placed.byMessageId.has(earlierReply.id)).toBe(false);
     expect(placed.byMessageId.get(ownerReply.id)?.map((item) => item.id)).toEqual(['p']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('does not cross a later user or harness input-turn boundary', () => {
@@ -221,7 +221,7 @@ describe('placeVaultProvisionRequests', () => {
       ]);
 
       expect([...placed.byMessageId]).toEqual([]);
-      expect(placed.unanchored.map((item) => item.id)).toEqual([`p-${boundaryKind}`]);
+      expect(placed.awaitingReply).toEqual([]);
     }
   });
 
@@ -246,7 +246,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['late']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('resolves a native requester message id to its durable transcript row', () => {
@@ -258,7 +258,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['native-late']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('scopes native requester matching to the originating platform', () => {
@@ -284,7 +284,7 @@ describe('placeVaultProvisionRequests', () => {
 
     expect(placed.byMessageId.get(slackReply.id)?.map((item) => item.id)).toEqual(['native-platform']);
     expect(placed.byMessageId.has(webReply.id)).toBe(false);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('uses a resolved durable source override for stable turn identities', () => {
@@ -297,7 +297,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['turn-late']);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('does not cross a later input when resolving from the requester message', () => {
@@ -310,7 +310,9 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect([...placed.byMessageId]).toEqual([]);
-    expect(placed.unanchored.map((item) => item.id)).toEqual(['late']);
+    // Created after the latest turn's reply: the newest pending state, so it
+    // waits at the tail rather than borrowing that unrelated reply.
+    expect(placed.awaitingReply.map((item) => item.id)).toEqual(['late']);
   });
 
   it('does not timestamp-place an unresolved explicit source onto another turn', () => {
@@ -321,7 +323,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect([...placed.byMessageId]).toEqual([]);
-    expect(placed.unanchored.map((item) => item.id)).toEqual(['missing-source']);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('keeps a delayed reply when the next input arrives after request creation', () => {
@@ -336,7 +338,7 @@ describe('placeVaultProvisionRequests', () => {
 
     expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['late']);
     expect(placed.byMessageId.has(unrelatedReply.id)).toBe(false);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('uses transcript time for queued source-turn boundaries', () => {
@@ -356,7 +358,7 @@ describe('placeVaultProvisionRequests', () => {
 
     expect(placed.byMessageId.get(ownerReply.id)?.map((item) => item.id)).toEqual(['late']);
     expect(placed.byMessageId.has(unrelatedReply.id)).toBe(false);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('ignores a stale requester message when a later turn owns the request', () => {
@@ -371,7 +373,7 @@ describe('placeVaultProvisionRequests', () => {
 
     expect(placed.byMessageId.get(actualReply.id)?.map((item) => item.id)).toEqual(['late']);
     expect(placed.byMessageId.has(oldReply.id)).toBe(false);
-    expect(placed.unanchored).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('keeps approvals out of message placement and leaves unmatched provisions visible', () => {
@@ -381,7 +383,7 @@ describe('placeVaultProvisionRequests', () => {
     ]);
 
     expect([...placed.byMessageId]).toEqual([]);
-    expect(placed.unanchored.map((item) => item.id)).toEqual(['future']);
+    expect(placed.awaitingReply.map((item) => item.id)).toEqual(['future']);
   });
 
   it('does not attach a request whose owning reply may be outside the retained window', () => {
@@ -391,7 +393,7 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect([...placed.byMessageId]).toEqual([]);
-    expect(placed.unanchored.map((item) => item.id)).toEqual(['older']);
+    expect(placed.awaitingReply).toEqual([]);
   });
 
   it('uses transcript-entry time when a queued row was accepted after the request', () => {
@@ -408,6 +410,38 @@ describe('placeVaultProvisionRequests', () => {
     );
 
     expect([...placed.byMessageId]).toEqual([]);
-    expect(placed.unanchored.map((item) => item.id)).toEqual(['trimmed']);
+    expect(placed.awaitingReply).toEqual([]);
+  });
+
+  it('shows a running turn request at the tail until its reply lands', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const interim = { ...message('agent-interim', '2026-07-30T10:01:30Z'), type: 'interim' };
+    const live = request('live', 'provision', '2026-07-30T10:01:00Z', null, { turn_id: 'turn-live' });
+
+    const running = placeVaultProvisionRequests([source, interim], [live]);
+    expect([...running.byMessageId]).toEqual([]);
+    expect(running.awaitingReply.map((item) => item.id)).toEqual(['live']);
+
+    const reply = { ...message('owner-reply', '2026-07-30T10:02:00Z'), metadata: { turn_id: 'turn-live' } };
+    const settled = placeVaultProvisionRequests([source, interim, reply], [live]);
+    expect(settled.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['live']);
+    expect(settled.awaitingReply).toEqual([]);
+  });
+
+  it('stops waiting at the tail once a later input starts another turn', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const queuedInput = message(
+      'queued-input',
+      '2026-07-30T10:00:30Z',
+      'user',
+      '2026-07-30T10:02:00Z',
+    );
+    const placed = placeVaultProvisionRequests(
+      [source, queuedInput],
+      [request('superseded', 'provision', '2026-07-30T10:01:00Z')],
+    );
+
+    expect([...placed.byMessageId]).toEqual([]);
+    expect(placed.awaitingReply).toEqual([]);
   });
 });

@@ -4,27 +4,24 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import type { VaultRequest } from '@/context/ApiContext';
+import { isVaultApprovalRequest } from '@/lib/vaultRequestPlacement';
 import { buttonVariants } from './button-variants';
 import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
 
-const isApproval = (request: VaultRequest): boolean => {
-  const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
-  return type === 'access' || type === 'sign';
-};
-
 /**
- * In-scroll list of a session's pending approval cards (design: Form A), rendered at the end of
- * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Each card is
- * observed individually so the floating bar reflects exactly which approvals have scrolled
- * off-viewport.
+ * In-scroll list of the pending request cards that belong at the end of the chat transcript
+ * (design: Form A): approvals, plus provision forms still waiting for their turn's reply. The
+ * caller decides which requests belong here. Each APPROVAL card is observed individually so the
+ * floating bar reflects exactly which approvals have scrolled off-viewport; a provision form
+ * never enters that bar.
  */
 export const VaultChatRequests: React.FC<{
   requests: VaultRequest[];
   onResolved: () => void;
   onOffscreenApprovalsChange?: (offscreen: VaultRequest[]) => void;
 }> = ({ requests, onResolved, onOffscreenApprovalsChange }) => {
-  const approvalRequests = useMemo(() => requests.filter(isApproval), [requests]);
+  const approvalRequests = useMemo(() => requests.filter(isVaultApprovalRequest), [requests]);
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const offscreen = useRef<Set<string>>(new Set());
 
@@ -58,17 +55,21 @@ export const VaultChatRequests: React.FC<{
     report();
   }, [approvalRequests, report]);
 
-  if (approvalRequests.length === 0) return null;
+  if (requests.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
-      {approvalRequests.map((request) => (
+      {requests.map((request) => (
         <div
           key={request.id}
           data-request-id={request.id}
-          ref={(el) => {
-            if (el) cardRefs.current.set(request.id, el);
-            else cardRefs.current.delete(request.id);
-          }}
+          ref={
+            isVaultApprovalRequest(request)
+              ? (el) => {
+                  if (el) cardRefs.current.set(request.id, el);
+                  else cardRefs.current.delete(request.id);
+                }
+              : undefined
+          }
         >
           <VaultRequestCard request={request} onResolved={onResolved} />
         </div>

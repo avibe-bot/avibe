@@ -19,7 +19,8 @@ export function isVaultApprovalRequest(request: VaultRequest): boolean {
 
 export type VaultProvisionPlacement = {
   byMessageId: Map<string, VaultRequest[]>;
-  unanchored: VaultRequest[];
+  /** Requests of the transcript's latest turn whose owning reply has not landed. */
+  awaitingReply: VaultRequest[];
 };
 
 function isAgentReplyWithExplicitProvenance(message: WorkbenchMessage): boolean {
@@ -100,6 +101,14 @@ function inferReplyWithinTurn(
   return undefined;
 }
 
+// Either clock counts: a queued input can be authored before the request and
+// still enter the transcript after it, starting the next turn.
+function inputFollowsRequest(messages: WorkbenchMessage[], requestTime: number): boolean {
+  return messages.some((message) => isInputTurn(message) && (
+    messageOrderTimeMs(message) >= requestTime || transcriptOrderTimeMs(message) >= requestTime
+  ));
+}
+
 function inferReplyFromSourceMessage(
   messages: WorkbenchMessage[],
   sourceMessageId: string,
@@ -140,8 +149,9 @@ function inferReplyFromSourceMessage(
  *
  * Newer producers can set `message_id` explicitly. Historical CLI-created rows
  * do not, so use the session's serialized turn order: the first Agent-authored
- * message created after the request is the reply that owns it. Requests without
- * either anchor remain visible at the transcript tail until a reply arrives.
+ * message created after the request is the reply that owns it. A request made
+ * during a turn that is still running has no owner yet; it waits at the
+ * transcript tail until its reply arrives or another input starts a new turn.
  */
 export function placeVaultProvisionRequests(
   messages: WorkbenchMessage[],
@@ -149,7 +159,7 @@ export function placeVaultProvisionRequests(
   sourceMessageIds: ReadonlyMap<string, string> = new Map(),
 ): VaultProvisionPlacement {
   const byMessageId = new Map<string, VaultRequest[]>();
-  const unanchored: VaultRequest[] = [];
+  const awaitingReply: VaultRequest[] = [];
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   const agentMessages = messages.filter(isAgentReplyWithExplicitProvenance);
   // Window coverage follows transcript-entry order. A queued row can be authored
@@ -200,9 +210,21 @@ export function placeVaultProvisionRequests(
         ?? (sourceUnresolved || Number.isNaN(requestTime) || !windowCoversRequest
           ? undefined
           : inferReplyWithinTurn(messages, requestTime));
-    if (inferred) appendRequest(byMessageId, inferred.id, request);
-    else unanchored.push(request);
+    if (inferred) {
+      appendRequest(byMessageId, inferred.id, request);
+      continue;
+    }
+    // Without an owner, only a request from the latest loaded turn belongs at the
+    // tail. A named but unloaded anchor, an uncovered window, or a later input
+    // means the request's turn has ended, so it must not sit below newer turns.
+    if (
+      !explicitReplyUnresolved && !sourceUnresolved &&
+      !Number.isNaN(requestTime) && windowCoversRequest &&
+      !inputFollowsRequest(messages, requestTime)
+    ) {
+      awaitingReply.push(request);
+    }
   }
 
-  return { byMessageId, unanchored };
+  return { byMessageId, awaitingReply };
 }

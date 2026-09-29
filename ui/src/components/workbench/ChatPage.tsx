@@ -550,10 +550,11 @@ export const ChatPage: React.FC = () => {
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
   );
-  // Provision cards belong beside the Agent reply that owns them. Requests whose
-  // owning message is outside the retained window stay unanchored here; they are
-  // intentionally not moved into the transcript footer, so opening a Session
-  // never turns a historical form into a bottom-fixed card or a scroll target.
+  // Provision cards belong beside the Agent reply that owns them. Only a request
+  // from the latest turn that no reply has claimed yet (typically one the running
+  // Agent just made) waits in the transcript footer. Requests whose owner is
+  // outside the retained window stay out of it, so opening a Session never turns
+  // a historical form into a bottom card.
   // Mirror the latest messages into a ref (updated every render) so effects that
   // must NOT re-run on every message change — chiefly the deep-link jump effect,
   // whose around-fetch would otherwise be cancelled by an SSE/reconcile update —
@@ -589,10 +590,18 @@ export const ChatPage: React.FC = () => {
   // detaching the tail while the reader is scrolled up (see MAX_RETAINED_MESSAGES).
   // Suppresses live append/reconcile and shows the jump-to-latest button, which
   // reloads the tail. Consumers: the SSE-append skip, reconcile skip, the
-  // send-path reloadLatest, and the inbox mark-read gate.
+  // send-path reloadLatest, the inbox mark-read gate, and the Vault footer.
   const [historicalWindow, setHistoricalWindow] = useState(false);
   const historicalWindowRef = useRef(false);
   historicalWindowRef.current = historicalWindow;
+  // The transcript footer holds every pending approval plus the provision forms
+  // still awaiting a reply. A detached window's end is not the live tail.
+  const footerVaultRequests = useMemo(() => {
+    const waiting = new Set(
+      historicalWindow ? [] : provisionPlacement.awaitingReply.map((request) => request.id),
+    );
+    return vaultRequests.filter((request) => isVaultApprovalRequest(request) || waiting.has(request.id));
+  }, [historicalWindow, provisionPlacement, vaultRequests]);
   // Realtime dictation context: the body of the latest Agent reply in this chat,
   // without Avibe's generated footer. A result row is persisted whole, so a
   // running Turn still reads the previous reply. A window detached from the live
@@ -3013,7 +3022,7 @@ export const ChatPage: React.FC = () => {
             // approve/deny buttons would write to a session that can't accept it.
             sessionId && !readOnly && capabilities.can_use_vault_secrets ? (
               <VaultChatRequests
-                requests={pendingApprovals}
+                requests={footerVaultRequests}
                 onResolved={refreshVaultRequests}
                 onOffscreenApprovalsChange={setOffscreenApprovals}
               />
