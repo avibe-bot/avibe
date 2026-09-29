@@ -275,6 +275,47 @@ describe('chat selection action gesture lifetime', () => {
     expect(top).toBe(800);
   });
 
+  it.each([
+    {
+      name: 'first line is near the top and the last line is below the viewport',
+      bounds: { top: 20, bottom: 1036, left: 40, right: 340, width: 300, height: 1016 },
+      lines: [
+        { top: 20, bottom: 56, left: 40, right: 340, width: 300, height: 36 },
+        { top: 1000, bottom: 1036, left: 40, right: 340, width: 300, height: 36 },
+      ],
+    },
+    {
+      name: 'first line is above the viewport and the last line is near the bottom',
+      bounds: { top: -120, bottom: 800, left: 40, right: 340, width: 300, height: 920 },
+      lines: [
+        { top: -120, bottom: -84, left: 40, right: 340, width: 300, height: 36 },
+        { top: 764, bottom: 800, left: 40, right: 340, width: 300, height: 36 },
+      ],
+    },
+    {
+      name: 'both endpoint lines are visible with a safe middle band',
+      bounds: { top: 80, bottom: 764, left: 40, right: 340, width: 300, height: 684 },
+      lines: [
+        { top: 80, bottom: 116, left: 40, right: 340, width: 300, height: 36 },
+        { top: 728, bottom: 764, left: 40, right: 340, width: 300, height: 36 },
+      ],
+    },
+  ])('avoids both endpoint hit regions when $name', ({ bounds, lines }) => {
+    selectionBounds = bounds;
+    selectionLineRects = lines;
+    mountToolbar();
+    const toolbar = screen.getByRole('toolbar');
+    const top = Number.parseFloat(toolbar.getAttribute('style')!.match(/top:\s*([^;]+)/)![1]);
+
+    for (const line of [lines[0], lines[lines.length - 1]]) {
+      const outsideHitRegion = (
+        top >= line.bottom + 44 + 8
+        || top + 36 <= line.top - 44 - 8
+      );
+      expect(outsideHitRegion).toBe(true);
+    }
+  });
+
   it('keeps desktop placement at the original selection gap', () => {
     coarsePointer = false;
     selectionBounds = { ...defaultBounds, top: 80, bottom: 116 };

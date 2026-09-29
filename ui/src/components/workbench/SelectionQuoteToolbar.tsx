@@ -260,45 +260,71 @@ export const SelectionQuoteToolbar: React.FC<{
 
   const toolbarHeight = height || TOOLBAR_H;
   const placementGap = isTouch ? SELECTION_HANDLE_GAP : GAP;
-  const roomAbove = sel.first.top >= toolbarHeight + placementGap + EDGE;
-  const roomBelow = window.innerHeight - sel.last.bottom >= toolbarHeight + placementGap + EDGE;
-  const preferBelow = (sel.top + sel.bottom) / 2 >= window.innerHeight / 2;
-  let below: boolean;
-  if (!isTouch) {
-    // Desktop has no OS selection menu — just prefer above, flip if no room.
-    below = !roomAbove;
-  } else if (preferBelow && roomBelow) {
-    // Keep the web toolbar toward the nearer viewport edge, away from the
-    // native selection menu around the screen center.
-    below = true;
-  } else if (!preferBelow && roomAbove) {
-    below = false;
-  } else if (roomBelow) {
-    below = true;
-  } else if (roomAbove) {
-    below = false;
-  } else {
-    // A very tall selection can leave neither side with a full safe slot.
-    // Dock to whichever viewport edge is farther from its corresponding
-    // selection handle; some visible action is better than hiding the bar.
-    const topEdge = EDGE;
-    const bottomEdge = Math.max(EDGE, window.innerHeight - toolbarHeight - EDGE);
-    const topDistance = sel.first.top - SELECTION_HANDLE_PADDING - (topEdge + toolbarHeight);
-    const bottomDistance = bottomEdge - (sel.last.bottom + SELECTION_HANDLE_PADDING);
-    below = bottomDistance >= topDistance;
-  }
   const topEdge = EDGE;
   const bottomEdge = Math.max(EDGE, window.innerHeight - toolbarHeight - EDGE);
-  const rawTop = below
-    ? sel.last.bottom + placementGap
-    : sel.first.top - toolbarHeight - placementGap;
-  // Keep the toolbar on-screen vertically too, so it stays visible (and the
-  // user can still act) when the selection is scrolled near a viewport edge.
-  const top = Math.min(Math.max(rawTop, topEdge), bottomEdge);
+  const clampTop = (rawTop: number) => Math.min(Math.max(rawTop, topEdge), bottomEdge);
+  const preferBelow = (sel.top + sel.bottom) / 2 >= window.innerHeight / 2;
+  const preferredAboveTop = clampTop(sel.first.top - toolbarHeight - placementGap);
+  const preferredBelowTop = clampTop(sel.last.bottom + placementGap);
   // Clamp by the on-screen (capped) width so a toolbar wider than the viewport
   // centers + scrolls internally instead of pushing an edge off-screen.
   const half = Math.min(width, window.innerWidth - 2 * EDGE) / 2;
   const left = Math.min(Math.max(sel.left, EDGE + half), window.innerWidth - EDGE - half);
+
+  let top: number;
+  if (!isTouch) {
+    // Desktop has no OS selection menu — just prefer above, flip if no room.
+    top = sel.first.top >= toolbarHeight + GAP + EDGE
+      ? preferredAboveTop
+      : preferredBelowTop;
+  } else {
+    // A toolbar is safe only when its full rectangle misses both endpoint
+    // handle regions. This matters for long selections: neither the area above
+    // the first line nor the area below the last line may fit, while the
+    // middle band between those two regions still can.
+    const measuredWidth = width || Math.max(0, window.innerWidth - 2 * EDGE);
+    const half = Math.min(measuredWidth, window.innerWidth - 2 * EDGE) / 2;
+    const toolbarLeft = left - half;
+    const toolbarRight = left + half;
+    const safeRects = [sel.first, sel.last].map((rect) => ({
+      top: rect.top - SELECTION_HANDLE_GAP,
+      bottom: rect.bottom + SELECTION_HANDLE_GAP,
+      left: rect.left - SELECTION_HANDLE_GAP,
+      right: rect.right + SELECTION_HANDLE_GAP,
+    }));
+    const intersectsSafeRect = (candidateTop: number) => safeRects.some((rect) => (
+      toolbarLeft < rect.right
+      && toolbarRight > rect.left
+      && candidateTop < rect.bottom
+      && candidateTop + toolbarHeight > rect.top
+    ));
+    const overlapArea = (candidateTop: number) => safeRects.reduce((total, rect) => {
+      const overlapWidth = Math.max(0, Math.min(toolbarRight, rect.right) - Math.max(toolbarLeft, rect.left));
+      const overlapHeight = Math.max(
+        0,
+        Math.min(candidateTop + toolbarHeight, rect.bottom) - Math.max(candidateTop, rect.top),
+      );
+      return total + overlapWidth * overlapHeight;
+    }, 0);
+    const middleStart = sel.first.bottom + SELECTION_HANDLE_GAP;
+    const middleEnd = sel.last.top - SELECTION_HANDLE_GAP - toolbarHeight;
+    const middleTop = middleStart <= middleEnd
+      ? clampTop((middleStart + middleEnd) / 2)
+      : null;
+    const candidates = [
+      preferBelow ? preferredBelowTop : preferredAboveTop,
+      preferBelow ? preferredAboveTop : preferredBelowTop,
+      ...(middleTop === null ? [] : [middleTop]),
+      topEdge,
+      bottomEdge,
+    ];
+    const safeCandidate = candidates.find((candidateTop) => !intersectsSafeRect(candidateTop));
+    top = safeCandidate ?? candidates.reduce((best, candidateTop) => (
+      overlapArea(candidateTop) < overlapArea(best) ? candidateTop : best
+    ));
+  }
+  // Keep the toolbar on-screen vertically too, so it stays visible (and the
+  // user can still act) when the selection is scrolled near a viewport edge.
 
   const itemClass = 'h-9 gap-1.5 rounded-none px-3 text-[13px] font-medium';
 

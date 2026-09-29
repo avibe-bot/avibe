@@ -27,19 +27,25 @@ pointer ownership that is released only by those terminal events, so a withheld
 ## Implementation
 
 - Remove pointer capture and the `activePointerId` lifetime state. Keep only a
-  matching primary-button press record, cleared by every new pointerdown,
-  selection change, scroll, and action dismissal.
+  matching primary-button press record. New pointerdown, changed selection
+  text, scrolling, action dismissal, component teardown, and a 700ms expiry
+  clear the record; an unchanged selectionchange can preserve it briefly so a
+  valid tap is not lost.
 - Track the first and last client rects of the selection instead of only the
   aggregate range rect.
 - Place the touch toolbar above the first line or below the last line with a
-  52px safe offset. If neither full slot fits, dock to the farther viewport
-  edge.
+  52px safe offset. Evaluate those positions, the safe middle band, and the
+  viewport edges as full-rectangle candidates; choose a candidate that does
+  not intersect either expanded endpoint handle region, or the candidate with
+  the smallest overlap when no fully safe slot exists.
 
 ## Validation
 
 - Component tests simulate pointerdown without any terminal pointer event,
   clear the selection, select new text, and activate the new toolbar.
 - Geometry tests verify the toolbar clears the native 44px handle region.
+- Long-selection geometry tests cover endpoint lines near or beyond both
+  viewport edges and the safe middle band between visible endpoints.
 - Focused UI tests, changed-file lint, and production build are required.
 - Playwright WebKit and Chromium probes must include the missing-terminal-event
   model; event-complete taps alone are not sufficient.
