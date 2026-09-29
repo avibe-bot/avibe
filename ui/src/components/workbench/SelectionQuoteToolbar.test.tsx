@@ -175,6 +175,45 @@ describe('chat selection action gesture lifetime', () => {
     expect(quote).toHaveBeenCalledExactlyOnceWith(NEXT_TEXT);
   });
 
+  it.each([
+    ['secondary button', { ...press, button: 2, isPrimary: false }],
+    ['without a matching press', null],
+  ])('does not activate %s', (_case, down) => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    if (down) fireEvent.pointerDown(button, down);
+    fireEvent.pointerUp(button, press);
+
+    expect(quote).not.toHaveBeenCalled();
+  });
+
+  it('does not activate when the pointer id or button does not match', () => {
+    mountToolbar();
+    const quoteButton = screen.getByRole('button', { name: 'chat.selection.quote' });
+    const askButton = screen.getByRole('button', { name: 'chat.selection.askInNew' });
+
+    fireEvent.pointerDown(quoteButton, press);
+    fireEvent.pointerUp(quoteButton, { ...press, pointerId: 2 });
+    expect(quote).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(quoteButton, press);
+    fireEvent.pointerUp(askButton, press);
+    expect(quote).not.toHaveBeenCalled();
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse a press after a new gesture starts elsewhere', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    fireEvent.pointerDown(button, press);
+    fireEvent.pointerDown(document.body, press);
+    fireEvent.pointerUp(button, press);
+
+    expect(quote).not.toHaveBeenCalled();
+  });
+
   it('hides after a cleared selection while scrolling', () => {
     const container = mountToolbar();
     expect(screen.queryByRole('toolbar')).not.toBeNull();
@@ -206,11 +245,13 @@ describe('chat selection action gesture lifetime', () => {
 
   it('keeps desktop placement at the original selection gap', () => {
     coarsePointer = false;
+    selectionBounds = { ...defaultBounds, top: 80, bottom: 116 };
+    selectionLineRects = [selectionBounds];
     mountToolbar();
     const toolbar = screen.getByRole('toolbar');
     const top = Number.parseFloat(toolbar.getAttribute('style')!.match(/top:\s*([^;]+)/)![1]);
 
-    expect(top).toBe(156);
+    expect(top).toBe(36);
   });
 
   it.each(['Enter', ' '])('preserves %s keyboard activation', (key) => {

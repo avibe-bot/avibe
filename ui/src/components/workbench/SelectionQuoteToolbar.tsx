@@ -64,6 +64,10 @@ export const SelectionQuoteToolbar: React.FC<{
   const [sel, setSel] = useState<SelectionState | null>(null);
   const [copied, setCopied] = useState(false);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const pressRef = useRef<{
+    pointerId: number;
+    button: HTMLButtonElement;
+  } | null>(null);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(TOOLBAR_H);
   // Touch (coarse pointer — phones AND tablets/iPads) is where the OS selection
@@ -110,7 +114,13 @@ export const SelectionQuoteToolbar: React.FC<{
     let timer = 0;
     // Debounce so the toolbar appears when the selection settles, not on every
     // intermediate range while dragging the selection / handles.
+    const onPointerDown = () => {
+      // A new gesture invalidates any prior button press, including one whose
+      // terminal event was delivered outside the toolbar or not delivered at all.
+      pressRef.current = null;
+    };
     const onSelectionChange = () => {
+      pressRef.current = null;
       window.clearTimeout(timer);
       timer = window.setTimeout(recompute, 150);
     };
@@ -118,14 +128,17 @@ export const SelectionQuoteToolbar: React.FC<{
     // at the new position once it settles. The toolbar persists as long as the
     // selection exists, so the user can scroll to move it clear of the OS menu.
     const onScroll = () => {
+      pressRef.current = null;
       setSel(null);
       window.clearTimeout(timer);
       timer = window.setTimeout(recompute, 150);
     };
+    document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('selectionchange', onSelectionChange);
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.clearTimeout(timer);
+      document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('selectionchange', onSelectionChange);
       container.removeEventListener('scroll', onScroll);
     };
@@ -146,6 +159,7 @@ export const SelectionQuoteToolbar: React.FC<{
   if (!onQuote && !onAskInNew && !isTouch) return null;
 
   const dismiss = () => {
+    pressRef.current = null;
     window.getSelection()?.removeAllRanges();
     setSel(null);
     setCopied(false);
@@ -170,23 +184,48 @@ export const SelectionQuoteToolbar: React.FC<{
 
   // Activate on pointerup (mouse + touch) and Enter/Space (keyboard). The
   // pointerdown preventDefault keeps the text selection alive. We deliberately
-  // do not retain pointer ownership here: iOS can deliver pointerdown for a
-  // touch near a selection handle without ever delivering pointerup, so any
-  // state that waits for an end event can permanently freeze this toolbar.
-  const activate = (run: () => void) => ({
-    onPointerDown: (e: React.PointerEvent) => e.preventDefault(),
-    onPointerUp: () => run(),
-    onKeyDown: (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        run();
-      }
-    },
-  });
+  // keep only a short-lived gesture match here: iOS can deliver pointerdown
+  // for a touch near a selection handle without ever delivering pointerup, so
+  // state that waits for an end event must not gate selection recomputation.
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    pressRef.current = null;
+    if (!e.isPrimary || e.button !== 0) return;
+    e.preventDefault();
+    pressRef.current = { pointerId: e.pointerId, button: e.currentTarget };
+  };
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>, run: () => void) => {
+    const press = pressRef.current;
+    pressRef.current = null;
+    if (
+      !press
+      || !e.isPrimary
+      || e.button !== 0
+      || press.pointerId !== e.pointerId
+      || press.button !== e.currentTarget
+    ) {
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (
+      e.clientX >= rect.left
+      && e.clientX <= rect.right
+      && e.clientY >= rect.top
+      && e.clientY <= rect.bottom
+    ) {
+      run();
+    }
+  };
+  const handleKeyDown = (e: React.KeyboardEvent, run: () => void) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      run();
+    }
+  };
 
   const toolbarHeight = height || TOOLBAR_H;
-  const roomAbove = sel.first.top >= toolbarHeight + SELECTION_HANDLE_GAP + EDGE;
-  const roomBelow = window.innerHeight - sel.last.bottom >= toolbarHeight + SELECTION_HANDLE_GAP + EDGE;
+  const placementGap = isTouch ? SELECTION_HANDLE_GAP : GAP;
+  const roomAbove = sel.first.top >= toolbarHeight + placementGap + EDGE;
+  const roomBelow = window.innerHeight - sel.last.bottom >= toolbarHeight + placementGap + EDGE;
   const preferBelow = (sel.top + sel.bottom) / 2 >= window.innerHeight / 2;
   let below: boolean;
   if (!isTouch) {
@@ -214,7 +253,6 @@ export const SelectionQuoteToolbar: React.FC<{
   }
   const topEdge = EDGE;
   const bottomEdge = Math.max(EDGE, window.innerHeight - toolbarHeight - EDGE);
-  const placementGap = isTouch ? SELECTION_HANDLE_GAP : GAP;
   const rawTop = below
     ? sel.last.bottom + placementGap
     : sel.first.top - toolbarHeight - placementGap;
@@ -244,7 +282,13 @@ export const SelectionQuoteToolbar: React.FC<{
       {/* Separators sit BEFORE each item after the first, so a hidden action
           never leaves a dangling divider at the edge of the bar. */}
       {onQuote && (
-        <Button variant="ghost" className={itemClass} {...activate(runQuote)}>
+        <Button
+          variant="ghost"
+          className={itemClass}
+          onPointerDown={handlePointerDown}
+          onPointerUp={(e) => handlePointerUp(e, runQuote)}
+          onKeyDown={(e) => handleKeyDown(e, runQuote)}
+        >
           <TextQuote className="size-3.5 text-muted" />
           {t('chat.selection.quote')}
         </Button>
@@ -252,7 +296,13 @@ export const SelectionQuoteToolbar: React.FC<{
       {onAskInNew && (
         <>
           {onQuote && <span className="h-5 w-px bg-border" />}
-          <Button variant="ghost" className={itemClass} {...activate(runAsk)}>
+          <Button
+            variant="ghost"
+            className={itemClass}
+            onPointerDown={handlePointerDown}
+            onPointerUp={(e) => handlePointerUp(e, runAsk)}
+            onKeyDown={(e) => handleKeyDown(e, runAsk)}
+          >
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
           </Button>
@@ -261,7 +311,13 @@ export const SelectionQuoteToolbar: React.FC<{
       {isTouch && (
         <>
           {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
-          <Button variant="ghost" className={itemClass} {...activate(runCopy)}>
+          <Button
+            variant="ghost"
+            className={itemClass}
+            onPointerDown={handlePointerDown}
+            onPointerUp={(e) => handlePointerUp(e, runCopy)}
+            onKeyDown={(e) => handleKeyDown(e, runCopy)}
+          >
             {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
             {t('chat.selection.copy')}
           </Button>

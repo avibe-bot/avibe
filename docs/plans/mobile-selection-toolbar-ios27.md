@@ -26,7 +26,9 @@ pointer ownership that is released only by those terminal events, so a withheld
 
 ## Implementation
 
-- Remove pointer capture and the `activePointerId` lifetime state.
+- Remove pointer capture and the `activePointerId` lifetime state. Keep only a
+  matching primary-button press record, cleared by every new pointerdown,
+  selection change, scroll, and action dismissal.
 - Track the first and last client rects of the selection instead of only the
   aggregate range rect.
 - Place the touch toolbar above the first line or below the last line with a
