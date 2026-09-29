@@ -310,12 +310,13 @@ curl -fsSL https://opencode.ai/install | bash
 ## 卸载
 
 ```bash
-vibe stop
+vibe_bin="$(command -v vibe)"   # 卸载前先记下 Avibe 的启动器
+"$vibe_bin" stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # 旧版安装
-vibe_bin="$(command -v vibe)" && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```

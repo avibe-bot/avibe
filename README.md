@@ -310,12 +310,13 @@ OpenCode asks for approval on every tool call unless `~/.config/opencode/opencod
 ## Uninstall
 
 ```bash
-vibe stop
+vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
+"$vibe_bin" stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
 uv tool uninstall avibe-os
-uv tool uninstall vibe-remote   # legacy installs
-vibe_bin="$(command -v vibe)" && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+uv tool uninstall vibe-remote   # legacy install
+rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```
