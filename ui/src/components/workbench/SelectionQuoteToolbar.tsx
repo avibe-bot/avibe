@@ -69,6 +69,7 @@ export const SelectionQuoteToolbar: React.FC<{
     pointerId: number;
     button: HTMLButtonElement;
     selectionText: string;
+    deferred: boolean;
   } | null>(null);
   const pressExpiryRef = useRef<number | null>(null);
   const [width, setWidth] = useState(0);
@@ -111,13 +112,15 @@ export const SelectionQuoteToolbar: React.FC<{
     });
   }, [containerRef]);
 
-  const clearPress = useCallback(() => {
+  const clearPress = useCallback((recomputeDeferred = true) => {
+    const deferred = pressRef.current?.deferred ?? false;
     if (pressExpiryRef.current !== null) {
       window.clearTimeout(pressExpiryRef.current);
       pressExpiryRef.current = null;
     }
     pressRef.current = null;
-  }, []);
+    if (deferred && recomputeDeferred) recompute();
+  }, [recompute]);
   const armPressExpiry = useCallback(() => {
     const press = pressRef.current;
     if (!press || pressExpiryRef.current !== null) return;
@@ -147,6 +150,7 @@ export const SelectionQuoteToolbar: React.FC<{
         // Keep the rendered snapshot alive for a short time so a browser
         // selectionchange between pointerdown and pointerup cannot cancel a
         // valid tap. The expiry still releases missing terminal events.
+        press.deferred = true;
         armPressExpiry();
         return;
       }
@@ -168,7 +172,7 @@ export const SelectionQuoteToolbar: React.FC<{
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.clearTimeout(timer);
-      clearPress();
+      clearPress(false);
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('selectionchange', onSelectionChange);
       container.removeEventListener('scroll', onScroll);
@@ -190,7 +194,7 @@ export const SelectionQuoteToolbar: React.FC<{
   if (!onQuote && !onAskInNew && !isTouch) return null;
 
   const dismiss = () => {
-    clearPress();
+    clearPress(false);
     window.getSelection()?.removeAllRanges();
     setSel(null);
     setCopied(false);
@@ -226,30 +230,31 @@ export const SelectionQuoteToolbar: React.FC<{
       pointerId: e.pointerId,
       button: e.currentTarget,
       selectionText: sel.text,
+      deferred: false,
     };
-    armPressExpiry();
   };
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>, run: () => void) => {
     const press = pressRef.current;
-    clearPress();
-    if (
+    const matchesPress = (
       !press
       || !e.isPrimary
       || e.button !== 0
       || press.pointerId !== e.pointerId
       || press.button !== e.currentTarget
-    ) {
-      return;
-    }
+    );
     const rect = e.currentTarget.getBoundingClientRect();
-    if (
-      e.clientX >= rect.left
+    const releasedInside = (
+      !matchesPress
+      && e.clientX >= rect.left
       && e.clientX <= rect.right
       && e.clientY >= rect.top
       && e.clientY <= rect.bottom
-    ) {
-      run();
+    );
+    clearPress(releasedInside ? false : true);
+    if (!releasedInside) {
+      return;
     }
+    run();
   };
   const handleKeyDown = (e: React.KeyboardEvent, run: () => void) => {
     if (e.key === 'Enter' || e.key === ' ') {

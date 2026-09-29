@@ -156,6 +156,18 @@ describe('chat selection action gesture lifetime', () => {
     expect(screen.queryByRole('toolbar')).toBeNull();
   });
 
+  it('keeps a complete gesture alive when the selection clears before release', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    fireEvent.pointerDown(button, press);
+    clearSelection();
+    fireEvent.pointerUp(button, press);
+
+    expect(quote).toHaveBeenCalledExactlyOnceWith(TEXT);
+    expect(screen.queryByRole('toolbar')).toBeNull();
+  });
+
   it('recovers when iOS delivers pointerdown but never delivers an end event', () => {
     const container = mountToolbar();
     const button = screen.getByRole('button', { name: 'chat.selection.quote' });
@@ -174,6 +186,29 @@ describe('chat selection action gesture lifetime', () => {
     fireEvent.pointerUp(nextButton, press);
 
     expect(quote).toHaveBeenCalledExactlyOnceWith(NEXT_TEXT);
+  });
+
+  it('recomputes after a deferred press is released outside the button', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    fireEvent.pointerDown(button, press);
+    clearSelection();
+    fireEvent.pointerUp(button, { ...press, clientX: 500 });
+
+    expect(quote).not.toHaveBeenCalled();
+    expect(screen.queryByRole('toolbar')).toBeNull();
+  });
+
+  it('allows a long primary press to activate', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    fireEvent.pointerDown(button, press);
+    act(() => vi.advanceTimersByTime(800));
+    fireEvent.pointerUp(button, press);
+
+    expect(quote).toHaveBeenCalledExactlyOnceWith(TEXT);
   });
 
   it('preserves a complete gesture across selectionchange', () => {
