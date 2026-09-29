@@ -377,6 +377,18 @@ v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.
 
+## Microphone
+
+Workbench voice input records through `getUserMedia` inside the WebView. On
+macOS, wry grants the WebKit-level media request, but the OS still gates the
+microphone on two bundle facts: `src-tauri/Info.plist` (merged by Tauri into the
+generated one) declares `NSMicrophoneUsageDescription`, and the hardened-runtime
+entitlements grant `com.apple.security.device.audio-input`. Without the usage
+description macOS denies access with no prompt; without the entitlement a
+Developer ID–signed build is denied the same way. The first recording shows the
+standard macOS prompt; a later denial is changed in System Settings → Privacy &
+Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
+
 ## CI
 
 `.github/workflows/desktop-shell.yml` runs on macOS and Windows whenever

@@ -49,19 +49,60 @@ fn the_macos_bundle_declares_the_hardened_runtime_and_entitlements() {
     );
 }
 
+/// `<key>` names in a plist, ignoring XML comments so explanatory prose can
+/// never satisfy or break an assertion.
+fn plist_keys(plist: &str) -> Vec<String> {
+    let mut body = String::new();
+    let mut rest = plist;
+    while let Some(start) = rest.find("<!--") {
+        body.push_str(&rest[..start]);
+        rest = rest[start..].split_once("-->").map_or("", |(_, tail)| tail);
+    }
+    body.push_str(rest);
+    body.split("<key>")
+        .skip(1)
+        .filter_map(|chunk| chunk.split_once("</key>").map(|(key, _)| key.trim().to_owned()))
+        .collect()
+}
+
 #[test]
-fn entitlements_grant_no_executable_memory_exception() {
-    let entitlements = read_to_string(&entitlements_path());
+fn entitlements_grant_only_microphone_input() {
+    let keys = plist_keys(&read_to_string(&entitlements_path()));
     // WKWebView's JavaScript engine JITs inside WebKit-owned helper
     // processes; the embedding Tauri process itself needs no
     // executable-memory exception, and the notary does not require one.
-    // Granting it would weaken the hardened runtime for the whole process,
-    // so its absence is the invariant: any re-add must come with evidence
-    // that the app process itself needs it.
-    assert!(
-        !entitlements.contains("<key>"),
-        "entitlements must stay empty; in particular no executable-memory exception for the embedding process"
+    // Granting it would weaken the hardened runtime for the whole process.
+    //
+    // The single allowed entitlement is audio input: Workbench voice input
+    // records through getUserMedia, and under the hardened runtime macOS
+    // denies that capture unless the app holds it. Any further addition must
+    // come with evidence that the app process itself needs it.
+    assert_eq!(
+        keys,
+        vec!["com.apple.security.device.audio-input".to_owned()],
+        "entitlements must grant exactly audio input; in particular no executable-memory exception"
     );
+}
+
+#[test]
+fn the_bundle_declares_why_it_uses_the_microphone() {
+    // Tauri merges `Info.plist` next to tauri.conf.json into the bundle's
+    // generated one. Without this usage description macOS denies microphone
+    // access outright — no prompt — so the Workbench's getUserMedia fails.
+    let path = crate_dir().join("Info.plist");
+    let plist = read_to_string(&path);
+    assert_eq!(
+        plist_keys(&plist),
+        vec!["NSMicrophoneUsageDescription".to_owned()],
+        "Info.plist carries only the microphone usage description"
+    );
+    let description = plist
+        .split_once("<key>NSMicrophoneUsageDescription</key>")
+        .and_then(|(_, tail)| tail.split_once("<string>"))
+        .and_then(|(_, tail)| tail.split_once("</string>"))
+        .map(|(value, _)| value.trim())
+        .unwrap_or_default();
+    assert!(!description.is_empty(), "the microphone usage description is non-empty");
 }
 
 #[test]

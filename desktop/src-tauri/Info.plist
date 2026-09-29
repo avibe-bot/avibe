@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged by the Tauri bundler into the generated Info.plist. The
+	     Workbench's voice input calls getUserMedia inside WKWebView; wry
+	     grants the WebKit-level media request, but macOS TCC denies
+	     microphone access outright (no prompt, NotAllowedError in the page)
+	     unless the host app declares why it needs the microphone. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Avibe uses the microphone for voice input in the Workbench.</string>
+</dict>
+</plist>
