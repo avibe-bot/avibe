@@ -328,7 +328,7 @@ uv_is_native_for_host() {
 # Print the Python download mirror the install step should give uv, if any.
 # Newer uv is left alone: an explicit mirror turns its GitHub fallback off.
 uv_python_install_mirror() {
-    if [ -n "${UV_PYTHON_INSTALL_MIRROR+set}" ]; then
+    if [ -n "${UV_PYTHON_INSTALL_MIRROR+set}" ] || [ -n "${UV_PYTHON_DOWNLOADS_JSON_URL+set}" ]; then
         return 0
     fi
     # `uv tool` reads UV_CONFIG_FILE or the user and system uv.toml, never a project's.
@@ -339,7 +339,7 @@ uv_python_install_mirror() {
         configs+=("$config_dir/uv/uv.toml")
     done
     for config in "${configs[@]}"; do
-        if [ -n "$config" ] && grep -qs 'python-install-mirror' "$config"; then
+        if [ -n "$config" ] && grep -qsE 'python-(install-mirror|downloads-json-url)' "$config"; then
             return 0
         fi
     done
@@ -619,12 +619,23 @@ uv_tool_install() {
 install_package_candidate() {
     local package_spec="$1"
     shift
+    local install_args=("$package_spec" --force)
 
     if [ "$package_spec" = "$PACKAGE_NAME" ]; then
-        uv_tool_install "$package_spec" --force --refresh "$@"
-    else
-        uv_tool_install "$package_spec" --force "$@"
+        install_args+=(--refresh)
     fi
+    install_args+=("$@")
+    if uv_tool_install "${install_args[@]}"; then
+        return 0
+    fi
+    # The mirror replaces uv's GitHub source instead of adding one. After it
+    # fails once, retry and continue without it; a Python it installed stays.
+    if [ -z "$UV_INSTALL_PYTHON_MIRROR" ]; then
+        return 1
+    fi
+    UV_INSTALL_PYTHON_MIRROR=""
+    info "Retrying without Astral's CDN for the Python download..."
+    uv_tool_install "${install_args[@]}"
 }
 
 resolve_vibe_on_original_path() {

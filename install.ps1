@@ -268,7 +268,7 @@ function Install-Uv {
 # The Python download mirror the install step should give uv, if any. Newer uv
 # is left alone: an explicit mirror turns its GitHub fallback off.
 function Get-UvPythonInstallMirror {
-    if (Test-Path Env:UV_PYTHON_INSTALL_MIRROR) {
+    if ((Test-Path Env:UV_PYTHON_INSTALL_MIRROR) -or (Test-Path Env:UV_PYTHON_DOWNLOADS_JSON_URL)) {
         return $null
     }
     # `uv tool` reads UV_CONFIG_FILE or the user and system uv.toml, never a project's.
@@ -277,7 +277,7 @@ function Get-UvPythonInstallMirror {
     if ($env:SystemDrive) { $configs += Join-Path "$env:SystemDrive\" "ProgramData\uv\uv.toml" }
     foreach ($config in $configs) {
         if ($config -and (Test-Path -LiteralPath $config -PathType Leaf) -and
-            (Select-String -LiteralPath $config -Pattern "python-install-mirror" -SimpleMatch -Quiet)) {
+            (Select-String -LiteralPath $config -Pattern "python-(install-mirror|downloads-json-url)" -Quiet)) {
             return $null
         }
     }
@@ -564,6 +564,20 @@ function Invoke-UvToolInstallAttempt {
     }
 }
 
+function Invoke-UvToolInstall {
+    param([string[]]$Arguments, [ref]$PythonInstallMirror)
+
+    $result = Invoke-UvToolInstallAttempt -Arguments $Arguments -PythonInstallMirror $PythonInstallMirror.Value
+    if ($result.Success -or -not $PythonInstallMirror.Value) {
+        return $result
+    }
+    # The mirror replaces uv's GitHub source instead of adding one. After it
+    # fails once, retry and continue without it; a Python it installed stays.
+    $PythonInstallMirror.Value = $null
+    Write-Info "Retrying without Astral's CDN for the Python download..."
+    return Invoke-UvToolInstallAttempt -Arguments $Arguments
+}
+
 function Install-Vibe {
     Write-Info "Installing avibe-os (Python will be downloaded automatically if needed)..."
 
@@ -579,7 +593,7 @@ function Install-Vibe {
 
     if ($customPackageSpec) {
         Write-Info "Trying custom package spec..."
-        $result = Invoke-UvToolInstallAttempt -Arguments @($customPackageSpec, "--force") -PythonInstallMirror $pythonInstallMirror
+        $result = Invoke-UvToolInstall -Arguments @($customPackageSpec, "--force") -PythonInstallMirror ([ref]$pythonInstallMirror)
         if ($result.Success) {
             Write-Success "avibe-os installed successfully (from custom package spec)"
             return
@@ -614,7 +628,7 @@ function Install-Vibe {
 
     foreach ($attempt in $attempts) {
         Write-Info "Trying $($attempt.Name)..."
-        $result = Invoke-UvToolInstallAttempt -Arguments $attempt.Arguments -PythonInstallMirror $pythonInstallMirror
+        $result = Invoke-UvToolInstall -Arguments $attempt.Arguments -PythonInstallMirror ([ref]$pythonInstallMirror)
         if ($result.Success) {
             Write-Success "avibe-os installed successfully (from $($attempt.Name))"
             return

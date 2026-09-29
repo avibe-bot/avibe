@@ -96,7 +96,10 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         if [ "$1" != "tool" ] || [ "$2" != "install" ]; then
             exit 1
         fi
-        printf '%s' "${{UV_PYTHON_INSTALL_MIRROR-<unset>}}" > "{uv_log}.python-mirror"
+        printf '%s\\n' "${{UV_PYTHON_INSTALL_MIRROR-<unset>}}" >> "{uv_log}.python-mirror"
+        if [ "${{VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR:-}}" = "1" ] && [ -n "${{UV_PYTHON_INSTALL_MIRROR+set}}" ]; then
+            exit 1
+        fi
 
         bin_dir="${{UV_TOOL_BIN_DIR:-$HOME/.local/bin}}"
         tool_env="${{UV_TOOL_DIR:-$HOME/.local/share/uv/tools}}/avibe-os"
@@ -380,17 +383,40 @@ ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-s
 
 
 @pytest.mark.parametrize(
-    ("uv_version", "user_mirror", "user_config", "expected_mirror"),
+    ("uv_version", "user_env", "user_config", "cdn_down", "expected_mirrors"),
     [
-        ("uv 0.10.7 (8e2c9a1 2026-03-02)", None, None, ASTRAL_PYTHON_INSTALL_MIRROR),
-        ("uv 0.10.8", None, None, "<unset>"),
-        ("uv 0.9.8", "https://mirror.example.test/python", None, "https://mirror.example.test/python"),
-        ("uv 0.9.8", None, 'python-install-mirror = "https://mirror.example.test/python"\n', "<unset>"),
+        ("uv 0.10.7 (8e2c9a1 2026-03-02)", {}, None, False, [ASTRAL_PYTHON_INSTALL_MIRROR]),
+        ("uv 0.10.8", {}, None, False, ["<unset>"]),
+        (
+            "uv 0.9.8",
+            {"UV_PYTHON_INSTALL_MIRROR": "https://mirror.example.test/python"},
+            None,
+            False,
+            ["https://mirror.example.test/python"],
+        ),
+        ("uv 0.9.8", {}, 'python-install-mirror = "https://mirror.example.test/python"\n', False, ["<unset>"]),
+        (
+            "uv 0.9.8",
+            {"UV_PYTHON_DOWNLOADS_JSON_URL": "https://mirror.example.test/downloads.json"},
+            None,
+            False,
+            ["<unset>"],
+        ),
+        ("uv 0.9.8", {}, 'python-downloads-json-url = "https://mirror.example.test/downloads.json"\n', False, ["<unset>"]),
+        ("uv 0.9.8", {}, None, True, [ASTRAL_PYTHON_INSTALL_MIRROR, "<unset>"]),
     ],
-    ids=["uv-without-cdn", "uv-with-cdn", "user-env-mirror", "user-config-mirror"],
+    ids=[
+        "uv-without-cdn",
+        "uv-with-cdn",
+        "user-env-mirror",
+        "user-config-mirror",
+        "user-env-downloads-json",
+        "user-config-downloads-json",
+        "cdn-down-falls-back-to-github",
+    ],
 )
 def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(
-    tmp_path, uv_version, user_mirror, user_config, expected_mirror
+    tmp_path, uv_version, user_env, user_config, cdn_down, expected_mirrors
 ):
     home_dir = tmp_path / "home"
     home_dir.mkdir()
@@ -404,20 +430,21 @@ def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(
         (config_home / "uv" / "uv.toml").write_text(user_config, encoding="utf-8")
 
     env = os.environ.copy()
-    for name in ("UV_PYTHON_INSTALL_MIRROR", "UV_CONFIG_FILE"):
+    for name in ("UV_PYTHON_INSTALL_MIRROR", "UV_PYTHON_DOWNLOADS_JSON_URL", "UV_CONFIG_FILE"):
         env.pop(name, None)
     env["HOME"] = str(home_dir)
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
     env["XDG_CONFIG_HOME"] = str(config_home)
     env["XDG_CONFIG_DIRS"] = str(tmp_path / "system-config")
     env["VIBE_TEST_UV_VERSION"] = uv_version
-    if user_mirror is not None:
-        env["UV_PYTHON_INSTALL_MIRROR"] = user_mirror
+    env.update(user_env)
+    if cdn_down:
+        env["VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR"] = "1"
 
     install_result = _install(env)
 
     assert install_result.returncode == 0, install_result.stdout + install_result.stderr
-    assert Path(f"{uv_log}.python-mirror").read_text(encoding="utf-8") == expected_mirror
+    assert Path(f"{uv_log}.python-mirror").read_text(encoding="utf-8").splitlines() == expected_mirrors
 
 
 def test_install_script_canonicalizes_relative_avibe_home(tmp_path):
