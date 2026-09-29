@@ -65,9 +65,7 @@ impl HealthProbe for HttpHealthProbe {
     async fn presence(&self, origin: &LoopbackOrigin, expected: Option<&str>) -> Presence {
         let response = match self.client.get(origin.readiness_url()).send().await {
             Ok(response) => response,
-            // Only a refused connection proves that nothing listens. A loopback
-            // connect that times out has something in the way.
-            Err(error) if error.is_connect() && !error.is_timeout() => return Presence::Absent,
+            Err(error) if is_connection_refused(&error) => return Presence::Absent,
             Err(_) => return Presence::Unknown,
         };
         let status = response.status();
@@ -86,6 +84,15 @@ impl HealthProbe for HttpHealthProbe {
             None => Presence::Unknown,
         }
     }
+}
+
+/// Whether a request failed because the connection was refused, the only
+/// connect failure that proves nothing listens. A timeout, a denied socket or
+/// an unavailable local address may hide a listener.
+fn is_connection_refused(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source())
+        .filter_map(|error| error.downcast_ref::<std::io::Error>())
+        .any(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
 }
 
 fn classify(controller_runtime_id: Option<String>, ready: bool, expected: Option<&str>) -> Presence {
@@ -527,6 +534,32 @@ mod tests {
         let probe = HttpHealthProbe::new(crate::bootstrap::DEFAULT_PROBE_TIMEOUT).expect("probe builds");
 
         assert_eq!(probe.presence(&origin, Some(&"a".repeat(64))).await, Presence::Absent);
+    }
+
+    #[test]
+    fn no_other_connect_failure_proves_absence() {
+        // The shape reqwest reports: a connect error caused by the socket's error.
+        #[derive(Debug)]
+        struct Connect(std::io::Error);
+        impl std::fmt::Display for Connect {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("tcp connect error")
+            }
+        }
+        impl std::error::Error for Connect {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        for (kind, refused) in [
+            (std::io::ErrorKind::ConnectionRefused, true),
+            (std::io::ErrorKind::PermissionDenied, false),
+            (std::io::ErrorKind::AddrNotAvailable, false),
+            (std::io::ErrorKind::TimedOut, false),
+        ] {
+            assert_eq!(is_connection_refused(&Connect(kind.into())), refused, "{kind:?}");
+        }
     }
 
     #[tokio::test]
