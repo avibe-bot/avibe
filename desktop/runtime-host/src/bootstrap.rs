@@ -400,14 +400,18 @@ impl RuntimeHost {
                 if !trigger.allows_handover() {
                     return publish(sink, ownership_lost(&origin, attempt));
                 }
-                let launcher = resolved_launcher.clone().expect("an identified launcher");
-                if let Err(code) = hand_over(launcher, runtime_id).await {
-                    return publish(
-                        sink,
-                        BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
-                    );
+                // A helper an earlier run started may still be deciding about
+                // this predecessor. The poll loop hands over once it settles.
+                if !self.launched_runtime().launch_pending() {
+                    let launcher = resolved_launcher.clone().expect("an identified launcher");
+                    if let Err(code) = hand_over(launcher, runtime_id).await {
+                        return publish(
+                            sink,
+                            BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
+                        );
+                    }
+                    handover_performed = true;
                 }
-                handover_performed = true;
             }
             // Starting, not provable, or nothing there. `vibe start` is
             // idempotent and decides for itself whether a service already runs.
@@ -503,10 +507,12 @@ impl RuntimeHost {
                 }
                 // `vibe start` adopted a predecessor it found by pid file or
                 // lock instead of starting this Runtime.
-                Presence::Foreign { runtime_id, .. } if identified => {
-                    if handover_performed || !trigger.allows_handover() {
-                        return publish(sink, ownership_lost(&origin, attempt));
-                    }
+                Presence::Foreign { .. } if identified && (handover_performed || !trigger.allows_handover()) => {
+                    return publish(sink, ownership_lost(&origin, attempt));
+                }
+                // Hand over only once the helper has settled, so its completion
+                // or rollback never races a second helper.
+                Presence::Foreign { runtime_id, .. } if identified && !self.launched_runtime().launch_pending() => {
                     if let Err(code) = hand_over(launcher.clone(), runtime_id).await {
                         return publish(
                             sink,
@@ -514,7 +520,8 @@ impl RuntimeHost {
                         );
                     }
                     handover_performed = true;
-                    *self.launched_runtime() = LaunchState::default();
+                    // The settled helper releases its slot; the liveness fence stays.
+                    self.clear_failed_launch();
                     if let Err(error) = self.launch_if_needed(launcher.clone()) {
                         return publish(
                             sink,

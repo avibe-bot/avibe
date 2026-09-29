@@ -490,7 +490,8 @@ async fn launch_and_retry_hand_over_a_desktop_predecessor_by_its_observed_id_kee
 
 #[tokio::test(start_paused = true)]
 async fn a_predecessor_found_while_polling_is_handed_over_and_the_successor_relaunched_at_once() {
-    let launcher = FakeLauncher::bundled();
+    // The helper exited zero: `vibe start` adopted the predecessor and settled.
+    let launcher = FakeLauncher::new(Some(bundle_id()), true, 0, Some(true));
     let host = runtime_host(
         FakeProbe::serving([
             Served::Nothing,
@@ -512,6 +513,30 @@ async fn a_predecessor_found_while_polling_is_handed_over_and_the_successor_rela
         "the post-handover successor must launch in the same run"
     );
     assert_eq!(launcher.prunes(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_predecessor_is_never_handed_over_while_this_apps_start_helper_still_runs() {
+    let launcher = FakeLauncher::bundled();
+    let host = runtime_host(
+        FakeProbe::serving([Served::Nothing, Served::Ready(Some(predecessor()))]),
+        launcher.clone(),
+        fast_settings(),
+    );
+
+    // Found while polling, and again on the Retry's first probe.
+    for trigger in [Launch, Retry] {
+        let status = boot(&host, trigger).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Failed, "{trigger:?}");
+        assert_eq!(status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+        assert!(status.retryable);
+        assert!(
+            launcher.verbs().is_empty(),
+            "the running helper may still act on the predecessor"
+        );
+        assert_eq!(launcher.calls(), 1, "a second helper must never overlap the first");
+    }
 }
 
 #[tokio::test(start_paused = true)]
