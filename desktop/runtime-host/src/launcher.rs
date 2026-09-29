@@ -24,6 +24,7 @@ use crate::health::RuntimeReadiness;
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
 use crate::status::BootstrapNoticeCode;
+use crate::takeover::{Discovery, ExternalRuntime, LocalRuntimePreference};
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
 /// Desktop applications inherit a minimal `PATH` when launched from Finder or
@@ -121,6 +122,10 @@ pub enum LaunchError {
     RuntimeStop,
     #[error("the Runtime ownership receipt no longer matches the service")]
     OwnershipLost,
+    #[error("select an existing Avibe data home")]
+    DataHomeRequired,
+    #[error("local Runtime takeover was refused")]
+    TakeoverRefused,
 }
 
 /// What the shell proved about a Runtime before removing app-private files.
@@ -151,6 +156,8 @@ impl LaunchError {
                 BootstrapNoticeCode::RuntimeDiscoveryFailed
             }
             Self::InvalidOrigin => BootstrapNoticeCode::InvalidOrigin,
+            Self::DataHomeRequired => BootstrapNoticeCode::DataHomeRequired,
+            Self::TakeoverRefused => BootstrapNoticeCode::TakeoverFailed,
             Self::OwnershipLost => BootstrapNoticeCode::RuntimeOwnershipLost,
             Self::Spawn(_) | Self::Handover | Self::NotOwned | Self::RuntimeStop => {
                 BootstrapNoticeCode::RuntimeSpawnFailed
@@ -165,6 +172,14 @@ impl LaunchError {
 /// repair must observe the current filesystem instead of a shell-lifetime cache.
 pub trait RuntimeLauncher: Send + Sync {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError>;
+
+    fn request_management(&self) -> Result<(), LaunchError> {
+        Err(LaunchError::TakeoverRefused)
+    }
+
+    fn select_home(&self, _home: &Path) -> Result<(), LaunchError> {
+        Err(LaunchError::DataHomeRequired)
+    }
 
     /// Gracefully stops and removes an app-private Runtime, if this launcher owns
     /// one. Installed/user-managed launchers deliberately do nothing.
@@ -198,6 +213,19 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
 
     fn handover(&self) -> Result<(), LaunchError> {
         Ok(())
+    }
+
+    fn external_runtime(&self) -> Option<ExternalRuntime> {
+        None
+    }
+    fn allows_external(&self) -> bool {
+        true
+    }
+    fn connect_only(&self) -> bool {
+        false
+    }
+    fn choose_management(&self, _take_over: bool) -> Result<(), LaunchError> {
+        Err(LaunchError::TakeoverRefused)
     }
 
     fn prune_superseded(&self) {}
@@ -337,6 +365,7 @@ impl RuntimeLauncher for InstalledVibeLauncher {
             command: RuntimeCommand::installed(self.resolve_executable()?),
             expected_runtime_id: None,
             cleanup: None,
+            local_runtime: None,
             // A development shell drives an install it does not own and has no
             // application data directory to write diagnostics into.
             log: BootstrapLog::disabled(),
@@ -350,11 +379,13 @@ pub struct BundledVibeLauncher {
     bundle: PrivateRuntimeBundle,
     backend_root: PathBuf,
     log: BootstrapLog,
+    preference_path: PathBuf,
 }
 
 impl BundledVibeLauncher {
     pub fn new(bundle_dir: PathBuf, install_root: PathBuf, backend_root: PathBuf, log: BootstrapLog) -> Self {
         Self {
+            preference_path: install_root.with_file_name("local-runtime.json"),
             bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
             backend_root,
             log,
@@ -369,20 +400,65 @@ impl RuntimeLauncher for BundledVibeLauncher {
         record_runtime_prepare(&self.log, &prepared, started.elapsed());
         let runtime = prepared.map_err(|_| LaunchError::RuntimeInstall)?;
         let runtime_id = runtime.runtime_id.clone();
+        let mut command = RuntimeCommand::private(
+            runtime.root.clone(),
+            runtime.python,
+            runtime.node,
+            runtime.npm_cli,
+            self.backend_root.clone(),
+            &runtime_id,
+            env::var_os("PATH").as_deref(),
+        );
+        let preference = LocalRuntimePreference::read(&self.preference_path)?;
+        // An explicit process environment belongs to the caller and wins over
+        // the shell's saved selection. Independent permission is home-scoped.
+        let selected = if env::var_os("AVIBE_HOME").is_some() {
+            None
+        } else {
+            preference.home.as_deref()
+        };
+        let discovery: Discovery = serde_json::from_slice(&takeover_helper(&command, "inspect", selected, None)?)
+            .map_err(|_| LaunchError::DataHomeRequired)?;
+        if !discovery.home.is_absolute() {
+            return Err(LaunchError::DataHomeRequired);
+        }
+        let independent = preference.independent && preference.home.as_ref() == Some(&discovery.home);
+        // Keep the discovered instance selected even if its old service is
+        // stopped manually while the confirmation is open or after a refusal.
+        if discovery.home.join("config/config.json").is_file() {
+            LocalRuntimePreference {
+                home: Some(discovery.home.clone()),
+                independent,
+            }
+            .write(&self.preference_path)?;
+        }
+        command
+            .environment
+            .push((OsString::from("AVIBE_HOME"), discovery.home.clone().into_os_string()));
         Ok(Arc::new(ResolvedVibeExecutable {
-            command: RuntimeCommand::private(
-                runtime.root.clone(),
-                runtime.python,
-                runtime.node,
-                runtime.npm_cli,
-                self.backend_root.clone(),
-                &runtime_id,
-                env::var_os("PATH").as_deref(),
-            ),
+            command,
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
+            local_runtime: Some((discovery, independent, self.preference_path.clone())),
             log: self.log.clone(),
         }))
+    }
+
+    fn request_management(&self) -> Result<(), LaunchError> {
+        let mut preference = LocalRuntimePreference::read(&self.preference_path)?;
+        preference.independent = false;
+        preference.write(&self.preference_path)
+    }
+
+    fn select_home(&self, home: &Path) -> Result<(), LaunchError> {
+        if !home.is_absolute() || !home.join("config/config.json").is_file() {
+            return Err(LaunchError::DataHomeRequired);
+        }
+        LocalRuntimePreference {
+            home: Some(home.to_owned()),
+            independent: false,
+        }
+        .write(&self.preference_path)
     }
 
     fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
@@ -401,6 +477,12 @@ impl RuntimeLauncher for BundledVibeLauncher {
                 &runtime.runtime_id,
                 env::var_os("PATH").as_deref(),
             );
+            let mut command = command;
+            if let Some(home) = LocalRuntimePreference::read(&self.preference_path)?.home {
+                command
+                    .environment
+                    .push((OsString::from("AVIBE_HOME"), home.into_os_string()));
+            }
             run_handover(&command)?;
         }
         self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
@@ -434,11 +516,15 @@ struct ResolvedVibeExecutable {
     command: RuntimeCommand,
     expected_runtime_id: Option<String>,
     cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
+    local_runtime: Option<(Discovery, bool, PathBuf)>,
     log: BootstrapLog,
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+        if let Some((discovery, _, _)) = &self.local_runtime {
+            return LoopbackOrigin::parse(&discovery.origin).map_err(|_| LaunchError::InvalidOrigin);
+        }
         query_endpoint(&self.command, &self.log)
     }
 
@@ -492,6 +578,41 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         }
     }
 
+    fn external_runtime(&self) -> Option<ExternalRuntime> {
+        self.local_runtime
+            .as_ref()
+            .and_then(|(discovery, _, _)| discovery.external.clone())
+    }
+
+    fn allows_external(&self) -> bool {
+        self.local_runtime
+            .as_ref()
+            .is_none_or(|(_, independent, _)| *independent)
+    }
+
+    fn connect_only(&self) -> bool {
+        self.local_runtime
+            .as_ref()
+            .is_some_and(|(_, independent, _)| *independent)
+    }
+
+    fn choose_management(&self, take_over: bool) -> Result<(), LaunchError> {
+        let (discovery, _, preference_path) = self.local_runtime.as_ref().ok_or(LaunchError::TakeoverRefused)?;
+        if take_over {
+            let receipt = discovery.external.as_ref().ok_or(LaunchError::TakeoverRefused)?;
+            if receipt.reason.is_some() {
+                return Err(LaunchError::TakeoverRefused);
+            }
+            let json = serde_json::to_string(receipt).map_err(|_| LaunchError::TakeoverRefused)?;
+            takeover_helper(&self.command, "takeover", Some(&discovery.home), Some(&json))?;
+        }
+        LocalRuntimePreference {
+            home: Some(discovery.home.clone()),
+            independent: !take_over,
+        }
+        .write(preference_path)
+    }
+
     fn prune_superseded(&self) {
         if let Some((bundle, active_root)) = &self.cleanup {
             let _ = bundle.prune_superseded(active_root);
@@ -499,7 +620,7 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RuntimeCommand {
     executable: PathBuf,
     prefix_args: Vec<OsString>,
@@ -634,6 +755,75 @@ struct EndpointAttempt {
     status: Option<std::process::ExitStatus>,
     stderr: Option<Vec<u8>>,
     elapsed: Duration,
+}
+
+/// Execute only the helper shipped in this verified private Runtime. Output is
+/// bounded and consumed concurrently; a GUI never inherits a console or stdin.
+fn takeover_helper(
+    runtime: &RuntimeCommand,
+    action: &str,
+    home: Option<&Path>,
+    receipt: Option<&str>,
+) -> Result<Vec<u8>, LaunchError> {
+    let mut helper = runtime.clone();
+    let module = helper.prefix_args.last_mut().ok_or(LaunchError::TakeoverRefused)?;
+    *module = OsString::from("vibe.desktop_takeover");
+    let mut command = Command::new(&helper.executable);
+    helper.apply(&mut command);
+    command
+        .arg(action)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(home) = home {
+        command.arg("--home").arg(home);
+    }
+    if let Some(receipt) = receipt {
+        command.arg("--receipt").arg(receipt);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(LaunchError::EndpointSpawn)?;
+    let stdout = child.stdout.take().ok_or(LaunchError::EndpointOutput)?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(MAX_ENDPOINT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now() + ENDPOINT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LaunchError::EndpointTimeout);
+            }
+        }
+    };
+    let bytes = receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| LaunchError::EndpointTimeout)?
+        .map_err(|_| LaunchError::EndpointOutput)?;
+    if bytes.len() as u64 > MAX_ENDPOINT_BYTES {
+        return Err(LaunchError::EndpointOutput);
+    }
+    if !status.success() {
+        return Err(if action == "inspect" {
+            LaunchError::DataHomeRequired
+        } else {
+            LaunchError::TakeoverRefused
+        });
+    }
+    Ok(bytes)
 }
 
 fn query_endpoint(runtime: &RuntimeCommand, log: &BootstrapLog) -> Result<LoopbackOrigin, LaunchError> {

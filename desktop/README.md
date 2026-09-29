@@ -96,6 +96,42 @@ shell removes superseded private Runtime trees; reopening an older app reinstall
 its own immutable payload for rollback. User state stays under `~/.avibe` and
 is not part of the application or private Runtime.
 
+### Taking over an existing local installation
+
+Desktop checks the selected local service before opening its Workbench. When an
+independently installed service is running, choose **Manage with Desktop** to
+stop that identified service and start the application's bundled Runtime against
+the same data folder. Configuration, conversations, attachments, and project
+paths stay where they are. Database upgrades use the normal startup migration
+and backup path; replacing the application does not imply an arbitrary database
+downgrade is supported.
+
+An explicit `AVIBE_HOME` wins over Desktop's saved folder. Otherwise Desktop
+remembers its selection and can discover one running same-user instance. With
+multiple instances or an unidentifiable folder, select an existing Avibe home
+(the folder containing `config/config.json`). Discovery does not create or
+migrate user data. The selected home stays selected if the old service is later
+stopped manually.
+
+**Keep Independent** connects without taking over the service. The sidebar
+identifies the service version separately from the Desktop version, and its
+entry opens native management. Use **Manage Local Service…** in the application
+menu to revisit the choice. Older Workbenches may still show their original
+version entry; the native menu remains available independently of that page.
+
+Active work postpones takeover. Stop a service with its original installation
+when its version cannot report activity, or disable its external supervisor
+before takeover when it is managed by launchd, systemd, or another service
+manager. Desktop does not alter external service registrations. The CLI installer
+does not create such registrations; Desktop's existing Start at Login option
+starts the application and therefore its selected Runtime.
+
+Global uv/pip packages and shell profiles are not rewritten. Desktop-launched
+agents already receive the bundled `vibe` entry on PATH; a terminal configured
+for an independent installation continues to use that installation. If it starts
+an old service again, Desktop requires another management decision instead of
+silently treating it as an updated managed Runtime.
+
 `desktop-self-contained-package` builds per-target artifacts for:
 
 - Apple silicon macOS (`aarch64-apple-darwin`);

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 mod native_frame;
 mod notifications;
+mod runtime_takeover;
 mod update_install;
 mod updater;
 
@@ -104,6 +105,7 @@ struct ProductCatalog {
 struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
     updater: updater::Catalog,
+    takeover: runtime_takeover::Catalog,
     notifications: notifications::NativeNotificationCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
@@ -339,6 +341,14 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &quit,
         ],
     )?;
+    let management = MenuItem::with_id(
+        app,
+        runtime_takeover::MENU_ID,
+        native_catalog_for_locales(sys_locale::get_locales()).takeover.menu,
+        cfg!(feature = "bundled-runtime"),
+        None::<&str>,
+    )?;
+    tray.insert(&management, 4)?;
     let application_menu = application_menu(app)?;
     let application = application_menu.items()?.into_iter().find_map(|item| match item {
         MenuItemKind::Submenu(submenu) => Some(submenu),
@@ -350,7 +360,10 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         // Elsewhere the first submenu is File, and Settings leads it.
         let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
         submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
-        submenu.insert_items(&[&updater.menu, &updater.channel_menu], settings_position + 1)?;
+        submenu.insert_items(
+            &[&management, &updater.menu, &updater.channel_menu],
+            settings_position + 1,
+        )?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     app.set_menu(application_menu)?;
@@ -927,6 +940,7 @@ fn spawn_owned_bootstrap(app: AppHandle) {
             latest,
         };
         let status = host.bootstrap(&sink).await;
+        let status = runtime_takeover::resolve(&app, &host, status, &sink).await;
 
         if status.phase == BootstrapPhase::Ready {
             open_workbench(&app, &status, activity);
@@ -1607,6 +1621,7 @@ pub fn run() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
                 updater::MENU_ID => updater::check(app.clone(), true),
+                runtime_takeover::MENU_ID => runtime_takeover::request(app.clone()),
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
                 QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
@@ -1633,6 +1648,10 @@ pub fn run() {
                         // title bar; an older adopted Workbench gets the standard one.
                         #[cfg(target_os = "macos")]
                         macos_title_bar::sync(webview);
+                        if let Some(shell) = webview.try_state::<Shell>() {
+                            let managed = shell.host.manages_connection();
+                            let _ = webview.eval(runtime_takeover::management_script(managed));
+                        }
                         apply_pending_deep_link(webview.app_handle());
                         // Settings become available the moment a Workbench is on
                         // screen, not at the monitor's first tick. The shared
@@ -1641,6 +1660,10 @@ pub fn run() {
                     }
                 })
                 .on_navigation(|webview, url| {
+                    if webview.label() == MAIN_WINDOW && url.as_str() == runtime_takeover::OPEN_URL {
+                        runtime_takeover::request(webview.app_handle().clone());
+                        return false;
+                    }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
                         updater::check(webview.app_handle().clone(), true);
                         return false;

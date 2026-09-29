@@ -79,4 +79,5 @@ pub fn bundled_runtime_host(
     ))
 }
 
+pub mod takeover;
 pub mod update;

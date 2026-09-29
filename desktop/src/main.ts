@@ -16,6 +16,7 @@ type NoticeCode =
   | 'adopted'
   | 'starting'
   | 'ready'
+  | 'independent_unavailable'
   | 'invalid_origin'
   | 'runtime_not_found'
   | 'runtime_install_failed'
@@ -26,6 +27,9 @@ type NoticeCode =
   | 'launcher_exited'
   | 'ready_timeout'
   | 'workbench_navigation_failed'
+  | 'takeover_required'
+  | 'takeover_failed'
+  | 'data_home_required'
 
 interface BootstrapNotice {
   code: string
@@ -57,6 +61,7 @@ const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
   'adopted',
   'starting',
   'ready',
+  'independent_unavailable',
   'invalid_origin',
   'runtime_not_found',
   'runtime_install_failed',
@@ -67,6 +72,9 @@ const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
   'launcher_exited',
   'ready_timeout',
   'workbench_navigation_failed',
+  'takeover_required',
+  'takeover_failed',
+  'data_home_required',
 ])
 
 const root = document.documentElement

@@ -227,10 +227,12 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
     }
     assert!(!build.contains("deep_link") && !build.contains("window_state"));
     assert!(!source.contains("on_open_url"));
-    // The one script the shell runs in the Workbench is its constant Settings
-    // request; nothing page-supplied is ever evaluated.
-    assert_eq!(source.matches(".eval(").count(), 1);
+    // Both scripts are native constants: Settings and the connection ownership
+    // boolean. Paths, version strings, and page input never become JavaScript.
+    assert_eq!(source.matches(".eval(").count(), 2);
     assert!(source.contains("window.eval(open_settings_script())"));
+    assert!(source.contains("webview.eval(runtime_takeover::management_script(managed))"));
+    assert!(shipping_source("src/runtime_takeover.rs").contains("fn management_script(managed: bool) -> &'static str"));
     assert!(!source.contains("RunEvent::Opened"));
     let receiver = source
         .split("fn receive_native_deep_link(")

@@ -19,7 +19,11 @@
       "runtime_ownership_lost": "The Runtime changed and this app can no longer stop it. Choose Try again to check the current Runtime.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
-      "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
+      "workbench_navigation_failed": "Avibe could not open the Workbench in this window.",
+      "takeover_required": "Choose how Desktop should manage the existing local Avibe service. Retry to reopen the choice.",
+      "takeover_failed": "The local service could not be switched. Retry to inspect its current state; your data has been retained.",
+      "data_home_required": "Select the existing Avibe data folder to continue.",
+      "independent_unavailable": "The independently managed service is unavailable. Start it using its installation, or choose Manage Local Service in the application menu."
     },
     "tray": {
       "open": "Open Avibe",
@@ -82,7 +86,7 @@
       "menu": "Check for Desktop Updates…",
       "testChannel": "Use TEST Updates",
       "title": "Avibe Desktop Updates",
-      "current": "Current version",
+      "current": "Desktop version",
       "latest": "Latest version",
       "checking": "Checking for updates…",
       "upToDate": "This app is up to date.",
@@ -99,6 +103,20 @@
       "confirm": "An update is available. Download and install it now? Avibe will restart. Your sessions and settings will be kept.",
       "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",
       "error": "Update failed — retry"
+    },
+    "takeover": {
+      "menu": "Manage Local Service…",
+      "title": "Local Avibe Service",
+      "message": "An independently installed Avibe service is using {{home}}. Let Desktop manage this service so future application updates also update the service. Projects, conversations, and settings stay in this folder. You can continue managing it independently.",
+      "manage": "Manage with Desktop",
+      "independent": "Keep Independent",
+      "later": "Later",
+      "selectHome": "Select Data Folder",
+      "homeMessage": "The existing Avibe data folder could not be identified. Select the folder containing your Avibe config and state. No new instance will be created from this selection.",
+      "busy": "Avibe is still working in {{home}}. Let the current work finish, then choose Manage Local Service from the application menu. You can open it independently now.",
+      "supervised": "The service in {{home}} is started by an external service manager. Disable that startup registration and stop its service before letting Desktop manage this data folder. You can keep connecting independently.",
+      "unavailable": "Desktop cannot safely verify the service or active work in {{home}}. Stop the old service using its existing installation, then retry. You can keep connecting independently.",
+      "managed": "This local service is managed by Desktop and follows application updates."
     }
   },
   "installHint": {
@@ -3684,7 +3702,9 @@
     "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
-    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app"
+    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app",
+    "desktopServiceVersion": "Desktop {{desktop}} · Service {{service}}",
+    "independentServiceVersion": "Service v{{version}}"
   },
   "doctor": {
     "title": "System Status",

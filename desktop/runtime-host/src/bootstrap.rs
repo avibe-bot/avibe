@@ -109,6 +109,8 @@ pub struct RuntimeHost {
     launcher: Arc<dyn RuntimeLauncher>,
     settings: RuntimeHostSettings,
     launched_runtime: Mutex<LaunchState>,
+    pending_external: Mutex<Option<Arc<dyn ResolvedRuntimeLauncher>>>,
+    monitor_runtime_id: Mutex<Option<String>>,
 }
 
 struct LaunchAttempt {
@@ -157,7 +159,61 @@ impl RuntimeHost {
             launcher,
             settings,
             launched_runtime: Mutex::new(LaunchState::default()),
+            pending_external: Mutex::new(None),
+            monitor_runtime_id: Mutex::new(None),
         }
+    }
+
+    pub fn external_runtime(&self) -> Option<crate::takeover::ExternalRuntime> {
+        self.pending_external.lock().ok()?.as_ref()?.external_runtime()
+    }
+
+    pub async fn choose_management(&self, take_over: bool) -> Result<(), LaunchError> {
+        let launcher = self
+            .pending_external
+            .lock()
+            .map_err(|_| LaunchError::TakeoverRefused)?
+            .clone()
+            .ok_or(LaunchError::TakeoverRefused)?;
+        tokio::task::spawn_blocking(move || launcher.choose_management(take_over))
+            .await
+            .map_err(|_| LaunchError::TakeoverRefused)??;
+        *self.pending_external.lock().map_err(|_| LaunchError::TakeoverRefused)? = None;
+        Ok(())
+    }
+
+    pub fn request_management(&self) -> Result<(), LaunchError> {
+        self.launcher.request_management()
+    }
+
+    pub fn select_home(&self, home: &std::path::Path) -> Result<(), LaunchError> {
+        if self.has_launched() || self.has_owned_runtime() {
+            return Err(LaunchError::DataHomeRequired);
+        }
+        self.launcher.select_home(home)
+    }
+
+    fn require_management_choice(
+        &self,
+        launcher: &Arc<dyn ResolvedRuntimeLauncher>,
+        origin: &LoopbackOrigin,
+        sink: &dyn StatusSink,
+        attempt: u32,
+    ) -> BootstrapStatus {
+        *self.pending_external.lock().unwrap_or_else(|error| error.into_inner()) = Some(launcher.clone());
+        publish(
+            sink,
+            BootstrapStatus::failed(
+                origin,
+                attempt,
+                BootstrapNotice::new(BootstrapNoticeCode::TakeoverRequired),
+                true,
+            ),
+        )
+    }
+
+    pub fn manages_connection(&self) -> bool {
+        self.monitor_runtime_id.lock().is_ok_and(|identity| identity.is_some())
     }
 
     pub fn settings(&self) -> &RuntimeHostSettings {
@@ -216,7 +272,16 @@ impl RuntimeHost {
 
     /// Probes the exact validated origin using the same readiness contract as bootstrap.
     pub async fn is_ready(&self, origin: &LoopbackOrigin) -> bool {
-        self.probe.is_healthy(origin).await
+        let Some(readiness) = self.probe.readiness(origin).await else {
+            return false;
+        };
+        let expected = self
+            .monitor_runtime_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        expected
+            .as_ref()
+            .is_none_or(|expected| readiness.desktop_runtime_id.as_ref() == Some(expected))
     }
 
     /// Releases only completed helper retry state after readiness loss.
@@ -285,13 +350,31 @@ impl RuntimeHost {
         };
 
         let mut attempt = 1;
+        *self
+            .monitor_runtime_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = resolved_launcher
+            .as_ref()
+            .filter(|launcher| !launcher.allows_external())
+            .and_then(|launcher| launcher.expected_runtime_id().map(str::to_owned));
         let mut handover_performed = false;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
+        if let Some(launcher) = &resolved_launcher {
+            if !launcher.allows_external() && launcher.external_runtime().is_some() {
+                return self.require_management_choice(launcher, &origin, sink, attempt);
+            }
+        }
 
         // External Runtimes and the same desktop Runtime are adopted. A
         // desktop-managed predecessor is stopped through its own graceful CLI
         // before the successor starts.
         if let Some(readiness) = self.probe.readiness(&origin).await {
+            if let Some(launcher) = &resolved_launcher {
+                if !launcher.allows_external() && readiness.desktop_runtime_id.is_none() {
+                    return self.require_management_choice(launcher, &origin, sink, attempt);
+                }
+            }
+
             let needs_handover = resolved_launcher
                 .as_ref()
                 .is_some_and(|launcher| launcher.requires_handover(&readiness));
@@ -373,6 +456,21 @@ impl RuntimeHost {
             );
         }
 
+        if resolved_launcher
+            .as_ref()
+            .is_some_and(|launcher| launcher.connect_only())
+        {
+            return publish(
+                sink,
+                BootstrapStatus::failed(
+                    &origin,
+                    attempt,
+                    BootstrapNotice::new(BootstrapNoticeCode::IndependentUnavailable),
+                    true,
+                ),
+            );
+        }
+
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
         if let Err(error) = self.launch_if_needed(resolved_launcher.clone()) {
@@ -396,6 +494,12 @@ impl RuntimeHost {
             let readiness = self.probe.readiness(&origin).await;
             let mut needs_polling_handover = false;
             if let Some(readiness) = readiness {
+                if let Some(launcher) = &resolved_launcher {
+                    if !launcher.allows_external() && readiness.desktop_runtime_id.is_none() {
+                        return self.require_management_choice(launcher, &origin, sink, attempt);
+                    }
+                }
+
                 if readiness_matches_launched_runtime(resolved_launcher.as_ref(), &readiness) {
                     cleanup_if_current(resolved_launcher.as_ref(), &readiness).await;
                     return publish(

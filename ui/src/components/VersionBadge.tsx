@@ -33,6 +33,17 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const api = useApi();
   const inDesktopShell = isDesktopShell();
   const isDesktop = useIsDesktop();
+  const [managedConnection, setManagedConnection] = React.useState<boolean | undefined>(
+    () => (window as Window & { __AVIBE_DESKTOP_MANAGED_CONNECTION__?: boolean }).__AVIBE_DESKTOP_MANAGED_CONNECTION__,
+  );
+  React.useEffect(() => {
+    const update = () => setManagedConnection(
+      (window as Window & { __AVIBE_DESKTOP_MANAGED_CONNECTION__?: boolean }).__AVIBE_DESKTOP_MANAGED_CONNECTION__,
+    );
+    window.addEventListener('avibe:runtime-management', update);
+    update();
+    return () => window.removeEventListener('avibe:runtime-management', update);
+  }, []);
   const [versionInfo, setVersionInfo] = React.useState<VersionInfo | null>(null);
   const [isPopupOpen, setIsPopupOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
@@ -45,9 +56,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const popupId = React.useId();
 
   React.useEffect(() => {
-    if (inDesktopShell) return;
     checkVersion();
-    loadAutoUpdateSetting();
+    if (!inDesktopShell) loadAutoUpdateSetting();
   }, []);
 
   React.useEffect(() => {
@@ -120,7 +130,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   const hasUpdate = !inDesktopShell && versionInfo?.managed_by !== 'desktop' && versionInfo?.has_update === true;
   const isDesktopManaged = versionInfo?.managed_by === 'desktop';
-  const currentVersion = (inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : versionInfo?.current) || '...';
+  const independentService = inDesktopShell && (managedConnection === false || (versionInfo !== null && versionInfo.managed_by !== 'desktop'));
+  const serviceVersion = managedConnection === false && versionInfo?.managed_by === 'desktop'
+    ? t('dashboard.unknownRevision') : versionInfo?.current;
+  const currentVersion = (inDesktopShell && !independentService ? window.__AVIBE_DESKTOP_VERSION__ : serviceVersion) || '...';
   const isSourceBuild = !inDesktopShell && versionInfo?.build?.kind === 'source';
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
@@ -130,7 +143,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     : t(isSourceBuild ? 'dashboard.refreshBuildInfo' : 'dashboard.checkUpdate');
   const badgeTitle = isSourceBuild
     ? `${t('dashboard.sourceRevision')}: ${sourceRevision || t('dashboard.unknownRevision')}${versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}`
-    : `v${currentVersion}`;
+    : independentService
+      ? t('dashboard.desktopServiceVersion', { desktop: window.__AVIBE_DESKTOP_VERSION__ || '...', service: currentVersion })
+      : `v${currentVersion}`;
   // Desktop details belong in the shared floating layer, outside the sidebar.
   // Phones retain their fixed panel below the header.
   const Popup = isDesktop ? PopoverContent : 'div';
@@ -151,11 +166,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             aria-controls={popupId}
             onClick={inDesktopShell ? (event) => {
               event.preventDefault();
-              window.location.href = 'avibe://updates';
+              window.location.href = independentService ? 'avibe://runtime' : 'avibe://updates';
             } : undefined}
           >
-            {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
-            {displayVersion}
+            {independentService ? t('dashboard.independentServiceVersion', { version: displayVersion }) : <>
+              {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
+              {displayVersion}
+            </>}
             {hasUpdate && (
               <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold animate-pulse" />
             )}

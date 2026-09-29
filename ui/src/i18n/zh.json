@@ -19,7 +19,11 @@
       "runtime_ownership_lost": "运行时已更换，此应用已无法停止它。点击“重试”以检查当前运行时。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
-      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。",
+      "takeover_required": "请选择如何管理已有的本机 Avibe 服务。点击重试可重新选择。",
+      "takeover_failed": "本机服务未能完成切换，原有数据已保留。请重试以检查当前状态。",
+      "data_home_required": "请选择已有的 Avibe 数据文件夹以继续。",
+      "independent_unavailable": "独立管理的服务当前不可用。请通过原来的安装启动它，或从系统菜单选择“管理本机服务”。"
     },
     "tray": {
       "open": "打开应用",
@@ -82,7 +86,7 @@
       "menu": "检查桌面应用更新…",
       "testChannel": "使用测试版更新",
       "title": "桌面应用更新",
-      "current": "当前版本",
+      "current": "Desktop 版本",
       "latest": "最新版本",
       "checking": "正在检查更新…",
       "upToDate": "当前应用已是最新版本。",
@@ -99,6 +103,20 @@
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
       "disabledDetail": "此构建尚未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
+    },
+    "takeover": {
+      "menu": "管理本机服务…",
+      "title": "本机 Avibe 服务",
+      "message": "独立安装的 Avibe 服务正在使用 {{home}}。交由 Desktop 管理后，今后更新应用也会更新本机服务。项目、会话和设置继续保存在此文件夹中。你也可以继续独立管理。",
+      "manage": "交由 Desktop 管理",
+      "independent": "继续独立管理",
+      "later": "稍后",
+      "selectHome": "选择数据文件夹",
+      "homeMessage": "无法确定已有的 Avibe 数据文件夹。请选择包含 Avibe 配置和状态的文件夹，此操作不会新建实例。",
+      "busy": "{{home}} 中的 Avibe 仍有任务正在执行。请等待任务结束，再从系统菜单选择“管理本机服务”。现在可以继续独立连接。",
+      "supervised": "{{home}} 中的服务由外部服务管理器启动。请先禁用对应的自启动配置并停止旧服务，再交由 Desktop 管理此数据文件夹。也可以继续独立连接。",
+      "unavailable": "无法安全核实 {{home}} 中的服务或活动任务。请通过原来的安装停止旧服务后重试，也可以继续独立连接。",
+      "managed": "此本机服务由 Desktop 管理，将随应用一起更新。"
     }
   },
   "installHint": {
@@ -3684,7 +3702,9 @@
     "restarting": "正在重启...",
     "autoUpdate": "自动更新",
     "autoUpdateHint": "空闲时自动安装",
-    "desktopManagedUpdate": "更新将随 Avibe 桌面应用提供"
+    "desktopManagedUpdate": "更新将随 Avibe 桌面应用提供",
+    "desktopServiceVersion": "Desktop {{desktop}} · 服务 {{service}}",
+    "independentServiceVersion": "服务 v{{version}}"
   },
   "doctor": {
     "title": "系统状态",

@@ -46,6 +46,10 @@ pub enum BootstrapNoticeCode {
     LauncherExited,
     ReadyTimeout,
     WorkbenchNavigationFailed,
+    TakeoverRequired,
+    TakeoverFailed,
+    DataHomeRequired,
+    IndependentUnavailable,
 }
 
 /// Typed, bounded arguments for one localized bootstrap notice.

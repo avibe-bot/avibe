@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 const expectedNoticeCodes = [
   'adopted',
+  'data_home_required',
+  'independent_unavailable',
   'invalid_origin',
   'launcher_exited',
   'probing',
@@ -15,6 +17,8 @@ const expectedNoticeCodes = [
   'runtime_spawn_failed',
   'runtime_stopped',
   'starting',
+  'takeover_failed',
+  'takeover_required',
   'workbench_navigation_failed',
 ]
 
