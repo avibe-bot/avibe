@@ -38,7 +38,7 @@ product logic.
 The Runtime outlives the shell. Closing the window never stops a Runtime,
 whether the shell adopted it or started it.
 
-### Why the Workbench stays unprivileged
+### Native command boundaries
 
 The three bootstrap commands are declared in `src-tauri/build.rs`, which makes
 `tauri-build` generate `allow-bootstrap-status` / `allow-bootstrap-retry`
@@ -57,8 +57,16 @@ as a Runtime origin outright — in release builds too, where the dev server doe
 not exist — so no `AVIBE_DESKTOP_ORIGIN` value can produce a Workbench page that
 Tauri would classify as the shell's own.
 
-All three properties are asserted, in `src-tauri/tests/shell_boundaries.rs` and
-`runtime-host/src/origin.rs`. Widening any of them fails a test.
+These Runtime-management boundaries are asserted in
+`src-tauri/tests/shell_boundaries.rs` and `runtime-host/src/origin.rs`.
+
+On macOS, a separate `window-drag` capability grants only Tauri's
+`start_dragging` and `internal_toggle_maximize` commands to the main window's
+bootstrap and literal-loopback Workbench pages. The existing navigation policy
+still admits only the active Runtime origin. Same-origin Show Pages can access
+these two window commands through their parent; they are intentionally inside
+this window-control boundary. No remote bootstrap, notification, updater, file,
+or Runtime lifecycle permission is granted.
 
 ## Product packages
 
@@ -275,26 +283,27 @@ far enough onto the display it overlaps most, or the nearest. Fullscreen, Spaces
 visibility, and routes are not restored. An absent or corrupt store uses the
 centered 1200×800 default.
 
-On macOS the main window uses an overlay title bar with a hidden title: the
-traffic lights float over the page and there is no separate title strip.
-WKWebView has no `app-region` CSS, and Tauri's drag-region attribute needs an IPC
-grant the Workbench origin must not have, so the shell lays one transparent
-native view (`src/macos_title_bar.rs`) over the sidebar's top — a 248x28pt
-strip at the top-left corner, above the WebView, where the traffic lights float.
-A drag there moves the window; a double-click follows the system "double-click a
-window's title bar" setting. No capability or command is added. Everything right
-of the sidebar keeps its full height, so the main pane's chat and search headers
-reach the window's top edge. The shell also sets `--shell-titlebar-inset: 28px`
-on the top-level document before any page script runs; `ui/src/index.css`
-defaults it to `0px`, and left-edge and full-window Workbench surfaces add it so
-no control sits under the strip or the traffic lights. Because the shell can
-adopt an already-running Runtime whose Workbench was built against different
-strip geometry (or none), the overlay is opt-in per page: after every
-main-window page load the shell natively asks whether the page declares
-`<meta name="avibe-shell-title-strip" content="248x28">` (both `index.html`
-files do). A page that does not, or cannot answer, gets the standard title bar
-with the window title, the strip hidden, and the inset reset to `0px`. Windows
-and Linux keep the native title bar and a zero inset.
+On macOS the main window uses an overlay title bar with a hidden title. The
+traffic lights float over the existing layout, without an additional horizontal
+bar. Tauri's built-in `data-tauri-drag-region` handler owns window gestures. The
+chat header's full-width outer padding and inner blank space are direct-target
+drag regions; child controls, menus and popups keep their normal mouse input.
+Setup retains its language switcher and marks its existing header's empty space.
+Transparent DOM regions cover existing traffic-light clearance on the sidebar,
+Setup, Settings, ordinary Workbench pages and bootstrap, without adding height.
+No native hit-test overlay, WebKit message handler or custom mouse listener is
+installed. Double-click follows the bundled Tauri implementation (toggle maximize),
+not a locally emulated macOS double-click preference.
+
+The shell publishes `--shell-titlebar-inset: 28px` and
+`__AVIBE_DESKTOP_DRAG__` before page scripts run. The inset only preserves the
+existing traffic-light clearance; chat and search headers still reach the top
+edge. Pages declare `<meta name="avibe-shell-drag-regions" content="tauri">`.
+An older page without that declaration gets a standard title bar and a zero
+inset, so it remains draggable. The legacy `avibe-shell-title-strip` declaration
+is retained for older shells; pages under those shells do not activate the new
+drag attributes. Windows, Linux and ordinary browsers retain their existing
+layout and do not activate the macOS drag regions.
 
 Links that ask for a new browsing context (`target="_blank"` or
 `window.open`) open in the system browser when they are `http(s)`; anything

@@ -78,10 +78,11 @@ def _assert_log_sinks_released(spawned: _Spawned) -> None:
 
 
 def test_a_child_whose_pid_record_cannot_be_written_does_not_survive(spawned, tmp_path: Path) -> None:
-    # A real write failure: the record's directory does not exist.
-    pid_path = tmp_path / "missing" / "vibe-ui.pid"
+    # A real write failure: where the record's directory should be is a file.
+    (tmp_path / "not-a-directory").write_text("", encoding="utf-8")
+    pid_path = tmp_path / "not-a-directory" / "vibe-ui.pid"
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(OSError):
         runtime.spawn_background(_sleeper(), pid_path, "ui_stdout.log", "ui_stderr.log")
 
     _assert_killed_and_reaped(spawned)

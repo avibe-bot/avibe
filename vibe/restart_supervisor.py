@@ -365,6 +365,14 @@ def _run_restart_job(
         mark_duration("stop_runtime_seconds", stop_runtime_started_at)
         if restart_ui and ui_pid and ui_stopped is False and runtime.pid_alive(ui_pid):
             return fail(f"UI pid {ui_pid} did not stop", 2, started_at=restart_started_at)
+        if restart_ui:
+            from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
+
+            # The UI owns backend installs. One killed before it drained them
+            # leaves the installer tree running, and the successor must not
+            # start while it is.
+            if not reap_abandoned_desktop_backend_installs():
+                return fail("desktop backend installer processes did not stop", 2, started_at=restart_started_at)
         if stopped is False:
             remaining_service_pids = _remaining_service_pids_after_stop()
             if remaining_service_pids:

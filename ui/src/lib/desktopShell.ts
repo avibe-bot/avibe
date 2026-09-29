@@ -3,6 +3,8 @@ declare global {
     /** Defined by the Avibe desktop shell before any page script runs, top-level document only. */
     readonly __AVIBE_DESKTOP_SHELL__?: true;
     readonly __AVIBE_DESKTOP_VERSION__?: string;
+    /** The macOS shell grants Tauri window dragging to this page. */
+    readonly __AVIBE_DESKTOP_DRAG__?: true;
   }
 }
 
@@ -24,3 +26,10 @@ export function isDesktopShell(): boolean {
  * shell loads Settings as a page instead.
  */
 export const DESKTOP_OPEN_SETTINGS_EVENT = 'avibe:desktop-open-settings';
+
+/** Only a direct press on this layout element drags; descendants keep their input. */
+export function desktopDragRegion(): '' | undefined {
+  return isDesktopShell() && window.__AVIBE_DESKTOP_DRAG__ === true
+    && document.querySelector('meta[name="avibe-shell-drag-regions"][content="tauri"]')
+    ? '' : undefined;
+}

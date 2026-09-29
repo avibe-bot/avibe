@@ -8,8 +8,10 @@
          drag strip free of controls (--shell-titlebar-inset); without an exact
          match the shell keeps the standard title bar. -->
     <meta name="avibe-shell-title-strip" content="248x28" />
+    <meta name="avibe-shell-drag-regions" content="tauri" />
   </head>
   <body>
+    <div class="window-drag-region" data-tauri-drag-region></div>
     <main class="stage" role="main">
       <section class="card" aria-labelledby="title">
         <!--

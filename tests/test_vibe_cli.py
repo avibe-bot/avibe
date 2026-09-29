@@ -1622,7 +1622,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     assert not any(call == "stop" for call in calls)
 
 
-def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
+def _superseded_controller(monkeypatch, result, *, ui_running=False):
     calls = []
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "b" * 64)
     monkeypatch.setattr(
@@ -1632,27 +1632,43 @@ def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
     )
     monkeypatch.setattr(
         cli.runtime,
-        "resolve_service_owner_pid",
-        lambda include_starting: 1234,
+        "stop_desktop_runtime",
+        lambda runtime_id, **kwargs: calls.append((runtime_id, kwargs)) or result,
     )
-    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: True)
-    monkeypatch.setattr(
-        cli.runtime,
-        "stop_service",
-        lambda: calls.append(("service",)) or True,
-    )
-    monkeypatch.setattr(
-        cli.runtime,
-        "stop_ui",
-        lambda **kwargs: calls.append(("ui", kwargs)) or True,
-    )
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: ui_running)
+    return calls
+
+
+def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
+    calls = _superseded_controller(monkeypatch, cli.runtime.DesktopRuntimeStopResult())
 
     cli._handover_superseded_desktop_runtime()
 
-    assert calls == [
-        ("service",),
-        ("ui", {"stop_remote_access": False}),
-    ]
+    # The Runtime health named is the one stopped, through the scoped stop.
+    assert calls == [("a" * 64, {})]
+
+
+def _left(role):
+    return (cli.runtime.DesktopRuntimeProcess(pid=4242, role=role, name="python"),)
+
+
+@pytest.mark.parametrize(
+    ("result", "ui_running"),
+    [
+        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), False),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), False),
+        # Stopped, but a UI of some other Runtime still holds the pidfile.
+        (cli.runtime.DesktopRuntimeStopResult(), True),
+    ],
+)
+def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, ui_running):
+    _superseded_controller(monkeypatch, result, ui_running=ui_running)
+
+    with pytest.raises(RuntimeError):
+        cli._handover_superseded_desktop_runtime()
 
 
 @pytest.mark.parametrize("controller_runtime_id", [None, "b" * 64])
@@ -1670,13 +1686,8 @@ def test_desktop_start_preserves_external_or_matching_controllers(
     )
     monkeypatch.setattr(
         cli.runtime,
-        "stop_service",
-        lambda: pytest.fail("controller must be preserved"),
-    )
-    monkeypatch.setattr(
-        cli.runtime,
-        "stop_ui",
-        lambda **_kwargs: pytest.fail("UI must be preserved"),
+        "stop_desktop_runtime",
+        lambda *_args, **_kwargs: pytest.fail("controller must be preserved"),
     )
 
     cli._handover_superseded_desktop_runtime()
@@ -2203,14 +2214,16 @@ def test_cmd_start_leaves_no_ui_running_when_the_ui_pid_record_cannot_be_written
     `start_ui` never captured it and the rollback -- which only undoes what it
     was told it created -- had nothing to undo. The orphan kept the listener.
     Here the real `start_ui` and the real spawn run against a stand-in
-    interpreter that just sleeps, and the pid record's directory is missing.
+    interpreter that just sleeps, and a file stands where the pid record's
+    directory would be.
     """
 
     started = _ui_refuses_to_start(monkeypatch, reused=False)
-    children = _real_ui_children(monkeypatch, tmp_path, tmp_path / "missing" / "vibe-ui.pid")
+    (tmp_path / "not-a-directory").write_text("", encoding="utf-8")
+    children = _real_ui_children(monkeypatch, tmp_path, tmp_path / "not-a-directory" / "vibe-ui.pid")
 
     try:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(OSError):
             cli.cmd_start()
 
         assert len(children) == 1, children
@@ -4316,12 +4329,15 @@ def test_start_parser_accepts_no_open_browser():
     assert args.open_browser is False
 
 
-@pytest.mark.parametrize("receipt", [None, json.dumps(_startup_receipt_payload())])
-def test_stop_parser_and_main_preserve_optional_receipt(monkeypatch, receipt):
-    arguments = ["stop"] if receipt is None else ["stop", "--receipt", receipt]
-    parsed = cli.build_parser().parse_args(arguments)
-    assert parsed.command == "stop"
-    assert parsed.receipt == receipt
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["stop"], {}),
+        (["stop", "--receipt", json.dumps(_startup_receipt_payload())], {"receipt": json.dumps(_startup_receipt_payload())}),
+        (["stop", "--expect-runtime-id", "a" * 64], {"expect_runtime_id": "a" * 64}),
+    ],
+)
+def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expected):
     calls = []
     monkeypatch.setattr(cli.sys, "argv", ["vibe", *arguments])
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
@@ -4331,7 +4347,14 @@ def test_stop_parser_and_main_preserve_optional_receipt(monkeypatch, receipt):
         cli.main()
 
     assert exited.value.code == 3
-    assert calls == ([{}] if receipt is None else [{"receipt": receipt}])
+    assert calls == [expected]
+
+
+def test_stop_parser_rejects_a_receipt_with_an_expected_runtime_id():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["stop", "--receipt", json.dumps(_startup_receipt_payload()), "--expect-runtime-id", "a" * 64]
+        )
 
 
 def test_remote_parser_accepts_pairing_command():

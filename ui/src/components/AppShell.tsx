@@ -1,3 +1,4 @@
+import { DesktopDragRegion } from './DesktopDragRegion';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
@@ -468,6 +469,7 @@ export const AppShell: React.FC = () => {
           settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >
+        <DesktopDragRegion className="absolute inset-x-0 top-0" />
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && (
             <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
@@ -573,6 +575,9 @@ export const AppShell: React.FC = () => {
         </header>
       )}
 
+      {!chromeless && !isFullScreenMobile && !isSettings && (
+        <DesktopDragRegion className="fixed left-[var(--app-sidebar-w)] right-0 top-0 z-10" />
+      )}
       <main
         id={APP_SHELL_SCROLL_ID}
         className={clsx(

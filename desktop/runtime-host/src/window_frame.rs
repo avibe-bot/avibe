@@ -18,10 +18,10 @@ pub struct WindowFrame {
 /// The grab handle: the part of the title bar that drags the window on every
 /// frame the shell draws, in logical px from the window's top-left corner.
 ///
-/// The macOS overlay title bar moves the window only through its native drag
-/// strip, `TITLE_BAR_STRIP_WIDTH` × `TITLE_BAR_INSET` (248 × 28 pt) in
-/// `src-tauri/src/macos_title_bar.rs`, so the handle ends with that strip and
-/// must shrink if the strip does. It starts past the traffic lights, which end
+/// The macOS sidebar reserves at least 248 × 28 pt of draggable clearance
+/// (`DesktopDragRegion` in the Workbench). Other header areas can contain
+/// controls, so recovery conservatively keeps this guaranteed area reachable.
+/// It starts past the traffic lights, which end
 /// about 60 pt from the left edge, and past the Windows window icon. The
 /// standard macOS title bar and the Windows caption drag across all of it.
 const HANDLE_LEFT: f64 = 72.0;

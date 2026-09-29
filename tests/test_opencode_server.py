@@ -234,6 +234,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             create_process.await_args.kwargs["env"]["OPENCODE_DISABLE_EXTERNAL_SKILLS"],
             "1",
         )
+        # A desktop Runtime's scoped stop knows the server by this stamp.
+        self.assertEqual(create_process.await_args.kwargs["env"]["AVIBE_DESKTOP_ROLE"], "opencode")
 
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -967,8 +969,8 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             await manager.mark_run_active("ses-active")
 
             with patch.object(
-                Path,
-                "write_text",
+                SERVER_MODULE,
+                "write_atomic",
                 side_effect=OSError("read-only pid file"),
             ):
                 with self.assertRaisesRegex(OSError, "read-only pid file"):

@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "window-drag",
+  "description": "Allow only built-in window drag gestures on macOS, in bootstrap and the loopback Workbench. Same-origin Show Pages share this window-control boundary; Runtime management remains local-only.",
+  "platforms": [
+    "macOS"
+  ],
+  "local": true,
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*",
+      "http://[\\:\\:1]:*/*"
+    ]
+  },
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

@@ -1,3 +1,4 @@
+import { desktopDragRegion } from '../../lib/desktopShell';
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
@@ -102,7 +103,7 @@ export const SearchPage: React.FC = () => {
     // routes here (sidebar field + ⌘K own search), but keep it sane if hit.
     <div className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:absolute">
       {/* Header — back chevron + active search field (design.pen P6Nsz/KmsNV). */}
-      <header className="flex shrink-0 items-center gap-2.5 border-b border-border bg-background/92 px-4 py-3 backdrop-blur">
+      <header data-tauri-drag-region={desktopDragRegion()} className="flex shrink-0 items-center gap-2.5 border-b border-border bg-background/92 px-4 py-3 backdrop-blur">
         <Button
           type="button"
           variant="ghost"

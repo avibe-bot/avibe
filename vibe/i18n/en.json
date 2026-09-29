@@ -842,7 +842,10 @@
     "checkUpdate": "Updates are delivered with the Avibe desktop app.",
     "upgrade": "This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.",
     "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
-    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately."
+    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately.",
+    "handoverRefused": "Refused to stop the superseded desktop-managed Avibe Runtime: {reason}",
+    "handoverFailed": "Failed to stop the superseded desktop-managed Avibe Runtime: {part}",
+    "handoverForeignUi": "A UI server that is not the superseded desktop-managed Avibe Runtime's is still running."
   },
   "agentInstall": {
     "installFailed": "Could not install {backend}.",
@@ -1073,6 +1076,14 @@
       "repairExplicitCommandFailed": "The Show Runtime command from VIBE_SHOW_RUNTIME_BIN could not start: {reason}. Fix or remove the override, then rerun Doctor.",
       "repairPrepareFailed": "Show Runtime preparation failed: {detail}",
       "repairLegacyArchiveUnavailable": "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides."
+    },
+    "stop": {
+      "opencodeStopped": "OpenCode server stopped",
+      "serviceFailed": "ERROR: Avibe service did not stop; preserving pidfile and aborting.",
+      "uiFailed": "ERROR: Avibe UI did not stop; preserving pidfile and aborting.",
+      "installerFailed": "ERROR: Desktop backend installer processes did not stop.",
+      "opencodeFailed": "ERROR: The OpenCode server this Runtime started did not stop.",
+      "unknownFailed": "ERROR: A process this Runtime started could not be identified and was left running."
     }
   },
   "doctor": {

@@ -537,6 +537,27 @@ def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path
     assert runtime.read_json(runtime.get_restart_status_path())["state"] == "succeeded"
 
 
+def test_restart_job_does_not_start_while_an_abandoned_installer_tree_survives(monkeypatch, tmp_path):
+    from vibe import desktop_backends
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = []
+
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(desktop_backends, "reap_abandoned_desktop_backend_installs", lambda: False)
+
+    rc = restart_supervisor._run_restart_job(job_id="jobinstall", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
+
+    assert rc == 2
+    assert calls == ["stop_runtime"]
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["state"] == "failed"
+    assert "desktop backend installer processes did not stop" in status["error"]
+
+
 def test_restart_job_aborts_when_extra_service_survives_stop(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

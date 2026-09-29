@@ -13651,12 +13651,18 @@ def _handover_superseded_desktop_runtime() -> None:
     if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
         return
 
-    service_was_running = runtime.resolve_service_owner_pid(include_starting=True) is not None
-    ui_was_running = runtime.ui_pid_file_points_to_running_ui()
-    if service_was_running and runtime.stop_service() is not True:
-        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe service")
-    if ui_was_running and runtime.stop_ui(stop_remote_access=False) is not True:
-        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe UI")
+    # Health names the Runtime that answered; the stop signals only processes
+    # that carry its id.
+    result = runtime.stop_desktop_runtime(actual_runtime_id)
+    language = _configured_cli_language()
+    if result.refusal is not None:
+        raise RuntimeError(i18n_t("desktopRuntime.handoverRefused", language, reason=result.refusal))
+    if result.failure is not None:
+        raise RuntimeError(i18n_t("desktopRuntime.handoverFailed", language, part=result.failure))
+    # A UI still running is not the superseded Runtime's. Starting would reuse
+    # it, or replace it with an unscoped stop.
+    if runtime.ui_pid_file_points_to_running_ui():
+        raise RuntimeError(i18n_t("desktopRuntime.handoverForeignUi", language))
 
 
 def cmd_start(*, open_browser: bool | None = None):
@@ -13923,7 +13929,63 @@ def _stop_receipt_refusal(receipt_json: str) -> str | None:
     return None
 
 
-def cmd_stop(*, receipt: str | None = None):
+# The part of a stop that did not stop: its localized diagnostic and the
+# status detail, which stays English for machine readers.
+_STOP_FAILURES = {
+    "service": ("runtime.stop.serviceFailed", "service stop failed"),
+    "ui": ("runtime.stop.uiFailed", "ui stop failed"),
+    "installer": ("runtime.stop.installerFailed", "desktop backend install drain failed"),
+    "opencode": ("runtime.stop.opencodeFailed", "opencode stop failed"),
+    "unknown": ("runtime.stop.unknownFailed", "unidentified runtime process left running"),
+}
+
+
+def _stop_failed(part: str, write_status: Callable[..., None] | None = None) -> int:
+    key, detail = _STOP_FAILURES[part]
+    print(i18n_t(key, _configured_cli_language()), file=sys.stderr)
+    (write_status or _write_status)("error", detail)
+    return 2
+
+
+def _write_status_unless_a_service_holds_the_lock(*status: str) -> None:
+    # The service holding the lock owns the shared status, even another
+    # Runtime's. The write holds the free lock, so no service can start, and
+    # publish its own status, before it lands.
+    runtime.desktop_service_lock_presence(while_absent=lambda: _write_status(*status))
+
+
+def _report_opencode_stopped() -> None:
+    print(i18n_t("runtime.stop.opencodeStopped", _configured_cli_language()))
+
+
+def _print_stop_json(payload: dict) -> None:
+    print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
+
+
+def _stop_expected_desktop_runtime(runtime_id: str) -> int:
+    result = runtime.stop_desktop_runtime(runtime_id)
+    if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
+        _print_stop_json({"reason": result.refusal})
+        return 3
+    if result.left_running:
+        _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in result.left_running]})
+    if result.opencode_stopped:
+        _report_opencode_stopped()
+    # Unlike a full stop, an OpenCode server of this Runtime that survives
+    # fails this stop: the desktop host replaces or removes the bundle it runs from.
+    if result.outcome is runtime.DesktopRuntimeStopOutcome.FAILED:
+        status = _stop_failed(result.failure, _write_status_unless_a_service_holds_the_lock)
+        remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
+        _print_stop_json({"failed": result.failure, "remaining": remaining})
+        return status
+
+    _write_status_unless_a_service_holds_the_lock("stopped")
+    return 0
+
+
+def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None):
+    if expect_runtime_id is not None:
+        return _stop_expected_desktop_runtime(expect_runtime_id)
     if receipt is not None:
         reason = _stop_receipt_refusal(receipt)
         if reason is not None:
@@ -13934,19 +13996,22 @@ def cmd_stop(*, receipt: str | None = None):
 
     service_stopped = runtime.stop_service()
     ui_stopped = runtime.stop_ui()
+    from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
+
+    # Each tree's owner decides whether it is abandoned, so the reap runs
+    # whichever stop above failed.
+    installers_reaped = reap_abandoned_desktop_backend_installs()
 
     # Also terminate OpenCode server on full stop
     if _stop_opencode_server():
-        print("OpenCode server stopped")
+        _report_opencode_stopped()
 
     if service_was_running and service_stopped is False:
-        print("ERROR: Avibe service did not stop; preserving pidfile and aborting.", file=sys.stderr)
-        _write_status("error", "service stop failed")
-        return 2
+        return _stop_failed("service")
     if ui_was_running and ui_stopped is False:
-        print("ERROR: Avibe UI did not stop; preserving pidfile and aborting.", file=sys.stderr)
-        _write_status("error", "ui stop failed")
-        return 2
+        return _stop_failed("ui")
+    if not installers_reaped:
+        return _stop_failed("installer")
 
     _write_status("stopped")
     return 0
@@ -16520,9 +16585,15 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command")
 
     stop_parser = subparsers.add_parser("stop", help="Stop all services")
-    stop_parser.add_argument(
+    stop_scope = stop_parser.add_mutually_exclusive_group()
+    stop_scope.add_argument(
         "--receipt",
         help="Stop only if the service identity matches this startup receipt JSON.",
+    )
+    stop_scope.add_argument(
+        "--expect-runtime-id",
+        metavar="RUNTIME_ID",
+        help="Stop only the processes the desktop Runtime with this id started.",
     )
     start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
     start_parser.add_argument(
@@ -18667,7 +18738,11 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
-        sys.exit(cmd_stop(receipt=args.receipt) if args.receipt is not None else cmd_stop())
+        if args.receipt is not None:
+            sys.exit(cmd_stop(receipt=args.receipt))
+        if args.expect_runtime_id is not None:
+            sys.exit(cmd_stop(expect_runtime_id=args.expect_runtime_id))
+        sys.exit(cmd_stop())
     if args.command == "start":
         if _generation_downgrade_blocks("start", allow_downgrade=args.allow_downgrade):
             sys.exit(1)

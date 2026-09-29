@@ -842,7 +842,10 @@
     "checkUpdate": "更新由 Avibe 桌面应用统一提供。",
     "upgrade": "此 Runtime 由 Avibe 桌面应用管理。请更新桌面应用来更新 Avibe。",
     "apiUpgrade": "此 Runtime 由 Avibe 桌面应用管理。",
-    "backendUpgrade": "此 Codex 后端属于旧版 Avibe 桌面 Runtime，无法原地更新。请重新打开当前桌面应用，将其安装为私有后端。"
+    "backendUpgrade": "此 Codex 后端属于旧版 Avibe 桌面 Runtime，无法原地更新。请重新打开当前桌面应用，将其安装为私有后端。",
+    "handoverRefused": "已拒绝停止被取代的桌面托管 Avibe Runtime：{reason}",
+    "handoverFailed": "未能停止被取代的桌面托管 Avibe Runtime：{part}",
+    "handoverForeignUi": "仍有一个不属于被取代的桌面托管 Avibe Runtime 的 UI 服务在运行。"
   },
   "agentInstall": {
     "installFailed": "无法安装 {backend}。",
@@ -1073,6 +1076,14 @@
       "repairPostVerificationFailed": "Show Runtime 准备已完成，但无法验证是否可启动：{detail}",
       "repairPrepareFailed": "Show Runtime 准备失败：{detail}",
       "repairLegacyArchiveUnavailable": "打包的 Show Runtime 清单不可用，旧版上游归档地址也没有发布资产。请升级或重新安装官方 Avibe 软件包，或移除过期的 runtime 来源覆盖配置。"
+    },
+    "stop": {
+      "opencodeStopped": "OpenCode 服务已停止",
+      "serviceFailed": "错误：Avibe 服务未能停止；已保留 pidfile 并中止。",
+      "uiFailed": "错误：Avibe UI 未能停止；已保留 pidfile 并中止。",
+      "installerFailed": "错误：桌面后端安装进程未能停止。",
+      "opencodeFailed": "错误：此 Runtime 启动的 OpenCode 服务未能停止。",
+      "unknownFailed": "错误：此 Runtime 启动的一个进程无法识别，已保留运行。"
     }
   },
   "doctor": {

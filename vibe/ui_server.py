@@ -16835,6 +16835,38 @@ app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)
 
 
+def drain_desktop_backend_installs_on_shutdown() -> None:
+    """Stop the backend installer trees this UI started, so none outlives it."""
+
+    from vibe.desktop_backends import drain_desktop_backend_installs
+
+    try:
+        drained = drain_desktop_backend_installs()
+    except Exception:
+        logger.error("Failed to drain desktop backend installs on shutdown", exc_info=True)
+        return
+    if not drained:
+        logger.error("Desktop backend installer processes are still running at shutdown")
+
+
+# A stop signal reaches handle_exit first; uvicorn then waits for open
+# connections before running lifespan shutdown, and a managed stop escalates to
+# SIGKILL well before a long-lived stream closes. Exits that set should_exit
+# directly still pass through lifespan shutdown.
+app.add_event_handler("shutdown", drain_desktop_backend_installs_on_shutdown)
+
+
+def _create_ui_server(config):
+    import uvicorn
+
+    class _UIServer(uvicorn.Server):
+        def handle_exit(self, sig, frame) -> None:
+            super().handle_exit(sig, frame)
+            drain_desktop_backend_installs_on_shutdown()
+
+    return _UIServer(config)
+
+
 # cloudflared holds idle origin connections in a pool for up to
 # --proxy-keepalive-timeout (default 1m30s) and reuses them for later requests.
 # uvicorn's own default is 5s, so the origin closes connections the tunnel still
@@ -16918,7 +16950,7 @@ def run_ui_server(host: str, port: int) -> None:
                 timeout_keep_alive=_UI_KEEPALIVE_TIMEOUT_SECONDS,
             )
             bound_sockets = _bind_ui_sockets(host, port)
-            _server = uvicorn.Server(uvicorn_config)
+            _server = _create_ui_server(uvicorn_config)
             # Reconcile remote_access in the background so cloudflared download/
             # connector start does not block /health and the rest of the UI
             # from coming up after restart/reload.

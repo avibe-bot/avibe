@@ -823,8 +823,12 @@ def reap_orphaned_process_tree(
     return "unconfirmed"
 
 
-def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process]:
-    """This user's live, inspectable processes whose marker hashes to ``worker_fingerprint``.
+def processes_carrying_marker(
+    worker_fingerprint: str,
+    *,
+    marker_env: str = PROCESS_IDENTITY_ENV,
+) -> list[psutil.Process]:
+    """This user's live, inspectable processes whose ``marker_env`` hashes to ``worker_fingerprint``.
 
     Best effort by design. The marked tree is a same-user, non-setuid process
     this service spawned, so its ownership and environment are readable; a process
@@ -837,7 +841,11 @@ def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process]:
     own_uid = os.getuid() if hasattr(os, "getuid") else None
     own_user = None if own_uid is not None else psutil.Process(own_pid).username()
     found: list[psutil.Process] = []
-    for process in psutil.process_iter(["uids", "username"]):
+    # The cached iteration skips, once, a pid psutil has flagged as reused, so
+    # a rescan could miss that pid's new holder. Each scan starts fresh.
+    psutil.process_iter.cache_clear()
+    # psutil rejects an attribute its platform lacks, and Windows has no uids.
+    for process in psutil.process_iter(["uids"] if own_uid is not None else ["username"]):
         if process.pid == own_pid:
             continue
         if own_uid is not None:
@@ -847,7 +855,7 @@ def _processes_carrying_marker(worker_fingerprint: str) -> list[psutil.Process]:
         elif process.info.get("username") != own_user:
             continue
         try:
-            marker = process.environ().get(PROCESS_IDENTITY_ENV)
+            marker = process.environ().get(marker_env)
         except (psutil.Error, OSError):
             # Exited, or not inspectable and therefore not a tree this service spawned.
             continue
@@ -879,7 +887,7 @@ def reap_marked_processes(
     if not is_valid_worker_fingerprint(worker_fingerprint):
         return "gone"
     try:
-        victims = _processes_carrying_marker(worker_fingerprint)
+        victims = processes_carrying_marker(worker_fingerprint)
         if not victims:
             return "gone"
         logger.warning("Reaping %d %s process(es) found by their identity marker", len(victims), label)
@@ -895,7 +903,7 @@ def reap_marked_processes(
             except psutil.NoSuchProcess:
                 continue
         _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
-        if not alive and not _processes_carrying_marker(worker_fingerprint):
+        if not alive and not processes_carrying_marker(worker_fingerprint):
             return "reaped"
     except Exception as exc:
         if on_error is not None:

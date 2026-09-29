@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import aiohttp
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import V2Config, is_model_hub_enabled
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
@@ -33,6 +34,7 @@ from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
+from vibe.desktop_runtime import DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV
 from vibe.opencode_config import (
     OPENCODE_REASONING_VARIANTS,
     OpenCodeRuntimeConfigInvalidError,
@@ -750,7 +752,7 @@ class OpenCodeServerManager:
         revised["active_run_sessions"] = sorted(retained)
         if retained != set(active):
             try:
-                self._pid_file.write_text(json.dumps(revised))
+                write_atomic(self._pid_file, json.dumps(revised))
             except Exception:
                 logger.warning(
                     "Could not persist reconciled OpenCode run markers",
@@ -1097,7 +1099,7 @@ class OpenCodeServerManager:
                 payload["model_hub_overlay_provider_ids"] = list(
                     self._model_hub_overlay_provider_ids
                 )
-            self._pid_file.write_text(json.dumps(payload))
+            write_atomic(self._pid_file, json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
 
@@ -1146,7 +1148,7 @@ class OpenCodeServerManager:
         if references_current_server:
             assert isinstance(info, dict)
             info["active_run_sessions"] = sorted(updated)
-            self._pid_file.write_text(json.dumps(info))
+            write_atomic(self._pid_file, json.dumps(info))
         return updated
 
     def _clear_pid_file(self) -> None:
@@ -1937,6 +1939,7 @@ class OpenCodeServerManager:
         logger.info(f"Starting OpenCode server: {' '.join(cmd)}")
 
         env = os.environ.copy()
+        env[DESKTOP_ROLE_ENV] = DESKTOP_OPENCODE_ROLE
         env["OPENCODE_ENABLE_EXA"] = "1"
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
         env.update(server_environment())
