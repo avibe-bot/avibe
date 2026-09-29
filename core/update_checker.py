@@ -16,7 +16,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -156,6 +156,9 @@ class UpdateState:
     blocked_auto_update_reason: Optional[str] = None
     blocked_auto_update_at: Optional[str] = None
     blocked_auto_update_current_version: Optional[str] = None
+    # Backend name -> the release its unattended upgrade last ran for, so a
+    # release that fails to install is not retried on every check.
+    backend_auto_update_attempts: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "UpdateState":
@@ -164,6 +167,7 @@ class UpdateState:
             return cls()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            attempts = data.get("backend_auto_update_attempts")
             return cls(
                 notified_version=data.get("notified_version"),
                 notified_at=data.get("notified_at"),
@@ -173,6 +177,11 @@ class UpdateState:
                 blocked_auto_update_reason=data.get("blocked_auto_update_reason"),
                 blocked_auto_update_at=data.get("blocked_auto_update_at"),
                 blocked_auto_update_current_version=data.get("blocked_auto_update_current_version"),
+                backend_auto_update_attempts=(
+                    {str(name): str(version) for name, version in attempts.items()}
+                    if isinstance(attempts, dict)
+                    else {}
+                ),
             )
         except Exception as e:
             logger.warning(f"Failed to load update state: {e}")
@@ -191,6 +200,7 @@ class UpdateState:
                 "blocked_auto_update_reason": self.blocked_auto_update_reason,
                 "blocked_auto_update_at": self.blocked_auto_update_at,
                 "blocked_auto_update_current_version": self.blocked_auto_update_current_version,
+                "backend_auto_update_attempts": self.backend_auto_update_attempts,
             }
             write_atomic(path, json.dumps(data, indent=2))
         except Exception as e:
@@ -385,6 +395,8 @@ class UpdateChecker:
             if self.config.check_interval_minutes <= 0:
                 return
 
+            await self._reconcile_backend_auto_updates()
+
             # Fetch version info in a thread to avoid blocking the event loop
             version_info = await asyncio.to_thread(_fetch_pypi_version_sync)
 
@@ -507,6 +519,57 @@ class UpdateChecker:
         except Exception as exc:  # noqa: BLE001
             logger.warning("askill managed dependency reconcile raised: %s", exc, exc_info=True)
 
+    async def _reconcile_backend_auto_updates(self) -> None:
+        """Upgrade opted-in backend CLIs, each only while no turn is using it."""
+        coordinator = getattr(self.controller, "backend_restart_coordinator", None)
+        if coordinator is None or not self._quiet_for_idle_window():
+            return
+
+        from modules.agents.catalog import AGENT_BACKENDS, supports_install
+        from vibe import api
+
+        for backend in AGENT_BACKENDS:
+            if not supports_install(backend):
+                continue
+
+            # Once the install ran, its outcome is recorded; only a failure
+            # to enter or leave the idle window is left to the next check.
+            async def install(name: str = backend) -> dict:
+                try:
+                    return await asyncio.to_thread(api.install_agent, name)
+                except Exception as exc:  # noqa: BLE001
+                    return {"ok": False, "message": str(exc) or type(exc).__name__}
+
+            try:
+                runtime = await asyncio.to_thread(api.get_backend_runtime, backend)
+                latest = runtime.get("latest_version")
+                if not (
+                    runtime.get("ok")
+                    and runtime.get("enabled")
+                    and runtime.get("auto_update")
+                    and runtime.get("installed")
+                    and runtime.get("has_update")
+                    and latest
+                ) or self.state.backend_auto_update_attempts.get(backend) == latest:
+                    continue
+                result = await coordinator.run_when_idle(backend, install)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Backend %s auto-update failed: %s", backend, exc, exc_info=True)
+                continue
+
+            if result is None:
+                logger.info("Backend %s auto-update to %s deferred: backend is busy", backend, latest)
+                continue
+            if result.get("code") == "install_locked":
+                logger.info("Backend %s auto-update to %s deferred: another install is running", backend, latest)
+                continue
+            self.state.backend_auto_update_attempts[backend] = latest
+            self.state.save()
+            if result.get("ok"):
+                logger.info("Backend %s auto-updated to %s", backend, latest)
+            else:
+                logger.warning("Backend %s auto-update to %s failed: %s", backend, latest, result.get("message"))
+
     async def _get_version_info_async(self) -> Dict[str, Any]:
         """Get version info asynchronously."""
         return await asyncio.to_thread(_fetch_pypi_version_sync)
@@ -538,7 +601,10 @@ class UpdateChecker:
             logger.debug("Not idle: has active sessions")
             return False
 
-        # Check for recent activity
+        return self._quiet_for_idle_window()
+
+    def _quiet_for_idle_window(self) -> bool:
+        """Check that no message has arrived within ``idle_minutes``."""
         # If no activity recorded yet, consider it NOT idle (just started)
         if not self.state.last_activity_at:
             logger.debug("Not idle: no activity recorded yet (service just started)")

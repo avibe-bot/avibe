@@ -12,13 +12,14 @@ import stat
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 300.0
 _POLL_INTERVAL_SECONDS = 0.1
 _NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
+_T = TypeVar("_T")
 
 
 class NativeMigrationBlockedError(RuntimeError):
@@ -391,7 +392,7 @@ class BackendRestartCoordinator:
         self._refresh = refresh
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
         self._poll_interval = max(0.001, poll_interval)
-        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._request_locks: dict[str, asyncio.Lock] = {}
         self._outcomes: dict[str, dict[str, str]] = {}
         self._migration_backends: set[str] = set()
@@ -611,7 +612,67 @@ class BackendRestartCoordinator:
             return "restarted"
         return "draining"
 
-    def _on_done(self, backend: str, task: asyncio.Task[None]) -> None:
+    async def run_when_idle(self, backend: str, operation: Callable[[], Awaitable[_T]]) -> _T | None:
+        """Run ``operation`` while ``backend`` admits no turn, then refresh it.
+
+        Unattended maintenance can simply try again later, so unlike a restart
+        this never waits out or cancels work: it returns ``None`` without running
+        ``operation`` when a turn, cutover, migration, or native login already
+        holds the backend. Messages that arrive meanwhile are deferred to the
+        refreshed runtime, which also applies a restart requested during it.
+        """
+        lock = self._request_locks.setdefault(backend, asyncio.Lock())
+        async with lock:
+            if backend in self._migration_backends or backend in self._blocked_backends():
+                return None
+            try:
+                self._assert_no_native_login((backend,))
+            except NativeMigrationBlockedError:
+                return None
+            existing = self._tasks.get(backend)
+            if existing is not None:
+                if not existing.done():
+                    return None
+                self._on_done(backend, existing)
+
+            agent_service = self.controller.agent_service
+            session_turns = self.controller.session_turns
+            agent_service.begin_backend_drain(backend)
+            session_turns.begin_backend_drain(backend)
+            busy = True
+            try:
+                await agent_service.prepare_backend_restart(backend)
+                busy = await self._has_active_turns(backend)
+            finally:
+                # Nothing changed, so deferred messages resume on the same runtime.
+                if busy and backend not in self._blocked_backends():
+                    agent_service.end_backend_drain(backend)
+                    await session_turns.end_backend_drain(backend)
+            if busy:
+                return None
+            task = asyncio.create_task(self._maintain(backend, operation), name=f"backend-maintenance:{backend}")
+            self._tasks[backend] = task
+            task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+
+        # The requester going away must not abandon a half-applied install
+        # before the refresh that picks it up.
+        return await asyncio.shield(task)
+
+    async def _maintain(self, backend: str, operation: Callable[[], Awaitable[_T]]) -> _T:
+        refreshed = False
+        try:
+            try:
+                return await operation()
+            finally:
+                # Even a failed operation may have replaced the CLI.
+                await self._refresh(backend, False)
+                refreshed = True
+        finally:
+            if backend not in self._blocked_backends():
+                self.controller.agent_service.end_backend_drain(backend)
+                await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+
+    def _on_done(self, backend: str, task: asyncio.Task[Any]) -> None:
         current = self._tasks.get(backend) is task
         if current:
             self._tasks.pop(backend, None)

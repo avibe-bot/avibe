@@ -1,7 +1,9 @@
 import asyncio
 import json
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -2553,6 +2555,44 @@ def test_install_agent_returns_resolved_path(monkeypatch):
 
     assert result["ok"] is True
     assert result["path"] == "/Users/test/.opencode/bin/opencode"
+
+
+def test_install_agent_refuses_a_second_concurrent_install_of_one_backend(monkeypatch):
+    # Settings installs in the UI process and auto-update in the controller;
+    # both reach the CLI only through ``install_agent``.
+    started = threading.Event()
+    release = threading.Event()
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        started.set()
+        assert release.wait(5)
+        return subprocess.CompletedProcess(command, 0, "installed", "")
+
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: f"/usr/bin/{binary}" if binary in {"curl", "bash"} else None,
+    )
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "Popen", _PopenFromRun)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda binary: "/Users/test/.opencode/bin/opencode")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(api.install_agent, "opencode")
+        assert started.wait(5)
+        ran_before = len(commands)
+        second = api.install_agent("opencode")
+        ran_after = len(commands)
+        release.set()
+        assert first.result(timeout=5)["ok"] is True
+
+    assert second["ok"] is False
+    assert second["code"] == "install_locked"
+    assert ran_after == ran_before
+    # The finished install leaves the backend installable again.
+    assert api.install_agent("opencode")["ok"] is True
 
 
 def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):

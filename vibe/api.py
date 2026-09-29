@@ -126,6 +126,7 @@ from core.vibe_agents import (
     validate_agent_backend,
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
+from storage.lock import MigrationFileLock, MigrationLockTimeout
 from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
 
 
@@ -7185,6 +7186,29 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
 
 
 def install_agent(name: str) -> dict:
+    """Install (or upgrade) an agent CLI tool, one install per backend at a time.
+
+    Settings runs this in the UI process and backend auto-update in the
+    controller, so only a file lock keeps two installers off one CLI.
+    """
+    lock = MigrationFileLock(paths.get_state_dir() / "agent_install" / f"{name}.lock", timeout_seconds=0)
+    try:
+        lock.acquire()
+    except MigrationLockTimeout:
+        return {
+            "ok": False,
+            "code": "install_locked",
+            "message": _desktop_backend_install_message(name, "install_locked"),
+            "output": None,
+            "path": None,
+        }
+    try:
+        return _install_agent(name)
+    finally:
+        lock.release()
+
+
+def _install_agent(name: str) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
     Upgrade path (binary already on disk): keep the user's install method
@@ -10125,6 +10149,7 @@ def get_backend_runtime(name: str) -> dict:
         "ok": True,
         "name": name,
         "enabled": enabled,
+        "auto_update": bool(getattr(backend_cfg, "auto_update", True)),
         "cli_path": configured_path,
         "resolved_path": resolved_path,
         "installed": installed,

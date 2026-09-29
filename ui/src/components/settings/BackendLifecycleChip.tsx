@@ -6,12 +6,14 @@ import { useApi, type BackendRuntimeInfo } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { InstallOutcome, type InstallOutcomeResult } from '../shared/InstallOutcome';
 import { Button } from '../ui/button';
+import { ToggleSwitch } from './SettingsPrimitives';
 import {
   badgeVariants,
   interactiveBadgeTriggerClassName,
   mobileHeaderPopoverClassName,
 } from '../ui/badge-variants';
 import { getBackendUiMeta } from '@/lib/agentBackends';
+import { setConfigField } from '@/lib/configMutations';
 import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
@@ -143,6 +145,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   const [runtime, setRuntime] = React.useState<BackendRuntimeInfo | null>(null);
   const [runtimeLoading, setRuntimeLoading] = React.useState(false);
   const [operation, setOperation] = React.useState<Operation>('idle');
+  const [savingAutoUpdate, setSavingAutoUpdate] = React.useState(false);
   // The last upgrade's failure stays in the popover until the next attempt, so
   // the reason outlives the toast that announced it. It is tied to what it
   // describes: the executable it ran against, and the host's refresh generation,
@@ -267,6 +270,18 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     }
   };
 
+  const handleAutoUpdateToggle = async (autoUpdate: boolean) => {
+    setSavingAutoUpdate(true);
+    try {
+      await api.mutateConfig([setConfigField(['agents', name, 'auto_update'], autoUpdate)]);
+      if (isMountedRef.current) setRuntime((prev) => (prev ? { ...prev, auto_update: autoUpdate } : prev));
+    } catch (e) {
+      showToast(String(e), 'error');
+    } finally {
+      if (isMountedRef.current) setSavingAutoUpdate(false);
+    }
+  };
+
   const handleRestart = async () => {
     setOperation('restarting');
     onOperationChange?.(true);
@@ -362,6 +377,20 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
               failed={!!shownFailure}
             />
             {shownFailure && <InstallOutcome result={shownFailure} className="text-xs" />}
+            {visual !== 'disabled' && typeof runtime?.auto_update === 'boolean' && (
+              <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                <div className="min-w-0">
+                  <div className="text-sm text-foreground">{t('backendLifecycle.autoUpdate')}</div>
+                  <div className="text-xs text-muted">{t('backendLifecycle.autoUpdateHint')}</div>
+                </div>
+                <ToggleSwitch
+                  enabled={runtime.auto_update}
+                  onClick={() => void handleAutoUpdateToggle(!runtime.auto_update)}
+                  disabled={savingAutoUpdate}
+                  label={t('backendLifecycle.autoUpdate')}
+                />
+              </div>
+            )}
           </div>
 
           {visual !== 'disabled' && visual !== 'updating' && (

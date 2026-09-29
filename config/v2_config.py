@@ -1908,6 +1908,10 @@ class RuntimeConfig:
 class OpenCodeConfig:
     enabled: bool = True
     cli_path: str = "opencode"
+    # Install a newer release of this backend CLI once no turn is using it.
+    # Runs on the Avibe update checker, so ``update.check_interval_minutes = 0``
+    # also stops it.
+    auto_update: bool = True
     default_agent: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
@@ -1930,6 +1934,7 @@ class OpenCodeConfig:
 class ClaudeConfig:
     enabled: bool = True
     cli_path: str = "claude"
+    auto_update: bool = True  # See ``OpenCodeConfig.auto_update``.
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" relies on Claude Code's own credential storage;
     # "api_key" injects ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL)
@@ -1954,6 +1959,7 @@ class ClaudeConfig:
 class CodexConfig:
     enabled: bool = True
     cli_path: str = "codex"
+    auto_update: bool = True  # See ``OpenCodeConfig.auto_update``.
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" defers to whatever ~/.codex/config.toml already
     # has (typically `auth.method = "ChatGPT"`); "api_key" writes the

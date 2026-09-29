@@ -10,6 +10,7 @@ import { BackendLifecycleChip } from './BackendLifecycleChip';
 const api = vi.hoisted(() => ({
   getBackendRuntime: vi.fn(),
   installAgent: vi.fn(),
+  mutateConfig: vi.fn(),
   restartBackend: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
@@ -82,6 +83,24 @@ afterEach(() => {
 });
 
 describe('BackendLifecycleChip', () => {
+  it('saves the backend auto-update switch to its own agent config', async () => {
+    api.getBackendRuntime.mockResolvedValue({ ...updateAvailable, auto_update: true });
+    api.mutateConfig.mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
+    await user.click(await screen.findByRole('button', { name: 'backendLifecycle.statusUpdateAvailable' }));
+    const toggle = await screen.findByRole('switch', { name: 'backendLifecycle.autoUpdate' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+
+    await user.click(toggle);
+
+    expect(api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['agents', 'codex', 'auto_update'], value: false },
+    ]);
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+  });
+
   it('keeps an active upgrade visible across popover dismissal and stale runtime refreshes', async () => {
     const install = deferred<{ ok: boolean; message: string; output: null }>();
     api.installAgent.mockReturnValue(install.promise);

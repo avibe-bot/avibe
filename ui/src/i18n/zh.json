@@ -3434,7 +3434,9 @@
     "reinstall": "重新安装",
     "restart": "重启",
     "restartSuccess": "已请求重启",
-    "restartFailed": "重启失败"
+    "restartFailed": "重启失败",
+    "autoUpdate": "自动更新",
+    "autoUpdateHint": "该后端空闲时自动安装新版本"
   },
   "channelList": {
     "eyebrow": "群组",

@@ -1947,6 +1947,7 @@ export type BackendRuntimeInfo = {
   ok: boolean;
   name?: string;
   enabled?: boolean;
+  auto_update?: boolean;
   cli_path?: string;
   resolved_path?: string | null;
   installed?: boolean;

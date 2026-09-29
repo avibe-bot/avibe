@@ -3434,7 +3434,9 @@
     "reinstall": "Reinstall",
     "restart": "Restart",
     "restartSuccess": "Restart requested",
-    "restartFailed": "Restart failed"
+    "restartFailed": "Restart failed",
+    "autoUpdate": "Auto Update",
+    "autoUpdateHint": "Install new releases once this backend is idle"
   },
   "channelList": {
     "eyebrow": "Groups",
