@@ -63,8 +63,8 @@ and fall back to GitHub.
   every listed asset already exists in the bucket with those bytes.
 - `sha256` is GitHub's asset digest, re-verified against the downloaded bytes
   before upload. `commit` is the peeled tag target.
-- Producer: the release mirror workflow. Planned consumers: the desktop
-  updater, the CLI update checker, and the runtime downloaders, replacing their
+- Producer: the release mirror workflow. Consumers: the desktop updater.
+  Planned: the CLI update checker and the runtime downloaders, replacing their
   `api.github.com` discovery calls.
 - The index is unauthenticated metadata. A hostile index can at most withhold
   releases or name copies that then fail the consumer's existing verification.
@@ -122,10 +122,11 @@ Cloudflare configuration lives outside the repository. The expected state:
 1. Mirror and index (this change), then a full backfill by manual dispatch.
 2. Cache Rule, then real-file tests from the three mainland carriers at the
    evening peak.
-3. Clients, one at a time: desktop updater, then runtime and Show Runtime
-   downloads, then `install.sh` and `install.ps1`. Each tries the mirror first,
-   then GitHub, with a connect timeout and a stall watchdog, resumes with
+3. Clients, one at a time: desktop updater (done), then runtime and Show
+   Runtime downloads, then `install.sh` and `install.ps1`. Each tries the mirror
+   first, then GitHub, with a connect timeout and a stall watchdog, resumes with
    `Range` when switching source, and remembers the last source that worked.
+   The desktop shell's `avibe_runtime_host::download` is the Rust reference.
 4. Install-script third-party dependencies (the uv installer and
    python-build-standalone) through `UV_INSTALLER_GITHUB_BASE_URL` and
    `UV_PYTHON_INSTALL_MIRROR`, if step 2 shows GitHub is still their

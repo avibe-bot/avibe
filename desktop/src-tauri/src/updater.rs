@@ -1,10 +1,13 @@
 //! Native-only desktop updater. Remote WebViews never receive updater commands.
-use avibe_runtime_host::update::{self, Channel, Manifest, REPOSITORY};
+use avibe_runtime_host::{
+    download::{self, Length},
+    update::{self, Channel, Manifest, Release, REPOSITORY},
+};
 use serde::Deserialize;
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
     time::Duration,
@@ -14,7 +17,6 @@ use tauri::{
     AppHandle, Manager,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
-use tauri_plugin_updater::{Update, UpdaterExt};
 
 pub const MENU_ID: &str = "desktop-update";
 pub const CHANNEL_ID: &str = "desktop-update-test";
@@ -81,6 +83,9 @@ struct State {
 pub struct Updater {
     state: Mutex<State>,
     busy: AtomicBool,
+    /// Index into `update::sources` of the source that last completed a
+    /// download; the next download tries it first.
+    source: AtomicUsize,
     channel_path: PathBuf,
     skipped_path: PathBuf,
     pub menu: MenuItem<tauri::Wry>,
@@ -113,6 +118,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             channel,
         }),
         busy: AtomicBool::new(false),
+        source: AtomicUsize::new(0),
         channel_path,
         skipped_path: app.path().app_local_data_dir()?.join("update-skipped.json"),
         menu: MenuItem::with_id(app, MENU_ID, &c.menu, true, None::<&str>)?,
@@ -210,69 +216,85 @@ fn skip_version(app: &AppHandle, version: &str) {
 }
 
 #[derive(Deserialize)]
-struct Release {
+struct GithubRelease {
     tag_name: String,
     draft: bool,
     prerelease: bool,
-    assets: Vec<ReleaseAsset>,
+    assets: Vec<GithubAsset>,
 }
 #[derive(Deserialize)]
-struct ReleaseAsset {
+struct GithubAsset {
     name: String,
     browser_download_url: String,
 }
 
-async fn bytes(client: &reqwest::Client, url: &str, max: usize) -> Result<Vec<u8>, String> {
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| "network request failed")?
-        .error_for_status()
-        .map_err(|_| "release metadata unavailable")?;
-    let mut result = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "metadata download failed")? {
-        if result.len() + chunk.len() > max {
-            return Err("metadata too large".into());
-        }
-        result.extend_from_slice(&chunk);
-    }
-    Ok(result)
-}
-async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Update, Manifest)>, String> {
-    let client = reqwest::Client::builder()
+/// Connects fail fast; a download that stops moving hands over to the next
+/// source, while a slow one that keeps moving is left to finish.
+fn client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .https_only(true)
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
         .user_agent("Avibe-desktop-updater")
         .build()
-        .map_err(|_| "HTTP client failed")?;
-    let mut candidates = Vec::new();
+        .map_err(|_| "HTTP client failed".into())
+}
+async fn fetch(client: &reqwest::Client, url: String, max: u64) -> Result<Vec<u8>, String> {
+    Ok(download::fetch(client, &[url], 0, Length::AtMost(max)).await?.0)
+}
+/// A release asset from the mirror or GitHub, starting with the last source
+/// that worked. Callers authenticate the bytes.
+async fn asset(app: &AppHandle, client: &reqwest::Client, url: &str, length: Length) -> Result<Vec<u8>, String> {
+    let source = &app.state::<Updater>().source;
+    let (data, used) = download::fetch(client, &update::sources(url), source.load(Ordering::SeqCst), length).await?;
+    source.store(used, Ordering::SeqCst);
+    Ok(data)
+}
+/// The mirror's index lists releases and their commits in one request; the
+/// paginated GitHub API is the fallback when the mirror is unreachable.
+async fn releases(client: &reqwest::Client) -> Result<Vec<Release>, String> {
+    match fetch(client, update::INDEX_URL.into(), 8 * 1024 * 1024)
+        .await
+        .and_then(|data| update::index_releases(&data))
+    {
+        Ok(releases) => return Ok(releases),
+        Err(error) => eprintln!("desktop update index: {error}; falling back to GitHub"),
+    }
+    let mut releases = Vec::new();
     // GitHub orders by creation, not SemVer. Walk the complete bounded history;
     // reaching the bound fails instead of claiming an incomplete list is current.
     for page in 1..=10 {
-        let data = bytes(
-            &client,
-            &format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=100&page={page}"),
+        let data = fetch(
+            client,
+            format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=100&page={page}"),
             8 * 1024 * 1024,
         )
         .await?;
-        let releases: Vec<Release> = serde_json::from_slice(&data).map_err(|_| "invalid releases response")?;
-        let done = releases.len() < 100;
-        for release in releases {
-            if !release.draft && release.prerelease == (channel == Channel::Test) {
-                if let Ok(version) = channel.version(&release.tag_name) {
-                    candidates.push((version, release));
-                }
-            }
+        let listed: Vec<GithubRelease> = serde_json::from_slice(&data).map_err(|_| "invalid releases response")?;
+        let done = listed.len() < 100;
+        for release in listed.into_iter().filter(|release| !release.draft) {
+            let assets = release
+                .assets
+                .into_iter()
+                .filter(|asset| asset.browser_download_url == update::asset_url(&release.tag_name, &asset.name))
+                .map(|asset| asset.name)
+                .collect();
+            releases.push(Release {
+                tag: release.tag_name,
+                prerelease: release.prerelease,
+                commit: None,
+                assets,
+            });
         }
         if done {
-            break;
-        }
-        if page == 10 {
-            return Err("release history exceeds discovery bound".into());
+            return Ok(releases);
         }
     }
-    let Some((version, release)) = candidates.into_iter().max_by(|a, b| a.0.cmp(&b.0)) else {
+    Err("release history exceeds discovery bound".into())
+}
+async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<Manifest>, String> {
+    let client = client()?;
+    let Some((version, release)) = channel.latest(releases(&client).await?) else {
         return Err("no release in this channel".into());
     };
     set_state(app, Phase::Checking, Some(version.to_string()));
@@ -280,63 +302,49 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Update
         return Ok(None);
     }
     let name = update::manifest_name(TARGET);
-    for name in [&name, &format!("{name}.sig")] {
-        let expected = update::asset_url(&release.tag_name, name);
-        if release
-            .assets
-            .iter()
-            .filter(|asset| asset.name == *name && asset.browser_download_url == expected)
-            .count()
-            != 1
-        {
-            return Err("signed updater metadata unavailable; manual installation required".into());
-        }
+    let signature = format!("{name}.sig");
+    if !release.assets.contains(&name) || !release.assets.contains(&signature) {
+        return Err("signed updater metadata unavailable; manual installation required".into());
     }
-    let manifest_url = update::asset_url(&release.tag_name, &name);
-    let raw = bytes(&client, &manifest_url, 64 * 1024).await?;
-    let sig = bytes(&client, &format!("{manifest_url}.sig"), 4096).await?;
-    let manifest = Manifest::authenticated(&raw, std::str::from_utf8(&sig).map_err(|_| "invalid signature")?, KEY)?;
-    let commit: serde_json::Value = serde_json::from_slice(
-        &bytes(
-            &client,
-            &format!("https://api.github.com/repos/{REPOSITORY}/commits/{}", release.tag_name),
-            2 * 1024 * 1024,
-        )
-        .await?,
+    let raw = asset(
+        app,
+        &client,
+        &update::asset_url(&release.tag, &name),
+        Length::AtMost(64 * 1024),
     )
-    .map_err(|_| "invalid source response")?;
-    let artifact = manifest.validate(
-        channel,
-        &release.tag_name,
-        commit["sha"].as_str().ok_or("missing source")?,
-        TARGET,
-    )?;
-    if !release.assets.iter().any(|a| a.browser_download_url == artifact.url) {
+    .await?;
+    let sig = asset(
+        app,
+        &client,
+        &update::asset_url(&release.tag, &signature),
+        Length::AtMost(4096),
+    )
+    .await?;
+    let manifest = Manifest::authenticated(&raw, std::str::from_utf8(&sig).map_err(|_| "invalid signature")?, KEY)?;
+    let commit = match release.commit {
+        Some(commit) => commit,
+        None => serde_json::from_slice::<serde_json::Value>(
+            &fetch(
+                &client,
+                format!("https://api.github.com/repos/{REPOSITORY}/commits/{}", release.tag),
+                2 * 1024 * 1024,
+            )
+            .await?,
+        )
+        .map_err(|_| "invalid source response")?["sha"]
+            .as_str()
+            .ok_or("missing source")?
+            .to_owned(),
+    };
+    let artifact = manifest.validate(channel, &release.tag, &commit, TARGET)?;
+    if !release
+        .assets
+        .iter()
+        .any(|name| update::asset_url(&release.tag, name) == artifact.url)
+    {
         return Err("updater artifact missing".into());
     }
-    let updater = app
-        .updater_builder()
-        .pubkey(KEY)
-        .target(update::target_spec(TARGET)?.0)
-        .endpoints(vec![manifest_url.parse().map_err(|_| "invalid endpoint")?])
-        .map_err(|_| "invalid updater endpoint")?
-        .timeout(Duration::from_secs(600))
-        .build()
-        .map_err(|_| "updater initialization failed")?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|_| "updater check failed")?
-        .ok_or("release changed during check")?;
-    let authenticated: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| "invalid manifest")?;
-    if update.raw_json != authenticated
-        || update.version != manifest.version
-        || update.download_url.as_str() != artifact.url
-        || update.signature != artifact.signature
-    {
-        return Err("updater response differs from signed manifest".into());
-    }
-    Ok(Some((update, manifest)))
+    Ok(Some(manifest))
 }
 
 pub fn check(app: AppHandle, interactive: bool) {
@@ -360,7 +368,7 @@ pub fn check(app: AppHandle, interactive: bool) {
     set_state(&app, Phase::Checking, None);
     tauri::async_runtime::spawn(async move {
         match find_update(&app, channel).await {
-            Ok(Some((update, manifest))) => {
+            Ok(Some(manifest)) => {
                 set_state(&app, Phase::Available, Some(manifest.version.clone()));
                 let skipped = skipped_version(&app.state::<Updater>());
                 if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
@@ -387,7 +395,7 @@ pub fn check(app: AppHandle, interactive: bool) {
                         c.cancel.clone(),
                     ))
                     .show_with_result(move |result| match choice(&result, &c) {
-                        Choice::Install => install(confirmation, update, manifest),
+                        Choice::Install => install(confirmation, manifest),
                         Choice::Skip => {
                             skip_version(&confirmation, &manifest.version);
                             finish(&confirmation);
@@ -425,17 +433,17 @@ fn finish(app: &AppHandle) {
     updater.busy.store(false, Ordering::SeqCst);
     let _ = updater.channel_menu.set_enabled(true);
 }
-fn install(app: AppHandle, update: Update, manifest: Manifest) {
+fn install(app: AppHandle, manifest: Manifest) {
     set_state(&app, Phase::Downloading, None);
     tauri::async_runtime::spawn(async move {
         let result = async {
-            let download = update
-                .download(|_, _| {}, || {})
-                .await
-                .map_err(|_| "download or signature verification failed".to_string());
             let artifact = manifest
                 .validate(manifest.channel, &manifest.tag, &manifest.source_sha, TARGET)?
                 .clone();
+            let download = match client() {
+                Ok(client) => asset(&app, &client, &artifact.url, Length::Exact(artifact.size)).await,
+                Err(error) => Err(error),
+            };
             let handle = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 update::install_verified(download, &artifact, KEY, |data| {
@@ -476,26 +484,6 @@ fn install(app: AppHandle, update: Update, manifest: Manifest) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn signed_manifests_are_consumed_by_the_pinned_official_updater() {
-        for (target, key, _) in update::TARGETS {
-            for channel in ["test", "stable"] {
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-                    "../runtime-host/tests/fixtures/updater/{channel}-{target}.json"
-                ));
-                let raw = std::fs::read(path).unwrap();
-                let release: tauri_plugin_updater::RemoteRelease = serde_json::from_slice(&raw).unwrap();
-                let manifest: Manifest = serde_json::from_slice(&raw).unwrap();
-                assert_eq!(release.version.to_string(), manifest.version);
-                assert_eq!(
-                    release.download_url(key).unwrap().as_str(),
-                    manifest.platforms[*key].url
-                );
-                assert_eq!(release.signature(key).unwrap(), &manifest.platforms[*key].signature);
-            }
-        }
-    }
-
     #[test]
     fn dialog_buttons_map_to_one_choice_and_dismissal_is_later() {
         for locale in ["en", "zh"] {

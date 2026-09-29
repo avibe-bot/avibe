@@ -401,15 +401,22 @@ The **Use TEST Updates** toggle persists beside the private Runtime, defaults on
 for prerelease app versions and off for stable versions, and never downgrades.
 Browsers and Python installations retain their existing update behavior.
 
-The provider discovers published GitHub Releases in `avibe-bot/avibe`, using
-canonical `gh-vX.Y.ZrcN` for TEST and `vX.Y.Z` for stable. It selects the highest
-SemVer in the channel (up to 1,000 releases; overflow is an error). Releases
+The provider discovers published releases of `avibe-bot/avibe` from the
+`dl.avibe.bot` release index, which also lists each tag's peeled commit
+([release download mirror](../docs/plans/release-download-mirror.md)). When the
+index is unavailable it falls back to the GitHub API (up to 1,000 releases;
+overflow is an error). It uses canonical `gh-vX.Y.ZrcN` for TEST and `vX.Y.Z`
+for stable and selects the highest SemVer in the channel. Releases
 without signed metadata cannot be installed automatically, including rc14. A
 signed per-target `desktop-update-<target>.json` binds the repository, tag, peeled
 source commit, desktop version, target, artifact URL, size, SHA-256, and Tauri
 artifact signature. Both metadata and payload signatures are verified locally
 with the build-pinned public key. `.SIGNATURE` is OS-signing status text only.
-The plugin response must equal the authenticated metadata before download.
+Metadata, signatures, and the payload come from the mirror first and GitHub
+second, starting with the source that last worked. A connection that does not
+open within 10 seconds, or delivers nothing for 30 seconds, hands over to the
+next source, which resumes with `Range`. Neither source is trusted: the same
+verification applies to every byte, wherever it came from.
 
 macOS installs a signed `.app.tar.gz`; the DMG remains the first/manual install
 format. The app is extracted on the installation filesystem, its bundle ID,
@@ -453,10 +460,11 @@ never use the disposable test-fixture key for a release.
    overwrite a published asset, and never rotate the public key without a planned
    bridge release signed by the currently trusted key.
 
-Dependencies: native updater `tauri-plugin-updater` 2.12.0 (locked), shared
-`minisign-verify` 0.2.5 / `base64` 0.22 / `semver` 1, HTTPS `reqwest`, and native
-archive/temporary-file support. The frontend needs no updater JS permission or
-plugin: it opens the native owner through a fixed navigation request.
+Dependencies: shared `minisign-verify` 0.2.5 / `base64` 0.22 / `semver` 1, HTTPS
+`reqwest`, and native archive/temporary-file support. The shell downloads and
+verifies updates itself; no updater plugin is installed. The frontend needs no
+updater JS permission or plugin: it opens the native owner through a fixed
+navigation request.
 
 ### Residual native acceptance
 

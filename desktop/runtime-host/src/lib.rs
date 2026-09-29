@@ -23,6 +23,7 @@
 pub mod bootstrap;
 pub mod bootstrap_log;
 pub mod deep_link;
+pub mod download;
 pub mod health;
 pub mod launcher;
 pub mod notifications;

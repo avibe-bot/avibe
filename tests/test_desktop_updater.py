@@ -30,14 +30,13 @@ def test_enabled_channel_requires_both_signing_key_and_pinned_public_key(enabled
             desktop_updater.configuration(enabled, public, private)
 
 
-def test_disabled_build_explicitly_erases_endpoint_and_embedded_public_key(tmp_path, monkeypatch):
+def test_disabled_build_explicitly_erases_the_embedded_public_key(tmp_path, monkeypatch):
     config = tmp_path / 'config.json'
     config.write_text(json.dumps({'version': '3.1.2-rc.15'}))
     env = tmp_path / 'env'
     monkeypatch.setenv('AVIBE_DESKTOP_UPDATER_PUBLIC_KEY', 'a configured key')
     desktop_updater.configure(config, env, False)
     actual = json.loads(config.read_text())
-    assert actual['plugins']['updater'] == {'pubkey': '', 'endpoints': []}
     assert not actual['bundle']['createUpdaterArtifacts']
     assert env.read_text() == 'AVIBE_DESKTOP_UPDATER_PUBLIC_KEY=\n'
 

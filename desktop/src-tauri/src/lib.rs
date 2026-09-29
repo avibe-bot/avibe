@@ -1698,7 +1698,6 @@ pub fn run() {
         )
         .plugin(native_frame::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {

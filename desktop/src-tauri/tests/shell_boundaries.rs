@@ -963,7 +963,9 @@ fn explicit_stop_does_not_schedule_automatic_recovery() {
 fn updates_have_one_native_owner_and_no_remote_install_permission() {
     let source = include_str!("../src/lib.rs");
     let updater = include_str!("../src/updater.rs");
-    assert!(source.contains("tauri_plugin_updater::Builder::new().build()"));
+    // The shell downloads and verifies updates itself; no plugin exposes a
+    // second update path.
+    assert!(!source.contains("tauri_plugin_updater"));
     assert!(source.contains("updater::check(app.handle().clone(), false)"));
     assert!(source.contains("updater::MENU_ID => updater::check(app.clone(), true)"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));

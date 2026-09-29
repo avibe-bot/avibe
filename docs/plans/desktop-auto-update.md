@@ -20,13 +20,15 @@ no silent auto-install option: installation keeps its native confirmation.
 
 ## Distribution contract
 
-GitHub Releases in `avibe-bot/avibe` are the discovery source. Canonical stable
-`vX.Y.Z` and TEST `gh-vX.Y.ZrcN` tags select disjoint channels. Each target owns a
-Tauri-compatible manifest plus detached Minisign signature. The signed manifest
-binds repository, tag, peeled source commit, SemVer, target, artifact URL, size,
-SHA-256, and the artifact's own Tauri signature. The shell verifies all these
-fields and the GitHub tag source before offering installation. It checks the
-plugin's fetched JSON against the authenticated manifest before downloading.
+GitHub Releases in `avibe-bot/avibe` are the source of truth. The shell discovers
+them through the `dl.avibe.bot` release index and falls back to the GitHub API
+when the index is unavailable ([release download mirror](release-download-mirror.md)).
+Canonical stable `vX.Y.Z` and TEST `gh-vX.Y.ZrcN` tags select disjoint channels.
+Each target owns a Tauri-compatible manifest plus detached Minisign signature.
+The signed manifest binds repository, tag, peeled source commit, SemVer, target,
+artifact URL, size, SHA-256, and the artifact's own Tauri signature. The shell
+verifies all these fields and the tag's peeled commit, as listed by the index or
+the GitHub API, before offering installation.
 
 macOS updater payloads are `.app.tar.gz`; DMGs remain manual installers. Windows
 uses NSIS EXE. `.SIGNATURE` remains human-readable OS-signing metadata and never
@@ -36,10 +38,12 @@ Existing unsigned releases cannot become auto-installable retroactively.
 
 ## Installation and verification
 
-The pinned Tauri v2 updater owns HTTPS update checks and artifact signature
-verification. Application replacement must preserve the old runnable application
-on failure. The implementation must account for the upstream macOS install path
-not restoring its temporary backup, and Windows returning before NSIS completes.
+The shell owns HTTPS update checks and downloads, mirror first with GitHub
+fallback, and verifies the artifact's size, SHA-256, and signature itself; no
+updater plugin is installed. Application replacement must preserve the old
+runnable application on failure. It does not use the upstream Tauri install
+path, which does not restore its temporary macOS backup and returns on Windows
+before NSIS completes.
 Validate metadata/signatures and all bytes before any replacement operation.
 
 Use shared Rust contract verification both in the shell and release validation;

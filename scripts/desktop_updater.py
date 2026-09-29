@@ -38,7 +38,6 @@ def configure(config: Path, env_file: Path, enabled: bool) -> None:
     data = json.loads(config.read_text(encoding='utf-8'))
     # Payloads are sealed after final OS signing. We sign those final bytes below.
     data.setdefault('bundle', {})['createUpdaterArtifacts'] = False
-    data.setdefault('plugins', {})['updater'] = {'pubkey': public if enabled else '', 'endpoints': []}
     config.write_text(json.dumps(data) + '\n', encoding='utf-8')
     with env_file.open('a', encoding='utf-8') as stream:
         stream.write(f"AVIBE_DESKTOP_UPDATER_PUBLIC_KEY={public if enabled else ''}\n")
