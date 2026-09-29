@@ -42,6 +42,11 @@ url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+tauri = { version = "2", features = ["tray-icon", "test"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Reads a native menu item's text, where muda keeps its accelerator.
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"

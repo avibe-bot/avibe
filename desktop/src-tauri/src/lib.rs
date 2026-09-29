@@ -44,7 +44,7 @@ use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::plugin::Builder as PluginBuilder;
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 use tauri::{RunEvent, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
@@ -318,7 +318,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         login_state.unwrap_or(false),
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, QUIT_MENU_ID, &catalog.quit, true, None::<&str>)?;
+    let quit = quit_menu_item(app, &catalog.quit)?;
     let notifications = CheckMenuItem::with_id(
         app,
         notifications::MENU_ID,
@@ -345,7 +345,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &quit,
         ],
     )?;
-    let application_menu = application_menu(app)?;
+    let application_menu = application_menu(app, &quit)?;
     let application = application_menu.items()?.into_iter().find_map(|item| match item {
         MenuItemKind::Submenu(submenu) => Some(submenu),
         _ => None,
@@ -1386,23 +1386,48 @@ fn commit_deep_link_navigation(
     }
 }
 
-fn application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let menu = Menu::default(app)?;
-    #[cfg(feature = "bundled-runtime")]
-    {
-        use tauri::menu::{MenuItem, PredefinedMenuItem};
+/// Quit, shared by the tray and the application menu. It carries the
+/// platform's Quit chord, so every Quit the menus offer asks about the Runtime.
+fn quit_menu_item<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<MenuItem<R>> {
+    MenuItem::with_id(app, QUIT_MENU_ID, label, true, Some("CmdOrCtrl+Q"))
+}
 
-        let first_submenu = menu.items()?.into_iter().find_map(|item| match item {
-            MenuItemKind::Submenu(submenu) => Some(submenu),
-            _ => None,
-        });
-        if let Some(submenu) = first_submenu {
+/// Stop and Quit, from any menu or chord, run the Runtime lifecycle flow.
+/// `Some(true)` quits.
+fn runtime_lifecycle_request(id: &str) -> Option<bool> {
+    match id {
+        STOP_MENU_ID => Some(false),
+        QUIT_MENU_ID => Some(true),
+        _ => None,
+    }
+}
+
+fn application_menu<R: Runtime>(app: &AppHandle<R>, quit: &MenuItem<R>) -> tauri::Result<Menu<R>> {
+    let menu = Menu::default(app)?;
+    let first_submenu = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(submenu) => Some(submenu),
+        _ => None,
+    });
+    if let Some(submenu) = first_submenu {
+        // `Menu::default` ends this submenu (the macOS app menu, or File) with
+        // a predefined Quit that ends the process without `ExitRequested`, so
+        // it would leave this app's Runtime running. `quit` takes its place.
+        let predefined_quit = PredefinedMenuItem::quit(app, None)?.text()?;
+        for item in submenu.items()? {
+            if let MenuItemKind::Predefined(predefined) = &item {
+                if predefined.text()? == predefined_quit {
+                    submenu.remove(predefined)?;
+                }
+            }
+        }
+        #[cfg(feature = "bundled-runtime")]
+        {
             let catalog = native_uninstall_catalog();
             let separator = PredefinedMenuItem::separator(app)?;
             let uninstall = MenuItem::with_id(app, UNINSTALL_MENU_ID, catalog.menu_label, true, None::<&str>)?;
-            let position = submenu.items()?.len().saturating_sub(1);
-            submenu.insert_items(&[&separator, &uninstall], position)?;
+            submenu.append_items(&[&separator, &uninstall])?;
         }
+        submenu.append(quit)?;
     }
     Ok(menu)
 }
@@ -1676,13 +1701,14 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
+            if let Some(quit) = runtime_lifecycle_request(event.id().as_ref()) {
+                request_runtime_lifecycle(app.clone(), quit);
+            }
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
                 updater::MENU_ID => updater::check(app.clone(), true),
                 updater::CHANNEL_ID => updater::toggle_channel(app),
-                STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
-                QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
                 notifications::MENU_ID => {
                     let notifications = app.state::<notifications::Notifications>();
@@ -1906,6 +1932,61 @@ mod tests {
                 assert_eq!(quit_choice(result, &catalog), QuitChoice::Cancel);
             }
         }
+    }
+
+    #[test]
+    fn stop_and_quit_run_the_runtime_lifecycle_from_every_menu() {
+        assert_eq!(runtime_lifecycle_request(STOP_MENU_ID), Some(false));
+        assert_eq!(runtime_lifecycle_request(QUIT_MENU_ID), Some(true));
+        assert_eq!(runtime_lifecycle_request(OPEN_MENU_ID), None);
+    }
+
+    // muda builds macOS menus only on the main thread, which a test never runs
+    // on. The guest acceptance run covers the macOS app menu and its ⌘Q.
+    #[cfg(windows)]
+    #[test]
+    fn the_application_menu_quits_only_through_the_runtime_lifecycle() {
+        use tauri::menu::ContextMenu;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuStringW, HMENU, MF_BYPOSITION};
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let quit = quit_menu_item(handle, "Quit Avibe").expect("quit item");
+        let menu = application_menu(handle, &quit).expect("application menu");
+        let predefined_quit = PredefinedMenuItem::quit(handle, None)
+            .and_then(|item| item.text())
+            .expect("predefined quit text");
+        let submenus: Vec<_> = menu
+            .items()
+            .expect("menu items")
+            .into_iter()
+            .filter_map(|item| match item {
+                MenuItemKind::Submenu(submenu) => Some(submenu),
+                _ => None,
+            })
+            .collect();
+        for submenu in &submenus {
+            for item in submenu.items().expect("submenu items") {
+                if let MenuItemKind::Predefined(predefined) = item {
+                    assert_ne!(predefined.text().expect("predefined text"), predefined_quit);
+                }
+            }
+        }
+        let first = submenus.first().expect("File submenu");
+        let Some(MenuItemKind::MenuItem(last)) = first.items().expect("File items").pop() else {
+            panic!("File must end with this app's Quit");
+        };
+        assert_eq!(runtime_lifecycle_request(last.id().as_ref()), Some(true));
+
+        // muda keeps an accelerator only in the native item text.
+        let hmenu = first.hpopupmenu().expect("File HMENU") as HMENU;
+        let mut text = [0u16; 64];
+        let len = unsafe {
+            let last = u32::try_from(GetMenuItemCount(hmenu) - 1).expect("File has items");
+            GetMenuStringW(hmenu, last, text.as_mut_ptr(), text.len() as i32, MF_BYPOSITION)
+        };
+        let len = usize::try_from(len).expect("menu string");
+        assert_eq!(String::from_utf16_lossy(&text[..len]), "Quit Avibe\tCtrl+Q");
     }
 
     #[test]
