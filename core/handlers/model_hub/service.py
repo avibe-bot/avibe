@@ -1012,6 +1012,7 @@ class ModelHubService:
         self._runtime_install_reconcile_lock = asyncio.Lock()
         self._runtime_install_reconciled = False
         self._runtime_lifecycle_lock = asyncio.Lock()
+        self._runtime_resume_task: asyncio.Task[None] | None = None
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -1593,7 +1594,12 @@ class ModelHubService:
             return recovered if isinstance(recovered, EngineStatus) else None
 
     async def recover_runtime_intent(self) -> None:
-        """Restore the runtime only when the user left it enabled."""
+        """Recover credential custody, then resume a runtime the user left enabled.
+
+        Only custody recovery gates service readiness. Resuming may first
+        download the engine, so it runs in the background, owned by `stop()`;
+        every consumer prepares the engine on demand in the meantime.
+        """
 
         try:
             await recover_native_migration(self)
@@ -1602,12 +1608,23 @@ class ModelHubService:
             # writer or native launch. Controller recovery preserves this gate.
             self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
             raise ModelHubError("migration_item_conflict", status=409) from None
-        async with self._runtime_lifecycle_lock:
-            await self.reconcile_runtime_installation()
-            if not self.store.load().enabled:
-                return
-            await self._prepare_engine_for_demand()
-            await self._engine_call(self.adapter.start())
+        task = self._runtime_resume_task
+        if task is None or task.done():
+            self._runtime_resume_task = asyncio.create_task(
+                self._resume_runtime_intent(),
+                name="model-hub-runtime-resume",
+            )
+
+    async def _resume_runtime_intent(self) -> None:
+        try:
+            async with self._runtime_lifecycle_lock:
+                await self.reconcile_runtime_installation()
+                if not self.store.load().enabled:
+                    return
+                await self._prepare_engine_for_demand()
+                await self._engine_call(self.adapter.start())
+        except Exception:
+            logger.exception("Model Hub runtime resume failed; the engine is prepared on demand")
 
     async def _ensure_runtime_dependency(
         self,
@@ -1631,6 +1648,12 @@ class ModelHubService:
                 await await_owned_task(task)
             except Exception:
                 logger.warning("Native takeover remains pending during shutdown")
+        resume = self._runtime_resume_task
+        if resume is not None and not resume.done():
+            # A resume may still be downloading the engine. Shutdown does not
+            # wait for the network; the next start resumes again.
+            resume.cancel()
+            await asyncio.gather(resume, return_exceptions=True)
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 

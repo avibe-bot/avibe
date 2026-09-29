@@ -175,7 +175,13 @@ def test_prepared_save_uncertain_outcome_keeps_its_provisional_grant(
     assert refs <= {entry.credential_ref for entry in service.revocations.list()}
     recovered, _, _ = _service(tmp_path, migration_home=tmp_path / "native")
     recovered.store, recovered.adapter = store, adapter
-    asyncio.run(recovered.recover_runtime_intent())
+
+    async def recover():
+        await recovered.recover_runtime_intent()
+        # Resuming the engine consumes the recovered revocation journal.
+        await recovered._runtime_resume_task
+
+    asyncio.run(recover())
     assert recovered.migration_journal.load() is None
     assert not recovered.revocations.list()
     assert {source.credential_ref for source in store.config.sources} == refs
