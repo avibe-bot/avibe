@@ -13,9 +13,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?labelColor=black&style=flat-square)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?labelColor=black&style=flat-square)](LICENSE)
 
-<a href="https://www.producthunt.com/products/vibe-remote?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-vibe-remote" target="_blank" rel="noopener noreferrer"><img alt="Avibe — 本地优先的 Agent OS | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1104967&theme=light&t=1774450119248"></a>
-
-[文档](https://docs.avibe.bot) · [English](README.md) · [中文](README_ZH.md)
+[文档](https://docs.avibe.bot/zh) · [English](README.md) · [中文](README_ZH.md)
 
 **驱动** ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square)
 
@@ -40,13 +38,13 @@ Claude Code、Codex、OpenCode 都强得离谱。可是：
 
 ## Avibe 给它松绑
 
-**一条命令，你的机器就成了 AI 伙伴的家。** 用浏览器、手机，或者你本来就开着的聊天软件，驱动*官方*的 Claude Code、Codex、OpenCode。你手上所有的订阅和 API Key，统统汇进同一个本地网关。代码、密钥和 agent 进程都留在你的机器上——`avibe.bot` 只负责登录和安全隧道，从不碰你的工作区。
+**一条命令，你的机器就成了 AI 伙伴的家。** 用浏览器、手机，或者你本来就开着的聊天软件，驱动*官方*的 Claude Code、Codex、OpenCode。你的 Claude、ChatGPT、Gemini、Kimi、xAI 订阅，加上各家 API Key，统统汇进同一个本地网关。代码、密钥和 agent 进程都留在你的机器上——`avibe.bot` 负责登录和安全隧道，从不碰你的工作区。
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
-浏览器自动弹开，三步设置向导会找到你已有的 agent（缺的顺手装上）、接好模型，直接把你送进 Workbench。
+浏览器自动弹开，三步设置向导帮你接好模型、找到你已有的 agent（缺的点一下就装上），直接把你送进 Workbench。
 
 > 开源——想看可以先读一遍[安装脚本](https://github.com/avibe-bot/avibe/blob/master/install.sh)。短链只是到这个文件的 307 重定向。
 
@@ -64,7 +62,7 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 ### 💬 不是又一个聊天框，是一整个 Workbench
 
-对话、文件、编辑器、终端，开成窗口并排摆在同一个浏览器标签页里；agent 做出来的应用和 Show Page 就开在旁边。用着用着你会忘了这是网页——它更像一个操作系统。
+文件、编辑器、终端开成窗口，和对话并排摆在同一个浏览器标签页里；agent 做出来的应用和 Show Page 就开在旁边。用着用着你会忘了这是网页——它更像一个操作系统。
 
 <img src="assets/screenshots/v4/apps-library-zh.png" alt="Avibe 多窗口 Workbench，同时打开文件、终端和编辑器" />
 
@@ -72,10 +70,17 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 订阅登录一次、API Key 添加一次——官方厂商、中转站、聚合平台、自建服务，来者不拒。把 Agent 切到网关模式，Avibe 的本地网关就按你排好的顺序，把它的模型请求送过去。
 
+- **配一次，所有 Agent 都能用。** 一次登录、一个 Key，Claude Code、Codex、OpenCode 同时取用——不用把凭据抄进三份配置。
+- **模型随便混搭。** 在 Claude Code 里用 GPT，在 Codex 里用 Claude——任何来源的模型都能加进任何 agent 的列表，协议差异由网关负责转换。
 - **额度见底？下一个已经接上了。** 某个来源在开始回答前撞上额度、限流或网络故障，路由里的下一个来源直接接手这次请求——你不用重试，也不用盯着。首选来源恢复后，下一轮对话自动切回去。
-- **一个池子，三个 agent 共用。** Claude Code、Codex、OpenCode 从同一批来源取用，每个模型各走各的路由。
-- **每份套餐值多少，一清二楚。** 按模型和来源看用量趋势，按官方 API 价格把用量折成钱。Claude 和 ChatGPT 订阅还能实时盯住 5 小时和每周额度——直接算出每个套餐已经回本几倍。
+- **路由想怎么排就怎么排。** 每个 agent 一套默认的来源顺序，任何一个模型还能单独固定自己的路由。
 - **一键搬家。** 已经在支持的 CLI 里登录过？你点头，登录就迁过来。凭据和路由都留在你的机器上。
+
+*四个来源供给三个 agent：每个 agent 都混用 GPT 和 Claude 模型，Codex 的订阅暂不可用，relay-gpt 已经顶上。*
+
+<img src="assets/screenshots/v4/model-hub-routes-zh.png" alt="Model Hub 路由视图：四个上游来源连到 Claude Code、Codex 和 OpenCode，每个 agent 混用 GPT 和 Claude 模型，其中一个 Codex 模型已由备用来源自动接管" />
+
+**每份套餐值多少，一清二楚。** 按模型和来源看用量趋势，按官方 API 价格把用量折成钱。Claude 和 ChatGPT 订阅还能实时盯住 5 小时和每周额度——直接算出每个套餐已经回本几倍。
 
 *维护者机器上真实的一天：24 小时约 6.8 亿 token，按官方 API 价格折合约 $540。*
 
@@ -83,7 +88,7 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 ### ⏰ 你睡觉，它上班——Agent Harness
 
-大多数 AI 工具，你一停手它就停。Avibe 给 agent 四个持久化基础能力——**运行、定时、监听、查历史**——让它能自己开工、等准时机、在后台闷头干完，有值得你看的东西再回来找你。定时 shell 命令成功时一声不吭，失败时直接交给 Agent 处理。
+大多数 AI 工具，你一停手它就停。Avibe 给 agent 四个持久化基础能力——**运行、定时、监听、查历史**——让它能自己开工、等准时机、在后台闷头干完，有值得你看的东西再回来找你。定时 shell 命令成功时一声不吭，失败时留下一条通知——你开启的话，也能直接交给 Agent 处理。
 
 不用背参数，直接说：
 
@@ -104,9 +109,9 @@ agent 之间开始互相派活时，**Runs** 把整条协作链画成一张图�
 
 ### 🎨 Show Pages——agent 直接甩给你一个网页
 
-要仪表盘、流程图、diff、报告，还是一个小应用？agent 交给你的是一个活的网页，而不是一大段文字。点一个元素、框一块区域、在截图上随手圈一圈，说一句你想要什么，agent 就改页面，或者就在你指的地方回答。
+要仪表盘、流程图、diff、报告，还是一个小应用？agent 交给你的是一个活的网页，而不是一大段文字。点一个元素、框一块区域、在截图上标几条编号批注，说一句你想要什么，agent 就改页面，或者就在你指的地方回答。
 
-页面可以私有、只分享给指定的人，或者发布成一个好记的链接。常用的固定到应用栏，点开就是一个 app。
+页面可以私有；和 `avibe.bot` 配对后，还能只分享给指定的人，或者发布成一个好记的链接。常用的固定到应用栏，点开就是一个 app。
 
 <img src="assets/screenshots/v4/show-page-zh.png" alt="Show Page 评审：评论锚定在页面元素上，Agent 回复在页面上" />
 
@@ -114,11 +119,11 @@ agent 之间开始互相派活时，**Runs** 把整条协作链画成一张图�
 
 <img src="assets/screenshots/v4/workbench-mobile-zh.png" alt="手机上的 Avibe Workbench" width="270" align="right" />
 
-活儿在你的机器上跑，你不用守着它。想开窗口就用 Workbench；想快就在 Slack、Discord、Telegram、微信或飞书里发一条消息——连到的是同一批 Agent、同一个会话。
+活儿在你的机器上跑，你不用守着它。想开窗口就用 Workbench；想快就在 Slack、Discord、Telegram、微信或飞书里发一条消息——连到的是同一批 Agent、同一台机器。
 
 - 🔔 **需要你时，它会拍拍你。** 把 Workbench 装成手机或桌面 app，任务需要你的那一刻就收到推送。
 - 🎙️ **动嘴，不动手。** 和 `avibe.bot` 配对后，实时语音输入边说边出字，说完自动就地整理干净。桌面上按 ⌥Z（Windows 和 Linux 上是 Alt+Z）。
-- 🌍 **你专属的 `you-app.avibe.bot`。** 一句 `vibe remote`，你的 Workbench 在任何地方、任何浏览器里都能打开——不用 VPN，不用端口转发。
+- 🌍 **你专属的 `you-app.avibe.bot`。** `vibe remote` 配对一次，你的 Workbench 在任何地方、任何浏览器里都能打开——不用 VPN，不用端口转发。
 - 🔒 **你的门，你定名单。** 只有你的访问策略允许的人能登录——默认只有你自己。认证、路由、主机校验全部默认拒绝。
 
 在飞机上，在咖啡馆，用着借来的电脑。agent 叫你一声，你打开链接指挥两句，转身接着忙。
@@ -127,9 +132,9 @@ agent 之间开始互相派活时，**Runs** 把整条协作链画成一张图�
 
 ### 🔐 Vaults——按名字用密钥，永远不碰密钥值
 
-API Key 或 token 添加一次。Agent 按名字申请，你在浏览器里点批准，Avibe 把它递给需要它的命令、认证请求或签名操作。Vault 的响应永远不包含密钥值；接收密钥的命令仍需避免把它打印出来。passkey 保护托管目前处于预览阶段。
+API Key 或 token 添加一次——缺了哪个，Agent 也能发请求让你在浏览器里补上。Agent 按名字取用，Avibe 把它递给需要它的命令、认证请求或签名操作。Vault 的响应永远不包含密钥值；接收密钥的命令仍需避免把它打印出来。passkey 保护托管在 sandbox 完整性门禁落地前仍未上线。
 
-**还有**——thread 即会话，随处可续 · agent 需要你拍板时弹按钮和表单 · 丰富的附件，音视频直接内联播放 · 键盘快捷键 · 后端一键升级。
+**还有**——thread 即会话，随时接着聊 · agent 需要你拍板时弹按钮和表单 · 丰富的附件，应用内直接预览，音频就地播放 · 键盘快捷键 · 后端一键升级。
 
 ---
 
@@ -137,10 +142,10 @@ API Key 或 token 添加一次。Agent 按名字申请，你在浏览器里点�
 
 | | |
 |---|---|
-| **本地优先，真正归你** | AI 伙伴、它的执行、你的密钥和代码都留在你的机器上。`avibe.bot` 只签发身份、提供安全隧道，从不代理你的工作区。 |
+| **本地优先，真正归你** | AI 伙伴、它的执行、你的密钥和代码都留在你的机器上。`avibe.bot` 签发身份、提供安全隧道，从不代理你的工作区。 |
 | **所有第一方 agent，一个家** | 驱动*官方*的 Claude Code、Codex、OpenCode。按任务、按项目、按频道切换，不被任何一家锁死。 |
-| **所有订阅，组成一支队** | Model Hub 把你的套餐和 Key 汇成一个池子，自动故障接管，还告诉你每一份到底值多少。 |
-| **浏览器和聊天，都是一等公民** | Workbench、手机、Slack、Discord、Telegram、微信、飞书——同一个 agent，同一个会话。 |
+| **所有订阅，组成一支队** | Model Hub 把你的套餐和 Key 汇成一个池子，三个 agent 共用、模型随便混搭，自动故障接管，还告诉你每一份到底值多少。 |
+| **浏览器和聊天，都是一等公民** | Workbench、手机、Slack、Discord、Telegram、微信、飞书——同一批 agent，同一台机器。 |
 | **没有中间商抽成** | 你和 agent 之间没有额外的推理循环，每个 token 都直接给到你选的 agent。 |
 
 ---
@@ -151,7 +156,7 @@ API Key 或 token 添加一次。Agent 按名字申请，你在浏览器里点�
   你，在任何地方             你的机器                                你的模型
 ┌──────────────┐      ┌──────────────────────────────────────┐      ┌──────────────┐
 │ Browser      │      │ Avibe                                │      │ Subscriptions│
-│ Phone app    │ ───▶ │   Claude Code ─┐                     │      │ API keys     │
+│ Phone (PWA)  │ ───▶ │   Claude Code ─┐                     │      │ API keys     │
 │ Slack        │      │   Codex       ─┼─▶ Model Hub ────────┼────▶ │ Relays       │
 │ Discord …    │ ◀─── │   OpenCode    ─┘                     │      │ Self-hosted  │
 └──────────────┘      └──────────────────────────────────────┘      └──────────────┘
@@ -171,7 +176,7 @@ Avibe 通过 Slack Socket Mode、Discord Gateway、Telegram 长轮询、微信�
 | | Avibe | OpenClaw |
 |---|---|---|
 | **上手** | 一条命令 + 网页向导，几分钟搞定。 | Gateway + channels + JSON 配置，准备花一个下午。 |
-| **安全** | 本地优先，只用 Socket Mode / WebSocket，无公网入站端口，攻击面极小。 | Gateway 要暴露端口，组件更多，面更大。 |
+| **安全** | 本地优先，只用 Socket Mode / WebSocket / 长轮询主动外连，无公网入站端口，攻击面极小。 | Gateway 要暴露端口，组件更多，面更大。 |
 | **Token 成本** | 中间没有额外的推理循环，token 直接给到你选的 agent。 | 每条消息都带着长长的人设/编排上下文，任务还没开始 token 就先烧在开销上。 |
 | **锁定** | 驱动官方 agent CLI，自带订阅和 Key，按任务切换。 | 绑死在它自己的助手循环里。 |
 
@@ -196,7 +201,7 @@ OpenClaw 是一个常驻的个人助手。Avibe 是给你已经信任的 agent �
 <details>
 <summary><b>我的代码和数据会去哪？</b></summary>
 
-代码、密钥和 agent 进程都留在你的机器上。agent 的 prompt 发给你配置的模型来源。`avibe.bot` 负责登录和远程 Web UI 隧道，但不代理你的工作区；唯一的例外是语音输入，它会经 `avibe.bot` 做转写。每一条网络路径都列在[边界清单](https://docs.avibe.bot/zh/concepts/local-first#哪些东西会离开你的机器)里。
+代码、密钥和 agent 进程都留在你的机器上。agent 的 prompt 发给你配置的模型来源。`avibe.bot` 负责登录和远程 Web UI 隧道，但不代理你的工作区；例外是语音输入，它会经 `avibe.bot` 做转写。每一条承载你内容的网络路径都列在[边界清单](https://docs.avibe.bot/zh/concepts/local-first#哪些东西会离开你的机器)里。
 </details>
 
 <details>
@@ -214,13 +219,13 @@ Avibe 开源（MIT），免费运行。你自带 agent 订阅或 API Key，直�
 <details>
 <summary><b>远程访问安全吗？</b></summary>
 
-`vibe remote` 从你的机器上跑一条 Cloudflare 隧道；浏览器流量必须先登录，而且只放行你的访问策略允许的人（默认只有你）。认证、路由、主机校验全部 **fail-closed**，聊天控制也不需要任何公网入站端口。
+`vibe remote` 从你的机器上跑一条 Cloudflare 隧道；浏览器流量必须先登录（你主动公开发布的 Show Page 除外），而且只放行你的访问策略允许的人（默认只有你）。认证、路由、主机校验全部 **fail-closed**，聊天控制也不需要任何公网入站端口。
 </details>
 
 <details>
 <summary><b>Avibe 和 OpenClaw、Hermes 有什么不同？</b></summary>
 
-OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自我进化的 agent。Avibe 在另一层：**Agent OS**。它给任何 agent 一个统一的世界模型——Agent、会话、Show Page、Harness、Model Hub——让 agent 能自己排期、搭自己的循环、通过真正的交互层找到你；然后它运行的是你自带的官方 Claude Code、Codex、OpenCode（Avibe 原生 agent [在路线图上](#路线图)）。OpenClaw 的具体对比见上面的[对比表](#avibe-vs-openclaw)。
+OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自我进化的 agent。Avibe 在另一层：**Agent OS**。它给自己运行的每个 agent 一个统一的世界模型——Agent、会话、Show Page、Harness、Model Hub——让 agent 能自己排期、搭自己的循环、通过真正的交互层找到你；然后它运行的是你自带的官方 Claude Code、Codex、OpenCode（Avibe 原生 agent [在路线图上](#路线图)）。OpenClaw 的具体对比见上面的[对比表](#avibe-vs-openclaw)。
 </details>
 
 ---
@@ -260,7 +265,7 @@ vibe vault      # 管理密钥、请求、认证请求与签名
 |---|---|
 | @ 一下 bot | 开一个任务或提问 |
 | 在 thread 里回复 | 继续同一个 agent 会话 |
-| `/stop` | 停止当前会话 |
+| `/stop` | 中断当前执行 |
 
 完整参考：[命令](docs/COMMANDS_ZH.md) · [CLI](docs/CLI_ZH.md)
 
@@ -274,7 +279,7 @@ vibe vault      # 管理密钥、请求、认证请求与签名
 <summary><b>Claude Code</b></summary>
 
 ```bash
-npm install -g @anthropic-ai/claude-code
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 </details>
 
@@ -293,7 +298,7 @@ npm install -g @openai/codex
 curl -fsSL https://opencode.ai/install | bash
 ```
 
-除非 `~/.config/opencode/opencode.json` 放行工具调用，否则 OpenCode 每次调用工具都会弹审批；设置向导可以帮你写好：
+除非 `~/.config/opencode/opencode.json` 放行工具调用，否则 OpenCode 可能会停下来等你审批；设置向导可以帮你写好：
 
 ```json
 { "permission": "allow" }
@@ -306,8 +311,8 @@ curl -fsSL https://opencode.ai/install | bash
 
 - **本地优先**——Avibe 跑在你的机器上，代码和 agent 进程都留在那。
 - **无公网入站端口**——聊天控制只用 Socket Mode / WebSocket / 长轮询。
-- **你的密钥，你的数据**——存放在 `~/.avibe/`，只发给你配置的模型来源。已有安装会保留 `~/.vibe_remote/` 作为兼容路径。
-- **远程访问默认拒绝**——`avibe.bot` 只负责身份和隧道，从不经手你的工作区。
+- **你的密钥，你的数据**——存放在 `~/.avibe/`；agent 的 prompt 只发给你配置的模型来源。已有安装会保留 `~/.vibe_remote/` 作为兼容路径。
+- **远程访问默认拒绝**——`avibe.bot` 负责身份和隧道，从不经手你的工作区。
 
 ---
 
@@ -343,7 +348,7 @@ rm -rf "$avibe_home" ~/.vibe_remote
 
 ## 文档
 
-- **[官方文档](https://docs.avibe.bot)**——快速上手、概念、平台与 agent 指南、排障
+- **[官方文档](https://docs.avibe.bot/zh)**——快速上手、概念、平台与 agent 指南、排障
 - **[Avibe 是什么](https://docs.avibe.bot/zh/concepts/agent-os)**——Agent OS 模型
 - **[Model Hub](https://docs.avibe.bot/zh/concepts/model-hub)**——来源、路由、自动接管、用量与额度
 - **[CLI 参考](docs/CLI_ZH.md)** · **[命令](docs/COMMANDS_ZH.md)** · **[Show Pages](docs/SHOW_PAGES.md)**
@@ -356,6 +361,6 @@ rm -rf "$avibe_home" ~/.vibe_remote
 
 **Agent 归你。走到哪，带到哪。**
 
-[立即安装](#avibe-给它松绑) · [文档](https://docs.avibe.bot) · [报 bug](https://github.com/avibe-bot/avibe/issues) · [关注 @alex_metacraft](https://x.com/alex_metacraft)
+[立即安装](#avibe-给它松绑) · [文档](https://docs.avibe.bot/zh) · [报 bug](https://github.com/avibe-bot/avibe/issues) · [关注 @alex_metacraft](https://x.com/alex_metacraft)
 
 </div>

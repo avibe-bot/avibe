@@ -13,8 +13,6 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?labelColor=black&style=flat-square)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?labelColor=black&style=flat-square)](LICENSE)
 
-<a href="https://www.producthunt.com/products/vibe-remote?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-vibe-remote" target="_blank" rel="noopener noreferrer"><img alt="Avibe — the local-first Agent OS | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1104967&theme=light&t=1774450119248"></a>
-
 [Docs](https://docs.avibe.bot) · [English](README.md) · [中文](README_ZH.md)
 
 **Drives** ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square)
@@ -40,13 +38,13 @@ Claude Code, Codex, and OpenCode are absurdly capable. But:
 
 ## Avibe sets it free
 
-**One command, and your machine becomes the home your AI partner lives in.** Drive the *official* Claude Code, Codex, and OpenCode from a browser, your phone, or the chat app you already have open. Every subscription and API key you own lands behind one local gateway. Your code, keys, and agent processes stay on your machine — `avibe.bot` signs you in and opens a secure tunnel, and never touches your workspace.
+**One command, and your machine becomes the home your AI partner lives in.** Drive the *official* Claude Code, Codex, and OpenCode from a browser, your phone, or the chat app you already have open. Your Claude, ChatGPT, Gemini, Kimi, and xAI subscriptions and your API keys all land behind one local gateway. Your code, keys, and agent processes stay on your machine — `avibe.bot` signs you in and opens a secure tunnel, and never touches your workspace.
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
-The browser pops open. A three-step wizard finds your agents (and installs the missing ones), wires up your models, and drops you straight into the Workbench.
+The browser pops open. A three-step wizard wires up your models, finds your agents (one click installs any that are missing), and drops you straight into the Workbench.
 
 > Open source — read the [install script](https://github.com/avibe-bot/avibe/blob/master/install.sh) first if you like. The short URL is a 307 redirect to that file.
 
@@ -64,18 +62,25 @@ We recommend WSL on Windows for the best compatibility — see [Run Avibe with W
 
 ### 💬 Not a chat box. A whole Workbench.
 
-Chat, files, editor, and terminal — windowed, side by side, in one browser tab — with the apps and Show Pages your agent builds opening right next to them. It stops feeling like a web page and starts feeling like an operating system.
+Files, editor, and terminal open as windows beside your chat, all in one browser tab — with the apps and Show Pages your agent builds opening right next to them. It stops feeling like a web page and starts feeling like an operating system.
 
 <img src="assets/screenshots/v4/apps-library-en.png" alt="Avibe's multi-window Workbench with Files, Terminal, and Editor open together" />
 
 ### 🔀 Model Hub — every plan you pay for, finally on the same team
 
-Sign in each subscription and add each API key once — official vendors, relays, aggregators, self-hosted endpoints, all welcome. Switch an Agent to gateway mode and Avibe's local gateway routes its models through them in the order you set.
+Sign in each subscription and add each API key once — official vendors, relays, aggregators, self-hosted endpoints, all welcome. Switch an agent to gateway mode and Avibe's local gateway routes its models through them in the order you set.
 
+- **Set up once, use it in every agent.** One sign-in or key feeds Claude Code, Codex, and OpenCode at the same time — no copying credentials into three configs.
+- **Mix and match models.** GPT inside Claude Code, Claude inside Codex — put any source's models on any agent's list, and the gateway translates between protocols.
 - **Plan runs dry? The next one picks it up.** If a source hits a quota, rate limit, or network failure before it starts answering, the next source in your route takes the request — no retry, no babysitting. Once your first choice recovers, the next turn goes back to it.
-- **One pool, three agents.** Claude Code, Codex, and OpenCode draw from the same sources, each model on its own route.
-- **Know exactly what your plans are worth.** Usage trends by model and source, and your usage priced at official API rates. For Claude and ChatGPT subscriptions, add live 5-hour and weekly quotas — down to how many times over each plan has already paid for itself.
+- **Route it your way.** Give each agent a default source order, then pin any single model to its own route chain.
 - **Move in with one click.** Already signed in to a supported CLI? Bring that login over with your explicit OK. Credentials and routes stay on your machine.
+
+*Four sources feeding three agents: GPT and Claude models mixed in every agent, and relay-gpt already covering for Codex's unavailable subscription.*
+
+<img src="assets/screenshots/v4/model-hub-routes-en.png" alt="Model Hub routes view: four upstream sources wired to Claude Code, Codex, and OpenCode, each agent mixing GPT and Claude models, with one Codex model taken over by a backup source" />
+
+**Know exactly what your plans are worth.** Usage trends by model and source, and your usage priced at official API rates. For Claude and ChatGPT subscriptions, add live 5-hour and weekly quotas — down to how many times over each plan has already paid for itself.
 
 *One real day on the maintainer's machine: ~680M tokens, worth ~$540 at official API prices.*
 
@@ -83,7 +88,7 @@ Sign in each subscription and add each API key once — official vendors, relays
 
 ### ⏰ It works while you sleep — the Agent Harness
 
-Most AI tools freeze the moment you stop typing. Avibe gives your agent four durable primitives — **run, schedule, watch, and inspect** — so it starts work on its own, waits for the right moment, grinds away in the background, and comes back when there's something worth your attention. Scheduled shell commands stay silent when they pass and hand failures to an Agent.
+Most AI tools freeze the moment you stop typing. Avibe gives your agent four durable primitives — **run, schedule, watch, and inspect** — so it starts work on its own, waits for the right moment, grinds away in the background, and comes back when there's something worth your attention. Scheduled shell commands stay silent when they pass; a failure leaves a notice — or, if you opt in, goes straight to an Agent.
 
 No flags to learn. Just say it:
 
@@ -104,9 +109,9 @@ When your agents start delegating to each other, **Runs** draws the whole chain 
 
 ### 🎨 Show Pages — your agent answers with a web page
 
-Ask for a dashboard, flowchart, diff, report, or small app, and get a live page instead of a wall of text. Click an element, box a region, or scribble on a screenshot, say what you want, and the agent reworks the page or answers right where you pointed.
+Ask for a dashboard, flowchart, diff, report, or small app, and get a live page instead of a wall of text. Click an element, box a region, or mark up a screenshot with numbered notes, say what you want, and the agent reworks the page or answers right where you pointed.
 
-Keep a page private, share it with specific people, or publish it at a link you'll actually remember. Pin your favorites to the Dock and they open like apps.
+Keep a page private, or pair with `avibe.bot` to share it with specific people or publish it at a link you'll actually remember. Pin your favorites to the Dock and they open like apps.
 
 <img src="assets/screenshots/v4/show-page-en.png" alt="Show Page review with anchored comments and Agent replies on the page" />
 
@@ -114,11 +119,11 @@ Keep a page private, share it with specific people, or publish it at a link you'
 
 <img src="assets/screenshots/v4/workbench-mobile-en.png" alt="Avibe Workbench on mobile" width="270" align="right" />
 
-Your machine does the work; you don't have to babysit it. Open the Workbench when you want windows, or fire off a message in Slack, Discord, Telegram, WeChat, or Lark / Feishu when that's faster — same Agents, same sessions.
+Your machine does the work; you don't have to babysit it. Open the Workbench when you want windows, or fire off a message in Slack, Discord, Telegram, WeChat, or Lark / Feishu when that's faster — same Agents, same machine.
 
 - 🔔 **It taps you on the shoulder.** Install the Workbench on your phone or desktop and get a push the moment a job needs you.
 - 🎙️ **Talk, don't type.** Pair with `avibe.bot` and realtime voice input writes as you speak, then tidies the transcript in place. On desktop, press ⌥Z (Alt+Z on Windows and Linux).
-- 🌍 **Your own `you-app.avibe.bot`.** One `vibe remote` and your Workbench opens in any browser, anywhere — no VPN, no port forwarding.
+- 🌍 **Your own `you-app.avibe.bot`.** Pair once with `vibe remote` and your Workbench opens in any browser, anywhere — no VPN, no port forwarding.
 - 🔒 **Your door, your guest list.** Only the people your access policy allows can sign in — by default, just you. Auth, routing, and host checks all fail closed.
 
 On a plane. At a café. On a borrowed laptop. Your agent pings you; you open the link, steer, and walk away again.
@@ -127,9 +132,9 @@ On a plane. At a café. On a borrowed laptop. Your agent pings you; you open the
 
 ### 🔐 Vaults — secrets by name, never by value
 
-Add an API key or token once. Agents ask for it by name, you approve in the browser, and Avibe hands it to the command, authenticated request, or signing operation that needs it. Vault responses never include the secret value; commands receiving it must still avoid printing it. Passkey-protected custody is in preview.
+Add an API key or token once — or let an Agent request a missing one for you to fill in from the browser. Agents use it by name, and Avibe hands it to the command, authenticated request, or signing operation that needs it. Vault responses never include the secret value; commands receiving it must still avoid printing it. Passkey-protected custody stays pre-launch until the sandbox integrity gate is enforced.
 
-**Plus** — thread = session, resumable anywhere · interactive buttons and forms when the agent needs a decision · rich attachments, including inline audio and video · keyboard shortcuts · one-click backend updates.
+**Plus** — thread = session, picks up where you left off · interactive buttons and forms when the agent needs a decision · rich attachments with in-app preview and inline audio · keyboard shortcuts · one-click backend updates.
 
 ---
 
@@ -139,8 +144,8 @@ Add an API key or token once. Agents ask for it by name, you approve in the brow
 |---|---|
 | **Local-first, actually yours** | Your AI partner, its execution, your keys, and your code stay on your machine. `avibe.bot` issues identity and a secure tunnel; it never proxies your workspace. |
 | **Every first-party agent, one home** | Drive the *official* Claude Code, Codex, and OpenCode. Switch per task, per project, or per channel — no vendor silo. |
-| **Every subscription, one team** | Model Hub pools your plans and keys, fails over on its own, and shows what each one is really worth. |
-| **Browser and chat, both first-class** | Workbench, phone, Slack, Discord, Telegram, WeChat, and Lark / Feishu — same agent, same sessions. |
+| **Every subscription, one team** | Model Hub pools your plans and keys for all three agents, lets them mix models freely, fails over on its own, and shows what each one is really worth. |
+| **Browser and chat, both first-class** | Workbench, phone, Slack, Discord, Telegram, WeChat, and Lark / Feishu — same agents, same machine. |
 | **No middleman tax** | No extra reasoning loop sits between you and your agent. Every token goes straight to the agent you chose. |
 
 ---
@@ -151,7 +156,7 @@ Add an API key or token once. Agents ask for it by name, you approve in the brow
   You, anywhere              Your machine                            Your models
 ┌──────────────┐      ┌──────────────────────────────────────┐      ┌──────────────┐
 │ Browser      │      │ Avibe                                │      │ Subscriptions│
-│ Phone app    │ ───▶ │   Claude Code ─┐                     │      │ API keys     │
+│ Phone (PWA)  │ ───▶ │   Claude Code ─┐                     │      │ API keys     │
 │ Slack        │      │   Codex       ─┼─▶ Model Hub ────────┼────▶ │ Relays       │
 │ Discord …    │ ◀─── │   OpenCode    ─┘                     │      │ Self-hosted  │
 └──────────────┘      └──────────────────────────────────────┘      └──────────────┘
@@ -171,7 +176,7 @@ Avibe connects out via Slack Socket Mode, Discord Gateway, Telegram long-polling
 | | Avibe | OpenClaw |
 |---|---|---|
 | **Setup** | One command + web wizard. Done in minutes. | Gateway + channels + JSON config. Expect an afternoon. |
-| **Security** | Local-first. Socket Mode / WebSocket only. No public inbound ports, minimal attack surface. | Gateway exposes ports. More moving parts, more surface. |
+| **Security** | Local-first. Outbound Socket Mode / WebSocket / long polling only. No public inbound ports, minimal attack surface. | Gateway exposes ports. More moving parts, more surface. |
 | **Token cost** | No extra reasoning loop in between. Tokens go straight to your chosen agent. | Every message carries a long persona/orchestration context. Tokens burn on overhead before your task starts. |
 | **Lock-in** | Drives the official agent CLIs; bring your own subscriptions and keys; switch per task. | Tied to its own assistant loop. |
 
@@ -196,7 +201,7 @@ Local-first here means your **code, data, and execution** stay on your machine �
 <details>
 <summary><b>Where do my code and data go?</b></summary>
 
-Your code, keys, and agent processes stay on your machine. Agent prompts go to the model sources you configure. `avibe.bot` handles sign-in and the Remote Web UI tunnel without proxying your workspace; Voice input is the exception that goes through `avibe.bot` for transcription. The [boundary inventory](https://docs.avibe.bot/concepts/local-first#what-leaves-your-machine) lists every network path.
+Your code, keys, and agent processes stay on your machine. Agent prompts go to the model sources you configure. `avibe.bot` handles sign-in and the Remote Web UI tunnel without proxying your workspace; Voice input is the exception that goes through `avibe.bot` for transcription. The [boundary inventory](https://docs.avibe.bot/concepts/local-first#what-leaves-your-machine) lists every network path that carries your content.
 </details>
 
 <details>
@@ -214,13 +219,13 @@ Avibe is open source (MIT) and free to run. You bring your own agent subscriptio
 <details>
 <summary><b>Is remote access secure?</b></summary>
 
-`vibe remote` runs a Cloudflare tunnel from your machine; browser traffic reaches it only after sign-in, and only for the people your access policy allows (by default, just you). Auth, routing, and host checks are **fail-closed**, and there are no public inbound ports for chat control.
+`vibe remote` runs a Cloudflare tunnel from your machine; browser traffic reaches it only after sign-in (except Show Pages you choose to publish), and only for the people your access policy allows (by default, just you). Auth, routing, and host checks are **fail-closed**, and there are no public inbound ports for chat control.
 </details>
 
 <details>
 <summary><b>How is Avibe different from OpenClaw or Hermes?</b></summary>
 
-OpenClaw and Hermes are *agents* — a gateway-style assistant and a self-improving agent. Avibe is a different layer: the **Agent OS**. It gives any agent a unified world model — agents, sessions, Show Pages, the Harness, Model Hub — so it can schedule itself, build its own loops, and reach you through a real interaction layer, then runs the official Claude Code, Codex, and OpenCode you bring (an Avibe-native agent is [on the roadmap](#roadmap)). See the [comparison table](#avibe-vs-openclaw) above for OpenClaw specifics.
+OpenClaw and Hermes are *agents* — a gateway-style assistant and a self-improving agent. Avibe is a different layer: the **Agent OS**. It gives every agent it runs a unified world model — agents, sessions, Show Pages, the Harness, Model Hub — so it can schedule itself, build its own loops, and reach you through a real interaction layer, then runs the official Claude Code, Codex, and OpenCode you bring (an Avibe-native agent is [on the roadmap](#roadmap)). See the [comparison table](#avibe-vs-openclaw) above for OpenClaw specifics.
 </details>
 
 ---
@@ -260,7 +265,7 @@ vibe vault      # Manage secrets, requests, authenticated fetches, and signing
 |---|---|
 | Mention the bot | Start a task or ask a question |
 | Reply in thread | Continue the same agent session |
-| `/stop` | Stop the current session |
+| `/stop` | Interrupt the current run |
 
 Full references: [Commands](docs/COMMANDS.md) · [CLI](docs/CLI.md)
 
@@ -274,7 +279,7 @@ The setup wizard detects Claude Code, Codex, and OpenCode on your machine and in
 <summary><b>Claude Code</b></summary>
 
 ```bash
-npm install -g @anthropic-ai/claude-code
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 </details>
 
@@ -293,7 +298,7 @@ npm install -g @openai/codex
 curl -fsSL https://opencode.ai/install | bash
 ```
 
-OpenCode asks for approval on every tool call unless `~/.config/opencode/opencode.json` allows them; the setup wizard can set this for you:
+OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.json` allows them; the setup wizard can set this for you:
 
 ```json
 { "permission": "allow" }
@@ -306,7 +311,7 @@ OpenCode asks for approval on every tool call unless `~/.config/opencode/opencod
 
 - **Local-first** — Avibe runs on your machine; your code and agent processes stay there.
 - **No public inbound ports** — Socket Mode / WebSocket / long-polling only for chat control.
-- **Your keys, your data** — stored under `~/.avibe/`, sent only to the model sources you configure. Existing installs keep `~/.vibe_remote/` as a compatibility path.
+- **Your keys, your data** — stored under `~/.avibe/`; agent prompts go only to the model sources you configure. Existing installs keep `~/.vibe_remote/` as a compatibility path.
 - **Fail-closed remote access** — `avibe.bot` brokers identity and the tunnel, never your workspace.
 
 ---
