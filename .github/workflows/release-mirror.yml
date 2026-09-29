@@ -1,0 +1,70 @@
+name: Mirror releases to dl.avibe.bot
+
+on:
+  # Release assets are uploaded with GITHUB_TOKEN, which does not emit release
+  # events to other workflows, so the mirror follows the publishing workflows.
+  workflow_run:
+    workflows:
+      - Publish to PyPI
+      - Release (AI Notes)
+      - Guard Model Hub engine release
+      - Guard Git Runtime release
+      - Build local-only Git runtime
+    types: [completed]
+  # Safety net for missed triggers and renamed workflows.
+  schedule:
+    - cron: "41 * * * *"
+  pull_request:
+    paths:
+      - "scripts/release_mirror.py"
+      - ".github/workflows/release-mirror.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan against the live bucket without writing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-mirror-${{ github.event_name == 'pull_request' && github.ref || 'bucket' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  mirror:
+    name: Reconcile the release mirror
+    if: >-
+      github.repository == 'avibe-bot/avibe' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Reconcile published releases with the bucket
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # Recent AWS CLI releases send request checksums R2 may not implement.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          # Pull requests only prove the plan against live state.
+          DRY_RUN: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python3 scripts/release_mirror.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --bucket avibe \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            ${args[@]+"${args[@]}"}
