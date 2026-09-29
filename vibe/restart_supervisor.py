@@ -4,16 +4,31 @@ import argparse
 import logging
 import os
 import subprocess
+import sys
 import time
 import uuid
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
+import psutil
+
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs
 from vibe import runtime
+from vibe.desktop_runtime import (
+    DESKTOP_BACKENDS_ROOT_ENV,
+    DESKTOP_NODE_BIN_ENV,
+    DESKTOP_NPM_CLI_ENV,
+    DESKTOP_RUNTIME_ID_ENV,
+    DESKTOP_RUNTIME_ROOT_ENV,
+    DESKTOP_SHELL_ENV,
+    desktop_runtime_id,
+    is_private_desktop_runtime_path,
+)
 from vibe.upgrade import (
+    DESKTOP_MANAGED_RUNTIME_ENV,
     RestartState,
     atomic_upgrade_lock,
     get_restart_command,
@@ -26,6 +41,18 @@ from vibe.upgrade import (
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
+# What the desktop launcher stamps on a Runtime it starts. The launch set adds
+# what that Runtime resolves its own tools through; the interpreter's `PYTHON*`
+# settings travel with it too.
+_DESKTOP_IDENTITY_ENV = (
+    DESKTOP_RUNTIME_ID_ENV,
+    DESKTOP_MANAGED_RUNTIME_ENV,
+    DESKTOP_SHELL_ENV,
+    DESKTOP_RUNTIME_ROOT_ENV,
+    DESKTOP_BACKENDS_ROOT_ENV,
+    DESKTOP_NPM_CLI_ENV,
+)
+_DESKTOP_LAUNCH_ENV = (*_DESKTOP_IDENTITY_ENV, DESKTOP_NODE_BIN_ENV, "PATH")
 
 
 class StartedRuntime(NamedTuple):
@@ -141,6 +168,48 @@ def _read_recorded_ui_pid() -> int | None:
     except (OSError, ValueError):
         return None
     return pid if pid > 0 else None
+
+
+def _replaced_runtime_environ() -> Mapping[str, str] | None:
+    """The environment of the Runtime this job replaces, when one of its processes can be read."""
+
+    for pid in (_read_recorded_pid(), _read_recorded_ui_pid()):
+        if not pid:
+            continue
+        try:
+            return psutil.Process(pid).environ()
+        except (psutil.Error, OSError):
+            continue
+    return None
+
+
+def _carry_desktop_identity() -> str:
+    """Give the successor the replaced Runtime's desktop identity when it runs the same bundle.
+
+    The identity lives only in the Runtime's environment, and this job inherits
+    its caller's: a restart from a terminal would drop it, and the desktop would
+    find an unmanaged Runtime. So it is read from the Runtime being replaced, or
+    from this job's own environment when none of its processes is left to read.
+    Only a successor started from that Runtime's own bundle carries it, with the
+    rest of its launch set; other code is not that Runtime, and carries none.
+    """
+
+    source = _replaced_runtime_environ()
+    if source is None:
+        source = dict(os.environ)
+    runtime_id = desktop_runtime_id(source)
+    if runtime_id is None or not is_private_desktop_runtime_path(sys.executable, source):
+        for key in _DESKTOP_IDENTITY_ENV:
+            os.environ.pop(key, None)
+        return "without a desktop identity"
+    python_settings = {key for key in (*source, *os.environ) if key.startswith("PYTHON")}
+    for key in (*_DESKTOP_LAUNCH_ENV, *sorted(python_settings)):
+        value = source.get(key)
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    return f"as desktop Runtime {runtime_id}"
 
 
 def _remaining_service_pids_after_stop() -> list[int]:
@@ -353,6 +422,7 @@ def _run_restart_job(
             write("restart job started after delay")
             restart_started_at = time.monotonic()
 
+        write(f"relaunching {_carry_desktop_identity()}")
         write("stopping UI and service" if restart_ui else "stopping service (Web UI kept running)")
         stop_runtime_started_at = time.monotonic()
         try:

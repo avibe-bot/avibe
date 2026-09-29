@@ -375,6 +375,96 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path, scope, read
     assert "restart_total_seconds" in status["stage_durations"]
 
 
+_DESKTOP_IDENTITY = (
+    "AVIBE_DESKTOP_RUNTIME_ID",
+    "AVIBE_DESKTOP_MANAGED_RUNTIME",
+    "AVIBE_DESKTOP_SHELL",
+    "AVIBE_DESKTOP_RUNTIME_ROOT",
+    "AVIBE_DESKTOP_BACKENDS_ROOT",
+    "AVIBE_DESKTOP_NPM_CLI",
+)
+
+
+@pytest.mark.parametrize(
+    ("replaced", "caller", "executable", "successor"),
+    [
+        # A terminal `vibe restart` of the bundle's own `vibe`.
+        ("tagged", "untagged", "bundle", "tagged"),
+        # The restart runs other code, which is not that Runtime.
+        ("tagged", "untagged", "other", "untagged"),
+        # The Runtime being replaced decides, not the caller.
+        ("untagged", "tagged", "bundle", "untagged"),
+        # With no Runtime process left to read, the caller's identity stands.
+        (None, "tagged", "bundle", "tagged"),
+    ],
+)
+def test_a_restart_relaunches_the_replaced_runtime_s_desktop_identity(
+    monkeypatch, tmp_path, replaced, caller, executable, successor
+):
+    import subprocess
+    from unittest import mock
+
+    from vibe import install_generations
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    bundle = tmp_path / "bundle"
+    launch = {
+        "AVIBE_DESKTOP_RUNTIME_ID": "a" * 64,
+        "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
+        "AVIBE_DESKTOP_SHELL": "1",
+        "AVIBE_DESKTOP_RUNTIME_ROOT": str(bundle),
+        "AVIBE_DESKTOP_BACKENDS_ROOT": str(tmp_path / "backends"),
+        "AVIBE_DESKTOP_NPM_CLI": str(bundle / "tools" / "npm" / "bin" / "npm-cli.js"),
+        "VIBE_SHOW_RUNTIME_NODE_BIN": str(bundle / "tools" / "bin" / "node"),
+        "PATH": os.pathsep.join([str(bundle / "bin"), str(bundle / "tools" / "bin"), "/usr/bin", "/bin"]),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    terminal = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONPATH": str(tmp_path / "caller-site")}
+    process = None
+    if replaced is not None:
+        runtime_env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTHON", "AVIBE_DESKTOP"))}
+        runtime_env.update(launch if replaced == "tagged" else terminal)
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=runtime_env)
+        paths.get_runtime_pid_path().write_text(str(process.pid), encoding="utf-8")
+    python = bundle / "python" / "bin" / "python3" if executable == "bundle" else tmp_path / "other" / "python3"
+    monkeypatch.setattr(sys, "executable", str(python))
+    calls = []
+    relaunched = {}
+
+    def start(start_ui=True):
+        relaunched.update(os.environ)
+        return _fake_start_runtime(calls)
+
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda *args, **kwargs: 222)
+    monkeypatch.setattr(install_generations, "collect_install_generations", lambda launcher: None)
+    try:
+        with mock.patch.dict(os.environ):
+            for key in (*_DESKTOP_IDENTITY, "PYTHONDONTWRITEBYTECODE"):
+                os.environ.pop(key, None)
+            os.environ.update(launch if caller == "tagged" else terminal)
+            rc = restart_supervisor._run_restart_job(job_id="jobidentity", delay_seconds=0, vibe_path=None, trigger="test")
+    finally:
+        if process is not None:
+            process.kill()
+            process.wait()
+
+    assert rc == 0
+    assert calls == ["stop_runtime", "start_runtime"]
+    if successor == "tagged":
+        for key, value in launch.items():
+            assert relaunched.get(key) == value, key
+        # The terminal's interpreter settings would put other code on the path.
+        assert "PYTHONPATH" not in relaunched
+    else:
+        assert not set(_DESKTOP_IDENTITY) & set(relaunched)
+
+
 def test_restart_job_uses_lock_holder_when_pidfile_is_missing(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
