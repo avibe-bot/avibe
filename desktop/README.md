@@ -151,7 +151,7 @@ are retained for 14 days; automatic update metadata is disabled unless the G2 si
 
 See [Desktop TEST installation](../docs/desktop-test-installation.md) for
 architecture selection, hash checks, app-specific Gatekeeper/SmartScreen
-approval, manual replacement upgrades that preserve `~/.avibe`, and removal.
+approval, signed and manual upgrades that preserve `~/.avibe`, and removal.
 Python, Avibe, Node, and npm are bundled; no separate installation is required.
 
 Release operators need the existing `OPENAI_API_KEY` for AI notes, Actions

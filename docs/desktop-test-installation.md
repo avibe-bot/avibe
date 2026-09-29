@@ -27,10 +27,19 @@ if your machine's policy permits it. Keep Gatekeeper, SmartScreen, and antivirus
 enabled; managed machines may require administrator approval.
 
 Python, Avibe, Node, and npm are bundled; no separate installation is required.
-Agent backends are detected or installed when selected in Avibe. There is no
-desktop auto-updater. Quit the shell and manually replace the app (macOS) or run
-the replacement installer (Windows) to upgrade. User data under `~/.avibe` is
-retained; reopening the replacement app verifies and activates its private Runtime.
+Agent backends are detected or installed when selected in Avibe.
+
+To upgrade, use the desktop updater when your installed release published signed
+update metadata (`desktop-update-<target>.json` assets; the first was
+`gh-v3.1.2rc2`). The app checks at startup, and **Check for Desktop Updates…** in
+the tray menu or the Workbench version badge checks on demand. A newer signed
+release asks before doing anything: choose **Download and Install**, **Skip This
+Version**, or **Later**. Prerelease builds follow TEST releases while **Use TEST
+Updates** is on, and updates never downgrade. Releases without that metadata,
+including builds that report **Desktop updates disabled**, upgrade manually: quit
+the shell and replace the app (macOS) or run the replacement installer (Windows).
+Either path keeps user data under `~/.avibe`; the replacement app verifies and
+activates its private Runtime when it opens.
 
 To remove the private Runtime and Avibe-managed backend installations, choose
 **Uninstall Avibe…** in the application's first menu and confirm, then remove
