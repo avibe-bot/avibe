@@ -129,8 +129,13 @@ async fn confirmed_takeover_is_required_before_a_bundled_bootstrap_can_serve_the
         );
         assert_eq!(instance.starts.load(Ordering::SeqCst), 0);
         assert_eq!(instance.stops.load(Ordering::SeqCst), 0);
+        assert!(
+            !host.manages_connection(),
+            "a pending decision is not a managed connection"
+        );
         host.choose_management(!independent).await.unwrap();
         assert!(host.bootstrap(&DiscardStatus).await.phase == avibe_runtime_host::BootstrapPhase::Ready);
+        assert_eq!(host.manages_connection(), !independent);
         assert_eq!(instance.stops.load(Ordering::SeqCst), usize::from(!independent));
         assert_eq!(instance.starts.load(Ordering::SeqCst), usize::from(!independent));
         if !independent {
@@ -222,4 +227,28 @@ async fn independent_readiness_cannot_adopt_or_monitor_a_different_home_at_the_s
     );
     assert_eq!(instance.starts.load(Ordering::SeqCst), 0);
     assert_eq!(instance.stops.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn adopted_managed_connections_are_reported_only_after_verified_readiness() {
+    let instance = Instance::default();
+    instance.managed.store(true, Ordering::SeqCst);
+    instance.starts.store(1, Ordering::SeqCst);
+    let host = host(&instance);
+    assert!(!host.manages_connection());
+    assert_eq!(
+        host.bootstrap(&DiscardStatus).await.notice.code,
+        BootstrapNoticeCode::Adopted
+    );
+    assert!(
+        !host.has_owned_runtime(),
+        "an adopted connection grants no stop receipt"
+    );
+    assert!(host.manages_connection());
+    instance.managed.store(false, Ordering::SeqCst);
+    assert_eq!(
+        host.bootstrap(&DiscardStatus).await.notice.code,
+        BootstrapNoticeCode::TakeoverRequired
+    );
+    assert!(!host.manages_connection());
 }

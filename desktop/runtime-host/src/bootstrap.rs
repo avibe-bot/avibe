@@ -276,14 +276,22 @@ impl RuntimeHost {
 
     /// Probes the exact validated origin using the same readiness contract as bootstrap.
     pub async fn is_ready(&self, origin: &LoopbackOrigin) -> bool {
-        let Some(readiness) = self.probe.readiness(origin).await else {
-            return false;
-        };
         let launcher = self
             .monitored_launcher
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
+        self.connection_ready(origin, launcher).await
+    }
+
+    async fn connection_ready(
+        &self,
+        origin: &LoopbackOrigin,
+        launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>,
+    ) -> bool {
+        let Some(readiness) = self.probe.readiness(origin).await else {
+            return false;
+        };
         let Some(launcher) = launcher else {
             return true;
         };
@@ -353,6 +361,10 @@ impl RuntimeHost {
 
     /// Runs the state machine once and returns its terminal status.
     pub async fn bootstrap(&self, sink: &dyn StatusSink) -> BootstrapStatus {
+        *self
+            .monitored_launcher
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         let (origin, resolved_launcher) = match self.resolve_origin().await {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -364,10 +376,6 @@ impl RuntimeHost {
         };
 
         let mut attempt = 1;
-        *self
-            .monitored_launcher
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = resolved_launcher.clone();
         let mut handover_performed = false;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
         // An independent connection grants no launch, handover, or cleanup
@@ -376,18 +384,17 @@ impl RuntimeHost {
             .as_ref()
             .is_some_and(|launcher| launcher.connect_only())
         {
+            if self.connection_ready(&origin, resolved_launcher.clone()).await {
+                return self.publish_ready(sink, &origin, attempt, BootstrapNoticeCode::Adopted, resolved_launcher);
+            }
             return publish(
                 sink,
-                if self.is_ready(&origin).await {
-                    BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted)
-                } else {
-                    BootstrapStatus::failed(
-                        &origin,
-                        attempt,
-                        BootstrapNotice::new(BootstrapNoticeCode::IndependentUnavailable),
-                        true,
-                    )
-                },
+                BootstrapStatus::failed(
+                    &origin,
+                    attempt,
+                    BootstrapNotice::new(BootstrapNoticeCode::IndependentUnavailable),
+                    true,
+                ),
             );
         }
         if let Some(launcher) = &resolved_launcher {
@@ -424,10 +431,7 @@ impl RuntimeHost {
                 handover_performed = true;
             } else {
                 cleanup_if_current(resolved_launcher.as_ref(), &readiness).await;
-                return publish(
-                    sink,
-                    BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted),
-                );
+                return self.publish_ready(sink, &origin, attempt, BootstrapNoticeCode::Adopted, resolved_launcher);
             }
         }
         // `/ready` rejects a UI/Controller pair with different private Runtime
@@ -518,17 +522,16 @@ impl RuntimeHost {
 
                 if readiness_matches_launched_runtime(resolved_launcher.as_ref(), &readiness) {
                     cleanup_if_current(resolved_launcher.as_ref(), &readiness).await;
-                    return publish(
+                    return self.publish_ready(
                         sink,
-                        BootstrapStatus::ready(
-                            &origin,
-                            attempt,
-                            if self.has_owned_runtime() {
-                                BootstrapNoticeCode::Ready
-                            } else {
-                                BootstrapNoticeCode::Adopted
-                            },
-                        ),
+                        &origin,
+                        attempt,
+                        if self.has_owned_runtime() {
+                            BootstrapNoticeCode::Ready
+                        } else {
+                            BootstrapNoticeCode::Adopted
+                        },
+                        resolved_launcher,
                     );
                 }
                 needs_polling_handover = !handover_performed
@@ -607,6 +610,23 @@ impl RuntimeHost {
                 true,
             ),
         )
+    }
+
+    fn publish_ready(
+        &self,
+        sink: &dyn StatusSink,
+        origin: &LoopbackOrigin,
+        attempt: u32,
+        code: BootstrapNoticeCode,
+        launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>,
+    ) -> BootstrapStatus {
+        // Remember only a verified connection. Expected launch policy alone
+        // must not label a deferred or failed takeover as already managed.
+        *self
+            .monitored_launcher
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = launcher;
+        publish(sink, BootstrapStatus::ready(origin, attempt, code))
     }
 
     async fn resolve_origin(&self) -> Result<(LoopbackOrigin, Option<Arc<dyn ResolvedRuntimeLauncher>>), LaunchError> {

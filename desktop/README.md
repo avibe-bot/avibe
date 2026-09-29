@@ -120,6 +120,9 @@ multiple instances or an unidentifiable folder, select an existing Avibe home
 (the folder containing `config/config.json`). Discovery does not create or
 migrate user data. The selected home stays selected if the old service is later
 stopped manually.
+When `AVIBE_HOME` explicitly pins the instance, a damaged Desktop preference
+file cannot override it. If that file cannot be saved, management choices last
+for the current application session and must be made again on the next launch.
 
 **Keep Independent** connects without taking over the service. The sidebar
 identifies the service version separately from the Desktop version, and its

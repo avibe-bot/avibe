@@ -1,6 +1,7 @@
 //! Native-only management decisions for a bundled local Runtime.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,11 +31,55 @@ pub(crate) struct Discovery {
     pub external: Option<ExternalRuntime>,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LocalRuntimePreference {
     pub home: Option<PathBuf>,
     pub independent: bool,
+}
+
+/// Saved selection, with a session fallback only when AVIBE_HOME already pins
+/// the instance. Broken preferences must never invent an implicit data home.
+#[derive(Debug)]
+pub(crate) struct LocalRuntimePreferences {
+    path: PathBuf,
+    explicit_session: Mutex<Option<LocalRuntimePreference>>,
+}
+
+impl LocalRuntimePreferences {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            explicit_session: Mutex::new(None),
+        }
+    }
+
+    pub fn read(&self, explicit_home: bool) -> Result<LocalRuntimePreference, LaunchError> {
+        if explicit_home {
+            if let Some(current) = self
+                .explicit_session
+                .lock()
+                .map_err(|_| LaunchError::DataHomeRequired)?
+                .clone()
+            {
+                return Ok(current);
+            }
+            return Ok(LocalRuntimePreference::read(&self.path).unwrap_or_default());
+        }
+        LocalRuntimePreference::read(&self.path)
+    }
+
+    pub fn write(&self, preference: LocalRuntimePreference, explicit_home: bool) -> Result<(), LaunchError> {
+        let saved = preference.write(&self.path);
+        if explicit_home {
+            *self.explicit_session.lock().map_err(|_| LaunchError::RuntimeInstall)? = Some(preference);
+            // A caller-supplied home remains authoritative even if this optional
+            // Desktop setting cannot be persisted. Its choice lasts this launch.
+            Ok(())
+        } else {
+            saved
+        }
+    }
 }
 
 impl LocalRuntimePreference {

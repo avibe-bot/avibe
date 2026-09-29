@@ -46,7 +46,7 @@ Native packaged takeover and OS-login acceptance are residual manual checks;
 this implementation must not modify the developer's running service or data.
 
 Local validation after integrating #2242 and review fixes: 138 Python tests
-passed across the takeover, Desktop Runtime, and scoped-stop files; 265 Rust tests/doc-tests
+passed across the takeover, Desktop Runtime, and scoped-stop files; 267 Rust tests/doc-tests
 passed across the workspace with all features; all four VersionBadge tests,
 both frontend builds, desktop localization, changed Python Ruff, Rust formatting,
 and Clippy passed. The old process and IPC fixtures use only test-owned state.
@@ -55,11 +55,29 @@ and Clippy passed. The old process and IPC fixtures use only test-owned state.
 
 The first reviewed head, `10e2b6e6b9`, received five findings: optional config
 recovery, independent connection/data-home binding, adopted managed-menu state,
-process timestamp drift, and discovery failure mistaken for absence. No class
-has appeared on two reviewed heads. The fixes reuse the pure V2 recovery parser
+process timestamp drift, and discovery failure mistaken for absence. The fixes reuse the pure V2 recovery parser
 and existing 2 ms receipt tolerance, verify the selected home's service and
 actual UI listener before independent navigation and during monitoring, and
 retain native ownership checks for stop authority. The consuming fixtures cover
 malformed released shapes without file writes, another listener at the expected
 port, an offline selected service, custom-home inspection failures, inherited
 IPC overrides, and bounded timestamp differences.
+
+The second reviewed head, `6f22c9219f`, received two findings: a pending takeover
+could still be described as managed, and an unreadable saved preference blocked
+an explicit `AVIBE_HOME`. The orchestrator fetched all reviews and threads for
+both heads, checked the native menu consumer, bootstrap publication paths and
+the consuming tests, and applied the repeated-class circuit breaker before
+further product edits. Management-state authority appeared on both heads: first
+a launch receipt was used as connection state, then expected launcher policy
+was used as verified state. Home-selection authority also needed a complete
+priority audit after the discovery failure finding.
+
+Scope decision: keep one publication boundary for verified connections, retain
+receipt ownership solely for stopping, and make explicit environment selection
+independent of saved-file readability across discovery, choice and removal.
+An explicit home already anchors the instance; if its Desktop preference cannot
+be saved, retain that management choice for the application session. Without an
+explicit home, unreadable preferences still require selection and may never
+fall back to an empty default. This is a reversible correction to the agreed
+contract; it adds no migration, package upgrade or service-stop authority.

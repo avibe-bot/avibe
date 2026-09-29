@@ -24,7 +24,7 @@ use crate::health::RuntimeReadiness;
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
 use crate::status::BootstrapNoticeCode;
-use crate::takeover::{Discovery, ExternalRuntime, LocalRuntimePreference};
+use crate::takeover::{Discovery, ExternalRuntime, LocalRuntimePreference, LocalRuntimePreferences};
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
 /// Desktop applications inherit a minimal `PATH` when launched from Finder or
@@ -382,13 +382,15 @@ pub struct BundledVibeLauncher {
     bundle: PrivateRuntimeBundle,
     backend_root: PathBuf,
     log: BootstrapLog,
-    preference_path: PathBuf,
+    preferences: Arc<LocalRuntimePreferences>,
 }
 
 impl BundledVibeLauncher {
     pub fn new(bundle_dir: PathBuf, install_root: PathBuf, backend_root: PathBuf, log: BootstrapLog) -> Self {
         Self {
-            preference_path: install_root.with_file_name("local-runtime.json"),
+            preferences: Arc::new(LocalRuntimePreferences::new(
+                install_root.with_file_name("local-runtime.json"),
+            )),
             bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
             backend_root,
             log,
@@ -412,10 +414,11 @@ impl RuntimeLauncher for BundledVibeLauncher {
             &runtime_id,
             env::var_os("PATH").as_deref(),
         );
-        let preference = LocalRuntimePreference::read(&self.preference_path)?;
+        let explicit_home = env::var_os("AVIBE_HOME").is_some_and(|home| !home.is_empty());
+        let preference = self.preferences.read(explicit_home)?;
         // An explicit process environment belongs to the caller and wins over
         // the shell's saved selection. Independent permission is home-scoped.
-        let selected = if env::var_os("AVIBE_HOME").is_some() {
+        let selected = if explicit_home {
             None
         } else {
             preference.home.as_deref()
@@ -429,11 +432,13 @@ impl RuntimeLauncher for BundledVibeLauncher {
         // Keep the discovered instance selected even if its old service is
         // stopped manually while the confirmation is open or after a refusal.
         if discovery.home.join("config/config.json").is_file() {
-            LocalRuntimePreference {
-                home: Some(discovery.home.clone()),
-                independent,
-            }
-            .write(&self.preference_path)?;
+            self.preferences.write(
+                LocalRuntimePreference {
+                    home: Some(discovery.home.clone()),
+                    independent,
+                },
+                explicit_home,
+            )?;
         }
         command
             .environment
@@ -447,26 +452,29 @@ impl RuntimeLauncher for BundledVibeLauncher {
             command,
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
-            local_runtime: Some((discovery, independent, self.preference_path.clone())),
+            local_runtime: Some((discovery, independent, self.preferences.clone())),
             log: self.log.clone(),
         }))
     }
 
     fn request_management(&self) -> Result<(), LaunchError> {
-        let mut preference = LocalRuntimePreference::read(&self.preference_path)?;
+        let explicit_home = env::var_os("AVIBE_HOME").is_some_and(|home| !home.is_empty());
+        let mut preference = self.preferences.read(explicit_home)?;
         preference.independent = false;
-        preference.write(&self.preference_path)
+        self.preferences.write(preference, explicit_home)
     }
 
     fn select_home(&self, home: &Path) -> Result<(), LaunchError> {
         if !home.is_absolute() || !home.join("config/config.json").is_file() {
             return Err(LaunchError::DataHomeRequired);
         }
-        LocalRuntimePreference {
-            home: Some(home.to_owned()),
-            independent: false,
-        }
-        .write(&self.preference_path)
+        self.preferences.write(
+            LocalRuntimePreference {
+                home: Some(home.to_owned()),
+                independent: false,
+            },
+            env::var_os("AVIBE_HOME").is_some_and(|home| !home.is_empty()),
+        )
     }
 
     fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
@@ -486,10 +494,12 @@ impl RuntimeLauncher for BundledVibeLauncher {
                 env::var_os("PATH").as_deref(),
             );
             let mut command = command;
-            if let Some(home) = LocalRuntimePreference::read(&self.preference_path)?.home {
-                command
-                    .environment
-                    .push((OsString::from("AVIBE_HOME"), home.into_os_string()));
+            if env::var_os("AVIBE_HOME").is_none_or(|home| home.is_empty()) {
+                if let Some(home) = self.preferences.read(false)?.home {
+                    command
+                        .environment
+                        .push((OsString::from("AVIBE_HOME"), home.into_os_string()));
+                }
             }
             run_handover(&command)?;
         }
@@ -524,7 +534,7 @@ struct ResolvedVibeExecutable {
     command: RuntimeCommand,
     expected_runtime_id: Option<String>,
     cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
-    local_runtime: Option<(Discovery, bool, PathBuf)>,
+    local_runtime: Option<(Discovery, bool, Arc<LocalRuntimePreferences>)>,
     log: BootstrapLog,
 }
 
@@ -605,7 +615,7 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     }
 
     fn choose_management(&self, take_over: bool) -> Result<(), LaunchError> {
-        let (discovery, _, preference_path) = self.local_runtime.as_ref().ok_or(LaunchError::TakeoverRefused)?;
+        let (discovery, _, preferences) = self.local_runtime.as_ref().ok_or(LaunchError::TakeoverRefused)?;
         if take_over {
             let receipt = discovery.external.as_ref().ok_or(LaunchError::TakeoverRefused)?;
             if receipt.reason.is_some() {
@@ -614,11 +624,13 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
             let json = serde_json::to_string(receipt).map_err(|_| LaunchError::TakeoverRefused)?;
             takeover_helper(&self.command, "takeover", Some(&discovery.home), Some(&json))?;
         }
-        LocalRuntimePreference {
-            home: Some(discovery.home.clone()),
-            independent: !take_over,
-        }
-        .write(preference_path)
+        preferences.write(
+            LocalRuntimePreference {
+                home: Some(discovery.home.clone()),
+                independent: !take_over,
+            },
+            env::var_os("AVIBE_HOME").is_some_and(|home| !home.is_empty()),
+        )
     }
 
     fn verify_independent_connection(&self) -> bool {
@@ -1644,6 +1656,55 @@ mod tests {
         let dir = env::temp_dir().join(format!("avibe-desktop-{label}-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch directory is created");
         dir
+    }
+
+    #[test]
+    fn explicit_home_survives_broken_preferences_and_retains_an_unsaved_choice() {
+        let root = scratch_dir("explicit-home-preference");
+        let home = root.join("existing 数据");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("history"), b"existing history").unwrap();
+        for unreadable in [false, true] {
+            let path = root.join(if unreadable {
+                "unwritable.json"
+            } else {
+                "malformed.json"
+            });
+            if unreadable {
+                // A directory makes both read and write fail on all platforms.
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"{partial").unwrap();
+            }
+            let preferences = LocalRuntimePreferences::new(path.clone());
+            assert!(
+                preferences.read(false).is_err(),
+                "no override must require home selection"
+            );
+            assert!(preferences.read(true).unwrap().home.is_none());
+            let choice = LocalRuntimePreference {
+                home: Some(home.clone()),
+                independent: true,
+            };
+            preferences.write(choice, true).unwrap();
+            let recovered = preferences.read(true).unwrap();
+            assert_eq!(recovered.home.as_ref(), Some(&home));
+            assert!(
+                recovered.independent,
+                "Keep Independent survives the following bootstrap"
+            );
+            if unreadable {
+                assert!(preferences.write(recovered, false).is_err());
+                assert!(
+                    preferences.read(false).is_err(),
+                    "the session fallback cannot invent an implicit home"
+                );
+            } else {
+                assert!(LocalRuntimePreferences::new(path).read(false).unwrap().independent);
+            }
+            assert_eq!(std::fs::read(home.join("history")).unwrap(), b"existing history");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
