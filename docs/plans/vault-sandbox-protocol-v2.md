@@ -135,7 +135,8 @@ root of the "unlocked but still prompted every time" experience.
   approval inside a freshly authorized session is one intent already paid for.
 - **G2 — The top-level sandbox is *the* authorization surface.** It renders
   daemon-endorsed context, in human language, for every consent it collects;
-  an embedded card only launches that surface.
+  the parent's approval click opens that surface directly, and an embedded
+  card only launches it when the parent could not.
 - **G3 — One clock.** The sandbox owns time; the parent renders events.
 - **G4 — Explicit risk tiers.** Silent / confirm / passkey-always are product
   decisions per operation class, configurable where it matters.
@@ -332,16 +333,44 @@ display-only).
 ### 6.6 Confirm-surface hardening (prerequisite for R2)
 
 R2/R3 authorization is performed in a dedicated top-level sandbox window. The
-embedded sandbox only renders a visible launcher and cannot authorize an
-operation from its iframe-local hit tests or from a parent-supplied visibility
-claim. Each request opens a unique popup window whose URL contains only the
-random request id and appearance settings. After the popup signals readiness,
-the opener transfers the signed prompt and encrypted wrap metadata through a
-same-origin, id-gated `postMessage` handshake; approval metadata is never put
-in the URL. The popup validates the opener origin and window source, renders
-the confirmation, performs any WebAuthn ceremony, and returns a typed result
-through the same channel. The opener applies a five-minute timeout and a
-short close grace period for queued mobile-browser messages.
+embedded sandbox cannot authorize an operation from its iframe-local hit tests
+or from a parent-supplied visibility claim. Each authorization uses a unique
+popup window whose URL contains only a random id and appearance settings.
+After the popup signals readiness, the requesting sandbox frame transfers the
+signed prompt and encrypted wrap metadata through a same-origin, id-gated
+`postMessage` handshake; approval metadata is never put in the URL. The popup
+validates the requester origin and window source, renders the confirmation,
+performs any WebAuthn ceremony, and returns a typed result through the same
+channel. The requester applies a five-minute timeout and a short close grace
+period for queued mobile-browser messages.
+
+The parent's approval click is the user gesture that opens this window, so the
+user reviews and approves the operation in one sandbox surface:
+
+1. The parent opens `…/index.html?mode=authorize&id=<id>&locale&theme`
+   synchronously in the click, before any await, and sends the id as the
+   top-level `authorizationWindow` field of the interactive RPC envelope
+   (`[A-Za-z0-9_-]{16,128}`; any other value fails the request with
+   `invalid_payload`). The parent keeps the frame collapsed for that request.
+2. The first authorization inside the request claims the id once; a second
+   authorization in the same request (the lock-race retry) finds no id and
+   falls back to the launcher below.
+3. The popup has no requester reference of its own, so it announces
+   `authorization-ready` every 500 ms to each same-origin frame of its opener,
+   with its own origin as the target origin. The requesting frame pairs with
+   the window whose ready message carries its id and ignores every other
+   source. The popup accepts `authorization-request` only from a frame of its
+   opener and replies only to that frame, so PRF output never leaves the
+   sandbox origin.
+4. A window that does not announce itself within 30 seconds, or closes, fails
+   the operation with the retryable `authorization_window_closed`. The parent
+   closes its handle when the operation settles.
+
+Without an id (the browser blocked the parent's window, or an older parent),
+the embedded sandbox renders a visible launcher card whose click opens the
+window itself. The parent holds a handle to the window it opened and can
+navigate or close it, but it cannot read the cross-origin document or its
+result, so it gains nothing beyond what it can already show in its own page.
 
 The old iframe visibility and parent-attestation checks remain telemetry-only
 compatibility signals while the top-level window is open. The security boundary
@@ -351,8 +380,8 @@ is the browser-rendered top-level sandbox page, not the embedder's DOM.
 
 ### 7.1 Approvals (access)
 
-Parent: one click (Approve) on the request card launches a top-level sandbox
-authorization window. Parent fetches **one** batch
+Parent: one click (Approve) on the request card opens the top-level sandbox
+authorization window (§6.6). Parent fetches **one** batch
 of signed contexts (`POST /vault/agent-bindings:batch` with the request id;
 daemon returns per-secret bindings sharing one display block), sends one
 `approveRelease`. Sandbox: one card — title, session label, command, egress,
@@ -418,8 +447,8 @@ triggered from the create form (`setup` immediately continues into the pending
 ### 7.4 Reveal
 
 Secret detail (protected static) gains "Show value / Copy value" actions
-calling `reveal`. R2: confirm in the top-level sandbox authorization window;
-after approval, plaintext is rendered inside the sandbox iframe only. This
+calling `reveal`. R2: the action click opens the top-level sandbox
+authorization window, where the user confirms; after approval, plaintext is rendered inside the sandbox iframe only. This
 closes the orphaned-`unseal` gap without moving plaintext into the parent.
 
 **Copy-mode caveat**: the system clipboard is a shared resource — once the

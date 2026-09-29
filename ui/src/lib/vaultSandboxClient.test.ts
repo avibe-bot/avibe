@@ -37,7 +37,7 @@ type TestVaultSandboxClient = {
   request: <T>(
     op: string,
     payload: unknown,
-    options: { timeoutMs?: number; interactive?: boolean },
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string },
   ) => Promise<T>;
 };
 
@@ -131,6 +131,49 @@ describe('VaultSandboxClient interactive request surface', () => {
     expect(wire).toMatchObject({ op: 'approveRelease', surface: visibleSurface });
     const pending = client.pending.get((wire as { id: string }).id);
     expect(pending).toBeDefined();
+    if (!pending) throw new Error('interactive request was not registered');
+    window.clearTimeout(pending.timer);
+    pending.resolve({ blindBoxes: [] });
+    await expect(result).resolves.toEqual({ blindBoxes: [] });
+  });
+
+  // The approval click already opened the sandbox authorization window, so the sandbox skips its
+  // launcher card. Expanding the frame here would bring back the duplicate review surface this
+  // path removes, and dropping the window id would make the sandbox show that card again.
+  it('keeps the frame collapsed and names the authorization window the parent opened', async () => {
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+
+    const client = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    Object.assign(client, {
+      iframe,
+      backdrop: null,
+      pending: new Map(),
+      readyPromise: Promise.resolve({}),
+      handshaken: true,
+      modalVisible: false,
+      interactiveRequests: new Set(),
+      surfaceRefreshTimer: null,
+    });
+    const setModalVisible = vi.spyOn(client, 'setModalVisible');
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+
+    const result = client.request<{ blindBoxes: unknown[] }>(
+      'approveRelease',
+      { items: [] },
+      { interactive: true, authorizationWindow: 'window-0123456789abcdef' },
+    );
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
+
+    const [wire] = postMessage.mock.calls[0];
+    expect(wire).toMatchObject({ op: 'approveRelease', authorizationWindow: 'window-0123456789abcdef' });
+    expect(wire).not.toHaveProperty('surface');
+    expect(setModalVisible).not.toHaveBeenCalled();
+    expect(iframe.style.visibility).not.toBe('visible');
+    // A fallback launcher still gets a surface attestation once the sandbox asks for its slot.
+    const requestId = (wire as { id: string }).id;
+    expect(client.interactiveRequests.has(requestId)).toBe(true);
+    const pending = client.pending.get(requestId);
     if (!pending) throw new Error('interactive request was not registered');
     window.clearTimeout(pending.timer);
     pending.resolve({ blindBoxes: [] });
