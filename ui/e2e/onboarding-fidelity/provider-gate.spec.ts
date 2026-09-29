@@ -4,6 +4,62 @@ import zh from '../../src/i18n/zh.json' with { type: 'json' };
 import { openOnboarding, openSetup, serveModelHub, serveProduct } from './support';
 
 for (const [lang, copy, width] of [['en', en, 1440], ['zh', zh, 390]] as const) {
+  test(`AUTH-SETUP-126: subscription creation satisfies the setup provider gate (${lang})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const denied = await serveProduct(page);
+    const vendor = lang === 'en' ? 'anthropic' : 'openai';
+    const source = {
+      id: 'src_subscription_fixture', vendor, display_name: '测试订阅', kind: 'subscription',
+      protocol: vendor === 'anthropic' ? 'anthropic' : 'openai_responses',
+      supply_channel: 'hub', billing: 'monthly', state: { status: 'standby' },
+      models: [], last_discovered_at: null,
+    };
+    let sources: typeof source[] = [];
+    const starts: { vendor: string; channel: string }[] = [];
+    const flow = {
+      flow_id: 'oaf_setup_fixture', vendor, channel: 'hub', state: 'success',
+      presentation: { expects: 'none' }, expires_at: '2099-01-01T00:00:00Z',
+    };
+    await page.route('**/api/agents?*', (route) => route.fulfill({ json: { ok: true, agents: [], default_agent_name: null } }));
+    await page.route('**/api/models/sources', (route) => route.fulfill({ json: { sources } }));
+    await page.route('**/api/models/oauth/start', (route) => {
+      const body = route.request().postDataJSON();
+      starts.push({ vendor: body.vendor, channel: body.channel });
+      return route.fulfill({ json: { flow } });
+    });
+    await page.route('**/api/models/oauth/status/oaf_setup_fixture', (route) => {
+      sources = [source];
+      return route.fulfill({ json: { flow, source, added_to: [], adopted_by: [] } });
+    });
+    await page.route('**/api/models/oauth/cancel', (route) => {
+      expect(route.request().postDataJSON().flow_id).toBe(flow.flow_id);
+      return route.fulfill({ json: { ok: true } });
+    });
+    await openOnboarding(page, { lang, realTime: true });
+    await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
+    const primary = page.locator('.onboarding-primary-action');
+    await expect(primary).toHaveText(copy.onboarding.providers.actionAdd);
+    await page.locator(`.setup-provider-card[data-provider="${vendor}"]`).click();
+    await page.getByRole('dialog').getByRole('contentinfo').getByRole('button', {
+      name: copy.onboarding.providers.addFooterSignInNamed.replace('{{name}}', vendor === 'anthropic' ? 'Claude' : 'ChatGPT'), exact: true,
+    }).click();
+    const chooser = page.getByRole('dialog').filter({ has: page.getByRole('heading', {
+      name: copy.settings.models.addSub.title.replace('{{vendor}}', vendor === 'anthropic' ? 'Claude' : 'ChatGPT'), exact: true,
+    }) });
+    await expect(chooser.getByRole('radio')).toHaveCount(1);
+    await expect(chooser.getByRole('radio')).toContainText(copy.settings.models.addSub.opt.hub.label);
+    expect(starts).toEqual([]);
+    await chooser.getByRole('button', { name: copy.settings.models.addSub.signIn, exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    expect(starts).toEqual([{ vendor, channel: 'hub' }]);
+    await expect(page.locator(`.setup-provider-card[data-provider="${vendor}"]`)).toHaveAttribute('data-state', 'connected');
+    await expect(primary).toHaveText(copy.onboarding.providers.actionContinue);
+    await expect(primary).toBeEnabled();
+    await primary.click();
+    await expect(page.locator('[data-setup-screen]')).toHaveAttribute('data-setup-screen', 'assistants');
+    expect(denied).toEqual([]);
+  });
+
   test(`AUTH-SETUP-126: assistant fixture can decline migration with an existing source (${lang})`, async ({ page }) => {
     await serveProduct(page);
     const applied = await serveModelHub(page);

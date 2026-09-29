@@ -89,9 +89,11 @@ export const OAuthConnectDialog: React.FC<{
   reauth?: Source | null;
   /** Snapshot candidates used to decide whether this backend's native slot is occupied. */
   sources?: Source[];
+  /** Setup creates sources for a Hub route. Reauthentication keeps its source's custody. */
+  hubOnly?: boolean;
   onClose: () => void;
   onConnected: (source?: Source, placement?: Adoption) => void;
-}> = ({ open, vendor, reauth = null, sources = [], onClose, onConnected }) => {
+}> = ({ open, vendor, reauth = null, sources = [], hubOnly = false, onClose, onConnected }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -106,7 +108,7 @@ export const OAuthConnectDialog: React.FC<{
   // before the passive open effect runs; deriving this here prevents an occupied
   // native row from ever being the initially focused/selected option.
   const [channel, setChannel] = React.useState<SupplyChannel>(() =>
-    reauth ? (reauth.supply_channel ?? 'native_cli') : initialSubscriptionChannel(vendor, sources),
+    reauth ? (reauth.supply_channel ?? 'native_cli') : hubOnly ? 'hub' : initialSubscriptionChannel(vendor, sources),
   );
   const [phase, setPhase] = React.useState<ConnectPhase>('choose');
   const [nativeSlotTaken, setNativeSlotTaken] = React.useState(() =>
@@ -167,7 +169,7 @@ export const OAuthConnectDialog: React.FC<{
   // Take the native-slot reading once per open. A source arriving after this is
   // the singleton race the start route owns; it must surface as Already bound,
   // not silently rewrite a choice already under the user's pointer.
-  const openSubject = open ? `${vendor}:${reauthId ?? 'create'}` : null;
+  const openSubject = open ? `${vendor}:${reauthId ?? 'create'}:${hubOnly}` : null;
   React.useEffect(() => {
     if (!openSubject) {
       initializedOpenSubject.current = null;
@@ -189,12 +191,12 @@ export const OAuthConnectDialog: React.FC<{
     }
     const occupied = nativeSubscriptionSlotTaken(vendor, sources);
     setNativeSlotTaken(occupied);
-    setChannel(initialSubscriptionChannel(vendor, sources));
+    setChannel(hubOnly ? 'hub' : initialSubscriptionChannel(vendor, sources));
     // A vendor with no chooser copy has no channel choice to put in front of the
     // user, so it opens straight into its flow — the same entry the re-auth
     // journey takes above.
     setPhase(chooser === null ? 'flow' : 'choose');
-  }, [chooser, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
+  }, [chooser, hubOnly, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
   /**
    * One owner for 「the server moved the rows the page behind this dialog draws」,
@@ -706,8 +708,8 @@ export const OAuthConnectDialog: React.FC<{
   // interpolate i18n keys at the user. Narrowing on `chooser` here rather than on
   // a bare phase check is what makes that a type error, not a runtime one.
   const choosing = !isReauth && phase === 'choose' && chooser !== null;
-  const recommended = recommendedSubscriptionChannel(vendor);
-  const optionOrder = subscriptionOptionOrder(vendor);
+  const recommended = hubOnly ? 'hub' : recommendedSubscriptionChannel(vendor);
+  const optionOrder: SupplyChannel[] = hubOnly ? ['hub'] : subscriptionOptionOrder(vendor);
   const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
   const selectableChannels = optionOrder.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
 
@@ -829,7 +831,7 @@ export const OAuthConnectDialog: React.FC<{
                 );
               })}
             </div>
-            {vendorCopy === 'claude' && (
+            {vendorCopy === 'claude' && !hubOnly && (
               <p className="model-hub-add-sub-hint flex items-start gap-2 text-muted">
                 <Info className="mt-0.5 size-3 shrink-0" />
                 <span>{t('settings.models.addSub.hint.claude')}</span>

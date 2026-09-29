@@ -109,6 +109,8 @@ of an existing key. At least one usable source must appear in Model Hub before
 **Continue to assistants** becomes available. Declining migration keeps the
 **Add subscription or API Key** action. If sources disappear before assistant
 setup completes, use **Add model source** to return to this step.
+Subscriptions added during setup connect through Model Hub so the assistant
+selection step can use them.
 
 In the wizard, help the user install or detect Claude Code, Codex, or OpenCode,
 then connect one assistant with a subscription or API key. Existing valid

@@ -541,6 +541,7 @@ export const AddSourceDialog: React.FC<{
       {phase.kind === 'waitingAuth' && (
         <OAuthConnectDialog
           open
+          hubOnly
           vendor={subscriptionVendor}
           sources={sources}
           // Cancelled, failed, or abandoned: back to the frame it was launched

@@ -57,3 +57,14 @@ The existing route-read epoch/token, provider read authority and completion gate
 remain the owners. No parallel state store or new backend policy is needed.
 Consumer validation covers pending/failing reads and retry recovery, native-only
 inventory, stale completion retry, current-visit readback and ordinary Hub entry.
+
+Review of `8dd1e03926` found the remaining producer side of the same custody
+boundary: setup still opened the general subscription chooser, whose Anthropic
+default creates native CLI custody. The full inventory now has three
+findings-bearing heads; the custody class repeats on the latter two. Before
+editing again, the producer-to-consumer audit confirmed that the existing OAuth
+API already supports Hub custody for both setup subscription vendors. Constrain
+only setup's create flow to that supported custody in the shared OAuth dialog,
+retaining its explicit sign-in and disclosure step. Settings and reauthentication
+keep their existing channel choice. Validate real dialog composition through
+the browser, including the outgoing OAuth channel and post-login inventory gate.

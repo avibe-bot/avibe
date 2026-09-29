@@ -69,6 +69,20 @@ const deferred = <T,>() => {
 };
 
 describe('add-subscription channel choice', () => {
+  it.each(['anthropic', 'openai'])('AUTH-SETUP-126: setup starts %s only with Hub custody after explicit sign-in', async (vendor) => {
+    const start = vi.spyOn(modelsApi, 'startOAuth').mockImplementation(() => new Promise(() => {}));
+    renderDialog({ vendor, hubOnly: true });
+    const options = screen.getAllByRole('radio');
+    expect(options).toHaveLength(1);
+    expect(options[0].getAttribute('aria-checked')).toBe('true');
+    expect(options[0].textContent).toContain(i18n.t('settings.models.addSub.opt.hub.label'));
+    expect(screen.queryByText(i18n.t('settings.models.addSub.hint.claude'))).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.models.addSub.signIn') }));
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(start.mock.calls[0].slice(0, 2)).toEqual([vendor, 'hub']);
+  });
+
   it('flips the recommendation and visible order by vendor', () => {
     expect(recommendedSubscriptionChannel('anthropic')).toBe('native_cli');
     expect(subscriptionOptionOrder('anthropic')).toEqual(['native_cli', 'hub']);

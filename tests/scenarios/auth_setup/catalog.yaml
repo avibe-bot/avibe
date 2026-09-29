@@ -458,6 +458,8 @@ scenarios:
       test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
     supporting_tests:
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
+      - ui/src/components/onboarding/providers/AddSourceDialog.test.tsx
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts
       - ui/src/components/onboarding/WizardCompletion.test.tsx
       - ui/src/components/onboarding/AssistantSetup.test.tsx
       - ui/e2e/onboarding-fidelity/provider-gate.spec.ts
