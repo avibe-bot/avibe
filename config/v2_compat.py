@@ -109,7 +109,8 @@ def runtime_agent_cli_path(
 ) -> str:
     """Project one saved selector to the executable used by desktop Runtime."""
 
-    selected = str(configured or default)
+    selected = str(configured).strip() if configured is not None else default
+    selected = selected or default
     from vibe.upgrade import is_desktop_managed_runtime
 
     if not resolve_agent_paths or not is_desktop_managed_runtime():

@@ -240,7 +240,7 @@ def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp
         slack=SlackConfig(),
         runtime=RuntimeConfig(default_cwd="/tmp/workdir"),
         agents=AgentsConfig(
-            claude=ClaudeConfig(cli_path="claude"),
+            claude=ClaudeConfig(cli_path="  claude  "),
             codex=CodexConfig(cli_path="codex"),
             opencode=OpenCodeConfig(cli_path="opencode"),
         ),
