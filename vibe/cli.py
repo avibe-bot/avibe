@@ -13852,6 +13852,23 @@ def cmd_desktop_endpoint() -> int:
     return 0
 
 
+def cmd_desktop_remove_backends() -> int:
+    """Delete the desktop's backend installs: 3 while an install holds them, 2 when part may remain."""
+
+    from vibe.desktop_backends import DesktopBackendError, remove_desktop_backends
+
+    try:
+        remove_desktop_backends()
+    except DesktopBackendError as exc:
+        logger.error("Desktop backend removal failed: %s", exc)
+        if exc.code == "install_locked":
+            _print_stop_json({"reason": exc.code})
+            return 3
+        _print_stop_json({"failed": exc.code})
+        return 2
+    return 0
+
+
 def cmd_vibe():
     """Compatibility default: bare `vibe` starts services and opens the Web UI."""
     return cmd_start()
@@ -16640,6 +16657,7 @@ def build_parser():
     desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
     desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint", help=argparse.SUPPRESS)
     desktop_endpoint_parser.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
+    desktop_subparsers.add_parser("remove-backends", help=argparse.SUPPRESS)
     restart_parser = subparsers.add_parser("restart", help="Restart all services")
     restart_parser.add_argument(
         "--delay-seconds",
@@ -18530,6 +18548,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("check-update",): None,
     ("status",): None,
     ("desktop", "endpoint"): "member",
+    ("desktop", "remove-backends"): "member",
     # Host scope, not instance scope: these act on this machine's screen and on
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
@@ -18781,6 +18800,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(cmd_start(open_browser=args.open_browser))
     if args.command == "desktop" and args.desktop_command == "endpoint":
         sys.exit(cmd_desktop_endpoint())
+    if args.command == "desktop" and args.desktop_command == "remove-backends":
+        sys.exit(cmd_desktop_remove_backends())
     if args.command == "restart":
         if _generation_downgrade_blocks("restart", allow_downgrade=args.allow_downgrade):
             sys.exit(1)

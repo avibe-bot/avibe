@@ -957,3 +957,112 @@ def test_an_installer_record_that_cannot_be_read_is_unknown_and_kept(monkeypatch
 
     assert refused.value.code == "install_locked"
     assert record.exists()
+
+
+# --- Removal deletes the backends only once no installer can be writing (#2131) ---
+
+
+def _remove_backends(monkeypatch, capsys, env: dict[str, str]) -> tuple[int, dict | None]:
+    """``vibe desktop remove-backends`` as the desktop runs it, with ``env``'s private paths."""
+
+    from vibe import cli
+
+    for key in (
+        "AVIBE_DESKTOP_RUNTIME_ROOT",
+        "VIBE_SHOW_RUNTIME_NODE_BIN",
+        "AVIBE_DESKTOP_NPM_CLI",
+        "AVIBE_DESKTOP_BACKENDS_ROOT",
+    ):
+        monkeypatch.setenv(key, env[key])
+    monkeypatch.setattr(cli.sys, "argv", ["vibe", "desktop", "remove-backends"])
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    err = capsys.readouterr().err.strip().splitlines()
+    return exited.value.code, json.loads(err[-1]) if err else None
+
+
+def _backend_files(env: dict[str, str]) -> set[str]:
+    root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+    # A claim leaves its lock file behind; that is not an install's file.
+    return {str(path.relative_to(root)) for path in root.rglob("*") if path.name != ".install.lock"}
+
+
+def _published_backends(env: dict[str, str]) -> None:
+    root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+    for backend in ("claude", "codex", "opencode"):
+        _write_native(root / backend / "releases" / "r1" / "bin" / backend)
+        (root / backend / "current.json").write_text("{}", encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_removal_reaps_an_abandoned_installer_before_it_deletes_the_backends(monkeypatch, capsys, installer_tree):
+    env, wait_for_tree = installer_tree
+    pids = _start_killed_owner(env, wait_for_tree)
+    _published_backends(env)
+
+    assert _remove_backends(monkeypatch, capsys, env) == (0, None)
+
+    assert _running(pids) == []
+    assert _install_records() == []
+    assert not os.path.lexists(env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_removal_keeps_every_file_while_an_installer_cannot_be_shown_gone(monkeypatch, capsys, installer_tree):
+    env, wait_for_tree = installer_tree
+    _start_killed_owner(env, wait_for_tree)
+    _published_backends(env)
+    monkeypatch.setattr(desktop_backends, "reap_marked_processes", lambda *args, **kwargs: "unconfirmed")
+    files = _backend_files(env)
+
+    assert _remove_backends(monkeypatch, capsys, env) == (3, {"reason": "install_locked"})
+
+    assert _backend_files(env) == files
+    assert len(_install_records()) == 1
+    assert _install_lock_is_free(env)
+
+
+def test_removal_deletes_nothing_while_any_backend_is_being_installed(
+    monkeypatch, capsys, tmp_path, owner_runtime_id, children
+):
+    # The held root sorts last, so the ones before it are already claimed.
+    env = _desktop_env(tmp_path)
+    _published_backends(env)
+    held = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "opencode" / ".install.lock"
+    ready = tmp_path / "held"
+    holder = (
+        "import pathlib, sys, time\n"
+        "from storage.lock import MigrationFileLock\n"
+        "MigrationFileLock(pathlib.Path(sys.argv[1])).acquire()\n"
+        "pathlib.Path(sys.argv[2]).touch()\n"
+        "time.sleep(120)\n"
+    )
+    children.append(subprocess.Popen([sys.executable, "-c", holder, str(held), str(ready)], cwd=_REPO_ROOT))
+    deadline = time.monotonic() + 15
+    while not ready.exists():
+        assert time.monotonic() < deadline, "lock holder did not start"
+        time.sleep(0.05)
+    monkeypatch.setattr(desktop_backends, "DESKTOP_BACKEND_REMOVAL_LOCK_TIMEOUT_SECONDS", 0.2)
+    files = _backend_files(env)
+
+    assert _remove_backends(monkeypatch, capsys, env) == (3, {"reason": "install_locked"})
+
+    assert _backend_files(env) == files
+    assert _install_lock_is_free(env)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX file permissions")
+def test_removal_that_cannot_delete_every_file_fails(monkeypatch, capsys, tmp_path, owner_runtime_id):
+    env = _desktop_env(tmp_path)
+    _published_backends(env)
+    stuck = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "codex" / "releases"
+    stuck.chmod(0o500)
+    try:
+        result = _remove_backends(monkeypatch, capsys, env)
+    finally:
+        stuck.chmod(0o700)
+
+    assert result == (2, {"failed": "backend_removal_failed"})
+    assert (stuck / "r1").is_dir()
