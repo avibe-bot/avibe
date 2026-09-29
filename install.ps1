@@ -271,27 +271,20 @@ function Get-UvPythonInstallMirror {
     if ((Test-Path Env:UV_PYTHON_INSTALL_MIRROR) -or (Test-Path Env:UV_PYTHON_DOWNLOADS_JSON_URL)) {
         return $null
     }
-    # `uv tool` reads UV_CONFIG_FILE alone when set, else the user and system uv.toml.
-    $configs = @()
-    if ($env:UV_CONFIG_FILE) {
-        $configs += $env:UV_CONFIG_FILE
-    } else {
-        if ($env:APPDATA) { $configs += Join-Path $env:APPDATA "uv\uv.toml" }
-        if ($env:SystemDrive) { $configs += Join-Path "$env:SystemDrive\" "ProgramData\uv\uv.toml" }
-    }
-    foreach ($config in $configs) {
-        if ((Test-Path -LiteralPath $config -PathType Leaf) -and
-            (Select-String -LiteralPath $config -Pattern "python-(install-mirror|downloads-json-url)" -Quiet)) {
-            return $null
-        }
+    $version = try { (& uv --version 2>$null) -join " " } catch { "" }
+    if (-not ($version -match '^uv (\d+)\.(\d+)\.(\d+)') -or
+        [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])" -ge [version]"0.10.8") {
+        return $null
     }
 
-    $version = try { (& uv --version 2>$null) -join " " } catch { "" }
-    if ($version -match '^uv (\d+)\.(\d+)\.(\d+)' -and
-        [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])" -lt [version]"0.10.8") {
-        return $ASTRAL_PYTHON_INSTALL_MIRROR
+    # uv resolves its own config files, so a Python source the user chose there
+    # is kept. A config uv cannot load keeps uv's default too.
+    $settings = try { (& uv tool install --show-settings $PACKAGE_NAME 2>$null) -join "`n" } catch { "" }
+    if (-not $settings -or $LASTEXITCODE -ne 0 -or
+        $settings -match 'python_(install_mirror|downloads_json_url): Some\(') {
+        return $null
     }
-    return $null
+    return $ASTRAL_PYTHON_INSTALL_MIRROR
 }
 
 function Invoke-NativeCommand {
@@ -475,7 +468,12 @@ function Invoke-UvToolInstallAttempt {
         if ($PythonInstallMirror) {
             $env:UV_PYTHON_INSTALL_MIRROR = $PythonInstallMirror
         }
-        $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+        try {
+            $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+        } finally {
+            # Only an unset variable is ever given the mirror, so unset restores it.
+            if ($PythonInstallMirror) { Remove-Item Env:UV_PYTHON_INSTALL_MIRROR -ErrorAction SilentlyContinue }
+        }
         if (-not $result.Success) {
             Remove-Item -LiteralPath $generationRoot -Recurse -Force -ErrorAction SilentlyContinue
             return $result
@@ -563,8 +561,6 @@ function Invoke-UvToolInstallAttempt {
         Remove-Item -LiteralPath $installerMarker -Force -ErrorAction SilentlyContinue
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
         if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
-        # Only an unset variable is ever given the mirror, so unset restores it.
-        if ($PythonInstallMirror) { Remove-Item Env:UV_PYTHON_INSTALL_MIRROR -ErrorAction SilentlyContinue }
     }
 }
 

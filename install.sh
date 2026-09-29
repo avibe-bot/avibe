@@ -331,22 +331,6 @@ uv_python_install_mirror() {
     if [ -n "${UV_PYTHON_INSTALL_MIRROR+set}" ] || [ -n "${UV_PYTHON_DOWNLOADS_JSON_URL+set}" ]; then
         return 0
     fi
-    # `uv tool` reads UV_CONFIG_FILE alone when set, else the user and system uv.toml.
-    local config config_dir config_dirs configs
-    if [ -n "${UV_CONFIG_FILE:-}" ]; then
-        configs=("$UV_CONFIG_FILE")
-    else
-        configs=("${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml)
-        IFS=':' read -r -a config_dirs <<< "${XDG_CONFIG_DIRS:-/etc/xdg}"
-        for config_dir in "${config_dirs[@]}"; do
-            configs+=("$config_dir/uv/uv.toml")
-        done
-    fi
-    for config in "${configs[@]}"; do
-        if grep -qsE 'python-(install-mirror|downloads-json-url)' "$config"; then
-            return 0
-        fi
-    done
 
     local version major minor patch_extra
     version="$(uv --version 2>/dev/null || true)"
@@ -358,9 +342,18 @@ EOF
     case "$major.$minor.$patch" in
         *[!0-9.]*|.*|*..*|*.) return 0 ;;
     esac
-    if [ "$major" -eq 0 ] && { [ "$minor" -lt 10 ] || { [ "$minor" -eq 10 ] && [ "$patch" -lt 8 ]; }; }; then
-        printf '%s\n' "$ASTRAL_PYTHON_INSTALL_MIRROR"
+    if [ "$major" -ne 0 ] || [ "$minor" -gt 10 ] || { [ "$minor" -eq 10 ] && [ "$patch" -ge 8 ]; }; then
+        return 0
     fi
+
+    # uv resolves its own config files, so a Python source the user chose there
+    # is kept. A config uv cannot load keeps uv's default too.
+    local settings
+    settings="$(uv tool install --show-settings "$PACKAGE_NAME" 2>/dev/null)" || return 0
+    case "$settings" in
+        *"python_install_mirror: Some("*|*"python_downloads_json_url: Some("*) return 0 ;;
+    esac
+    printf '%s\n' "$ASTRAL_PYTHON_INSTALL_MIRROR"
 }
 
 node_version_parts() {

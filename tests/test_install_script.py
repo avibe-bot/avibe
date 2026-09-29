@@ -84,6 +84,19 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
             echo "$VIBE_TEST_UV_VERSION"
             exit 0
         fi
+        if [[ " $* " == *" --show-settings "* ]]; then
+            if [ "${{VIBE_TEST_UV_SETTINGS_FAIL:-}}" = "1" ]; then
+                exit 2
+            fi
+            for setting in python_install_mirror python_downloads_json_url; do
+                if [ "${{VIBE_TEST_UV_CONFIGURED_SOURCE:-}}" = "$setting" ]; then
+                    printf '    %s: Some(\\n        "https://mirror.example.test/python",\\n    ),\\n' "$setting"
+                else
+                    printf '    %s: None,\\n' "$setting"
+                fi
+            done
+            exit 0
+        fi
 
         printf '%s' "${{UV_TOOL_BIN_DIR:-}}" > "{uv_log}"
         printf '%s' "${{UV_TOOL_DIR:-}}" > "{uv_log}.tools"
@@ -383,86 +396,58 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
 
 
 ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-standalone/releases/download"
-MIRROR_CONFIG = 'python-install-mirror = "https://mirror.example.test/python"\n'
 
 
 @pytest.mark.parametrize(
-    ("uv_version", "env_overrides", "user_config", "config_file", "expected_mirrors"),
+    ("uv_version", "env_overrides", "expected_mirrors"),
     [
-        ("uv 0.10.7 (8e2c9a1 2026-03-02)", {}, None, None, [ASTRAL_PYTHON_INSTALL_MIRROR]),
-        ("uv 0.10.8", {}, None, None, ["<unset>"]),
+        ("uv 0.10.7 (8e2c9a1 2026-03-02)", {}, [ASTRAL_PYTHON_INSTALL_MIRROR]),
+        ("uv 0.10.8", {}, ["<unset>"]),
         (
             "uv 0.9.8",
             {"UV_PYTHON_INSTALL_MIRROR": "https://mirror.example.test/python"},
-            None,
-            None,
             ["https://mirror.example.test/python"],
         ),
-        ("uv 0.9.8", {}, MIRROR_CONFIG, None, ["<unset>"]),
-        (
-            "uv 0.9.8",
-            {"UV_PYTHON_DOWNLOADS_JSON_URL": "https://mirror.example.test/downloads.json"},
-            None,
-            None,
-            ["<unset>"],
-        ),
-        ("uv 0.9.8", {}, 'python-downloads-json-url = "https://mirror.example.test/downloads.json"\n', None, ["<unset>"]),
-        ("uv 0.9.8", {}, None, MIRROR_CONFIG, ["<unset>"]),
-        ("uv 0.9.8", {}, MIRROR_CONFIG, "", [ASTRAL_PYTHON_INSTALL_MIRROR]),
+        ("uv 0.9.8", {"UV_PYTHON_DOWNLOADS_JSON_URL": "https://mirror.example.test/downloads.json"}, ["<unset>"]),
+        ("uv 0.9.8", {"VIBE_TEST_UV_CONFIGURED_SOURCE": "python_install_mirror"}, ["<unset>"]),
+        ("uv 0.9.8", {"VIBE_TEST_UV_CONFIGURED_SOURCE": "python_downloads_json_url"}, ["<unset>"]),
+        ("uv 0.9.8", {"VIBE_TEST_UV_SETTINGS_FAIL": "1"}, ["<unset>"]),
         (
             "uv 0.9.8",
             {"VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR": "1"},
-            None,
-            None,
             [ASTRAL_PYTHON_INSTALL_MIRROR] * 3 + ["<unset>"],
         ),
-        (
-            "uv 0.9.8",
-            {"VIBE_TEST_UV_FAIL_WITHOUT_INDEX_URL": "1"},
-            None,
-            None,
-            [ASTRAL_PYTHON_INSTALL_MIRROR] * 2,
-        ),
+        ("uv 0.9.8", {"VIBE_TEST_UV_FAIL_WITHOUT_INDEX_URL": "1"}, [ASTRAL_PYTHON_INSTALL_MIRROR] * 2),
     ],
     ids=[
         "uv-without-cdn",
         "uv-with-cdn",
         "user-env-mirror",
-        "user-config-mirror",
         "user-env-downloads-json",
-        "user-config-downloads-json",
-        "config-file-mirror",
-        "config-file-replaces-user-config",
+        "uv-config-mirror",
+        "uv-config-downloads-json",
+        "uv-config-unreadable",
         "cdn-down-retries-every-source-without-it",
         "pypi-down-keeps-cdn-for-tsinghua",
     ],
 )
 def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(
-    tmp_path, uv_version, env_overrides, user_config, config_file, expected_mirrors
+    tmp_path, uv_version, env_overrides, expected_mirrors
 ):
     home_dir = tmp_path / "home"
     home_dir.mkdir()
     path_dir = tmp_path / "path-bin"
     path_dir.mkdir()
-    config_home = tmp_path / "config"
     uv_log = tmp_path / "uv-tool-bin-dir.txt"
     _write_fake_uv(path_dir / "uv", uv_log)
-    if user_config is not None:
-        (config_home / "uv").mkdir(parents=True)
-        (config_home / "uv" / "uv.toml").write_text(user_config, encoding="utf-8")
 
     env = os.environ.copy()
-    for name in ("UV_PYTHON_INSTALL_MIRROR", "UV_PYTHON_DOWNLOADS_JSON_URL", "UV_CONFIG_FILE"):
+    for name in ("UV_PYTHON_INSTALL_MIRROR", "UV_PYTHON_DOWNLOADS_JSON_URL"):
         env.pop(name, None)
     env["HOME"] = str(home_dir)
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
-    env["XDG_CONFIG_HOME"] = str(config_home)
-    env["XDG_CONFIG_DIRS"] = str(tmp_path / "system-config")
     env["VIBE_TEST_UV_VERSION"] = uv_version
     env.update(env_overrides)
-    if config_file is not None:
-        (tmp_path / "uv-config.toml").write_text(config_file, encoding="utf-8")
-        env["UV_CONFIG_FILE"] = str(tmp_path / "uv-config.toml")
 
     install_result = _install(env)
 
