@@ -279,7 +279,7 @@ The setup wizard detects Claude Code, Codex, and OpenCode on your machine and in
 <summary><b>Claude Code</b></summary>
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash
+bash -o pipefail -c 'curl -fsSL https://claude.ai/install.sh | bash'
 ```
 </details>
 
@@ -295,7 +295,7 @@ npm install -g @openai/codex
 <summary><b>OpenCode</b></summary>
 
 ```bash
-curl -fsSL https://opencode.ai/install | bash
+bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
 ```
 
 OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.json` allows them; the setup wizard can set this for you:
@@ -319,13 +319,17 @@ OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.j
 ## Uninstall
 
 ```bash
-vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
-"$vibe_bin" stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
+vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
+if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
+  "$vibe_bin" stop
+else
+  echo "Skipping ${vibe_bin}: not Avibe's launcher"; vibe_bin=""
+fi
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # legacy install
-rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```

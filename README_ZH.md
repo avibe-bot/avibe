@@ -279,7 +279,7 @@ vibe vault      # 管理密钥、请求、认证请求与签名
 <summary><b>Claude Code</b></summary>
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash
+bash -o pipefail -c 'curl -fsSL https://claude.ai/install.sh | bash'
 ```
 </details>
 
@@ -295,7 +295,7 @@ npm install -g @openai/codex
 <summary><b>OpenCode</b></summary>
 
 ```bash
-curl -fsSL https://opencode.ai/install | bash
+bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
 ```
 
 除非 `~/.config/opencode/opencode.json` 放行工具调用，否则 OpenCode 可能会停下来等你审批；设置向导可以帮你写好：
@@ -319,13 +319,17 @@ curl -fsSL https://opencode.ai/install | bash
 ## 卸载
 
 ```bash
-vibe_bin="$(command -v vibe)"   # 卸载前先记下 Avibe 的启动器
-"$vibe_bin" stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
+vibe_bin="$(command -v vibe)"   # 卸载前先记下 Avibe 的启动器
+if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
+  "$vibe_bin" stop
+else
+  echo "跳过 ${vibe_bin}：不是 Avibe 的启动器"; vibe_bin=""
+fi
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # 旧版安装
-rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```
