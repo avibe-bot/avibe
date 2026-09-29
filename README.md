@@ -4,7 +4,7 @@
 
 # Avibe
 
-### The local-first Agent OS — your AI partner lives on your own machine.
+### The local-first Agent OS — your own AI partner.
 
 **Every agent. Every subscription. Running on your machine, steered from your pocket.**
 
@@ -70,11 +70,11 @@ Chat, files, editor, and terminal — windowed, side by side, in one browser tab
 
 ### 🔀 Model Hub — every plan you pay for, finally on the same team
 
-Sign in each subscription and add each API key once — official vendors, relays, aggregators, self-hosted endpoints, all welcome. Avibe's local gateway routes every Agent's models through them in the order you set.
+Sign in each subscription and add each API key once — official vendors, relays, aggregators, self-hosted endpoints, all welcome. Switch an Agent to gateway mode and Avibe's local gateway routes its models through them in the order you set.
 
 - **Plan runs dry? The next one picks it up.** If a source hits a quota, rate limit, or network failure before it starts answering, the next source in your route takes the request — no retry, no babysitting. Once your first choice recovers, the next turn goes back to it.
 - **One pool, three agents.** Claude Code, Codex, and OpenCode draw from the same sources, each model on its own route.
-- **Know exactly what every plan is worth.** Usage trends by model and source, live 5-hour and weekly quotas, and your usage priced at official API rates — down to how many times over each plan has already paid for itself.
+- **Know exactly what your plans are worth.** Usage trends by model and source, and your usage priced at official API rates. For Claude and ChatGPT subscriptions, add live 5-hour and weekly quotas — down to how many times over each plan has already paid for itself.
 - **Move in with one click.** Already signed in to a supported CLI? Bring that login over with your explicit OK. Credentials and routes stay on your machine.
 
 *One real day on the maintainer's machine: ~680M tokens, worth ~$540 at official API prices.*
@@ -117,9 +117,9 @@ Keep a page private, share it with specific people, or publish it at a link you'
 Your machine does the work; you don't have to babysit it. Open the Workbench when you want windows, or fire off a message in Slack, Discord, Telegram, WeChat, or Lark / Feishu when that's faster — same Agents, same sessions.
 
 - 🔔 **It taps you on the shoulder.** Install the Workbench on your phone or desktop and get a push the moment a job needs you.
-- 🎙️ **Talk, don't type.** Realtime voice input writes as you speak, then tidies the transcript in place. On desktop, press ⌥Z (Alt+Z on Windows and Linux).
+- 🎙️ **Talk, don't type.** Pair with `avibe.bot` and realtime voice input writes as you speak, then tidies the transcript in place. On desktop, press ⌥Z (Alt+Z on Windows and Linux).
 - 🌍 **Your own `you-app.avibe.bot`.** One `vibe remote` and your Workbench opens in any browser, anywhere — no VPN, no port forwarding.
-- 🔒 **A guest list, not an open door.** Only the emails you authorize can sign in, and auth, routing, and host checks all fail closed.
+- 🔒 **Your door, your guest list.** Only the people your access policy allows can sign in — by default, just you. Auth, routing, and host checks all fail closed.
 
 On a plane. At a café. On a borrowed laptop. Your agent pings you; you open the link, steer, and walk away again.
 
@@ -159,7 +159,7 @@ Add an API key or token once. Agents ask for it by name, you approve in the brow
 
 1. **You ask** — in the browser or a chat app: *"Add dark mode to the settings page."*
 2. **Avibe routes** the message to the right Agent, in the right project.
-3. **The agent** reads your local codebase, writes code, and streams its work back. Model Hub picks the source for each call.
+3. **The agent** reads your local codebase, writes code, and streams its work back. In gateway mode, Model Hub picks the source for each call; in direct mode, the agent uses its own login.
 4. **You review** in the same surface, iterate in the thread, and pick it up later from anywhere.
 
 Avibe connects out via Slack Socket Mode, Discord Gateway, Telegram long-polling, WeChat polling, or Lark WebSocket — no public inbound ports for chat control. Agent prompts go only to the model sources you configure.
@@ -214,7 +214,7 @@ Avibe is open source (MIT) and free to run. You bring your own agent subscriptio
 <details>
 <summary><b>Is remote access secure?</b></summary>
 
-`vibe remote` runs a Cloudflare tunnel from your machine; browser traffic reaches it only after sign-in, and only for the emails you authorize. Auth, routing, and host checks are **fail-closed**, and there are no public inbound ports for chat control.
+`vibe remote` runs a Cloudflare tunnel from your machine; browser traffic reaches it only after sign-in, and only for the people your access policy allows (by default, just you). Auth, routing, and host checks are **fail-closed**, and there are no public inbound ports for chat control.
 </details>
 
 <details>
