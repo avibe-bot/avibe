@@ -146,11 +146,11 @@ archives download through `core.dependency_network.fetch_to_path`:
 2. Cache Rule, then real-file tests from the three mainland carriers at the
    evening peak.
 3. Clients, one at a time: desktop updater (done), then runtime and Show
-   Runtime downloads (done), then `install.sh` and `install.ps1`. Each tries the
-   mirror first, then GitHub, with a connect timeout and a stall watchdog,
-   resumes with `Range` when switching source, and remembers the last source
-   that worked. The references are the desktop shell's
-   `avibe_runtime_host::download` (Rust) and Client downloads above (Python).
+   Runtime downloads (done). Each tries the mirror first, then GitHub, with a
+   connect timeout and a stall watchdog, resumes with `Range` when switching
+   source, and remembers the last source that worked. The references are the
+   desktop shell's `avibe_runtime_host::download` (Rust) and Client downloads
+   above (Python).
 4. Install-script third-party dependencies (the uv installer and
    python-build-standalone). The install scripts fetch no Avibe release
    assets; their GitHub traffic is uv and the Python it installs. The uv
