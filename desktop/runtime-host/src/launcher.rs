@@ -58,6 +58,9 @@ pub const DESKTOP_BACKENDS_ROOT_ENV: &str = "AVIBE_DESKTOP_BACKENDS_ROOT";
 /// same Runtime. The shell owns a WebView for exactly this purpose, so it always
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
+/// Lets this start stop another desktop Runtime that serves this home. `vibe
+/// start` refuses that handover without it.
+const HAND_OVER_ARG: &str = "--hand-over";
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const REMOVE_BACKENDS_ARGS: [&str; 2] = ["desktop", "remove-backends"];
 /// How long the shell waits for the Runtime to name its own address.
@@ -191,7 +194,9 @@ pub trait RuntimeLauncher: Send + Sync {
 /// spawned; readiness is decided by the presence probe.
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
-    fn launch(&self) -> Result<LaunchedRuntime, LaunchError>;
+    /// `hand_over` lets the start replace another desktop Runtime serving this
+    /// home. The start owns that act and reports it in its exit.
+    fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError>;
 
     /// The provenance id of the Runtime this launcher starts, if it has one.
     /// Only a Runtime serving this id is this launcher's own.
@@ -200,8 +205,7 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
     }
 
     /// Stops the Runtime whose identity is `runtime_id`, and nothing else.
-    /// `keep_remote_access` leaves the tunnel connector for a successor.
-    fn stop(&self, _runtime_id: &str, _keep_remote_access: bool) -> CliOutcome {
+    fn stop(&self, _runtime_id: &str) -> CliOutcome {
         CliOutcome::Unrunnable
     }
 
@@ -213,33 +217,65 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn prune_superseded(&self) {}
 }
 
-/// Whether the launcher process itself survived long enough to do its job.
+/// What the launcher's exit says about one start.
 ///
 /// `vibe start` is short-lived by design: it brings the Runtime up and exits, so
 /// the shell cannot treat "it is gone" as failure. Its exit code distinguishes
-/// startup failure from completion and nothing more: stop authority comes from
-/// the Runtime's identity, never from this helper. Empty means "still running,
-/// or not observable".
+/// startup failure from completion, and for a start of this shell's own Runtime
+/// the handover's verdict: stop authority comes from the Runtime's identity,
+/// never from this helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchExit {
+    /// 0: the start completed.
+    Started,
+    /// 3 from a start of this shell's Runtime: another desktop Runtime serves
+    /// this home, and the start did not replace it.
+    HandoverRefused,
+    /// 2 from a start asked to hand over: the Runtime it replaced may be left
+    /// partly running.
+    HandoverFailed,
+    /// Any other exit, or a signal.
+    Failed,
+}
+
+impl LaunchExit {
+    fn of(code: Option<i32>, identified: bool, hand_over: bool) -> Self {
+        match code {
+            Some(0) => Self::Started,
+            Some(3) if identified => Self::HandoverRefused,
+            Some(2) if hand_over => Self::HandoverFailed,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// Whether the launcher process itself survived long enough to do its job.
+/// Empty means "still running, or not observable".
 #[derive(Debug, Clone, Default)]
-pub struct LaunchWatch(Arc<OnceLock<bool>>);
+pub struct LaunchWatch(Arc<OnceLock<LaunchExit>>);
 
 impl LaunchWatch {
     /// A watch that has already seen the launcher exit. For launchers that learn
     /// the outcome synchronously, and for tests.
-    pub fn exited(succeeded: bool) -> Self {
+    pub fn exited(exit: LaunchExit) -> Self {
         let watch = Self::default();
-        watch.record(succeeded);
+        watch.record(exit);
         watch
+    }
+
+    /// The exit seen, if the launcher has exited.
+    pub fn exit(&self) -> Option<LaunchExit> {
+        self.0.get().copied()
     }
 
     /// True only once the launcher has been *seen* to exit non-zero.
     pub fn failed(&self) -> bool {
-        self.0.get().is_some_and(|succeeded| !succeeded)
+        self.exit().is_some_and(|exit| exit != LaunchExit::Started)
     }
 
     /// True only once the launcher has been *seen* to exit successfully.
     pub fn succeeded(&self) -> bool {
-        self.0.get().is_some_and(|succeeded| *succeeded)
+        self.exit() == Some(LaunchExit::Started)
     }
 
     /// Neither outcome has been seen: the launcher may still be starting pieces.
@@ -247,8 +283,8 @@ impl LaunchWatch {
         self.0.get().is_none()
     }
 
-    fn record(&self, succeeded: bool) {
-        let _ = self.0.set(succeeded);
+    fn record(&self, exit: LaunchExit) {
+        let _ = self.0.set(exit);
     }
 }
 
@@ -399,8 +435,13 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         query_endpoint(&self.command, &self.log)
     }
 
-    fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
-        let child = spawn_detached(&self.command).map_err(LaunchError::Spawn)?;
+    fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+        // Only this shell's own Runtime is started by a CLI of its version,
+        // which knows the flag and exits by the handover contract.
+        let identified = self.expected_runtime_id.is_some();
+        let hand_over = hand_over && identified;
+        let started = Instant::now();
+        let child = spawn_detached(&self.command, hand_over).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -412,10 +453,21 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         // The wait was already happening; recording its verdict costs nothing and
         // is the only place the shell can learn that the launcher died.
         let reaped = watch.clone();
+        let log = self.log.clone();
         std::thread::spawn(move || {
             let mut child = child;
             if let Ok(status) = child.wait() {
-                reaped.record(status.success());
+                let exit = LaunchExit::of(status.code(), identified, hand_over);
+                log.record(
+                    "runtime.start",
+                    &[
+                        ("outcome", format!("{exit:?}")),
+                        ("exit", status.to_string()),
+                        ("hand_over", hand_over.to_string()),
+                        ("ms", started.elapsed().as_millis().to_string()),
+                    ],
+                );
+                reaped.record(exit);
             }
         });
 
@@ -426,13 +478,8 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         self.expected_runtime_id.as_deref()
     }
 
-    fn stop(&self, runtime_id: &str, keep_remote_access: bool) -> CliOutcome {
-        run_lifecycle_verb(
-            &self.command,
-            &stop_arguments(runtime_id, keep_remote_access),
-            &self.log,
-            "runtime.stop",
-        )
+    fn stop(&self, runtime_id: &str) -> CliOutcome {
+        run_lifecycle_verb(&self.command, &stop_arguments(runtime_id), &self.log, "runtime.stop")
     }
 
     fn remove_backends(&self) -> CliOutcome {
@@ -883,18 +930,18 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-fn spawn_detached(runtime: &RuntimeCommand) -> std::io::Result<std::process::Child> {
-    lifecycle_command(runtime, &START_ARGS).spawn()
+fn spawn_detached(runtime: &RuntimeCommand, hand_over: bool) -> std::io::Result<std::process::Child> {
+    let mut command = lifecycle_command(runtime, &START_ARGS);
+    if hand_over {
+        command.arg(HAND_OVER_ARG);
+    }
+    command.spawn()
 }
 
 /// `vibe stop`, scoped to one Runtime identity. There is no unscoped form: a
 /// refusal is final, never a cue to stop whatever holds the service.
-fn stop_arguments(runtime_id: &str, keep_remote_access: bool) -> Vec<&str> {
-    let mut arguments = vec!["stop", "--expect-runtime-id", runtime_id];
-    if keep_remote_access {
-        arguments.push("--keep-remote-access");
-    }
-    arguments
+fn stop_arguments(runtime_id: &str) -> [&str; 3] {
+    ["stop", "--expect-runtime-id", runtime_id]
 }
 
 /// Runs one lifecycle verb to completion and reads its verdict.
@@ -1040,8 +1087,7 @@ mod tests {
             }
             .resolve()
             .expect("fake resolve");
-            assert_eq!(resolved.stop(&runtime_id, false), expected, "{body}");
-            assert_eq!(resolved.stop(&runtime_id, true), expected, "{body}");
+            assert_eq!(resolved.stop(&runtime_id), expected, "{body}");
             assert_eq!(resolved.remove_backends(), expected, "{body}");
             assert_eq!(
                 std::fs::read_to_string(&recording)
@@ -1052,11 +1098,6 @@ mod tests {
                     "stop",
                     "--expect-runtime-id",
                     &runtime_id,
-                    "shell=1",
-                    "stop",
-                    "--expect-runtime-id",
-                    &runtime_id,
-                    "--keep-remote-access",
                     "shell=1",
                     "desktop",
                     "remove-backends",
@@ -1075,7 +1116,7 @@ mod tests {
         .resolve()
         .expect("fake resolve");
         std::fs::remove_file(executable).expect("the Runtime disappears after resolution");
-        assert_eq!(resolved.stop(&runtime_id, false), CliOutcome::Unrunnable);
+        assert_eq!(resolved.stop(&runtime_id), CliOutcome::Unrunnable);
         assert_eq!(resolved.remove_backends(), CliOutcome::Unrunnable);
         std::fs::remove_dir_all(dir).expect("remove test-owned state");
     }
@@ -1089,7 +1130,7 @@ mod tests {
             withholds_inherited_python: true,
         };
         let runtime_id = "b".repeat(64);
-        let command = lifecycle_command(&runtime, &stop_arguments(&runtime_id, false));
+        let command = lifecycle_command(&runtime, &stop_arguments(&runtime_id));
         assert_eq!(command.get_program(), runtime.executable.as_os_str());
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -1485,7 +1526,7 @@ mod tests {
         let resolved = launcher.resolve().expect("the first executable resolves");
         std::fs::remove_file(first).expect("the first executable is removed");
         assert!(
-            matches!(resolved.launch(), Err(LaunchError::Spawn(_))),
+            matches!(resolved.launch(false), Err(LaunchError::Spawn(_))),
             "an in-flight attempt must not silently switch to the second candidate"
         );
         assert!(
@@ -1511,40 +1552,62 @@ mod tests {
         panic!("{} was never written", path.display());
     }
 
+    /// A launcher of this shell's own Runtime, whose CLI is of the shell's version.
+    #[cfg(unix)]
+    fn identified(executable: PathBuf) -> ResolvedVibeExecutable {
+        ResolvedVibeExecutable {
+            command: RuntimeCommand::installed(executable),
+            expected_runtime_id: Some("a".repeat(64)),
+            cleanup: None,
+            log: BootstrapLog::disabled(),
+        }
+    }
+
     /// Asserts the launch contract against what the operating system actually
     /// receives, rather than against the constant the code was built from.
     #[cfg(unix)]
     #[test]
     fn the_runtime_is_started_headless_and_marked_as_shell_started() {
-        let dir = scratch_dir("launch");
-        let recording = dir.join("argv");
-        let executable = write_fake_runtime(
-            &dir,
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" \"shell=$AVIBE_DESKTOP_SHELL\" > \"{}\"\n",
-                recording.display()
+        // Only this shell's own Runtime is asked to hand over: an installed
+        // CLI may predate the flag, and would refuse the start.
+        for (identified_launcher, hand_over, expected) in [
+            (false, true, &["start", "--no-open-browser", "shell=1"][..]),
+            (true, false, &["start", "--no-open-browser", "shell=1"][..]),
+            (
+                true,
+                true,
+                &["start", "--no-open-browser", "--hand-over", "shell=1"][..],
             ),
-        );
+        ] {
+            let dir = scratch_dir("launch");
+            let recording = dir.join("argv");
+            let executable = write_fake_runtime(
+                &dir,
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" \"shell=$AVIBE_DESKTOP_SHELL\" > \"{}\"\n",
+                    recording.display()
+                ),
+            );
 
-        let launcher = InstalledVibeLauncher {
-            candidates: vec![executable],
-        };
-        let launched = launcher
-            .resolve()
-            .expect("the fake runtime resolves")
-            .launch()
-            .expect("the fake runtime starts");
-        assert!(launched.pid > 0);
+            let resolved: Arc<dyn ResolvedRuntimeLauncher> = if identified_launcher {
+                Arc::new(identified(executable))
+            } else {
+                InstalledVibeLauncher {
+                    candidates: vec![executable],
+                }
+                .resolve()
+                .expect("the fake runtime resolves")
+            };
+            let launched = resolved.launch(hand_over).expect("the fake runtime starts");
+            assert!(launched.pid > 0);
 
-        let recorded = wait_for_file(&recording);
-        assert_eq!(
-            recorded.lines().collect::<Vec<_>>(),
+            let recorded = wait_for_file(&recording);
             // Without --no-open-browser the Runtime would open a second window
             // onto the Workbench, in the system browser.
-            ["start", "--no-open-browser", "shell=1"],
-        );
+            assert_eq!(recorded.lines().collect::<Vec<_>>(), expected);
 
-        std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[cfg(unix)]
@@ -1939,47 +2002,52 @@ mod tests {
     }
 
     /// The bootstrap loop aborts a doomed wait on this verdict, so it has to be
-    /// right in both directions: a launcher that refused its arguments must be
-    /// visible, and the ordinary `vibe start` — which exits 0 once the Runtime is
-    /// up — must never be mistaken for one.
+    /// right in every direction: a launcher that refused or failed must be
+    /// visible, the ordinary `vibe start` — which exits 0 once the Runtime is
+    /// up — must never be mistaken for one, and a handover verdict is read only
+    /// from a CLI that speaks the handover contract.
     #[cfg(unix)]
     #[test]
-    fn only_a_non_zero_launcher_exit_is_reported_as_a_failure() {
-        let refused = scratch_dir("exit-nonzero");
-        let launcher = InstalledVibeLauncher {
-            candidates: vec![write_fake_runtime(&refused, "#!/bin/sh\nexit 3\n")],
-        };
-        let launched = launcher
-            .resolve()
-            .expect("the fake runtime resolves")
-            .launch()
-            .expect("the fake runtime starts");
-        // The wait runs on a detached thread, so the verdict arrives late.
-        for _ in 0..200 {
-            if launched.watch.failed() {
-                break;
+    fn a_launcher_exit_is_read_by_the_start_contract_it_was_launched_under() {
+        for (identified_launcher, hand_over, code, expected) in [
+            (true, true, 0, LaunchExit::Started),
+            (true, true, 3, LaunchExit::HandoverRefused),
+            (true, false, 3, LaunchExit::HandoverRefused),
+            (true, true, 2, LaunchExit::HandoverFailed),
+            // Without a handover, a 2 is an ordinary failure, such as a usage error.
+            (true, false, 2, LaunchExit::Failed),
+            (true, true, 1, LaunchExit::Failed),
+            // An installed CLI never hands over, so its 3 and 2 are failures.
+            (false, true, 3, LaunchExit::Failed),
+            (false, true, 2, LaunchExit::Failed),
+            (false, false, 0, LaunchExit::Started),
+        ] {
+            let dir = scratch_dir("launch-exit");
+            let executable = write_fake_runtime(&dir, &format!("#!/bin/sh\nexit {code}\n"));
+            let resolved: Arc<dyn ResolvedRuntimeLauncher> = if identified_launcher {
+                Arc::new(identified(executable))
+            } else {
+                InstalledVibeLauncher {
+                    candidates: vec![executable],
+                }
+                .resolve()
+                .expect("the fake runtime resolves")
+            };
+            let launched = resolved.launch(hand_over).expect("the fake runtime starts");
+            // The wait runs on a detached thread, so the verdict arrives late.
+            for _ in 0..200 {
+                if !launched.watch.pending() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            assert_eq!(
+                launched.watch.exit(),
+                Some(expected),
+                "identified={identified_launcher} hand_over={hand_over} exit={code}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
         }
-        assert!(launched.watch.failed(), "a launcher that exited non-zero is invisible");
-
-        let succeeded = scratch_dir("exit-zero");
-        let launcher = InstalledVibeLauncher {
-            candidates: vec![write_fake_runtime(&succeeded, "#!/bin/sh\nexit 0\n")],
-        };
-        let launched = launcher
-            .resolve()
-            .expect("the fake runtime resolves")
-            .launch()
-            .expect("the fake runtime starts");
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        assert!(
-            !launched.watch.failed(),
-            "a normal start would be aborted as if it had failed"
-        );
-
-        std::fs::remove_dir_all(&refused).ok();
-        std::fs::remove_dir_all(&succeeded).ok();
     }
 
     #[test]

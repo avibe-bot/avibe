@@ -13635,41 +13635,56 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def _handover_superseded_desktop_runtime() -> None:
-    """Replace a different desktop-managed Controller before service reuse."""
+def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
+    """Replace a different desktop-managed Controller before service reuse.
+
+    Returns 0 to go on starting, 3 when this start does not take the home over,
+    and 2 when the superseded Runtime may be left partly running.
+    """
 
     from vibe import internal_client
     from vibe.desktop_runtime import desktop_runtime_id
 
     expected_runtime_id = desktop_runtime_id()
     if expected_runtime_id is None:
-        return
+        return 0
     controller_identity = internal_client.health_identity_sync()
     if controller_identity is None:
-        return
+        return 0
     actual_runtime_id = controller_identity.get("desktop_runtime_id")
     if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
-        return
+        return 0
 
+    language = _configured_cli_language()
+    # Only the desktop host asks for a handover, when a user launches or
+    # retries its app; any other start leaves another desktop Runtime alone.
+    if not allowed:
+        print(i18n_t("desktopRuntime.handoverNotRequested", language), file=sys.stderr)
+        return 3
     # Health names the Runtime that answered; the stop signals only processes
     # that carry its id.
     result = runtime.stop_desktop_runtime(actual_runtime_id)
-    language = _configured_cli_language()
     if result.refusal is not None:
-        raise RuntimeError(i18n_t("desktopRuntime.handoverRefused", language, reason=result.refusal))
+        print(i18n_t("desktopRuntime.handoverRefused", language, reason=result.refusal), file=sys.stderr)
+        return 3
     if result.failure is not None:
-        raise RuntimeError(i18n_t("desktopRuntime.handoverFailed", language, part=result.failure))
+        print(i18n_t("desktopRuntime.handoverFailed", language, part=result.failure), file=sys.stderr)
+        return 2
     # A UI still running is not the superseded Runtime's. Starting would reuse
     # it, or replace it with an unscoped stop.
     if runtime.ui_pid_file_points_to_running_ui():
-        raise RuntimeError(i18n_t("desktopRuntime.handoverForeignUi", language))
+        print(i18n_t("desktopRuntime.handoverForeignUi", language), file=sys.stderr)
+        return 3
+    return 0
 
 
-def cmd_start(*, open_browser: bool | None = None):
+def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
-    _handover_superseded_desktop_runtime()
+    handover_status = _handover_superseded_desktop_runtime(allowed=hand_over)
+    if handover_status:
+        return handover_status
 
     has_configured_platform_credentials = getattr(config, "has_configured_platform_credentials", None)
     if callable(has_configured_platform_credentials):
@@ -13947,7 +13962,7 @@ def _print_left_running(result: runtime.DesktopRuntimeStopResult) -> None:
         _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in left_running]})
 
 
-def _stop_expected_desktop_runtime(runtime_id: str, *, keep_remote_access: bool = False) -> int:
+def _stop_expected_desktop_runtime(runtime_id: str) -> int:
     result = runtime.stop_desktop_runtime(runtime_id)
     if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
         _print_stop_json({"reason": result.refusal})
@@ -13962,11 +13977,7 @@ def _stop_expected_desktop_runtime(runtime_id: str, *, keep_remote_access: bool 
         remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
         _print_stop_json({"failed": result.failure, "remaining": remaining})
         return status
-    if keep_remote_access:
-        _write_status_unless_a_service_holds_the_lock("stopped")
-        status = 0
-    else:
-        status = _stop_the_home_s_connector()
+    status = _stop_the_home_s_connector()
     _print_left_running(result)
     if status:
         _print_stop_json({"failed": "remote_access", "remaining": []})
@@ -13996,9 +14007,9 @@ def _stop_the_home_s_connector() -> int:
     return outcome[0]
 
 
-def cmd_stop(*, expect_runtime_id: str | None = None, keep_remote_access: bool = False):
+def cmd_stop(*, expect_runtime_id: str | None = None):
     if expect_runtime_id is not None:
-        return _stop_expected_desktop_runtime(expect_runtime_id, keep_remote_access=keep_remote_access)
+        return _stop_expected_desktop_runtime(expect_runtime_id)
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
@@ -16598,11 +16609,6 @@ def build_parser():
         metavar="RUNTIME_ID",
         help="Stop only the processes the desktop Runtime with this id started.",
     )
-    stop_parser.add_argument(
-        "--keep-remote-access",
-        action="store_true",
-        help="With --expect-runtime-id, leave the remote access tunnel running.",
-    )
     start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
     start_parser.add_argument(
         "--no-open-browser",
@@ -16616,6 +16622,7 @@ def build_parser():
         action="store_true",
         help="Start this install even though a newer one was activated since.",
     )
+    start_parser.add_argument("--hand-over", action="store_true", help=argparse.SUPPRESS)
     desktop_parser = subparsers.add_parser("desktop", help=argparse.SUPPRESS)
     desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
     desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint", help=argparse.SUPPRESS)
@@ -18748,17 +18755,13 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
-        if args.keep_remote_access and args.expect_runtime_id is None:
-            parser.error("--keep-remote-access requires --expect-runtime-id")
         if args.expect_runtime_id is not None:
-            sys.exit(
-                cmd_stop(expect_runtime_id=args.expect_runtime_id, keep_remote_access=args.keep_remote_access)
-            )
+            sys.exit(cmd_stop(expect_runtime_id=args.expect_runtime_id))
         sys.exit(cmd_stop())
     if args.command == "start":
         if _generation_downgrade_blocks("start", allow_downgrade=args.allow_downgrade):
             sys.exit(1)
-        sys.exit(cmd_start(open_browser=args.open_browser))
+        sys.exit(cmd_start(open_browser=args.open_browser, hand_over=args.hand_over))
     if args.command == "desktop" and args.desktop_command == "endpoint":
         sys.exit(cmd_desktop_endpoint())
     if args.command == "desktop" and args.desktop_command == "remove-backends":

@@ -40,9 +40,9 @@ pub use bootstrap::{
 pub use bootstrap_log::{BootstrapLog, BOOTSTRAP_LOG_NAME};
 pub use health::{HealthProbe, HttpHealthProbe, Presence};
 pub use launcher::{
-    vibe_executable_candidates, BundledVibeLauncher, CliOutcome, InstalledVibeLauncher, LaunchError, LaunchWatch,
-    LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher, DESKTOP_BACKENDS_ROOT_ENV, DESKTOP_NPM_CLI_ENV,
-    DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
+    vibe_executable_candidates, BundledVibeLauncher, CliOutcome, InstalledVibeLauncher, LaunchError, LaunchExit,
+    LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher, DESKTOP_BACKENDS_ROOT_ENV,
+    DESKTOP_NPM_CLI_ENV, DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
 pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
 pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};

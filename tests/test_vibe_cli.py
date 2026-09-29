@@ -1280,7 +1280,7 @@ def start_runtime(monkeypatch):
         return 5678
 
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
-    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda: None)
+    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
     monkeypatch.setattr(cli, "_ensure_config", lambda: SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=True),
@@ -1394,7 +1394,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_handover_superseded_desktop_runtime",
-        lambda: calls.append(("handover",)),
+        lambda **kwargs: calls.append(("handover", kwargs)) or 0,
     )
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
@@ -1411,7 +1411,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
 
     service_call = next(call for call in calls if call[0] == "start_service")
     ui_call = next(call for call in calls if call[0] == "start_ui")
-    assert calls.index(("handover",)) < calls.index(service_call)
+    assert calls.index(("handover", {"allowed": False})) < calls.index(service_call)
     assert service_call[1]["wait_for_ready"] is False
     assert ui_call[1:3] == ("127.0.0.1", 5123)
     assert not any(call == "stop" for call in calls)
@@ -1437,10 +1437,23 @@ def _superseded_controller(monkeypatch, result, *, ui_running=False):
 def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
     calls = _superseded_controller(monkeypatch, cli.runtime.DesktopRuntimeStopResult())
 
-    cli._handover_superseded_desktop_runtime()
+    assert cli._handover_superseded_desktop_runtime(allowed=True) == 0
 
     # The Runtime health named is the one stopped, through the scoped stop.
     assert calls == [("a" * 64, {})]
+
+
+def test_a_start_not_asked_to_hand_over_leaves_the_superseded_controller_running(monkeypatch):
+    # Only the desktop host, for a user's launch or retry, may replace another
+    # desktop Runtime; a recovery launch or a terminal start refuses instead.
+    calls = _superseded_controller(monkeypatch, cli.runtime.DesktopRuntimeStopResult())
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(cli, "_write_status", lambda *args: pytest.fail("the start must not begin"))
+
+    assert cli.cmd_start(open_browser=False) == 3
+    assert calls == []
 
 
 def _left(role):
@@ -1448,22 +1461,22 @@ def _left(role):
 
 
 @pytest.mark.parametrize(
-    ("result", "ui_running"),
+    ("result", "ui_running", "status"),
     [
-        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), False),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), False),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), False),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), False),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), False),
+        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), False, 3),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), False, 2),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), False, 2),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), False, 2),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), False, 2),
         # Stopped, but a UI of some other Runtime still holds the pidfile.
-        (cli.runtime.DesktopRuntimeStopResult(), True),
+        (cli.runtime.DesktopRuntimeStopResult(), True, 3),
     ],
 )
-def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, ui_running):
+def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, ui_running, status):
     _superseded_controller(monkeypatch, result, ui_running=ui_running)
 
-    with pytest.raises(RuntimeError):
-        cli._handover_superseded_desktop_runtime()
+    # 3: this start does not take the home over; 2: part of it may still run.
+    assert cli._handover_superseded_desktop_runtime(allowed=True) == status
 
 
 @pytest.mark.parametrize("controller_runtime_id", [None, "b" * 64])
@@ -1485,7 +1498,8 @@ def test_desktop_start_preserves_external_or_matching_controllers(
         lambda *_args, **_kwargs: pytest.fail("controller must be preserved"),
     )
 
-    cli._handover_superseded_desktop_runtime()
+    # Nothing to hand over, so a start the desktop did not ask to hand over still proceeds.
+    assert cli._handover_superseded_desktop_runtime(allowed=False) == 0
 
 
 def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):
@@ -4106,11 +4120,7 @@ def test_start_parser_accepts_no_open_browser():
     ("arguments", "expected"),
     [
         (["stop"], {}),
-        (["stop", "--expect-runtime-id", "a" * 64], {"expect_runtime_id": "a" * 64, "keep_remote_access": False}),
-        (
-            ["stop", "--expect-runtime-id", "a" * 64, "--keep-remote-access"],
-            {"expect_runtime_id": "a" * 64, "keep_remote_access": True},
-        ),
+        (["stop", "--expect-runtime-id", "a" * 64], {"expect_runtime_id": "a" * 64}),
     ],
 )
 def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expected):
@@ -4126,18 +4136,19 @@ def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expec
     assert calls == [expected]
 
 
-def test_only_a_scoped_stop_can_keep_remote_access(monkeypatch):
-    # A full stop always stops the tunnel with the UI.
+@pytest.mark.parametrize(("arguments", "hand_over"), [(["start"], False), (["start", "--hand-over"], True)])
+def test_only_a_start_asked_to_hand_over_may_replace_another_desktop_runtime(monkeypatch, arguments, hand_over):
     calls = []
-    monkeypatch.setattr(cli.sys, "argv", ["vibe", "stop", "--keep-remote-access"])
+    monkeypatch.setattr(cli.sys, "argv", ["vibe", *arguments])
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
-    monkeypatch.setattr(cli, "cmd_stop", lambda **kwargs: calls.append(kwargs) or 0)
+    monkeypatch.setattr(cli, "_generation_downgrade_blocks", lambda *args, **kwargs: False)
+    monkeypatch.setattr(cli, "cmd_start", lambda **kwargs: calls.append(kwargs) or 0)
 
     with pytest.raises(SystemExit) as exited:
         cli.main()
 
-    assert exited.value.code == 2
-    assert calls == []
+    assert exited.value.code == 0
+    assert calls == [{"open_browser": None, "hand_over": hand_over}]
 
 
 def test_remote_parser_accepts_pairing_command():

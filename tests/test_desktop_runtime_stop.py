@@ -422,15 +422,13 @@ def test_no_service_can_take_the_lock_before_the_stop_s_connector_and_status_lan
     assert lock_free_at == expected
 
 
-@pytest.mark.parametrize("keeper", ["keep_remote_access", "a_ui_of_this_home"])
-def test_the_tunnel_connector_is_left_to_what_still_serves_it(spawn, stop_env, keeper):
+def test_the_tunnel_connector_is_left_to_a_ui_that_still_serves_it(spawn, stop_env):
     service = spawn(RUNTIME_ID)
-    if keeper == "a_ui_of_this_home":
-        # Whoever started it, a running UI of this home serves the tunnel.
-        other_ui = spawn(None, "ui")
-        paths.get_runtime_ui_pid_path().write_text(str(other_ui.pid), encoding="utf-8")
+    # Whoever started it, a running UI of this home serves the tunnel.
+    other_ui = spawn(None, "ui")
+    paths.get_runtime_ui_pid_path().write_text(str(other_ui.pid), encoding="utf-8")
 
-    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID, keep_remote_access=keeper == "keep_remote_access") == 0
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
     service.wait(timeout=10)
     assert stop_env["remote_access"] == []

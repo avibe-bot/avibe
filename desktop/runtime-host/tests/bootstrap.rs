@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use avibe_runtime_host::deep_link::DeepLinks;
 use avibe_runtime_host::{
     bundled_runtime_host, BootstrapLog, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, BootstrapTrigger,
-    CliOutcome, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime, LoopbackOrigin, Presence, RemovalOutcome,
-    ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
+    CliOutcome, HealthProbe, LaunchError, LaunchExit, LaunchWatch, LaunchedRuntime, LoopbackOrigin, Presence,
+    RemovalOutcome, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
 };
 
 use BootstrapTrigger::{Launch, Recovery, Retry};
@@ -109,10 +109,7 @@ impl HealthProbe for FakeProbe {
 /// A lifecycle verb the host ran through the launcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verb {
-    Stop {
-        runtime_id: String,
-        keep_remote_access: bool,
-    },
+    Stop { runtime_id: String },
     RemoveBackends,
     RemoveFiles,
     RemoveUnverifiedFiles,
@@ -124,9 +121,11 @@ struct LauncherState {
     /// The first `failures` launches report no executable.
     failures: usize,
     /// `None` keeps the launch helper running; `Some` has already seen it exit.
-    exit: Option<bool>,
+    exit: Option<LaunchExit>,
     resolvable: AtomicBool,
     launches: AtomicUsize,
+    /// Whether each launch asked `vibe start` to hand over a predecessor.
+    handover_requests: Mutex<Vec<bool>>,
     prunes: AtomicUsize,
     verbs: Mutex<Vec<Verb>>,
     stop_outcome: Mutex<CliOutcome>,
@@ -137,7 +136,7 @@ struct LauncherState {
 struct FakeLauncher(Arc<LauncherState>);
 
 impl FakeLauncher {
-    fn new(runtime_id: Option<String>, private: bool, failures: usize, exit: Option<bool>) -> Arc<Self> {
+    fn new(runtime_id: Option<String>, private: bool, failures: usize, exit: Option<LaunchExit>) -> Arc<Self> {
         Arc::new(Self(Arc::new(LauncherState {
             runtime_id,
             private,
@@ -145,6 +144,7 @@ impl FakeLauncher {
             exit,
             resolvable: AtomicBool::new(true),
             launches: AtomicUsize::new(0),
+            handover_requests: Mutex::new(Vec::new()),
             prunes: AtomicUsize::new(0),
             verbs: Mutex::new(Vec::new()),
             stop_outcome: Mutex::new(CliOutcome::Completed),
@@ -162,6 +162,11 @@ impl FakeLauncher {
         Self::new(Some(bundle_id()), true, 0, None)
     }
 
+    /// This app's bundled Runtime, whose start helper has already exited.
+    fn bundled_exiting(exit: LaunchExit) -> Arc<Self> {
+        Self::new(Some(bundle_id()), true, 0, Some(exit))
+    }
+
     fn failing_first(failures: usize) -> Arc<Self> {
         Self::new(None, false, failures, None)
     }
@@ -169,16 +174,20 @@ impl FakeLauncher {
     /// Spawns successfully, then exits non-zero without starting a Runtime —
     /// what an installed `vibe` too old for the shell's arguments does.
     fn dying() -> Arc<Self> {
-        Self::new(None, false, 0, Some(false))
+        Self::new(None, false, 0, Some(LaunchExit::Failed))
     }
 
     /// The start helper exits zero, but no Runtime ever answers `/ready`.
     fn zero_exit_without_runtime() -> Arc<Self> {
-        Self::new(None, false, 0, Some(true))
+        Self::new(None, false, 0, Some(LaunchExit::Started))
     }
 
     fn calls(&self) -> usize {
         self.0.launches.load(Ordering::SeqCst)
+    }
+
+    fn handover_requests(&self) -> Vec<bool> {
+        self.0.handover_requests.lock().expect("launch recorder").clone()
     }
 
     fn prunes(&self) -> usize {
@@ -189,14 +198,11 @@ impl FakeLauncher {
         self.0.verbs.lock().expect("verb recorder").clone()
     }
 
-    fn stops(&self) -> Vec<(String, bool)> {
+    fn stops(&self) -> Vec<String> {
         self.verbs()
             .into_iter()
             .filter_map(|verb| match verb {
-                Verb::Stop {
-                    runtime_id,
-                    keep_remote_access,
-                } => Some((runtime_id, keep_remote_access)),
+                Verb::Stop { runtime_id } => Some(runtime_id),
                 _ => None,
             })
             .collect()
@@ -248,15 +254,20 @@ impl ResolvedRuntimeLauncher for FakeLauncher {
         Ok(origin())
     }
 
-    fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+    fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
         let call = self.0.launches.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0
+            .handover_requests
+            .lock()
+            .expect("launch recorder")
+            .push(hand_over);
         if call <= self.0.failures {
             return Err(LaunchError::ExecutableNotFound);
         }
         Ok(LaunchedRuntime {
             pid: 4242,
             watch: match self.0.exit {
-                Some(succeeded) => LaunchWatch::exited(succeeded),
+                Some(exit) => LaunchWatch::exited(exit),
                 None => LaunchWatch::default(),
             },
         })
@@ -266,10 +277,9 @@ impl ResolvedRuntimeLauncher for FakeLauncher {
         self.0.runtime_id.as_deref()
     }
 
-    fn stop(&self, runtime_id: &str, keep_remote_access: bool) -> CliOutcome {
+    fn stop(&self, runtime_id: &str) -> CliOutcome {
         self.record(Verb::Stop {
             runtime_id: runtime_id.to_owned(),
-            keep_remote_access,
         });
         self.0.stop_outcome.lock().expect("stop outcome").clone()
     }
@@ -462,7 +472,7 @@ async fn this_apps_runtime_with_a_stale_ui_is_restarted_rather_than_handed_over(
 }
 
 #[tokio::test(start_paused = true)]
-async fn launch_and_retry_hand_over_a_desktop_predecessor_by_its_observed_id_keeping_the_tunnel() {
+async fn launch_and_retry_ask_this_apps_start_to_hand_over_a_desktop_predecessor() {
     for trigger in [Launch, Retry] {
         for predecessor_state in [Served::Ready(Some(predecessor())), Served::UiMismatch(predecessor())] {
             let launcher = FakeLauncher::bundled();
@@ -477,11 +487,11 @@ async fn launch_and_retry_hand_over_a_desktop_predecessor_by_its_observed_id_kee
             assert_eq!(status.phase, BootstrapPhase::Ready, "{trigger:?}");
             assert_eq!(status.notice.code, BootstrapNoticeCode::Ready);
             assert_eq!(
-                launcher.stops(),
-                [(predecessor(), true)],
-                "only the observed predecessor is stopped, and its connector stays for the successor"
+                launcher.handover_requests(),
+                [true],
+                "`vibe start` replaces the predecessor"
             );
-            assert_eq!(launcher.calls(), 1, "the successor starts after the handover");
+            assert!(launcher.verbs().is_empty(), "the host itself never stops a predecessor");
             assert_eq!(launcher.prunes(), 1);
             assert!(host.has_owned_runtime());
         }
@@ -489,34 +499,32 @@ async fn launch_and_retry_hand_over_a_desktop_predecessor_by_its_observed_id_kee
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_predecessor_found_while_polling_is_handed_over_and_the_successor_relaunched_at_once() {
-    // The helper exited zero: `vibe start` adopted the predecessor and settled.
-    let launcher = FakeLauncher::new(Some(bundle_id()), true, 0, Some(true));
-    let host = runtime_host(
-        FakeProbe::serving([
-            Served::Nothing,
-            Served::Ready(Some(predecessor())),
-            Served::Starting,
-            Served::Ready(Some(bundle_id())),
-        ]),
-        launcher.clone(),
-        fast_settings(),
-    );
+async fn a_predecessor_still_serving_after_this_apps_start_exited_is_never_stopped() {
+    // Found on the first probe, and while polling after `vibe start` settled.
+    for script in [
+        vec![Served::Ready(Some(predecessor()))],
+        vec![Served::Nothing, Served::Ready(Some(predecessor()))],
+    ] {
+        let launcher = FakeLauncher::bundled_exiting(LaunchExit::Started);
+        let host = runtime_host(FakeProbe::serving(script), launcher.clone(), fast_settings());
 
-    let status = boot(&host, Launch).await;
+        let status = boot(&host, Launch).await;
 
-    assert_eq!(status.phase, BootstrapPhase::Ready);
-    assert_eq!(launcher.stops(), [(predecessor(), true)]);
-    assert_eq!(
-        launcher.calls(),
-        2,
-        "the post-handover successor must launch in the same run"
-    );
-    assert_eq!(launcher.prunes(), 1);
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeOwnershipLost);
+        assert!(status.retryable);
+        assert!(launcher.verbs().is_empty());
+        assert_eq!(
+            launcher.calls(),
+            1,
+            "a predecessor that stayed is not a reason to start again"
+        );
+        assert!(!host.has_owned_runtime());
+    }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_predecessor_is_never_handed_over_while_this_apps_start_helper_still_runs() {
+async fn a_predecessor_is_never_judged_while_this_apps_start_helper_still_runs() {
     let launcher = FakeLauncher::bundled();
     let host = runtime_host(
         FakeProbe::serving([Served::Nothing, Served::Ready(Some(predecessor()))]),
@@ -533,39 +541,14 @@ async fn a_predecessor_is_never_handed_over_while_this_apps_start_helper_still_r
         assert!(status.retryable);
         assert!(
             launcher.verbs().is_empty(),
-            "the running helper may still act on the predecessor"
+            "the running helper may still be replacing the predecessor"
         );
         assert_eq!(launcher.calls(), 1, "a second helper must never overlap the first");
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn recovery_never_stops_a_foreign_runtime() {
-    // Initially, and when `vibe start` adopts a predecessor while polling.
-    for script in [
-        vec![Served::Ready(Some(predecessor()))],
-        vec![Served::Nothing, Served::Ready(Some(predecessor()))],
-    ] {
-        let polled = script.len() > 1;
-        let launcher = FakeLauncher::bundled();
-        let host = runtime_host(FakeProbe::serving(script), launcher.clone(), fast_settings());
-
-        let status = boot(&host, Recovery).await;
-
-        assert_eq!(status.phase, BootstrapPhase::Failed);
-        assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeOwnershipLost);
-        assert!(status.retryable, "the user's Try again may hand over");
-        assert!(
-            launcher.verbs().is_empty(),
-            "recovery must not stop another shell's Runtime"
-        );
-        assert_eq!(launcher.calls(), usize::from(polled));
-        assert!(!host.has_owned_runtime());
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_predecessor_seen_again_after_its_handover_is_never_stopped_twice() {
+async fn recovery_never_asks_to_hand_over_a_foreign_runtime() {
     let launcher = FakeLauncher::bundled();
     let host = runtime_host(
         FakeProbe::serving([Served::Ready(Some(predecessor()))]),
@@ -573,39 +556,45 @@ async fn a_predecessor_seen_again_after_its_handover_is_never_stopped_twice() {
         fast_settings(),
     );
 
-    let status = boot(&host, Launch).await;
+    let status = boot(&host, Recovery).await;
 
     assert_eq!(status.phase, BootstrapPhase::Failed);
     assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeOwnershipLost);
-    assert_eq!(launcher.stops(), [(predecessor(), true)]);
-    assert_eq!(launcher.calls(), 1);
+    assert!(status.retryable, "the user's Try again may hand over");
+    assert_eq!(launcher.calls(), 0);
+    assert!(launcher.verbs().is_empty());
+
+    // Nothing answered, so recovery starts this app's Runtime, but its `vibe
+    // start` may not replace a predecessor it then finds, and declines.
+    let launcher = FakeLauncher::bundled_exiting(LaunchExit::HandoverRefused);
+    let host = runtime_host(
+        FakeProbe::serving([Served::Nothing, Served::Ready(Some(predecessor()))]),
+        launcher.clone(),
+        fast_settings(),
+    );
+
+    let status = boot(&host, Recovery).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeOwnershipLost);
+    assert!(status.retryable);
+    assert_eq!(
+        launcher.handover_requests(),
+        [false],
+        "recovery must not let `vibe start` stop another shell's Runtime"
+    );
+    assert!(launcher.verbs().is_empty());
+    assert!(!host.has_owned_runtime());
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_handover_that_does_not_complete_fails_closed_without_starting_the_successor() {
-    for (outcome, notice) in [
-        (
-            CliOutcome::Refused {
-                reason: "runtime_id_mismatch".to_owned(),
-            },
-            BootstrapNoticeCode::RuntimeOwnershipLost,
-        ),
-        (
-            CliOutcome::Failed {
-                part: "service".to_owned(),
-            },
-            BootstrapNoticeCode::RuntimeStopFailed,
-        ),
-        (
-            CliOutcome::Failed {
-                part: "unknown".to_owned(),
-            },
-            BootstrapNoticeCode::RuntimeStopFailed,
-        ),
-        (CliOutcome::Unrunnable, BootstrapNoticeCode::RuntimeStopFailed),
+async fn a_start_that_did_not_replace_its_predecessor_fails_closed_by_its_exit() {
+    for (exit, notice) in [
+        (LaunchExit::HandoverRefused, BootstrapNoticeCode::RuntimeOwnershipLost),
+        (LaunchExit::HandoverFailed, BootstrapNoticeCode::RuntimeStopFailed),
+        (LaunchExit::Failed, BootstrapNoticeCode::LauncherExited),
     ] {
-        let launcher = FakeLauncher::bundled();
-        launcher.answer_stop(outcome.clone());
+        let launcher = FakeLauncher::bundled_exiting(exit);
         let host = runtime_host(
             FakeProbe::serving([Served::Ready(Some(predecessor()))]),
             launcher.clone(),
@@ -614,12 +603,36 @@ async fn a_handover_that_does_not_complete_fails_closed_without_starting_the_suc
 
         let status = boot(&host, Launch).await;
 
-        assert_eq!(status.phase, BootstrapPhase::Failed, "{outcome:?}");
-        assert_eq!(status.notice.code, notice, "{outcome:?}");
+        assert_eq!(status.phase, BootstrapPhase::Failed, "{exit:?}");
+        assert_eq!(status.notice.code, notice, "{exit:?}");
         assert!(status.retryable);
-        assert_eq!(launcher.stops(), [(predecessor(), true)]);
-        assert_eq!(launcher.calls(), 0, "{outcome:?} must not start the successor");
+        assert_eq!(launcher.handover_requests(), [true]);
+        assert!(launcher.verbs().is_empty(), "{exit:?}");
+        assert!(!host.has_launched(), "{exit:?} releases the retry slot");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_that_finds_a_failed_start_reports_it_and_leaves_the_predecessor_alone() {
+    // The helper's non-zero exit landed after the first run timed out.
+    let launcher = FakeLauncher::bundled_exiting(LaunchExit::Failed);
+    let host = runtime_host(
+        FakeProbe::serving([Served::Nothing, Served::Ready(Some(predecessor()))]),
+        launcher.clone(),
+        immediate_timeout_settings(),
+    );
+    assert_eq!(boot(&host, Launch).await.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert!(host.has_launched());
+
+    let status = boot(&host, Retry).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::LauncherExited);
+    assert!(
+        launcher.verbs().is_empty(),
+        "a predecessor is never stopped on the way to a failure"
+    );
+    assert_eq!(launcher.calls(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -673,7 +686,7 @@ async fn an_absent_runtime_is_started_and_adopted_once_it_answers() {
 async fn a_helper_adopts_untagged_readiness_after_launch_without_handover_pruning_or_removal() {
     // The first probe misses, so the bundled helper is started and exits. The
     // next probe is an external Controller without a desktop identity.
-    let launcher = FakeLauncher::new(Some(bundle_id()), true, 0, Some(true));
+    let launcher = FakeLauncher::bundled_exiting(LaunchExit::Started);
     let host = runtime_host(
         FakeProbe::serving([Served::Nothing, Served::Ready(None)]),
         launcher.clone(),
@@ -736,7 +749,7 @@ async fn the_monitor_serves_only_the_adopted_presence_and_rereads_the_owner_on_e
     assert!(!host.is_serving(&origin()).await);
     assert!(host.has_owned_runtime());
     assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
-    assert_eq!(launcher.stops(), [(bundle_id(), false)]);
+    assert_eq!(launcher.stops(), [bundle_id()]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -756,7 +769,7 @@ async fn stop_reaches_only_this_apps_runtime_and_takes_its_tunnel_down() {
     boot(&host, Launch).await;
 
     assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
-    assert_eq!(launcher.stops(), [(bundle_id(), false)]);
+    assert_eq!(launcher.stops(), [bundle_id()]);
     assert!(!host.has_owned_runtime());
     assert_eq!(
         host.stop_owned_runtime().await,
@@ -832,7 +845,7 @@ async fn a_refused_stop_revokes_authority_and_an_unfinished_one_keeps_it() {
         assert!(host.has_owned_runtime(), "{unfinished:?} keeps the Runtime stoppable");
         launcher.answer_stop(CliOutcome::Completed);
         assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
-        assert_eq!(launcher.stops(), [(bundle_id(), false), (bundle_id(), false)]);
+        assert_eq!(launcher.stops(), [bundle_id(), bundle_id()]);
     }
 }
 
@@ -875,8 +888,7 @@ async fn uninstall_stops_this_apps_runtime_then_removes_backends_then_its_files(
             launcher.verbs(),
             [
                 Verb::Stop {
-                    runtime_id: bundle_id(),
-                    keep_remote_access: false
+                    runtime_id: bundle_id()
                 },
                 Verb::RemoveBackends,
                 Verb::RemoveFiles,
@@ -946,8 +958,7 @@ async fn uninstall_keeps_every_file_when_this_apps_runtime_does_not_confirm_its_
         assert_eq!(
             launcher.verbs(),
             [Verb::Stop {
-                runtime_id: bundle_id(),
-                keep_remote_access: false
+                runtime_id: bundle_id()
             }],
             "{stop:?} deletes nothing"
         );
@@ -988,8 +999,7 @@ async fn uninstall_deletes_the_bundle_only_after_every_backend_install_was_claim
             launcher.verbs(),
             [
                 Verb::Stop {
-                    runtime_id: bundle_id(),
-                    keep_remote_access: false
+                    runtime_id: bundle_id()
                 },
                 Verb::RemoveBackends,
             ],
@@ -1025,8 +1035,7 @@ async fn delete_anyway_rechecks_the_origin_and_deletes_only_while_nothing_answer
         launcher.verbs(),
         [
             Verb::Stop {
-                runtime_id: bundle_id(),
-                keep_remote_access: false
+                runtime_id: bundle_id()
             },
             Verb::RemoveUnverifiedFiles,
         ]
@@ -1049,8 +1058,8 @@ async fn uninstall_without_an_origin_keeps_the_files_while_a_launched_runtime_ma
 
     // Once this shell has spawned a helper, a Runtime may be alive whatever the
     // helper reported, so without an origin to ask every file is kept.
-    for exit in [Some(true), Some(false)] {
-        let launcher = FakeLauncher::new(Some(bundle_id()), true, 0, exit);
+    for exit in [LaunchExit::Started, LaunchExit::Failed] {
+        let launcher = FakeLauncher::bundled_exiting(exit);
         let host = runtime_host(
             FakeProbe::never_healthy(),
             launcher.clone(),

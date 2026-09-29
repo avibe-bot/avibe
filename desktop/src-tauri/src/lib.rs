@@ -1824,7 +1824,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use avibe_runtime_host::{
-        HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime, Presence, ResolvedRuntimeLauncher, RuntimeLauncher,
+        HealthProbe, LaunchError, LaunchExit, LaunchWatch, LaunchedRuntime, Presence, ResolvedRuntimeLauncher,
+        RuntimeLauncher,
     };
     use std::sync::atomic::AtomicUsize;
 
@@ -1955,13 +1956,13 @@ mod tests {
     struct RecoveryLauncher {
         watches: Mutex<std::collections::VecDeque<LaunchWatch>>,
         launches: Arc<AtomicUsize>,
-        stops: Arc<Mutex<Vec<(String, bool)>>>,
+        stops: Arc<Mutex<Vec<String>>>,
     }
 
     struct RecoveryExecutable {
         watch: LaunchWatch,
         launches: Arc<AtomicUsize>,
-        stops: Arc<Mutex<Vec<(String, bool)>>>,
+        stops: Arc<Mutex<Vec<String>>>,
     }
 
     const RECOVERY_RUNTIME_ID: &str = "4d";
@@ -1985,7 +1986,7 @@ mod tests {
             Some(RECOVERY_RUNTIME_ID)
         }
 
-        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+        fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
             self.launches.fetch_add(1, Ordering::SeqCst);
             Ok(LaunchedRuntime {
                 pid: 1,
@@ -1993,11 +1994,8 @@ mod tests {
             })
         }
 
-        fn stop(&self, runtime_id: &str, keep_remote_access: bool) -> CliOutcome {
-            self.stops
-                .lock()
-                .unwrap()
-                .push((runtime_id.to_owned(), keep_remote_access));
+        fn stop(&self, runtime_id: &str) -> CliOutcome {
+            self.stops.lock().unwrap().push(runtime_id.to_owned());
             CliOutcome::Completed
         }
     }
@@ -2032,9 +2030,9 @@ mod tests {
                         if pending {
                             LaunchWatch::default()
                         } else {
-                            LaunchWatch::exited(true)
+                            LaunchWatch::exited(LaunchExit::Started)
                         },
-                        LaunchWatch::exited(true),
+                        LaunchWatch::exited(LaunchExit::Started),
                     ]
                     .into(),
                 ),
@@ -2111,7 +2109,7 @@ mod tests {
                     assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
                     assert_eq!(
                         launcher.stops.lock().unwrap().as_slice(),
-                        [(RECOVERY_RUNTIME_ID.to_owned(), false)]
+                        [RECOVERY_RUNTIME_ID.to_owned()]
                     );
                     assert!(!host.has_owned_runtime());
                 }

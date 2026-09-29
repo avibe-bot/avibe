@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
 use crate::health::{HealthProbe, Presence};
-use crate::launcher::{CliOutcome, LaunchError, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
+use crate::launcher::{CliOutcome, LaunchError, LaunchExit, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
 use crate::origin::LoopbackOrigin;
 use crate::status::{BootstrapNotice, BootstrapNoticeCode, BootstrapStatus};
 
@@ -253,7 +253,7 @@ impl RuntimeHost {
             state.stopping = true;
             (owner, runtime_id)
         };
-        let outcome = tokio::task::spawn_blocking(move || launcher.stop(&runtime_id, false))
+        let outcome = tokio::task::spawn_blocking(move || launcher.stop(&runtime_id))
             .await
             .unwrap_or_else(|_| CliOutcome::Failed {
                 part: "unknown".to_owned(),
@@ -367,13 +367,11 @@ impl RuntimeHost {
             .is_some_and(|launcher| launcher.expected_runtime_id().is_some());
 
         let mut attempt = 1;
-        let mut handover_performed = false;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
 
         // This app's Runtime and any Runtime that is not a desktop predecessor
-        // are adopted. A predecessor with another desktop identity is stopped
-        // through its own CLI before the successor starts, and only when this
-        // run may hand over.
+        // are adopted. A predecessor with another desktop identity is replaced
+        // only by this app's `vibe start`, and only when this run may hand over.
         let presence = self.observe_presence(&origin, resolved_launcher.as_ref()).await;
         match presence {
             Presence::Mine { ready: true } | Presence::Unmanaged => {
@@ -400,40 +398,22 @@ impl RuntimeHost {
                     )
                     .await;
             }
-            Presence::Foreign { runtime_id, .. } if identified => {
-                if !trigger.allows_handover() {
-                    return publish(sink, ownership_lost(&origin, attempt));
-                }
-                // A helper an earlier run started may still be deciding about
-                // this predecessor. The poll loop hands over once it settles.
-                if !self.launched_runtime().launch_pending() {
-                    let launcher = resolved_launcher.clone().expect("an identified launcher");
-                    if let Err(code) = hand_over(launcher, runtime_id).await {
-                        return publish(
-                            sink,
-                            BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
-                        );
-                    }
-                    handover_performed = true;
-                }
+            Presence::Foreign { .. } if identified && !trigger.allows_handover() => {
+                return publish(sink, ownership_lost(&origin, attempt));
             }
-            // Starting, not provable, or nothing there. `vibe start` is
-            // idempotent and decides for itself whether a service already runs.
+            // A predecessor to hand over, starting, not provable, or nothing
+            // there. `vibe start` is idempotent and decides for itself whether
+            // a service already runs, and whether it may replace a predecessor.
             _ => {}
         }
 
         // A launcher may report its non-zero exit after an earlier bootstrap
         // timed out. Re-check the retained watch before deciding this run is
         // already waiting on a viable launch.
-        if self.clear_failed_launch() {
+        if let Some(code) = self.clear_failed_launch() {
             return publish(
                 sink,
-                BootstrapStatus::failed(
-                    &origin,
-                    attempt,
-                    BootstrapNotice::new(BootstrapNoticeCode::LauncherExited),
-                    true,
-                ),
+                BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
             );
         }
         // A development override points at another local Runtime and is treated
@@ -453,7 +433,7 @@ impl RuntimeHost {
 
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
-        if let Err(error) = self.launch_if_needed(launcher.clone()) {
+        if let Err(error) = self.launch_if_needed(launcher.clone(), trigger.allows_handover()) {
             return publish(
                 sink,
                 BootstrapStatus::failed(
@@ -467,10 +447,13 @@ impl RuntimeHost {
 
         publish(sink, BootstrapStatus::starting(&origin, attempt));
 
-        let mut deadline = Instant::now() + self.settings.ready_timeout;
+        let deadline = Instant::now() + self.settings.ready_timeout;
         while Instant::now() < deadline {
             sleep(self.settings.poll_interval).await;
             attempt += 1;
+            // Read before the probe, so a predecessor judged below was seen
+            // after this app's helper had exited.
+            let settled = !self.launched_runtime().launch_pending();
             let presence = self.observe_presence(&origin, Some(&launcher)).await;
             match presence {
                 Presence::Mine { ready: true } => {
@@ -509,52 +492,21 @@ impl RuntimeHost {
                         )
                         .await;
                 }
-                // `vibe start` adopted a predecessor it found by pid file or
-                // lock instead of starting this Runtime.
-                Presence::Foreign { .. } if identified && (handover_performed || !trigger.allows_handover()) => {
-                    return publish(sink, ownership_lost(&origin, attempt));
-                }
-                // Hand over only once the helper has settled, so its completion
-                // or rollback never races a second helper.
-                Presence::Foreign { runtime_id, .. } if identified && !self.launched_runtime().launch_pending() => {
-                    if let Err(code) = hand_over(launcher.clone(), runtime_id).await {
-                        return publish(
-                            sink,
-                            BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
-                        );
-                    }
-                    handover_performed = true;
-                    // The settled helper releases its slot; the liveness fence stays.
-                    self.clear_failed_launch();
-                    if let Err(error) = self.launch_if_needed(launcher.clone()) {
-                        return publish(
-                            sink,
-                            BootstrapStatus::failed(
-                                &origin,
-                                attempt,
-                                BootstrapNotice::new(error.notice_code()),
-                                error.is_retryable(),
-                            ),
-                        );
-                    }
-                    // Handover may legitimately spend most of the original
-                    // startup budget. The successor gets its own full window.
-                    deadline = Instant::now() + self.settings.ready_timeout;
-                }
                 _ => {}
             }
             // A launcher that exited non-zero started nothing, so the remaining
             // wait would be spent polling an address that will never answer.
-            if self.clear_failed_launch() {
+            // Its exit also says whether it declined or failed a handover.
+            if let Some(code) = self.clear_failed_launch() {
                 return publish(
                     sink,
-                    BootstrapStatus::failed(
-                        &origin,
-                        attempt,
-                        BootstrapNotice::new(BootstrapNoticeCode::LauncherExited),
-                        true,
-                    ),
+                    BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
                 );
+            }
+            // While the helper runs, a predecessor may be the one it is
+            // replacing. Once it has exited, one still serving was not replaced.
+            if identified && settled && matches!(presence, Presence::Foreign { .. }) {
+                return publish(sink, ownership_lost(&origin, attempt));
             }
             publish(sink, BootstrapStatus::starting(&origin, attempt));
         }
@@ -653,7 +605,7 @@ impl RuntimeHost {
             return RemovalOutcome::Kept;
         };
         let stopping = resolved.clone();
-        match run_blocking(move || stopping.stop(&runtime_id, false)).await {
+        match run_blocking(move || stopping.stop(&runtime_id)).await {
             CliOutcome::Completed => {}
             CliOutcome::Unrunnable if presence == Presence::Absent => return RemovalOutcome::Unverified,
             _ => return RemovalOutcome::Kept,
@@ -721,7 +673,7 @@ impl RuntimeHost {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn launch_if_needed(&self, launcher: Arc<dyn ResolvedRuntimeLauncher>) -> Result<(), LaunchError> {
+    fn launch_if_needed(&self, launcher: Arc<dyn ResolvedRuntimeLauncher>, hand_over: bool) -> Result<(), LaunchError> {
         let mut state = self.launched_runtime();
         if state.stopping {
             return Err(LaunchError::RuntimeStop);
@@ -734,20 +686,24 @@ impl RuntimeHost {
             // Spawning the helper is evidence that a Runtime may exist even
             // when the helper later reports failure. Keep that fact separate
             // from retry deduplication and stop authority.
-            state.attempt = Some(launcher.launch()?);
+            state.attempt = Some(launcher.launch(hand_over)?);
             state.runtime_may_be_running = true;
         }
         Ok(())
     }
 
-    /// A failed helper releases its retry slot and nothing else.
-    fn clear_failed_launch(&self) -> bool {
+    /// A failed helper releases its retry slot and nothing else. Returns the
+    /// notice its exit calls for.
+    fn clear_failed_launch(&self) -> Option<BootstrapNoticeCode> {
         let mut state = self.launched_runtime();
-        if state.attempt.as_ref().is_some_and(|attempt| attempt.watch.failed()) {
-            state.attempt = None;
-            return true;
-        }
-        false
+        let code = match state.attempt.as_ref()?.watch.exit()? {
+            LaunchExit::Started => return None,
+            LaunchExit::HandoverRefused => BootstrapNoticeCode::RuntimeOwnershipLost,
+            LaunchExit::HandoverFailed => BootstrapNoticeCode::RuntimeStopFailed,
+            LaunchExit::Failed => BootstrapNoticeCode::LauncherExited,
+        };
+        state.attempt = None;
+        Some(code)
     }
 
     /// Readiness timeout releases only a completed helper, never the liveness
@@ -761,16 +717,6 @@ impl RuntimeHost {
             return true;
         }
         false
-    }
-}
-
-/// Stops a desktop predecessor with another identity, leaving the tunnel
-/// connector for the successor.
-async fn hand_over(launcher: Arc<dyn ResolvedRuntimeLauncher>, runtime_id: String) -> Result<(), BootstrapNoticeCode> {
-    match run_blocking(move || launcher.stop(&runtime_id, true)).await {
-        CliOutcome::Completed => Ok(()),
-        CliOutcome::Refused { .. } => Err(BootstrapNoticeCode::RuntimeOwnershipLost),
-        CliOutcome::Failed { .. } | CliOutcome::Unrunnable => Err(BootstrapNoticeCode::RuntimeStopFailed),
     }
 }
 
@@ -831,11 +777,11 @@ mod tests {
             Ok(LoopbackOrigin::parse(ORIGIN).expect("test origin"))
         }
 
-        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+        fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
             self.launches.fetch_add(1, Ordering::SeqCst);
             Ok(LaunchedRuntime {
                 pid: 1,
-                watch: LaunchWatch::exited(true),
+                watch: LaunchWatch::exited(LaunchExit::Started),
             })
         }
 
@@ -843,7 +789,7 @@ mod tests {
             Some("b")
         }
 
-        fn stop(&self, _runtime_id: &str, _keep_remote_access: bool) -> CliOutcome {
+        fn stop(&self, _runtime_id: &str) -> CliOutcome {
             self.stops.fetch_add(1, Ordering::SeqCst);
             CliOutcome::Completed
         }
@@ -864,7 +810,7 @@ mod tests {
         }
 
         assert!(matches!(
-            host.launch_if_needed(resolved.clone()),
+            host.launch_if_needed(resolved.clone(), false),
             Err(LaunchError::RuntimeStop)
         ));
         assert_eq!(counting.launches.load(Ordering::SeqCst), 0);

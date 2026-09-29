@@ -18,8 +18,8 @@ host has to keep.
 
 `RUNTIME_ID` is the 64-character lowercase hex `AVIBE_DESKTOP_RUNTIME_ID` the
 desktop host exports to the Runtime it launches. Every process that Runtime
-starts inherits it. `--keep-remote-access`, accepted only with it, leaves the
-tunnel connector running; without it the stop also stops the connector.
+starts inherits it. The stop also stops the home's tunnel connector, under the
+rule in the ledger below.
 
 ### Discovery is one scan
 
@@ -100,13 +100,22 @@ are never localized; the exit-2 diagnostics go through `vibe/i18n/`
 
 ## Handover
 
-When a desktop `vibe start` finds a controller whose health names another
-desktop Runtime id, it calls the same `runtime.stop_desktop_runtime` with that
-observed id and fails the start if the stop is refused or fails. It also fails
-the start if the UI pidfile still names a running UI afterwards: that UI is not
-the superseded Runtime's, and the start would otherwise reuse it or replace it
-with an unscoped stop. The tunnel connector is left for the successor to adopt.
-These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
+`vibe start` alone owns the act of replacing a superseded desktop Runtime, and
+does it only when asked with `--hand-over`, a hidden flag the desktop host
+passes on app launch or a user Retry. When a desktop `vibe start` finds a
+controller whose health names another desktop Runtime id:
+
+- without `--hand-over` it exits 3 and leaves that Runtime running;
+- with it, it calls the same `runtime.stop_desktop_runtime` with that observed
+  id, and exits 3 if the stop is refused and 2 if it fails;
+- it also exits 3 if the UI pidfile still names a running UI afterwards: that
+  UI is not the superseded Runtime's, and the start would otherwise reuse it or
+  replace it with an unscoped stop.
+
+Exit 3 means this start did not take the home over; exit 2 means the superseded
+Runtime may be left partly running. `runtime.stop_desktop_runtime` never stops
+the tunnel connector, so the successor adopts it. These errors go through
+`vibe/i18n/` (`desktopRuntime.handover*`).
 
 ## Backend installer ownership (#2131)
 
@@ -224,9 +233,17 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
 - The tunnel connector serves the home, not one Runtime. After a successful
   scoped stop it is stopped through its own files, and only while the stop holds
   the free service lock and no UI of the home is running. A held lock leaves it
-  to that service. `--keep-remote-access` leaves it running; the handover uses
-  it so the successor adopts the tunnel, and the next UI start's
+  to that service. A handover inside `vibe start` never stops it, so the
+  successor adopts the tunnel, and the next UI start's
   `remote_access.reconcile()` brings a stopped tunnel back after Quit.
+- argparse usage errors also exit 2, so a `vibe start` too old to know
+  `--hand-over` reads as a handover that may have left the predecessor partly
+  running. The bundled launcher is always the same version, so this cannot
+  happen, and the reading fails closed. No other `vibe start` path exits 2 or 3.
+- A `vibe restart` or plain `vibe stop` run by a process a superseded Runtime
+  left running still acts on the Controller unscoped, because its desktop
+  identity was stripped with its old root. Claiming by the caller's own id
+  belongs at the start and restart boundary, tracked in #2135 for PR 3.
 - A role process in the stop's own lineage is never signalled and fails the
   stop; a program without a role in the lineage is not listed.
 - The scoped stop path reads no file: no pidfile, lock record or installer
@@ -271,20 +288,22 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
 `Foreign{id, ready}`, `Unmanaged` (no id), `Absent` (connection refused) or
 `Unknown` (any other failure). Each probe has 5 s, because Windows refuses a
 loopback connect only after about 2 s of SYN resends. The host runs one stop verb,
-`vibe stop --expect-runtime-id <id> [--keep-remote-access]`, mapped as exit 0 →
-`Completed`, 3 → `Refused{reason}`, 2 → `Failed{part}`, any other exit →
-`Failed{unknown}`, and a spawn error → `Unrunnable`.
+`vibe stop --expect-runtime-id <id>`, mapped as exit 0 → `Completed`, 3 →
+`Refused{reason}`, 2 → `Failed{part}`, any other exit → `Failed{unknown}`, and a
+spawn error → `Unrunnable`. The host never stops a predecessor itself.
 
-- B1, initial: `Mine{ready}` → adopt; `Mine{!ready}`, `Absent`, `Unknown` →
-  launch; `Unmanaged` → adopt as external; `Foreign(id)` → stop that id keeping
-  the tunnel, then launch on `Completed` and fail closed otherwise. Handover
-  runs only on app launch or a user Retry, never from monitor recovery, which
-  shows `runtime_ownership_lost` instead.
-- B4, polling: `Mine{ready}` → Ready; `Unmanaged` → Adopted. B5: the first
-  `Foreign` while polling stops it and relaunches; a second one fails.
-- No handover runs while this app's `vibe start` helper is still running: the
-  helper may still act on the predecessor, and a second helper would race its
-  completion or rollback. Polling hands over once it settles.
+- B1, initial: `Mine{ready}` → adopt; `Mine{!ready}`, `Absent`, `Unknown` and
+  `Foreign` → launch; `Unmanaged` → adopt as external. The host owns only the
+  handover policy: its launch passes `--hand-over` on app launch or a user
+  Retry, never from monitor recovery. Recovery that sees `Foreign` shows
+  `runtime_ownership_lost` and launches nothing.
+- The start helper's exit decides a handover: 3 → `runtime_ownership_lost`,
+  2 after `--hand-over` → `runtime_stop_failed`, any other non-zero exit →
+  `launcher_exited`.
+- B4, polling: `Mine{ready}` → Ready; `Unmanaged` → Adopted. B5: `Foreign` is
+  judged only once this app's helper has exited, because until then it may be
+  the predecessor the helper is replacing. One still serving after that was not
+  replaced, and shows `runtime_ownership_lost`.
 - B6, monitor: the Runtime is serving while presence stays the adopted class.
 - B7, uninstall: only `Mine`, or `Absent` with no launch in flight, is stopped
   by the bundle's id, then its backends and bundle are removed. Any other
