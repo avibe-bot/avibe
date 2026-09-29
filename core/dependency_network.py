@@ -5,7 +5,7 @@ from __future__ import annotations
 import errno
 import http.client
 import logging
-import shutil
+import re
 import socket
 import ssl
 import time
@@ -37,6 +37,7 @@ RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download/"
 RELEASE_MIRROR_ROOT = "https://dl.avibe.bot/releases/"
 # Index into download_sources() of the source that last completed a download.
 _preferred_source = 0
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 class DependencyNetworkError(RuntimeError):
@@ -166,39 +167,39 @@ def download_sources(url: str) -> list[str]:
 
 
 def fetch_to_path(
-    request: str | urllib.request.Request,
+    url: str,
     target: Path,
     *,
     timeout: float,
+    size: int | None = None,
     policy: RetryPolicy = DOWNLOAD_RETRY_POLICY,
     opener: Callable[..., Any] | None = None,
 ) -> None:
-    """Download to ``target`` from ``download_sources``, starting with the last one that worked.
+    """Download ``url`` to ``target`` from ``download_sources``, starting with the last one that worked.
 
     Each source gets up to ``policy.max_attempts`` attempts in rotation; one that
     fails non-retryably leaves the rotation. A failed or stalled attempt (the
     socket ``timeout``) keeps the bytes already written, and the next attempt
-    resumes them with ``Range``.
+    resumes them with ``Range``. The file is complete at the pinned ``size``, or
+    else at the length the source declares; a source that sends more leaves the
+    rotation and its bytes are discarded.
     """
     global _preferred_source
     if policy.max_attempts < 1:
         raise ValueError("retry policy must allow at least one attempt")
     resolved_opener = opener or urllib.request.urlopen
-    if isinstance(request, urllib.request.Request):
-        url, headers = request.full_url, dict(request.header_items())
-    else:
-        url, headers = str(request), {}
     sources = download_sources(url)
     rotation = [(_preferred_source + shift) % len(sources) for shift in range(len(sources))]
     attempts = 0
-    delay = 0.0
     _unlink_quietly(target)
     try:
         for round_number in range(1, policy.max_attempts + 1):
+            # The next round waits until every remaining source's retry window passes.
+            delay = 0.0
             for index in list(rotation):
                 attempts += 1
                 try:
-                    _continue_download(resolved_opener, sources[index], headers, target, timeout)
+                    _continue_download(resolved_opener, sources[index], target, timeout, size)
                 except Exception as exc:  # noqa: BLE001
                     details = dependency_error_details(exc, sources[index], attempts=attempts)
                     close = getattr(exc, "close", None)
@@ -206,9 +207,10 @@ def fetch_to_path(
                         close()
                     if not details.get("retryable") or round_number >= policy.max_attempts:
                         rotation.remove(index)
+                    else:
+                        delay = max(delay, _retry_delay(details, round_number, policy))
                     if not rotation:
                         raise DependencyNetworkError(details) from exc
-                    delay = _retry_delay(details, round_number, policy)
                     logger.warning(
                         "Dependency download attempt %d failed for %s (%s)",
                         attempts,
@@ -229,33 +231,40 @@ def fetch_to_path(
 def _continue_download(
     opener: Callable[..., Any],
     url: str,
-    headers: dict[str, str],
     target: Path,
     timeout: float,
+    size: int | None,
 ) -> None:
     offset = target.stat().st_size if target.exists() else 0
-    request = urllib.request.Request(url, headers=headers)
-    if not request.has_header("User-agent"):
-        # The mirror's CDN rejects urllib's default agent (Cloudflare error 1010).
-        request.add_header("User-Agent", "avibe-dependency-download")
+    # The mirror's CDN rejects urllib's default agent (Cloudflare error 1010).
+    request = urllib.request.Request(url, headers={"User-Agent": "avibe-dependency-download"})
     if offset:
         request.add_header("Range", f"bytes={offset}-")
     with opener(request, timeout=timeout) as response:
         response_headers = getattr(response, "headers", None) or {}
         if offset and getattr(response, "status", None) == 206:
-            content_range = str(response_headers.get("Content-Range") or "")
-            if not content_range.startswith(f"bytes {offset}-"):
+            match = re.fullmatch(r"bytes (\d+)-\d+/(\d+|\*)", str(response_headers.get("Content-Range") or ""))
+            if not match or int(match[1]) != offset:
                 raise ConnectionError("download resumed at the wrong offset")
+            declared = match[2]
         else:
             # A complete response, including one from a source that ignored Range.
             offset = 0
+            declared = str(response_headers.get("Content-Length") or "")
+        # The file's full length, which a partial response's own length is not.
+        end = size if size is not None else int(declared) if declared.isdigit() else None
         with target.open("ab" if offset else "wb") as destination:
-            shutil.copyfileobj(response, destination)
-            received = destination.tell() - offset
+            while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
+                destination.write(chunk)
+                if end is not None and destination.tell() > end:
+                    break
+            written = destination.tell()
+    if end is not None and written > end:
+        target.unlink()
+        raise ValueError("download exceeds its expected size")
     # urllib reports a connection closed before Content-Length as a clean end.
-    declared = str(response_headers.get("Content-Length") or "")
-    if declared.isdigit() and received < int(declared):
-        raise http.client.IncompleteRead(b"", int(declared) - received)
+    if end is not None and written < end:
+        raise http.client.IncompleteRead(b"", end - written)
 
 
 def probe_url(

@@ -300,14 +300,8 @@ def test_downloads_name_an_agent_because_the_mirror_rejects_the_urllib_default(t
         return _Stream(b"asset")
 
     dependency_network.fetch_to_path(RELEASE_URL, tmp_path / "asset.tmp", timeout=5, opener=opener)
-    dependency_network.fetch_to_path(
-        urllib.request.Request(RELEASE_URL, headers={"User-Agent": "caller-agent"}),
-        tmp_path / "asset.tmp",
-        timeout=5,
-        opener=opener,
-    )
 
-    assert agents == ["avibe-dependency-download", "caller-agent"]
+    assert agents == ["avibe-dependency-download"]
 
 
 def test_exhausted_sources_report_the_last_failure_and_remove_the_partial_file(monkeypatch, tmp_path) -> None:
@@ -333,6 +327,57 @@ def test_exhausted_sources_report_the_last_failure_and_remove_the_partial_file(m
     assert raised.value.details["kind"] == "timeout"
     assert raised.value.details["attempts"] == 4
     assert not target.exists()
+
+
+def test_next_round_waits_out_every_remaining_source_retry_window(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(dependency_network, "_preferred_source", 0)
+    sleeps: list[float] = []
+    monkeypatch.setattr(dependency_network.time, "sleep", sleeps.append)
+    opener, calls = _scripted_opener(
+        [
+            urllib.error.HTTPError(MIRROR_URL, 503, "Unavailable", hdrs={"Retry-After": "3"}, fp=None),
+            TimeoutError("stalled"),
+            _Stream(b"asset"),
+        ]
+    )
+
+    dependency_network.fetch_to_path(RELEASE_URL, tmp_path / "asset.tmp", timeout=5, opener=opener)
+
+    assert sleeps == [3.0]
+    assert [url for url, _range in calls] == [MIRROR_URL, RELEASE_URL, MIRROR_URL]
+
+
+class _Endless:
+    """A source that never stops sending, and fails the test if read without bound."""
+
+    status = 200
+    headers: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        self.reads += 1
+        if self.reads > 3:
+            pytest.fail("download kept reading past its pinned size")
+        return b"x" * size
+
+
+def test_a_source_sending_more_than_the_pinned_size_is_cut_off_and_discarded(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(dependency_network, "_preferred_source", 0)
+    target = tmp_path / "asset.tmp"
+    opener, calls = _scripted_opener([_Endless(), _Stream(b"abcdefghij")])
+
+    dependency_network.fetch_to_path(RELEASE_URL, target, timeout=5, size=10, opener=opener)
+
+    assert target.read_bytes() == b"abcdefghij"
+    assert calls == [(MIRROR_URL, None), (RELEASE_URL, None)]
 
 
 def _cut_after_abcd():
@@ -365,6 +410,11 @@ def _resumed(content_range: str = "bytes 4-9/10", body: bytes = b"efghij"):
             [_cut_after_abcd(), _resumed("bytes 0-9/10", b"abcdefghij"), _resumed()],
             [(MIRROR_URL, None), (RELEASE_URL, "bytes=4-"), (MIRROR_URL, "bytes=4-")],
             id="wrong-offset-is-not-spliced",
+        ),
+        pytest.param(
+            [_cut_after_abcd(), _resumed("bytes 4-5/10", b"ef"), _resumed("bytes 6-9/10", b"ghij")],
+            [(MIRROR_URL, None), (RELEASE_URL, "bytes=4-"), (MIRROR_URL, "bytes=6-")],
+            id="partial-range-continues-to-the-file-end",
         ),
     ],
 )
