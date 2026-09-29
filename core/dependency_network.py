@@ -30,6 +30,14 @@ class RetryPolicy:
 DOWNLOAD_RETRY_POLICY = RetryPolicy(max_attempts=3, initial_delay=1.0, max_delay=4.0)
 PROBE_RETRY_POLICY = RetryPolicy(max_attempts=2, initial_delay=0.5, max_delay=0.5)
 
+# Byte-identical copies of published Avibe release assets
+# (docs/plans/release-download-mirror.md). Trusted for availability only:
+# callers verify what they download, whichever source served it.
+RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download/"
+RELEASE_MIRROR_ROOT = "https://dl.avibe.bot/releases/"
+# Index into download_sources() of the source that last completed a download.
+_preferred_source = 0
+
 
 class DependencyNetworkError(RuntimeError):
     """A dependency request that exhausted its retry policy."""
@@ -145,6 +153,18 @@ def fetch_bytes(
     return _run_with_retry(request, operation, policy=policy)
 
 
+def download_sources(url: str) -> list[str]:
+    """Download order for a URL: the mirror, then GitHub, for Avibe release assets.
+
+    The mirror holds ``<tag>/<asset>`` only, so a URL with a query stays on its
+    own host. The mirror URL substitutes the prefix alone, which keeps
+    percent-encoding identical.
+    """
+    if url.startswith(RELEASE_DOWNLOAD_ROOT) and "?" not in url:
+        return [RELEASE_MIRROR_ROOT + url.removeprefix(RELEASE_DOWNLOAD_ROOT), url]
+    return [url]
+
+
 def fetch_to_path(
     request: str | urllib.request.Request,
     target: Path,
@@ -153,18 +173,89 @@ def fetch_to_path(
     policy: RetryPolicy = DOWNLOAD_RETRY_POLICY,
     opener: Callable[..., Any] | None = None,
 ) -> None:
+    """Download to ``target`` from ``download_sources``, starting with the last one that worked.
+
+    Each source gets up to ``policy.max_attempts`` attempts in rotation; one that
+    fails non-retryably leaves the rotation. A failed or stalled attempt (the
+    socket ``timeout``) keeps the bytes already written, and the next attempt
+    resumes them with ``Range``.
+    """
+    global _preferred_source
+    if policy.max_attempts < 1:
+        raise ValueError("retry policy must allow at least one attempt")
     resolved_opener = opener or urllib.request.urlopen
-
-    def operation() -> None:
-        _unlink_quietly(target)
-        with resolved_opener(request, timeout=timeout) as response, target.open("wb") as destination:
-            shutil.copyfileobj(response, destination)
-
+    if isinstance(request, urllib.request.Request):
+        url, headers = request.full_url, dict(request.header_items())
+    else:
+        url, headers = str(request), {}
+    sources = download_sources(url)
+    rotation = [(_preferred_source + shift) % len(sources) for shift in range(len(sources))]
+    attempts = 0
+    delay = 0.0
+    _unlink_quietly(target)
     try:
-        _run_with_retry(request, operation, policy=policy)
+        for round_number in range(1, policy.max_attempts + 1):
+            for index in list(rotation):
+                attempts += 1
+                try:
+                    _continue_download(resolved_opener, sources[index], headers, target, timeout)
+                except Exception as exc:  # noqa: BLE001
+                    details = dependency_error_details(exc, sources[index], attempts=attempts)
+                    close = getattr(exc, "close", None)
+                    if callable(close):
+                        close()
+                    if not details.get("retryable") or round_number >= policy.max_attempts:
+                        rotation.remove(index)
+                    if not rotation:
+                        raise DependencyNetworkError(details) from exc
+                    delay = _retry_delay(details, round_number, policy)
+                    logger.warning(
+                        "Dependency download attempt %d failed for %s (%s)",
+                        attempts,
+                        redact_url(sources[index]),
+                        details.get("kind"),
+                    )
+                    continue
+                if len(sources) > 1:
+                    _preferred_source = index
+                return
+            time.sleep(delay)
     except BaseException:
         _unlink_quietly(target)
         raise
+    raise AssertionError("download rotation exhausted without returning or raising")
+
+
+def _continue_download(
+    opener: Callable[..., Any],
+    url: str,
+    headers: dict[str, str],
+    target: Path,
+    timeout: float,
+) -> None:
+    offset = target.stat().st_size if target.exists() else 0
+    request = urllib.request.Request(url, headers=headers)
+    if not request.has_header("User-agent"):
+        # The mirror's CDN rejects urllib's default agent (Cloudflare error 1010).
+        request.add_header("User-Agent", "avibe-dependency-download")
+    if offset:
+        request.add_header("Range", f"bytes={offset}-")
+    with opener(request, timeout=timeout) as response:
+        response_headers = getattr(response, "headers", None) or {}
+        if offset and getattr(response, "status", None) == 206:
+            content_range = str(response_headers.get("Content-Range") or "")
+            if not content_range.startswith(f"bytes {offset}-"):
+                raise ConnectionError("download resumed at the wrong offset")
+        else:
+            # A complete response, including one from a source that ignored Range.
+            offset = 0
+        with target.open("ab" if offset else "wb") as destination:
+            shutil.copyfileobj(response, destination)
+            received = destination.tell() - offset
+    # urllib reports a connection closed before Content-Length as a clean end.
+    declared = str(response_headers.get("Content-Length") or "")
+    if declared.isdigit() and received < int(declared):
+        raise http.client.IncompleteRead(b"", int(declared) - received)
 
 
 def probe_url(
@@ -198,6 +289,11 @@ def probe_url(
             "download_error": error,
         }
 
+    # A download succeeds through any of its sources, the last being ``url`` itself.
+    for source in download_sources(url)[:-1]:
+        result = probe_url(source, timeout=timeout, policy=policy, opener=opener, user_agent=user_agent)
+        if result["ok"]:
+            return result
     request = urllib.request.Request(url, headers={"User-Agent": user_agent}, method="HEAD")
     resolved_opener = opener or urllib.request.urlopen
 
@@ -260,10 +356,7 @@ def _run_with_retry(
                 close()
             if not details.get("retryable") or attempt >= policy.max_attempts:
                 raise DependencyNetworkError(details) from exc
-            delay = details.get("retry_after_seconds")
-            if not isinstance(delay, (int, float)):
-                delay = min(policy.initial_delay * (2 ** (attempt - 1)), policy.max_delay)
-            delay = min(max(0.0, float(delay)), policy.max_delay)
+            delay = _retry_delay(details, attempt, policy)
             logger.warning(
                 "Dependency request attempt %d/%d failed for %s (%s); retrying in %.1fs",
                 attempt,
@@ -274,6 +367,13 @@ def _run_with_retry(
             )
             time.sleep(delay)
     raise AssertionError("retry loop exhausted without returning or raising")
+
+
+def _retry_delay(details: dict[str, Any], attempt: int, policy: RetryPolicy) -> float:
+    delay = details.get("retry_after_seconds")
+    if not isinstance(delay, (int, float)):
+        delay = min(policy.initial_delay * (2 ** (attempt - 1)), policy.max_delay)
+    return min(max(0.0, float(delay)), policy.max_delay)
 
 
 def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:

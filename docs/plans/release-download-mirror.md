@@ -116,6 +116,29 @@ Cloudflare configuration lives outside the repository. The expected state:
   and browser TTL respect the origin. The object headers above carry the
   policy; the rule exists because default caching skips extensions such as
   `.whl`, `.tgz`, `.json`, and `.sig`.
+- The zone's Browser Integrity Check answers the `Python-urllib` User-Agent
+  with 403 (error 1010). Clients name their own agent; curl, PowerShell, and
+  Rust clients already pass.
+
+## Client downloads
+
+The managed git runtime, the model hub engine, and Show Runtime manifest
+archives download through `core.dependency_network.fetch_to_path`:
+
+- An Avibe release URL without a query tries the mirror, then GitHub. Any other
+  URL (tmux builds, legacy Show Runtime archives, manifest overrides) keeps its
+  single source.
+- Sources rotate, each with the download retry budget. A non-retryable failure,
+  such as a mirror 404, drops that source.
+- A failed or stalled attempt (the caller's socket timeout) keeps its bytes, and
+  the next attempt asks for the rest with `Range`. A `200` restarts the file; a
+  `206` must start at the current length. A body shorter than its
+  `Content-Length` is incomplete, not finished.
+- The source that last completed a download goes first for the rest of the
+  process.
+- The pinned `sha256` check after download is unchanged.
+
+`probe_url` reports a release asset reachable when any of its sources answers.
 
 ## Rollout
 
