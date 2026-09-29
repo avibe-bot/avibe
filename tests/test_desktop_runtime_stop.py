@@ -23,7 +23,8 @@ import psutil
 import pytest
 
 from config import paths
-from vibe import cli, desktop_backends, desktop_runtime, remote_access, runtime
+from config.v2_config import V2Config
+from vibe import cli, desktop_backends, desktop_runtime, remote_access, runtime, ui_server
 
 # Random, so no process another test file started with a fixed id is ever in scope.
 RUNTIME_ID = secrets.token_hex(32)
@@ -54,7 +55,7 @@ def bundle(tmp_path) -> Path:
     (root / "bin").mkdir()
     (root / "bin" / "opencode").write_text(SLEEP + "\n", encoding="utf-8")
     (root / "serve").write_text(SLEEP + "\n", encoding="utf-8")
-    for name in ("node", "opencode", "my-opencode"):
+    for name in ("node", "opencode", "my-opencode", "cloudflared"):
         (root / name).symlink_to(sys.executable)
     return root
 
@@ -70,6 +71,7 @@ def argv_for(bundle):
             "opencode": [str(bundle / "node"), str(bundle / "bin" / "opencode"), *OPENCODE_SERVE],
             "opencode-native": [str(bundle / "opencode"), *OPENCODE_SERVE],
             "opencode-configured": [str(bundle / "my-opencode"), *OPENCODE_SERVE],
+            "connector": [str(bundle / "cloudflared"), "-c", SLEEP, "tunnel", "run"],
             # Other programs whose command lines only mention a role.
             "ui-lookalike": [sys.executable, "-c", SLEEP, "vibe.ui_server", "run_ui_server"],
             "opencode-lookalike": [sys.executable, "-c", SLEEP, "opencode", "serve"],
@@ -211,8 +213,8 @@ def test_the_service_ui_installer_and_opencode_carrying_the_id_are_all_stopped(s
     for child in children:
         child.wait(timeout=10)
         assert (child.pid, signal.SIGTERM) in stop_env["signals"]
-    # The tunnel is not stopped through the connector's files; see the ledger.
-    assert stop_env["remote_access"] == []
+    # With no service or UI of this home left, the tunnel connector stops too.
+    assert stop_env["remote_access"] == [True]
     assert stop_env["status"] == [("stopped",)]
 
 
@@ -378,24 +380,35 @@ def test_a_service_lock_this_runtime_is_not_shown_to_own_keeps_the_shared_status
             assert runtime._try_lock_file(stack.enter_context(lock_path.open("w", encoding="utf-8")))
         else:
             lock_path.mkdir(parents=True)
-        assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == (0 if late_role is None else 2)
+        # The successor still serves the tunnel; with no holder known, the
+        # connector's stop cannot be shown safe, and fails.
+        assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == (0 if (lock, late_role) == ("held", None) else 2)
 
     ui.wait(timeout=10)
     assert stop_env["status"] == []
+    assert stop_env["remote_access"] == []
 
 
 @pytest.mark.parametrize("late_role", [None, "installer"])
-def test_no_service_can_take_the_lock_before_the_stop_s_status_lands(spawn, stop_env, monkeypatch, late_role):
+def test_no_service_can_take_the_lock_before_the_stop_s_connector_and_status_land(
+    spawn, stop_env, monkeypatch, late_role
+):
     # A successor's service that takes the lock right after the stop decides
-    # the status is its own would publish a status the stop then overwrites.
+    # the status is its own would publish a status the stop then overwrites,
+    # and its UI would reconcile a tunnel the stop then takes down.
     record = cli._write_status
-    lock_free_at_write: list[bool] = []
+    lock_free_at: list[tuple[str, bool]] = []
 
     def write(*args, **kwargs):
-        lock_free_at_write.append(runtime.service_instance_lock_available()[0])
+        lock_free_at.append(("status", runtime.service_instance_lock_available()[0]))
         record(*args, **kwargs)
 
+    def stop_connector():
+        lock_free_at.append(("connector", runtime.service_instance_lock_available()[0]))
+        return {"ok": True}
+
     monkeypatch.setattr(cli, "_write_status", write)
+    monkeypatch.setattr(remote_access, "stop", stop_connector)
     ui = spawn(RUNTIME_ID, "ui")
     if late_role is not None:
         _after_first_scan(monkeypatch, lambda _found: spawn(RUNTIME_ID, late_role))
@@ -404,7 +417,71 @@ def test_no_service_can_take_the_lock_before_the_stop_s_status_lands(spawn, stop
 
     ui.wait(timeout=10)
     assert len(stop_env["status"]) == 1
-    assert lock_free_at_write == [False]
+    # A failed stop leaves the connector to the Runtime still running.
+    expected = [("connector", False), ("status", False)] if late_role is None else [("status", False)]
+    assert lock_free_at == expected
+
+
+@pytest.mark.parametrize("keeper", ["keep_remote_access", "a_ui_of_this_home"])
+def test_the_tunnel_connector_is_left_to_what_still_serves_it(spawn, stop_env, keeper):
+    service = spawn(RUNTIME_ID)
+    if keeper == "a_ui_of_this_home":
+        # Whoever started it, a running UI of this home serves the tunnel.
+        other_ui = spawn(None, "ui")
+        paths.get_runtime_ui_pid_path().write_text(str(other_ui.pid), encoding="utf-8")
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID, keep_remote_access=keeper == "keep_remote_access") == 0
+
+    service.wait(timeout=10)
+    assert stop_env["remote_access"] == []
+    assert stop_env["status"] == [("stopped",)]
+
+
+def _connector_stop_raises():
+    raise RuntimeError("connector state unreadable")
+
+
+@pytest.mark.parametrize(
+    "connector_stop", [lambda: {"ok": False, "error": "cloudflared_stop_failed"}, _connector_stop_raises]
+)
+def test_a_tunnel_connector_that_does_not_stop_fails_the_stop(spawn, stop_env, capsys, monkeypatch, connector_stop):
+    ui = spawn(RUNTIME_ID, "ui")
+    monkeypatch.setattr(remote_access, "stop", connector_stop)
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 2
+
+    ui.wait(timeout=10)
+    lines = _stderr_lines(capsys)
+    assert lines[-2] == "ERROR: The remote access tunnel could not be stopped."
+    assert json.loads(lines[-1]) == {"failed": "remote_access", "remaining": []}
+    assert stop_env["status"] == [("error", cli._STOP_FAILURES["remote_access"][1])]
+
+
+def test_quit_takes_the_tunnel_down_and_the_next_ui_start_brings_it_back(spawn, monkeypatch):
+    # Quit and uninstall end with this stop. It stops the connector through its
+    # own files and leaves remote access enabled, so the UI of the next launch
+    # reconciles the tunnel back.
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+    ui, connector = spawn(RUNTIME_ID, "ui"), spawn(RUNTIME_ID, "connector")
+    remote_access._pid_path().write_text(str(connector.pid), encoding="utf-8")
+
+    assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
+
+    ui.wait(timeout=10)
+    connector.wait(timeout=10)
+    assert not remote_access._pid_path().exists()
+    relaunched = V2Config.load()
+    assert relaunched.remote_access.vibe_cloud.enabled
+    starts: list[V2Config] = []
+    monkeypatch.setattr(remote_access, "start", lambda config=None: starts.append(config) or {"ok": True})
+
+    ui_server._reconcile_remote_access_for_ui_start(relaunched)
+
+    assert starts == [relaunched]
 
 
 def _lock_path_is_a_directory(monkeypatch):
@@ -440,6 +517,7 @@ def test_with_nothing_running_and_a_free_lock_the_stop_succeeds(stop_env):
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 0
 
     assert stop_env["signals"] == []
+    assert stop_env["remote_access"] == [True]
     assert stop_env["status"] == [("stopped",)]
 
 

@@ -1083,7 +1083,8 @@
       "uiFailed": "错误：Avibe UI 未能停止；已保留 pidfile 并中止。",
       "installerFailed": "错误：桌面后端安装进程未能停止。",
       "opencodeFailed": "错误：此 Runtime 启动的 OpenCode 服务未能停止。",
-      "unknownFailed": "错误：此 Runtime 启动的一个进程无法识别，已保留运行。"
+      "unknownFailed": "错误：此 Runtime 启动的一个进程无法识别，已保留运行。",
+      "remoteAccessFailed": "错误：远程访问隧道无法停止。"
     }
   },
   "doctor": {

@@ -4334,7 +4334,11 @@ def test_start_parser_accepts_no_open_browser():
     [
         (["stop"], {}),
         (["stop", "--receipt", json.dumps(_startup_receipt_payload())], {"receipt": json.dumps(_startup_receipt_payload())}),
-        (["stop", "--expect-runtime-id", "a" * 64], {"expect_runtime_id": "a" * 64}),
+        (["stop", "--expect-runtime-id", "a" * 64], {"expect_runtime_id": "a" * 64, "keep_remote_access": False}),
+        (
+            ["stop", "--expect-runtime-id", "a" * 64, "--keep-remote-access"],
+            {"expect_runtime_id": "a" * 64, "keep_remote_access": True},
+        ),
     ],
 )
 def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expected):
@@ -4355,6 +4359,20 @@ def test_stop_parser_rejects_a_receipt_with_an_expected_runtime_id():
         cli.build_parser().parse_args(
             ["stop", "--receipt", json.dumps(_startup_receipt_payload()), "--expect-runtime-id", "a" * 64]
         )
+
+
+def test_only_a_scoped_stop_can_keep_remote_access(monkeypatch):
+    # A full stop always stops the tunnel with the UI.
+    calls = []
+    monkeypatch.setattr(cli.sys, "argv", ["vibe", "stop", "--keep-remote-access"])
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    monkeypatch.setattr(cli, "cmd_stop", lambda **kwargs: calls.append(kwargs) or 0)
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+
+    assert exited.value.code == 2
+    assert calls == []
 
 
 def test_remote_parser_accepts_pairing_command():

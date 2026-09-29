@@ -13937,6 +13937,7 @@ _STOP_FAILURES = {
     "installer": ("runtime.stop.installerFailed", "desktop backend install drain failed"),
     "opencode": ("runtime.stop.opencodeFailed", "opencode stop failed"),
     "unknown": ("runtime.stop.unknownFailed", "unidentified runtime process left running"),
+    "remote_access": ("runtime.stop.remoteAccessFailed", "remote access stop failed"),
 }
 
 
@@ -13962,7 +13963,7 @@ def _print_stop_json(payload: dict) -> None:
     print(json.dumps(payload, separators=(",", ":")), file=sys.stderr)
 
 
-def _stop_expected_desktop_runtime(runtime_id: str) -> int:
+def _stop_expected_desktop_runtime(runtime_id: str, *, keep_remote_access: bool = False) -> int:
     result = runtime.stop_desktop_runtime(runtime_id)
     if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
         _print_stop_json({"reason": result.refusal})
@@ -13978,14 +13979,36 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
         remaining = [{"pid": item.pid, "role": item.role} for item in result.remaining]
         _print_stop_json({"failed": result.failure, "remaining": remaining})
         return status
+    if keep_remote_access:
+        _write_status_unless_a_service_holds_the_lock("stopped")
+        return 0
 
-    _write_status_unless_a_service_holds_the_lock("stopped")
-    return 0
+    # The tunnel connector serves this home's Web UI, whichever Runtime
+    # started it. It stops only while this stop holds the free service lock,
+    # so no service can run, and no UI of this home is left to serve it.
+    outcome: list[int] = []
+
+    def settle_the_connector() -> None:
+        if runtime.ui_pid_file_points_to_running_ui() or runtime.stop_remote_access_connector():
+            _write_status("stopped")
+            outcome.append(0)
+        else:
+            outcome.append(_stop_failed("remote_access"))
+
+    presence = runtime.desktop_service_lock_presence(while_absent=settle_the_connector)
+    # The service holding the lock still owns the connector, and the status.
+    if presence is runtime.DesktopRuntimePresence.MISMATCH or outcome == [0]:
+        return 0
+    if not outcome:
+        # No free lock showed that no service still needs the connector.
+        outcome.append(_stop_failed("remote_access", _write_status_unless_a_service_holds_the_lock))
+    _print_stop_json({"failed": "remote_access", "remaining": []})
+    return outcome[0]
 
 
-def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None):
+def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None, keep_remote_access: bool = False):
     if expect_runtime_id is not None:
-        return _stop_expected_desktop_runtime(expect_runtime_id)
+        return _stop_expected_desktop_runtime(expect_runtime_id, keep_remote_access=keep_remote_access)
     if receipt is not None:
         reason = _stop_receipt_refusal(receipt)
         if reason is not None:
@@ -16595,6 +16618,11 @@ def build_parser():
         metavar="RUNTIME_ID",
         help="Stop only the processes the desktop Runtime with this id started.",
     )
+    stop_parser.add_argument(
+        "--keep-remote-access",
+        action="store_true",
+        help="With --expect-runtime-id, leave the remote access tunnel running.",
+    )
     start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
     start_parser.add_argument(
         "--no-open-browser",
@@ -18738,10 +18766,14 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
+        if args.keep_remote_access and args.expect_runtime_id is None:
+            parser.error("--keep-remote-access requires --expect-runtime-id")
         if args.receipt is not None:
             sys.exit(cmd_stop(receipt=args.receipt))
         if args.expect_runtime_id is not None:
-            sys.exit(cmd_stop(expect_runtime_id=args.expect_runtime_id))
+            sys.exit(
+                cmd_stop(expect_runtime_id=args.expect_runtime_id, keep_remote_access=args.keep_remote_access)
+            )
         sys.exit(cmd_stop())
     if args.command == "start":
         if _generation_downgrade_blocks("start", allow_downgrade=args.allow_downgrade):

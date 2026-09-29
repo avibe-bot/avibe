@@ -1083,7 +1083,8 @@
       "uiFailed": "ERROR: Avibe UI did not stop; preserving pidfile and aborting.",
       "installerFailed": "ERROR: Desktop backend installer processes did not stop.",
       "opencodeFailed": "ERROR: The OpenCode server this Runtime started did not stop.",
-      "unknownFailed": "ERROR: A process this Runtime started could not be identified and was left running."
+      "unknownFailed": "ERROR: A process this Runtime started could not be identified and was left running.",
+      "remoteAccessFailed": "ERROR: The remote access tunnel could not be stopped."
     }
   },
   "doctor": {
