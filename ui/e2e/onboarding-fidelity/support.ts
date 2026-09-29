@@ -1,4 +1,4 @@
-import type { Page, Route } from '@playwright/test';
+import { expect, type Page, type Route } from '@playwright/test';
 
 export const ORIGIN = 'http://127.0.0.1:5212';
 
@@ -249,7 +249,17 @@ export async function openSetup(page: Page, lang: string) {
   await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
   // The handoff timer uses the same browser clock as the story in deterministic runs.
   await page.clock.runFor(950);
-  await page.getByRole('button', { name: lang === 'zh' ? '继续，选择 AI 助手' : 'Continue to assistants' }).click();
+  const onward = lang === 'zh' ? '继续，选择 AI 助手' : 'Continue to assistants';
+  const primary = page.locator('.onboarding-primary-action');
+  await expect(primary).toBeEnabled();
+  // A capture may also detect native keys. Decline that optional migration through
+  // its own review; the existing source above is what permits continuing.
+  if ((await primary.textContent())?.trim() !== onward) {
+    await expect(primary).toContainText(lang === 'zh' ? '迁移' : 'Migrate');
+    await primary.click();
+    await page.getByRole('dialog').getByRole('button', { name: lang === 'zh' ? '暂不迁移' : 'Not now', exact: true }).click();
+  }
+  await page.getByRole('button', { name: onward }).click();
   await page.clock.runFor(950);
   await page.locator('[data-setup-screen="assistants"]').waitFor();
   await page.locator('.onboarding-assistants').waitFor();

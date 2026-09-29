@@ -1,9 +1,18 @@
 import { expect, test } from '@playwright/test';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 import zh from '../../src/i18n/zh.json' with { type: 'json' };
-import { openOnboarding, serveProduct } from './support';
+import { openOnboarding, openSetup, serveModelHub, serveProduct } from './support';
 
 for (const [lang, copy, width] of [['en', en, 1440], ['zh', zh, 390]] as const) {
+  test(`AUTH-SETUP-126: assistant fixture can decline migration with an existing source (${lang})`, async ({ page }) => {
+    await serveProduct(page);
+    const applied = await serveModelHub(page);
+    await openOnboarding(page, { lang });
+    await openSetup(page, lang);
+    await expect(page.locator('[data-setup-screen]')).toHaveAttribute('data-setup-screen', 'assistants');
+    expect(applied).toEqual([]);
+  });
+
   test(`AUTH-SETUP-126: provider gate, add failure and lost-source recovery (${lang})`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const denied = await serveProduct(page);
