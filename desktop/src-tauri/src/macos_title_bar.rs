@@ -17,6 +17,8 @@ pub const TITLE_BAR_INSET: f64 = 28.0;
 const SUPPORT_META: &str = "avibe-shell-drag-regions";
 
 /// Advertise the built-in drag capability only on macOS, before React renders.
+/// Window restore still keeps a grab handle inside the sidebar's existing
+/// clearance; replacing its native overlay with a DOM region preserves that area.
 pub fn inset_script() -> String {
     format!(
         "if (window.self === window.top) {{ \

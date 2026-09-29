@@ -462,7 +462,19 @@ class DiscordBot(BaseIMClient):
             return message.channel
         return None
 
-    async def _resolve_target(self, context: MessageContext) -> Optional[discord.abc.Messageable]:
+    async def _resolve_target(
+        self,
+        context: MessageContext,
+        *,
+        thread_strict: bool = False,
+    ) -> Optional[discord.abc.Messageable]:
+        """Resolve the channel a context addresses.
+
+        ``thread_strict`` is for typing and reactions: they describe the thread's
+        turn, so an unresolvable thread (deleted, no access) yields None instead
+        of surfacing them in the parent channel.
+        """
+
         direct_channel = self._get_context_channel(context)
         if isinstance(direct_channel, discord.Thread):
             return direct_channel
@@ -471,6 +483,8 @@ class DiscordBot(BaseIMClient):
             target = await self._fetch_channel(context.thread_id)
             if isinstance(target, discord.Thread):
                 return target
+            if thread_strict:
+                return None
 
         if direct_channel is not None:
             return direct_channel
@@ -702,9 +716,35 @@ class DiscordBot(BaseIMClient):
     async def answer_callback(self, callback_id: str, text: Optional[str] = None, show_alert: bool = False) -> bool:
         return True
 
+    async def _resolve_reaction_target(
+        self,
+        context: MessageContext,
+        message_id: str,
+    ) -> Optional[discord.abc.Messageable]:
+        # A reaction goes on the message where it was posted, which is not the
+        # turn's thread when that thread was opened from it or from the message
+        # it replies to.
+        payload = context.platform_specific or {}
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if message is not None and str(getattr(message, "id", "")) == str(message_id):
+            channel = getattr(message, "channel", None)
+            if channel is not None:
+                return channel
+        target = await self._resolve_target(context, thread_strict=True)
+        if isinstance(target, discord.Thread) and str(target.id) == str(message_id):
+            # A thread started from a message shares that message's id, and the
+            # message itself lives in the parent channel. Forum posts keep their
+            # starter inside the thread, so only a text parent is used.
+            parent = target.parent
+            if parent is None and target.parent_id:
+                parent = await self._fetch_channel(str(target.parent_id))
+            if isinstance(parent, discord.TextChannel):
+                return parent
+        return target
+
     async def add_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
         async def _impl() -> bool:
-            target = await self._resolve_target(context)
+            target = await self._resolve_reaction_target(context, message_id)
             if target is None:
                 return False
             try:
@@ -722,7 +762,7 @@ class DiscordBot(BaseIMClient):
 
     async def remove_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
         async def _impl() -> bool:
-            target = await self._resolve_target(context)
+            target = await self._resolve_reaction_target(context, message_id)
             if target is None:
                 return False
             try:
@@ -758,7 +798,7 @@ class DiscordBot(BaseIMClient):
 
     async def send_typing_indicator(self, context: MessageContext) -> bool:
         async def _impl() -> bool:
-            target = await self._resolve_target(context)
+            target = await self._resolve_target(context, thread_strict=True)
             if target is None:
                 return False
 

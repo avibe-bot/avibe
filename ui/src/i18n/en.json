@@ -3401,7 +3401,8 @@
     "installHint": "Agent not found. Click to install automatically.",
     "installAgent": "Install",
     "installing": "Installing...",
-    "showOutput": "Show details"
+    "showOutput": "Show details",
+    "exitCode": "Exit code: {{code}}"
   },
   "backendLifecycle": {
     "title": "Backend status",

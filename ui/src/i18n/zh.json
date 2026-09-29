@@ -3401,7 +3401,8 @@
     "installHint": "未找到 Agent，点击自动安装。",
     "installAgent": "一键安装",
     "installing": "安装中...",
-    "showOutput": "显示详情"
+    "showOutput": "显示详情",
+    "exitCode": "退出码：{{code}}"
   },
   "backendLifecycle": {
     "title": "后端状态",

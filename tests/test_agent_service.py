@@ -944,6 +944,163 @@ def test_real_indicator_shows_queued_reaction_on_second_message_while_first_hold
     asyncio.run(_run())
 
 
+class _TypingReactionIM(_ReactionIM):
+    """Accepts every typing send, so only the turn can end the keepalive."""
+
+    async def send_typing_indicator(self, _context):
+        return True
+
+    async def clear_typing_indicator(self, _context):
+        return True
+
+
+async def _until(predicate) -> None:
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
+
+
+def _spawn_typing_turn(service, controller, message: str, message_id: str):
+    """Start a turn as MessageHandler does: eager typing, then the runtime gate,
+    both in the turn's own task, which has not run yet on return."""
+
+    request = _reaction_request(message, message_id)
+    request.context.thread_id = None
+
+    async def _turn():
+        await controller.processing_indicator._start_typing_indicator(request.processing_indicator)
+        controller.processing_indicator.apply_to_request(request, request.processing_indicator)
+        await service.handle_message("claude", request)
+
+    return request, asyncio.create_task(_turn())
+
+
+async def _start_typing_turn(service, controller, message: str, message_id: str):
+    """Spawn a typing turn and return the request, the turn and its keepalive."""
+
+    request, turn = _spawn_typing_turn(service, controller, message, message_id)
+    await _until(lambda: request.processing_indicator.typing_indicator_task is not None)
+    return request, turn, request.processing_indicator.typing_indicator_task
+
+
+async def _cancel(task) -> None:
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["uncontended", "queued-reaction"])
+def test_cancel_while_waiting_for_backend_finishes_unhanded_typing(queued) -> None:
+    """#2164: a turn cancelled in wait_backend_ready was never handed off, so it
+    must finish its own indicator. On 74569ae0f only the queued case did."""
+
+    async def _run():
+        im = _TypingReactionIM()
+        controller = _RealIndicatorController(im)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        service.register(_RuntimeAgent(release_first))
+        first = None
+        if queued:
+            first, first_turn, _ = await _start_typing_turn(service, controller, "first", "m1")
+            await _until(lambda: service._turn_gates["session:/repo"].token)
+        service.begin_backend_drain("claude")
+
+        request, turn, typing_task = await _start_typing_turn(service, controller, "second", "m2")
+        gate = service._turn_gates["session:/repo"]
+        if queued:
+            await _until(lambda: ("add", "m2", "👌") in im.events)
+            service.release_runtime_turn(first.context)
+        await _until(lambda: gate.lock.locked() and not gate.token)
+
+        await _cancel(turn)
+
+        assert typing_task.done()
+        assert request.typing_indicator_task is None
+        if queued:
+            assert ("remove", "m2", "👌") in im.events
+            release_first.set()
+            await asyncio.wait_for(first_turn, timeout=3)
+
+    asyncio.run(_run())
+
+
+def test_cancel_while_acquiring_a_just_released_gate_finishes_typing() -> None:
+    """#2164: a released lock with a waker still pending reports unlocked, so
+    the next turn creates no queued reaction yet still blocks in acquire(). On
+    74569ae0f that path finished only a queued reaction."""
+
+    async def _run():
+        im = _TypingReactionIM()
+        controller = _RealIndicatorController(im)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        service.register(_RuntimeAgent(release_first))
+        first, first_turn, _ = await _start_typing_turn(service, controller, "first", "m1")
+        await _until(lambda: service._turn_gates["session:/repo"].token)
+        second, second_turn, _ = await _start_typing_turn(service, controller, "second", "m2")
+        gate = service._turn_gates["session:/repo"]
+        await _until(lambda: ("add", "m2", "👌") in im.events)
+
+        # The third turn is scheduled before the first releases the gate, so it
+        # runs before the woken second turn takes the lock: it sees an unlocked
+        # gate, creates no queued reaction, and still waits behind the second.
+        third, third_turn = _spawn_typing_turn(service, controller, "third", "m3")
+        service.release_runtime_turn(first.context)
+        await _until(lambda: second.context.platform_specific.get("agent_runtime_turn_token"))
+        typing_task = third.processing_indicator.typing_indicator_task
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not third_turn.done()
+        assert ("add", "m3", "👌") not in im.events
+
+        await _cancel(third_turn)
+
+        assert typing_task.done()
+        service.release_runtime_turn(second.context)
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(first_turn, second_turn), timeout=3)
+
+    asyncio.run(_run())
+
+
+def test_released_gate_ends_the_handed_off_typing_keepalive_within_one_tick() -> None:
+    """After hand-off the gate token decides whether the turn is current: a
+    release that never reached the indicator (a dropped stale emit, a backend
+    refresh) still stops typing while the turn's task keeps running."""
+
+    async def _run():
+        im = _TypingReactionIM()
+        controller = _RealIndicatorController(im)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        service.register(agent)
+        with patch("core.processing_indicator.TYPING_KEEPALIVE_INTERVAL_SECONDS", 0):
+            request, turn, typing_task = await _start_typing_turn(service, controller, "first", "m1")
+            await _until(lambda: agent.started == ["first"])
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert request.processing_indicator.handed_off
+            assert not typing_task.done()
+
+            service.release_runtime_turn(request.context)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            assert typing_task.done()
+            assert not turn.done()
+            release_first.set()
+            await asyncio.wait_for(turn, timeout=3)
+
+    asyncio.run(_run())
+
+
 def test_processing_indicator_tracked_before_promote() -> None:
     """Regression (Codex P2): the indicator handle must be tracked (registered for
     terminal/cancel cleanup) BEFORE the promote await, so a cancel during promote

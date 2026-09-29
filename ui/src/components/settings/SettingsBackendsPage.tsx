@@ -171,6 +171,7 @@ export const SettingsBackendsPage: React.FC = () => {
                       name={meta.id}
                       enabled={agent.enabled}
                       cliStatus={agent.status}
+                      cliPath={agent.cli_path}
                       onChanged={async (info) => {
                         const installedPath = info?.installedPath || null;
                         if (installedPath) {

@@ -336,3 +336,50 @@ def test_retention_loop_shutdown_joins_executor(monkeypatch) -> None:
     asyncio.run(_main())
     assert controller.trace_retention_task is None
     assert controller._trace_retention_executor is None
+
+
+def test_backup_expiry_is_independent_of_trace_retention_opt_out(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    calls = []
+    monkeypatch.setattr(Controller, "_agent_events_retention_config", lambda self: None)
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
+    monkeypatch.setattr(real_module, "run_skill_retention", lambda *args, **kwargs: {})
+    monkeypatch.setattr("vibe.runtime.current_process_owns_service_instance", lambda: True)
+    monkeypatch.setattr("vibe.runtime.service_instance_started", lambda pid: True)
+    monkeypatch.setattr(
+        "storage.backups.expire_sqlite_migration_backups",
+        lambda path, **kwargs: calls.append(path) or {"status": "not_due", "removed": []},
+    )
+
+    assert controller._run_agent_events_retention_pass() == {"status": "disabled"}
+    assert len(calls) == 1
+
+
+def test_backup_expiry_failure_does_not_block_other_maintenance(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    calls = []
+    monkeypatch.setattr(Controller, "_agent_events_retention_config", lambda self: None)
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
+    monkeypatch.setattr(real_module, "run_skill_retention", lambda *args, **kwargs: calls.append("skill"))
+    monkeypatch.setattr("vibe.runtime.current_process_owns_service_instance", lambda: True)
+    monkeypatch.setattr("vibe.runtime.service_instance_started", lambda pid: True)
+
+    def fail_expiry(*args, **kwargs):
+        raise OSError("unreadable backup metadata")
+
+    monkeypatch.setattr("storage.backups.expire_sqlite_migration_backups", fail_expiry)
+    assert controller._run_agent_events_retention_pass() == {"status": "disabled"}
+    assert calls == ["skill"]
+
+
+@pytest.mark.parametrize(("owner", "ready"), [(False, True), (True, False)])
+def test_non_owner_or_unready_controller_does_not_expire_backups(monkeypatch, owner, ready) -> None:
+    controller = Controller.__new__(Controller)
+    monkeypatch.setattr("vibe.runtime.current_process_owns_service_instance", lambda: owner)
+    monkeypatch.setattr("vibe.runtime.service_instance_started", lambda pid: ready)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("An unready or non-owner controller must not reach expiry")
+
+    monkeypatch.setattr("storage.backups.expire_sqlite_migration_backups", unexpected)
+    assert controller._run_sqlite_backup_expiry_pass()["status"] == "not_owner"

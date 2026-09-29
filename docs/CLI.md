@@ -677,6 +677,27 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | `~/.vibe_remote/logs/vibe_remote.log` | Application logs |
 | `~/.vibe_remote/logs/opencode_server.json` | OpenCode server PID file |
 
+### Migration Backup Lifetime
+
+Automatic SQLite migration backups are temporary upgrade rollback points, not
+long-term archives. A backup becomes eligible for deletion 72 hours after its
+migration commits, database validation passes, and the core service reports
+readiness. Restarting the service does not extend this deadline. The last
+eligible copy can be deleted too.
+
+The core service checks on startup and hourly, including when trace retention
+is disabled. An offline installation catches up after startup. The existing
+rollback-position count limit still applies independently, so older copies can
+leave that window before 72 hours.
+
+Failed, interrupted, restored, or unconfirmed migration attempts are not
+age-expired. Legacy backups without recorded success evidence retain their
+existing count policy; their creation dates are not used to invent an expiry
+deadline. JSON import backups, manual archives, and unrecognized files are not
+covered by this age policy. Restoring a SQLite backup revokes the old expiry
+evidence before replacing the live database. Keep a separate manual archive
+when recovery must remain possible beyond the automatic rollback window.
+
 ## Environment Variables
 
 | Variable | Description |

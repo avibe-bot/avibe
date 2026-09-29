@@ -71,3 +71,16 @@ The previous lane's last Watch follow-up failed and no run was active. Its Watch
   height under 60px at 1366x800; no extra bar. All application requests were
   intercepted by the existing fixture and the denied-request ledger was empty.
   The temporary test/server were cleaned up. Native OS movement is still deferred.
+
+## Base synchronization
+
+Merged origin/master fb18756aa after GitHub reported a conflict. The sole conflict
+was the restored-window grab-area comment on the removed native drag strip.
+Preserved master window restoration, update architecture checks, backend install
+outcomes and other changes unchanged; the sidebar DOM region still covers the
+same grab area the restoration algorithm protects. Revalidate the merged tree.
+
+Merged-tree revalidation: UI/bootstrap builds, 199 UI tests, 75 desktop Rust
+tests, all 8 window-frame tests and Clippy passed. The first revised head
+55a600141 is under Codex review; wait for its terminal verdict before pushing
+the base synchronization, so review evidence cannot be attributed across heads.

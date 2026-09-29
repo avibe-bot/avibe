@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -162,6 +163,7 @@ ROOT_DIR = get_project_root()  # For backward compatibility
 MAIN_PATH = get_service_main_path()
 _SERVICE_LOCK = threading.Lock()
 _SERVICE_INSTANCE_LOCK_HANDLE = None
+_PENDING_SQLITE_BACKUP_READINESS: tuple[Path, str, tuple[str, ...], datetime] | None = None
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
 # /ready can spend up to two seconds in the Controller health probe.
 UI_ADOPTION_PROBE_TIMEOUT_SECONDS = 3.0
@@ -400,6 +402,45 @@ def mark_service_instance_started() -> None:
     if lock_file is None:
         return
     _write_service_instance_lock_record(lock_file, SERVICE_PHASE_RUNNING)
+    global _PENDING_SQLITE_BACKUP_READINESS
+    try:
+        from alembic.script import ScriptDirectory
+
+        from storage.importer import validated_sqlite_backup_attempt
+        from storage.migrations import alembic_config
+
+        target = paths.get_sqlite_state_path()
+        attempt = validated_sqlite_backup_attempt(target)
+        if attempt is not None and _PENDING_SQLITE_BACKUP_READINESS is None:
+            _PENDING_SQLITE_BACKUP_READINESS = (
+                target,
+                attempt,
+                tuple(ScriptDirectory.from_config(alembic_config(target)).get_heads()),
+                datetime.now(timezone.utc),
+            )
+        confirm_pending_sqlite_backup_readiness()
+    except Exception:
+        # Missing expiry evidence retains the bounded rollback window. Optional
+        # maintenance must not turn an otherwise ready service into a failed one.
+        logger.warning("Could not confirm SQLite backup expiry readiness; retaining backups", exc_info=True)
+
+
+def confirm_pending_sqlite_backup_readiness() -> None:
+    """Retry only this service's observed readiness, preserving its original clock."""
+    global _PENDING_SQLITE_BACKUP_READINESS
+    pending = _PENDING_SQLITE_BACKUP_READINESS
+    if pending is None or not current_process_owns_service_instance() or not service_instance_started(os.getpid()):
+        return
+    from storage.backups import confirm_sqlite_backup_readiness
+
+    target, attempt, revisions, ready_at = pending
+    confirm_sqlite_backup_readiness(
+        target, attempt_id=attempt, expected_revisions=revisions, now=ready_at
+    )
+    # A busy lock raises and keeps the pending event. A false result means this
+    # exact attempt is no longer eligible; never adopt another process's attempt.
+    if _PENDING_SQLITE_BACKUP_READINESS is pending:
+        _PENDING_SQLITE_BACKUP_READINESS = None
 
 
 def read_service_instance_lock_record() -> dict | None:
@@ -455,7 +496,8 @@ def service_instance_still_starting(pid: int) -> bool:
 
 
 def release_service_instance_lock() -> None:
-    global _SERVICE_INSTANCE_LOCK_HANDLE
+    global _SERVICE_INSTANCE_LOCK_HANDLE, _PENDING_SQLITE_BACKUP_READINESS
+    _PENDING_SQLITE_BACKUP_READINESS = None
     lock_file = _SERVICE_INSTANCE_LOCK_HANDLE
     if lock_file is None:
         return

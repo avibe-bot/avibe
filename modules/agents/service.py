@@ -288,20 +288,10 @@ class AgentService:
         except BaseException:
             # Cancellation (e.g. SIGTERM / shutdown) while still waiting in the
             # queue is raised by acquire() OUTSIDE the main try block below, so its
-            # CancelledError handler never runs. Let the queued-reaction task settle,
-            # then clean up the 👌 (and any eager typing) so it does not leak.
-            if queued_reaction_task is not None:
-                try:
-                    await queued_reaction_task
-                except BaseException:
-                    pass
-                if indicator is not None:
-                    try:
-                        # Pass the request (not the handle) so finish() clears BOTH
-                        # the handle and the flat request.ack_reaction_* fields.
-                        await indicator.finish(request)
-                    except Exception:
-                        logger.debug("Failed to clean up queued reaction on cancel", exc_info=True)
+            # CancelledError handler never runs. The turn was never handed off, so
+            # this path still owns the indicator: let the queued-reaction task
+            # settle, then finish the 👌 and any eager typing so neither leaks.
+            await self._finish_unhanded_indicator(indicator, request, queued_reaction_task)
             raise
         # A restart may have started while this turn waited behind the previous
         # owner of the runtime key. Keep the key lock, wait for cutover, then
@@ -311,16 +301,7 @@ class AgentService:
             await self.wait_backend_ready(agent_name)
             agent = self.get(agent_name)
         except BaseException:
-            if queued_reaction_task is not None:
-                try:
-                    await queued_reaction_task
-                except BaseException:
-                    pass
-                if indicator is not None:
-                    try:
-                        await indicator.finish(request)
-                    except Exception:
-                        logger.debug("Failed to clean up queued reaction on restart-wait cancel", exc_info=True)
+            await self._finish_unhanded_indicator(indicator, request, queued_reaction_task)
             if gate.lock.locked() and not gate.token:
                 gate.lock.release()
             raise
@@ -1156,6 +1137,9 @@ class AgentService:
         runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
         if not runtime_key or not runtime_token:
             return True
+        return self.runtime_turn_is_current(runtime_key, runtime_token)
+
+    def runtime_turn_is_current(self, runtime_key: str, runtime_token: str) -> bool:
         gate = self._turn_gates.get(runtime_key)
         return gate is not None and gate.token == runtime_token
 
@@ -1293,6 +1277,30 @@ class AgentService:
             logger.debug("harness prompt echo timed out at turn start; turn continues")
         except Exception:
             logger.debug("harness prompt echo failed at turn start", exc_info=True)
+
+    @staticmethod
+    async def _finish_unhanded_indicator(
+        indicator: Any,
+        request: AgentRequest,
+        queued_reaction_task: Optional[asyncio.Task],
+    ) -> None:
+        """Finish an indicator whose turn exited before hand-off to its gate."""
+
+        if queued_reaction_task is not None:
+            try:
+                await queued_reaction_task
+            except BaseException:
+                pass
+        elif getattr(request, "processing_indicator", None) is None:
+            return
+        if indicator is None:
+            return
+        try:
+            # Pass the request (not the handle) so finish() clears BOTH the
+            # handle and the flat request.ack_reaction_* / typing fields.
+            await indicator.finish(request)
+        except Exception:
+            logger.debug("Failed to finish processing indicator before hand-off", exc_info=True)
 
     def _track_processing_indicator_turn(self, request: AgentRequest) -> None:
         handle = getattr(request, "processing_indicator", None)

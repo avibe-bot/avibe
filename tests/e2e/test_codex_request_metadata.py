@@ -128,17 +128,17 @@ async def _completed(queue):
     return result
 
 
-def _assert_identity(request, identity, *, body_metadata=True):
+def _assert_identity(request, identity):
     assert request["headers"]["authorization"] == f"Bearer {TOKEN}"
     header = json.loads(request["headers"][METADATA_HEADER])
     assert {key: header[key] for key in identity} == identity
-    body = request["body"]
-    if body_metadata:
-        metadata = json.loads(body["client_metadata"][METADATA_HEADER])
-        assert {key: metadata[key] for key in identity} == identity
-        assert metadata["turn_id"] == header["turn_id"]
-    else:
-        assert "client_metadata" not in body
+    metadata = json.loads(request["body"]["client_metadata"][METADATA_HEADER])
+    assert {key: metadata[key] for key in identity} == identity
+    assert metadata["turn_id"] == header["turn_id"]
+
+
+def _is_remote_compaction(body):
+    return any(item.get("type") == "compaction_trigger" for item in body["input"])
 
 
 @pytest.fixture
@@ -195,33 +195,30 @@ def test_codex_auto_compaction_wire_metadata(metadata_runtime, large_initial_usa
 def test_codex_remote_compact_request_uses_header_metadata(
     metadata_runtime, large_initial_usage, monkeypatch,
 ):
-    """MH-PROTOCOL-004: inspect remote compact's carrier, not gateway support.
+    """MH-CODEX-METADATA-001: inspect remote compact's carrier, not gateway support.
 
     The Hub provider uses local compaction. A test-only OpenAI provider name
-    with remote_compaction_v2 disabled activates the legacy remote endpoint.
-    Its HTTP header survives even though its body has no client_metadata. The
-    receiver rejects that endpoint deterministically; no fake compaction
-    output or gateway support is implied.
+    activates remote compaction. Codex sends it to the ordinary Responses
+    endpoint, marked by a compaction_trigger input item; 0.155 removed the
+    legacy /responses/compact client. Its header and body both carry the new
+    turn's identity. The receiver rejects that request deterministically; no
+    fake compaction output or gateway support is implied.
     """
-    original_post = upstream.MockLLMUpstreamHandler.do_POST
+    original_stream = upstream.MockLLMUpstreamHandler._write_stream
 
-    def post(handler):
-        if handler.path != "/v1/responses/compact":
-            return original_post(handler)
-        handler._capture(handler.path, handler._read_json_body())
+    def stream(handler, protocol, body, behavior):
+        if not _is_remote_compaction(body):
+            return original_stream(handler, protocol, body, behavior)
         handler._write_json(400, {"error": {
             "type": "invalid_request_error", "message": "synthetic compact probe stop",
         }})
 
-    monkeypatch.setattr(upstream.MockLLMUpstreamHandler, "do_POST", post)
+    monkeypatch.setattr(upstream.MockLLMUpstreamHandler, "_write_stream", stream)
     first = {"avibe_route_id": "route-compact", "avibe_turn_id": "avibe-turn-before-compact"}
     second = {**first, "avibe_turn_id": "avibe-turn-compact"}
 
     async def probe(gateway):
-        overrides = [
-            "-c", 'model_providers.avibe_model_hub.name="OpenAI"',
-            "-c", "features.remote_compaction_v2=false",
-        ]
+        overrides = ["-c", 'model_providers.avibe_model_hub.name="OpenAI"']
         async with _transport(metadata_runtime, gateway, overrides=overrides) as (transport, queue, _notifications):
             thread_id = await _thread(transport, MODELS[0])
             await _turn(transport, thread_id, first)
@@ -235,9 +232,10 @@ def test_codex_remote_compact_request_uses_header_metadata(
         gateway.configure(protocol="openai_responses")
         asyncio.run(probe(gateway))
         requests = gateway.requests()
-    assert [request["path"] for request in requests] == ["/v1/responses", "/v1/responses/compact"]
+    assert [request["path"] for request in requests] == ["/v1/responses"] * 2
+    assert [_is_remote_compaction(request["body"]) for request in requests] == [False, True]
     _assert_identity(requests[0], first)
-    _assert_identity(requests[1], second, body_metadata=False)
+    _assert_identity(requests[1], second)
     assert requests[1]["body"]["model"] == MODELS[0]
 
 

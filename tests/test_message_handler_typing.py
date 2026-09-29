@@ -965,6 +965,80 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(captured_requests[0].typing_indicator_task)
         self.assertEqual(controller.im_client.sent_messages, [("wx-chat", "Error: agent failed")])
 
+    def _capture_typing_tasks(self, controller):
+        tasks = []
+        start = controller.processing_indicator.start
+
+        async def _start(*args, **kwargs):
+            handle = await start(*args, **kwargs)
+            tasks.append(handle.typing_indicator_task)
+            return handle
+
+        controller.processing_indicator.start = _start
+        return tasks
+
+    async def test_cancel_before_dispatch_finishes_eager_typing(self):
+        # #2164: cancellation is a BaseException, so the turn's `except Exception`
+        # cleanup never ran and the keepalive typed until the process exited.
+        controller = _StubController(platform="slack", ack_mode="typing", typing_result=True)
+        typing_tasks = self._capture_typing_tasks(controller)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        blocked = asyncio.Event()
+
+        async def _prepare_input_metadata(*_args, **_kwargs):
+            blocked.set()
+            await asyncio.Event().wait()
+
+        handler.prepare_input_metadata = _prepare_input_metadata
+        context = MessageContext(user_id="U1", channel_id="C1", message_id="m1")
+        turn = asyncio.create_task(handler.handle_user_message(context, "hello"))
+        await asyncio.wait_for(blocked.wait(), timeout=1)
+        self.assertFalse(typing_tasks[0].done())
+
+        turn.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await turn
+
+        self.assertTrue(typing_tasks[0].done())
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_cancel_after_hand_off_leaves_the_indicator_to_the_turn(self):
+        # Once the runtime turn tracks the indicator it owns the cleanup, including
+        # the ⏹️/⚠️ receipt; finishing it here on cancel would pre-empt that.
+        controller = _StubController(platform="slack", ack_mode="typing", typing_result=True)
+        typing_tasks = self._capture_typing_tasks(controller)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        tracked = asyncio.Event()
+        captured = []
+
+        async def _handle_message(_agent_name, request):
+            request.context.platform_specific = {
+                **(request.context.platform_specific or {}),
+                "agent_runtime_turn_key": "session:/tmp",
+                "agent_runtime_turn_token": "turn-1",
+            }
+            controller.processing_indicator.track_turn(request.context, request)
+            captured.append(request)
+            tracked.set()
+            await asyncio.Event().wait()
+
+        controller.agent_service.handle_message = _handle_message
+        context = MessageContext(user_id="U1", channel_id="C1", message_id="m1")
+        turn = asyncio.create_task(handler.handle_user_message(context, "hello"))
+        await asyncio.wait_for(tracked.wait(), timeout=1)
+
+        turn.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await turn
+
+        try:
+            self.assertFalse(typing_tasks[0].done())
+            self.assertIs(captured[0].processing_indicator.typing_indicator_task, typing_tasks[0])
+        finally:
+            await controller.processing_indicator.finish(captured[0])
+
     async def test_telegram_reaction_mode_matches_global_ack_strategy(self):
         controller = _StubController(platform="telegram", ack_mode="reaction", typing_result=True)
         handler = MessageHandler(controller)

@@ -81,5 +81,7 @@ restart is part of this change.
 - Genuine direct/native/Hub channel changes may still require process replacement.
 - No broad catch, notification suppression, or extra delivery retry is added.
 - The Hub provider's automatic compaction uses the existing Responses route.
-  The legacy remote compact endpoint remains unsupported; its header-only native
-  wire probe verifies the carrier, not end-to-end gateway support.
+  Codex compacts remotely only for OpenAI or Azure providers. That request uses
+  the ordinary Responses endpoint with identity in both carriers; Codex 0.155
+  removed the legacy `/responses/compact` client. Its native wire probe
+  verifies the carrier, not end-to-end gateway support.
