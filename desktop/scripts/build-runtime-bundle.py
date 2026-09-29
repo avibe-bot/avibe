@@ -788,6 +788,18 @@ def compile_payload(private_python: Path, payload: Path) -> None:
             str(python_root),
         ]
     )
+    # A Runtime that quietly compiles at run time again is the cost this step
+    # removes, and nothing downstream would notice it, so check what shipped.
+    sources = {source.parent / source.stem for source in python_root.rglob("*.py")}
+    compiled = set()
+    for bytecode in python_root.rglob("__pycache__/*.pyc"):
+        with bytecode.open("rb") as header:
+            # The flags word follows the magic number; 1 is unchecked-hash.
+            if int.from_bytes(header.read(8)[4:], "little") != 1:
+                raise SystemExit(f"Runtime bytecode is not unchecked-hash: {bytecode}")
+        compiled.add(bytecode.parent.parent / bytecode.name.rsplit(".", 2)[0])
+    if missing := sorted(sources - compiled):
+        raise SystemExit(f"{len(missing)} Runtime sources have no bytecode, including {missing[0]}.py")
 
 
 def main() -> int:

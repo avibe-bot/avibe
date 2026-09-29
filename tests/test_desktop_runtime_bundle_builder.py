@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import marshal
 import os
 import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -302,6 +304,22 @@ def test_runtime_zip_is_byte_for_byte_deterministic(tmp_path):
 
     assert first_metadata == second_metadata
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_shipped_bytecode_is_valid_wherever_the_tree_is_extracted(tmp_path):
+    payload = tmp_path / "payload"
+    package = payload / "python" / "lib" / "package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "module.py").write_text("VALUE = 1\n")
+
+    builder.compile_payload(Path(sys.executable), payload)
+
+    bytecode = next((package / "__pycache__").glob("module.*.pyc")).read_bytes()
+    # Unchecked-hash: no source mtime, so extraction time cannot invalidate it.
+    assert int.from_bytes(bytecode[4:8], "little") == 1
+    # Recorded relative to the tree, not to this build's directory.
+    assert Path(marshal.loads(bytecode[16:]).co_filename) == Path("lib/package/module.py")
 
 
 def test_probe_diagnostics_report_every_log_including_the_ones_that_are_missing(tmp_path):
