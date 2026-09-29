@@ -23,6 +23,11 @@ VIBE_TOOL_BIN_DIR=""
 # shell happens to have. Upgrades keep every other managed launcher in step.
 ROOT_TOOL_BIN_DIR="/usr/local/bin"
 VIBE_CANDIDATE_BIN_PATH=""
+# uv 0.10.8 and later fetch managed Python from Astral's CDN and fall back to
+# GitHub; earlier uv fetches it from GitHub only. uv_python_install_mirror
+# gives earlier uv the CDN for the install step unless the user chose a source.
+ASTRAL_PYTHON_INSTALL_MIRROR="https://releases.astral.sh/github/python-build-standalone/releases/download"
+UV_INSTALL_PYTHON_MIRROR=""
 LAUNCH_AFTER_INSTALL=""
 AVIBE_LAUNCHED=""
 ORIGINAL_PATH="$PATH"
@@ -320,6 +325,40 @@ uv_is_native_for_host() {
     uv_binary_is_acceptable "$uv_path"
 }
 
+# Print the Python download mirror the install step should give uv, if any.
+# Newer uv is left alone: an explicit mirror turns its GitHub fallback off.
+uv_python_install_mirror() {
+    if [ -n "${UV_PYTHON_INSTALL_MIRROR+set}" ]; then
+        return 0
+    fi
+    # `uv tool` reads UV_CONFIG_FILE or the user and system uv.toml, never a project's.
+    local config config_dir config_dirs
+    local configs=("${UV_CONFIG_FILE:-}" "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml)
+    IFS=':' read -r -a config_dirs <<< "${XDG_CONFIG_DIRS:-/etc/xdg}"
+    for config_dir in "${config_dirs[@]}"; do
+        configs+=("$config_dir/uv/uv.toml")
+    done
+    for config in "${configs[@]}"; do
+        if [ -n "$config" ] && grep -qs 'python-install-mirror' "$config"; then
+            return 0
+        fi
+    done
+
+    local version major minor patch_extra
+    version="$(uv --version 2>/dev/null || true)"
+    version="${version#uv }"
+    IFS='.' read -r major minor patch_extra <<EOF
+${version%% *}
+EOF
+    local patch="${patch_extra%%[^0-9]*}"
+    case "$major.$minor.$patch" in
+        *[!0-9.]*|.*|*..*|*.) return 0 ;;
+    esac
+    if [ "$major" -eq 0 ] && { [ "$minor" -lt 10 ] || { [ "$minor" -eq 10 ] && [ "$patch" -lt 8 ]; }; }; then
+        printf '%s\n' "$ASTRAL_PYTHON_INSTALL_MIRROR"
+    fi
+}
+
 node_version_parts() {
     local version=""
     version="$(node --version 2>/dev/null || true)"
@@ -498,7 +537,8 @@ uv_tool_install() {
     fi
 
     # Suppress package-manager progress only, not activation/retention diagnostics.
-    if UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" 2>/dev/null; then
+    if env ${UV_INSTALL_PYTHON_MIRROR:+"UV_PYTHON_INSTALL_MIRROR=$UV_INSTALL_PYTHON_MIRROR"} \
+        UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" 2>/dev/null; then
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
         if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
             warn "uv completed but the candidate vibe launcher was not created"
@@ -669,6 +709,11 @@ install_vibe() {
         info "Installing vibe command into $VIBE_TOOL_BIN_DIR"
     else
         warn "Could not find a writable directory in PATH; you may need a new shell before 'vibe' is available"
+    fi
+
+    UV_INSTALL_PYTHON_MIRROR="$(uv_python_install_mirror)"
+    if [ -n "$UV_INSTALL_PYTHON_MIRROR" ]; then
+        info "This uv downloads Python from GitHub; using Astral's CDN for any Python download instead"
     fi
 
     if [ -n "$install_package_spec" ]; then

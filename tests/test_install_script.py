@@ -80,6 +80,11 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         #!/usr/bin/env bash
         set -euo pipefail
 
+        if [ "$1" = "--version" ] && [ -n "${{VIBE_TEST_UV_VERSION:-}}" ]; then
+            echo "$VIBE_TEST_UV_VERSION"
+            exit 0
+        fi
+
         printf '%s' "${{UV_TOOL_BIN_DIR:-}}" > "{uv_log}"
         printf '%s' "${{UV_TOOL_DIR:-}}" > "{uv_log}.tools"
 
@@ -91,6 +96,7 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         if [ "$1" != "tool" ] || [ "$2" != "install" ]; then
             exit 1
         fi
+        printf '%s' "${{UV_PYTHON_INSTALL_MIRROR-<unset>}}" > "{uv_log}.python-mirror"
 
         bin_dir="${{UV_TOOL_BIN_DIR:-$HOME/.local/bin}}"
         tool_env="${{UV_TOOL_DIR:-$HOME/.local/share/uv/tools}}/avibe-os"
@@ -368,6 +374,50 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
     assert uv_log.read_text(encoding="utf-8")
+
+
+ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-standalone/releases/download"
+
+
+@pytest.mark.parametrize(
+    ("uv_version", "user_mirror", "user_config", "expected_mirror"),
+    [
+        ("uv 0.10.7 (8e2c9a1 2026-03-02)", None, None, ASTRAL_PYTHON_INSTALL_MIRROR),
+        ("uv 0.10.8", None, None, "<unset>"),
+        ("uv 0.9.8", "https://mirror.example.test/python", None, "https://mirror.example.test/python"),
+        ("uv 0.9.8", None, 'python-install-mirror = "https://mirror.example.test/python"\n', "<unset>"),
+    ],
+    ids=["uv-without-cdn", "uv-with-cdn", "user-env-mirror", "user-config-mirror"],
+)
+def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(
+    tmp_path, uv_version, user_mirror, user_config, expected_mirror
+):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    config_home = tmp_path / "config"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+    if user_config is not None:
+        (config_home / "uv").mkdir(parents=True)
+        (config_home / "uv" / "uv.toml").write_text(user_config, encoding="utf-8")
+
+    env = os.environ.copy()
+    for name in ("UV_PYTHON_INSTALL_MIRROR", "UV_CONFIG_FILE"):
+        env.pop(name, None)
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["XDG_CONFIG_HOME"] = str(config_home)
+    env["XDG_CONFIG_DIRS"] = str(tmp_path / "system-config")
+    env["VIBE_TEST_UV_VERSION"] = uv_version
+    if user_mirror is not None:
+        env["UV_PYTHON_INSTALL_MIRROR"] = user_mirror
+
+    install_result = _install(env)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert Path(f"{uv_log}.python-mirror").read_text(encoding="utf-8") == expected_mirror
 
 
 def test_install_script_canonicalizes_relative_avibe_home(tmp_path):

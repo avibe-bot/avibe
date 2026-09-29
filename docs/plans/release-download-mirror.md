@@ -152,6 +152,12 @@ archives download through `core.dependency_network.fetch_to_path`:
    that worked. The references are the desktop shell's
    `avibe_runtime_host::download` (Rust) and Client downloads above (Python).
 4. Install-script third-party dependencies (the uv installer and
-   python-build-standalone) through `UV_INSTALLER_GITHUB_BASE_URL` and
-   `UV_PYTHON_INSTALL_MIRROR`, if step 2 shows GitHub is still their
-   bottleneck. PyPI and npm keep using their existing mainland mirrors.
+   python-build-standalone). The install scripts fetch no Avibe release
+   assets; their GitHub traffic is uv and the Python it installs. The uv
+   installer tries Astral's CDN (`releases.astral.sh`) before GitHub, and so
+   does uv 0.10.8 and later for Python. For earlier uv the scripts pass that
+   CDN as `UV_PYTHON_INSTALL_MIRROR` to the install step only, and never when
+   the user already chose a Python source: a configured mirror turns off newer
+   uv's GitHub fallback. Mirror either into R2 only if step 2 shows
+   `releases.astral.sh` is slow from mainland carriers. PyPI and npm keep
+   using their existing mainland mirrors.
