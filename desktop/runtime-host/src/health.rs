@@ -524,7 +524,7 @@ mod tests {
         let origin = LoopbackOrigin::parse(&format!("http://{}", listener.local_addr().expect("address")))
             .expect("test origin is loopback");
         drop(listener);
-        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+        let probe = HttpHealthProbe::new(crate::bootstrap::DEFAULT_PROBE_TIMEOUT).expect("probe builds");
 
         assert_eq!(probe.presence(&origin, Some(&"a".repeat(64))).await, Presence::Absent);
     }

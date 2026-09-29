@@ -32,8 +32,12 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// shell does not give up before the Runtime itself would.
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Per-request timeout for a single readiness probe.
-pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Per-request timeout for a single presence probe.
+///
+/// It must outlast a refused loopback connect on Windows, which resends the SYN
+/// after the RST and refuses only after about 2 s. A shorter budget turns
+/// `Absent` into `Unknown`, and uninstall is then blocked.
+pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const READY_TIMEOUT_CEILING_SECONDS: u64 = 600;
 
