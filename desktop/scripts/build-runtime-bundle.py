@@ -757,6 +757,39 @@ def prune_payload(payload: Path) -> None:
         file.unlink()
 
 
+def compile_payload(private_python: Path, payload: Path) -> None:
+    """Ship the Runtime's bytecode inside its verified tree.
+
+    The installed Runtime runs with `-B`: a `.pyc` written at run time would
+    fail `verify_installed_tree`. Without shipped bytecode, every Runtime
+    process therefore recompiles every module it imports. Unchecked-hash
+    bytecode stays valid wherever the tree is extracted, since it records no
+    source mtime, and the tree hash already binds each `.pyc` to its source.
+    """
+    python_root = payload / "python"
+    run(
+        [
+            str(private_python),
+            "-I",
+            # compileall writes every file explicitly; `-B` only keeps its own
+            # imports from leaving timestamp bytecode that it then skips as current.
+            "-B",
+            "-m",
+            "compileall",
+            "-q",
+            "-j",
+            "0",
+            "--invalidation-mode",
+            "unchecked-hash",
+            # Record paths relative to the tree, not this build's work dir. The
+            # import system rewrites them to the installed location on load.
+            "-s",
+            str(python_root),
+            str(python_root),
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
@@ -815,8 +848,10 @@ def main() -> int:
         installed_payload = work_dir / "relocated runtime"
         payload.rename(installed_payload)
         payload = installed_payload
-        verify_payload(target_config, payload, work_dir, sources["npm_version"])
         prune_payload(payload)
+        compile_payload(payload / target_config["python_entrypoint"], payload)
+        # Probe the tree as it ships, bytecode included.
+        verify_payload(target_config, payload, work_dir, sources["npm_version"])
 
         output_parent = args.output.parent
         output_parent.mkdir(parents=True, exist_ok=True)
