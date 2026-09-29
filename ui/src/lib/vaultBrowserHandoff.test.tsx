@@ -103,14 +103,24 @@ const protectedSign = {
   },
 } satisfies VaultRequest;
 
-// The agent suggested Standard; the user answers on Protected.
+// The agent suggested Standard; the user answers on Protected. Shaped like the backend's
+// `_secure_input_card`, which derives `default_protection` from the spec it also carries.
+const standardSpec = { protection: 'standard' as const };
 const standardProvision = {
   ...pending,
   id: 'vrq_provision',
   request_type: 'provision',
   secret_name: 'WALLET_PASSWORD',
   delivery: {},
-  card: { request_type: 'provision', default_protection: 'standard' },
+  card: {
+    card_type: 'secure_input',
+    request_id: 'vrq_provision',
+    secret_name: 'WALLET_PASSWORD',
+    protection_options: ['standard', 'protected'],
+    default_protection: 'standard',
+    value: null,
+    spec: standardSpec,
+  },
 } satisfies VaultRequest;
 
 const protectedSecret: VaultSecret = {
@@ -184,6 +194,7 @@ const cases: Array<{
       <VaultSecretForm
         fixedName="WALLET_PASSWORD"
         provisionRequestId="vrq_provision"
+        requestSpec={standardSpec}
         defaultProtection="standard"
         onCancel={vi.fn()}
         onCreated={vi.fn()}
