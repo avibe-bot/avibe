@@ -1365,7 +1365,7 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         return True
 
     monkeypatch.setattr(cli.runtime, "wait_for_ui_server", wait_for_ui)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda: pytest.fail("reused Controller must survive"))
+    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: pytest.fail("reused Controller must survive"))
     monkeypatch.setattr(
         cli.runtime,
         "stop_ui",

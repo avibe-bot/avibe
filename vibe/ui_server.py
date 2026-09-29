@@ -6751,11 +6751,11 @@ def _restart_in_flight() -> bool:
     return age < _RESTART_SEED_GRACE_SECONDS
 
 
-def _restart_refusal_payload(refusal: "DesktopRuntimeClaimRefused") -> dict[str, Any]:
+def _runtime_refusal_payload(action: str, refusal: "DesktopRuntimeClaimRefused") -> dict[str, Any]:
     return {
         "ok": False,
-        "error": f"restart refused: {refusal}",
-        "code": "restart_refused",
+        "error": f"{action} refused: {refusal}",
+        "code": f"{action}_refused",
         "part": refusal.part,
         "reason": refusal.reason,
     }
@@ -6769,7 +6769,7 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     # marked restarting for a restart that will not happen.
     refusal = runtime.desktop_provenance_refusal(include_ui=False)
     if refusal is not None:
-        return _restart_refusal_payload(refusal)
+        return _runtime_refusal_payload("restart", refusal)
 
     def _schedule_restart() -> dict[str, Any]:
         status = runtime.read_status()
@@ -6874,7 +6874,15 @@ def control():
     status["last_action"] = action
     if action == "start":
         runtime.ensure_config()
-        service_pid = runtime.start_service()
+        try:
+            service_pid = runtime.start_service()
+        except runtime.DesktopRuntimeClaimRefused as refusal:
+            # The service running here is another Runtime's: it is left
+            # running, and the person is told why nothing started.
+            return (
+                jsonify({**_runtime_refusal_payload("start", refusal), "action": action, "status": runtime.read_status()}),
+                409,
+            )
         runtime.write_status("running", "started", service_pid, status.get("ui_pid"))
     elif action == "stop":
         runtime.write_status("stopping", "stopping", status.get("service_pid"), status.get("ui_pid"))
@@ -6912,7 +6920,7 @@ def control():
             refusal = runtime.desktop_provenance_refusal(include_ui=scope != "service")
             if refusal is not None:
                 return (
-                    jsonify({**_restart_refusal_payload(refusal), "action": action, "status": runtime.read_status()}),
+                    jsonify({**_runtime_refusal_payload("restart", refusal), "action": action, "status": runtime.read_status()}),
                     409,
                 )
             runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))

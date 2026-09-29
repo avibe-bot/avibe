@@ -49,10 +49,13 @@ export const SettingsServicePage: React.FC = () => {
       await control(action);
     } catch (e) {
       console.error('Service control action failed', e);
-      // The server stopped nothing: the Avibe running here is not this
-      // desktop Runtime's, and the person needs to know the restart did not happen.
-      if ((e as { code?: unknown } | null)?.code === 'restart_refused') {
+      // The server stopped and started nothing: the Avibe running here is not
+      // this desktop Runtime's, and the person needs to know the action did not happen.
+      const code = (e as { code?: unknown } | null)?.code;
+      if (code === 'restart_refused') {
         setControlMessage(t('settings.restartRefused'));
+      } else if (code === 'start_refused') {
+        setControlMessage(t('settings.startRefused'));
       }
     } finally {
       setLoading(false);

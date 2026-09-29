@@ -496,6 +496,7 @@
     "serviceRuntimeSubtitle": "查看本地 Avibe 进程状态，并执行启动、停止和重启。",
     "statusNow": "当前状态",
     "restartRefused": "未重启：无法确认此处运行的 Avibe 属于这个桌面应用，未停止任何进程。",
+    "startRefused": "未启动：无法确认此处运行的 Avibe 属于这个桌面应用，它仍在运行。",
     "configRestartRefused": "已保存，但未重启服务：无法确认此处运行的 Avibe 属于这个桌面应用。",
     "consoleServerTitle": "控制台服务",
     "consoleServerHint": "保存这些值只会重启 Web UI 服务，不会重启主服务。",

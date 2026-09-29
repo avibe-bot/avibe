@@ -13689,6 +13689,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
     else:
         ready = bool(getattr(getattr(config, "slack", None), "bot_token", ""))
 
+    previous_status = runtime.read_json(paths.get_runtime_status_path())
     if not ready:
         _write_status("setup", "missing platform credentials")
     else:
@@ -13810,27 +13811,26 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         # inside the region that kills the child if either step fails. So every
         # live process this sees as created has a record naming it, and no
         # child that missed the capture is still alive.
-        if ui_start.pid is not None and not ui_start.reused:
-            # `stop_remote_access=False`, the same distinction the stale-UI
-            # restart above makes, and for the same reason: `vibe start` never
-            # brings a tunnel up. `remote_access.start()` is reached only from
-            # the UI's explicit endpoint and from `vibe remote`; UI startup only
-            # starts monitors. Any tunnel alive here therefore predates this
-            # command, and tearing it down would destroy a remote URL this
-            # invocation did not create -- the one irreversible mistake
-            # available to a rollback.
-            runtime.stop_ui(stop_remote_access=False)
-        if service_start.pid is not None and not service_start.reused:
-            # A service that was already running is not ours to stop, and against
-            # one this command has then changed nothing to undo. stop_service()
-            # logs any pid it could not stop, so a rollback that itself fails
-            # still leaves evidence; either way the start has failed.
-            runtime.stop_service()
+        #
+        # The UI stop leaves the tunnel alone: `vibe start` never brings a
+        # tunnel up. `remote_access.start()` is reached only from the UI's
+        # explicit endpoint and from `vibe remote`; UI startup only starts
+        # monitors. Any tunnel alive here therefore predates this command, and
+        # tearing it down would destroy a remote URL this invocation did not
+        # create -- the one irreversible mistake available to a rollback.
+        #
+        # A service that was already running is not ours to stop, and against
+        # one this command has then changed nothing to undo. stop_service()
+        # logs any pid it could not stop, so a rollback that itself fails still
+        # leaves evidence; either way the start has failed. Under a desktop
+        # Runtime id a process another Runtime started meanwhile is refused,
+        # not stopped.
+        left_running = runtime.roll_back_start(service_start, ui_start)
+        if left_running is not None:
+            logger.warning("A failed start left another Runtime's process running: %s", left_running)
         if isinstance(exc, runtime.DesktopRuntimeClaimRefused):
-            print(
-                i18n_t("desktopRuntime.claimRefused", _configured_cli_language(), part=exc.part, reason=exc.reason),
-                file=sys.stderr,
-            )
+            runtime.restore_status_after_refused_start(previous_status)
+            _print_provenance_refusal("desktopRuntime.claimRefused", exc)
             return 3
         raise
     if service_ready:
@@ -14011,29 +14011,48 @@ def _stop_the_home_s_connector() -> int:
     return outcome[0]
 
 
-def _desktop_provenance_refused(key: str, *, include_ui: bool = True) -> bool:
-    """Print why a desktop caller may not act on the Avibe running here, if it may not."""
-
-    refusal = runtime.desktop_provenance_refusal(include_ui=include_ui)
-    if refusal is None:
-        return False
+def _print_provenance_refusal(key: str, refusal: runtime.DesktopRuntimeClaimRefused) -> None:
     print(
         i18n_t(key, _configured_cli_language(), part=refusal.part, reason=refusal.reason),
         file=sys.stderr,
     )
+
+
+def _desktop_provenance_refused(
+    key: str,
+    *,
+    include_ui: bool = True,
+    runtime_ids: frozenset[str] | None = None,
+) -> bool:
+    """Print why a desktop caller may not act on the Avibe running here, if it may not."""
+
+    refusal = runtime.desktop_provenance_refusal(include_ui=include_ui, runtime_ids=runtime_ids)
+    if refusal is None:
+        return False
+    _print_provenance_refusal(key, refusal)
     return True
 
 
 def cmd_stop(*, expect_runtime_id: str | None = None):
+    from vibe.desktop_runtime import desktop_caller_provenance
+
     if expect_runtime_id is not None:
         return _stop_expected_desktop_runtime(expect_runtime_id)
-    if _desktop_provenance_refused("desktopRuntime.stopRefused"):
+    # Asked of everything first, so a refusal stops nothing; asked again by
+    # each stop of the processes it is about to signal, so a Runtime that took
+    # over in between is refused too.
+    provenance = desktop_caller_provenance()
+    if _desktop_provenance_refused("desktopRuntime.stopRefused", runtime_ids=provenance):
         return 3
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
-    service_stopped = runtime.stop_service()
-    ui_stopped = runtime.stop_ui()
+    try:
+        service_stopped = runtime.stop_service(runtime_ids=provenance)
+        ui_stopped = runtime.stop_ui(runtime_ids=provenance)
+    except runtime.DesktopRuntimeClaimRefused as refusal:
+        _print_provenance_refusal("desktopRuntime.stopRefused", refusal)
+        return 3
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs

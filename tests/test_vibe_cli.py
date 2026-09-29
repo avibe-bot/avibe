@@ -1082,8 +1082,8 @@ def test_cmd_stop_ignores_absent_services(monkeypatch):
     status = []
 
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
-    monkeypatch.setattr(runtime, "stop_service", lambda: False)
-    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
 
@@ -1096,8 +1096,8 @@ def test_cmd_stop_fails_when_live_service_survives(monkeypatch, capsys):
     service_pid = paths.get_runtime_pid_path()
 
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: path == service_pid)
-    monkeypatch.setattr(runtime, "stop_service", lambda: False)
-    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
 
@@ -1111,8 +1111,8 @@ def test_cmd_stop_fails_when_lock_owner_survives_without_pidfile(monkeypatch, ca
 
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
     monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
-    monkeypatch.setattr(runtime, "stop_service", lambda: False)
-    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
 
@@ -1310,7 +1310,7 @@ def start_runtime(monkeypatch):
     # someone else's live process: the real stop_ui() would signal pid 5678.
     # Record both calls instead of making them.
     monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: stopped.append("stop_ui") or True)
-    monkeypatch.setattr(runtime, "stop_service", lambda: stopped.append("stop_service") or True)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: stopped.append("stop_service") or True)
     return SimpleNamespace(
         service_path=service_path, ui_path=ui_path, spawned=spawned, opened=opened, stopped=stopped,
     )
@@ -1762,7 +1762,7 @@ def _ui_refuses_to_start(
             raise ui_outcome
         return _fake_start_result(ui_outcome, kwargs, reused=ui_reused) if ui_outcome else None
 
-    def stop_service():
+    def stop_service(**kwargs):
         calls.append("stop_service")
         return True
 
@@ -1899,7 +1899,7 @@ def test_cmd_start_rolls_back_when_an_interrupt_arrives_before_the_start_finishe
     )
     # A tunnel is never brought up by `vibe start`, so one alive here predates
     # the command and is not this rollback's to tear down.
-    assert started.stop_ui_kwargs == [{"stop_remote_access": False}], (
+    assert started.stop_ui_kwargs == [{"stop_remote_access": False, "runtime_ids": frozenset()}], (
         f"the rollback destroyed a remote URL it did not create: {started.stop_ui_kwargs}"
     )
 
@@ -2175,7 +2175,7 @@ def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypat
 
     def stop_ui(**kwargs):
         started.calls.append("stop_ui")
-        assert kwargs == {"stop_remote_access": False}, kwargs
+        assert kwargs == {"stop_remote_access": False, "runtime_ids": frozenset()}, kwargs
         return _REAL_STOP_UI(**kwargs)
 
     monkeypatch.setattr(cli.runtime, "stop_ui", stop_ui)

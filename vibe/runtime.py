@@ -1475,7 +1475,7 @@ def wait_for_service_pid(pid: int, timeout: float = SERVICE_LOCK_READY_TIMEOUT_S
     return ready
 
 
-def stop_process(pid_path, timeout=5):
+def stop_process(pid_path, timeout=5, *, runtime_ids: frozenset[str] = frozenset(), part: str = "process"):
     if not pid_path.exists():
         return False
     try:
@@ -1486,6 +1486,7 @@ def stop_process(pid_path, timeout=5):
     if not pid_alive(pid):
         pid_path.unlink(missing_ok=True)
         return False
+    _refuse_foreign_desktop_process(pid, part, runtime_ids)
     stopped = stop_pid(pid, timeout=timeout)
     if stopped:
         pid_path.unlink(missing_ok=True)
@@ -2497,7 +2498,14 @@ def start_ui(
     return pid
 
 
-def stop_service():
+def stop_service(*, runtime_ids: frozenset[str] = frozenset()):
+    """Stop every service process; with ``runtime_ids``, only when all are that Runtime's.
+
+    The ids are checked on the very processes this stop selected, before any
+    of them is signalled, so a Runtime that took over since an earlier check
+    is refused, not stopped.
+    """
+
     with _SERVICE_LOCK:
         pid_path = paths.get_runtime_pid_path()
         owner_pid = resolve_service_owner_pid()
@@ -2511,6 +2519,8 @@ def stop_service():
             if recorded_pid and not pid_alive(recorded_pid):
                 pid_path.unlink(missing_ok=True)
             return False
+        for pid in target_pids:
+            _refuse_foreign_desktop_process(pid, "service", runtime_ids)
 
         stopped_all = True
         for pid in target_pids:
@@ -2546,9 +2556,26 @@ def stop_remote_access_connector() -> bool:
     return True
 
 
-def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_access: bool = True):
+def stop_ui(
+    timings: dict[str, float | bool] | None = None,
+    *,
+    stop_remote_access: bool = True,
+    runtime_ids: frozenset[str] = frozenset(),
+):
+    """Stop the recorded UI and, by default, the tunnel connector it serves.
+
+    With ``runtime_ids``, a UI that is not that Runtime's is refused, and so is
+    its connector: the UI is checked before the connector stops, and again as
+    the pid about to be signalled is read.
+    """
+
     remote_access_stopped = True
     started_at = time.monotonic()
+    ui_pid_path = paths.get_runtime_ui_pid_path()
+    if stop_remote_access and runtime_ids:
+        recorded_pid = _read_pid_file(ui_pid_path)
+        if recorded_pid and pid_alive(recorded_pid):
+            _refuse_foreign_desktop_process(recorded_pid, "ui", runtime_ids)
     if stop_remote_access:
         remote_access_started_at = time.monotonic()
         remote_access_stopped = stop_remote_access_connector()
@@ -2558,7 +2585,7 @@ def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_acces
         timings["stop_remote_access_seconds"] = 0.0
         timings["stop_remote_access_skipped"] = True
     ui_started_at = time.monotonic()
-    ui_stopped = stop_process(paths.get_runtime_ui_pid_path())
+    ui_stopped = stop_process(ui_pid_path, runtime_ids=runtime_ids, part="ui")
     if timings is not None:
         timings["stop_ui_process_seconds"] = _rounded_seconds(time.monotonic() - ui_started_at)
         timings["stop_ui_seconds"] = _rounded_seconds(time.monotonic() - started_at)
@@ -2806,9 +2833,19 @@ def claim_desktop_runtime_process(pid: int, part: str) -> None:
     from vibe.desktop_runtime import desktop_runtime_id
 
     runtime_id = desktop_runtime_id()
-    if runtime_id is None:
+    if runtime_id is not None:
+        _refuse_foreign_desktop_process(pid, part, frozenset({runtime_id}))
+
+
+def _refuse_foreign_desktop_process(pid: int, part: str, runtime_ids: frozenset[str]) -> None:
+    """Raise ``DesktopRuntimeClaimRefused`` unless a caller acting for ``runtime_ids`` may act on ``pid``.
+
+    No ids is a caller with no desktop provenance, which acts on anything.
+    """
+
+    if not runtime_ids:
         return
-    reason = _desktop_runtime_mismatch(pid, frozenset({runtime_id}))
+    reason = _desktop_runtime_mismatch(pid, runtime_ids)
     if reason is not None:
         raise DesktopRuntimeClaimRefused(part, reason)
 
@@ -2830,18 +2867,51 @@ def claim_ready_service(ready_pid: int, *, started_pid: int, start_info: Process
         raise
 
 
-def desktop_provenance_refusal(*, include_ui: bool = True) -> DesktopRuntimeClaimRefused | None:
+def roll_back_start(service_start: ProcessStartInfo, ui_start: ProcessStartInfo) -> DesktopRuntimeClaimRefused | None:
+    """Stop what a start that did not finish created, the UI and then its service.
+
+    Created is what the start infos record as not reused. The UI stop leaves the
+    tunnel connector alone: a start never brings one up, so any connector alive
+    predates it. Under a desktop Runtime id both stops act only on that
+    Runtime's processes, so one another Runtime started meanwhile is left
+    running; the refusal that left it is returned.
+    """
+
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    runtime_id = desktop_runtime_id()
+    runtime_ids = frozenset() if runtime_id is None else frozenset({runtime_id})
+    left_running = None
+    if ui_start.pid is not None and not ui_start.reused:
+        try:
+            stop_ui(stop_remote_access=False, runtime_ids=runtime_ids)
+        except DesktopRuntimeClaimRefused as refusal:
+            left_running = refusal
+    if service_start.pid is not None and not service_start.reused:
+        try:
+            stop_service(runtime_ids=runtime_ids)
+        except DesktopRuntimeClaimRefused as refusal:
+            left_running = left_running or refusal
+    return left_running
+
+
+def desktop_provenance_refusal(
+    *,
+    include_ui: bool = True,
+    runtime_ids: frozenset[str] | None = None,
+) -> DesktopRuntimeClaimRefused | None:
     """Why this caller may not stop or restart the Avibe running here, or None when it may.
 
     A caller with no desktop provenance manages whatever runs here, as it always
     has. A desktop caller acts only for its own Runtime: every service process,
     and with ``include_ui`` the recorded UI, must carry exactly its id. With
-    nothing running there is nothing to refuse.
+    nothing running there is nothing to refuse. ``runtime_ids`` defaults to
+    this caller's ``desktop_caller_provenance()``.
     """
 
     from vibe.desktop_runtime import desktop_caller_provenance
 
-    provenance = desktop_caller_provenance()
+    provenance = desktop_caller_provenance() if runtime_ids is None else runtime_ids
     if not provenance:
         return None
     owner_pid = resolve_service_owner_pid()
@@ -2909,6 +2979,25 @@ def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None
         finally:
             _unlock_file(lock_file)
     return DesktopRuntimePresence.ABSENT
+
+
+def restore_status_after_refused_start(previous: dict | None) -> None:
+    """Put back the status record a start replaced before it was refused.
+
+    A refused start leaves the Avibe here as it found it, and that includes the
+    ``starting`` it announced, which a status reader would otherwise believe
+    until the start deadline passed. A service holding the lock owns the
+    status, even another Runtime's, so then the record is left to it.
+    """
+
+    def restore() -> None:
+        status_path = paths.get_runtime_status_path()
+        if previous is None:
+            status_path.unlink(missing_ok=True)
+        else:
+            write_json(status_path, previous)
+
+    desktop_service_lock_presence(while_absent=restore)
 
 
 def _stop_desktop_processes(processes: list[psutil.Process], timeout: float = 5) -> None:

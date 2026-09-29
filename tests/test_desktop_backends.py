@@ -499,7 +499,7 @@ def quiet_stop(monkeypatch):
     # The full stop's service half scans live processes; nothing of this test
     # runs there, and the real host must not be touched. The UI half reads
     # only this test's UI pidfile.
-    monkeypatch.setattr(runtime, "stop_service", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: None)
     monkeypatch.setattr(remote_access, "stop", lambda: {"ok": True})
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
@@ -612,11 +612,11 @@ def test_the_tree_of_a_live_owner_stays_whatever_the_ui_pidfile_says(
     else:
         seen_at_start: list[list[int]] = []
 
-        def start(start_ui=True):
+        def start(start_ui=True, **kwargs):
             seen_at_start.append(_running(pids))
             raise RuntimeError("no Runtime starts in this test")
 
-        monkeypatch.setattr(restart_supervisor, "_stop_service_for_restart", lambda: (True, 0.0))
+        monkeypatch.setattr(restart_supervisor, "_stop_service_for_restart", lambda runtime_ids: (True, 0.0))
         monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
         monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
 

@@ -56,6 +56,9 @@ def bundle(tmp_path) -> Path:
     (root / "vibe").mkdir(parents=True)
     (root / "vibe" / "__init__.py").write_text("", encoding="utf-8")
     (root / "vibe" / "service_main.py").write_text(SLEEP + "\n", encoding="utf-8")
+    # Next to the entry, as in a bundle: a service found by its record alone
+    # is recognised by this.
+    (root / "vibe" / "runtime.py").write_text("", encoding="utf-8")
     (root / "vibe" / "ui_server.py").write_text(f"def run_ui_server(host, port):\n    {SLEEP}\n", encoding="utf-8")
     # OpenCode runs natively, through an npm install's `node` shim, or as
     # whatever executable `agents.opencode.cli_path` names; here each is this
@@ -534,8 +537,8 @@ def test_a_full_stop_keeps_a_surviving_opencode_server_non_fatal(spawn, stop_env
     # also serves people and the upgrade and restart flows, and keeps its exit.
     opencode = spawn(RUNTIME_ID, "opencode")
     _opencode_pid_path().write_text(json.dumps({"pid": opencode.pid, "port": 4096}), encoding="utf-8")
-    monkeypatch.setattr(runtime, "stop_service", lambda: False)
-    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "extra_service_process_pids", lambda owner_pid=None: [])
 
     assert cli.cmd_stop() == 0
@@ -700,7 +703,7 @@ def test_a_restart_job_for_another_desktop_runtime_fails_before_stopping_anythin
 ):
     # The job acts on whatever runs when it starts, whoever scheduled it.
     monkeypatch.setattr(
-        restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: pytest.fail("nothing may be stopped")
+        restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: pytest.fail("nothing may be stopped")
     )
     caller(OTHER_ID)
 
@@ -856,4 +859,188 @@ def test_a_desktop_start_whose_service_lost_the_lock_to_another_runtime_rolls_ba
     )
     assert stop_env["stop_pid"] == [own_ui.pid]
     assert not _signalled(stop_env, foreign)
+    assert _alive(foreign)
+
+
+def test_a_failed_desktop_start_undoes_nothing_another_runtime_started_meanwhile(spawn, stop_env, caller, monkeypatch):
+    # This start spawned its service and UI; before it finished, another
+    # Runtime's UI replaced the UI record. Undoing the start leaves that UI.
+    own_service = spawn(RUNTIME_ID)
+    own_ui = spawn(RUNTIME_ID, "ui")
+    foreign_ui = spawn(OTHER_ID, "ui")
+    _start_config(monkeypatch)
+
+    def start_service(**kwargs):
+        paths.get_runtime_pid_path().write_text(str(own_service.pid), encoding="utf-8")
+        return kwargs["start_info"].capture(own_service.pid, reused=False)
+
+    def start_ui(*args, start_info, **kwargs):
+        paths.get_runtime_ui_pid_path().write_text(str(own_ui.pid), encoding="utf-8")
+        return start_info.capture(own_ui.pid, reused=False)
+
+    def wait_for_service_ready(pid, timeout):
+        paths.get_runtime_ui_pid_path().write_text(str(foreign_ui.pid), encoding="utf-8")
+        raise RuntimeError("the readiness wait failed")
+
+    monkeypatch.setattr(runtime, "start_service", start_service)
+    monkeypatch.setattr(runtime, "start_ui", start_ui)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", wait_for_service_ready)
+    caller(RUNTIME_ID)
+
+    with pytest.raises(RuntimeError, match="the readiness wait failed"):
+        cli.cmd_start(open_browser=False)
+
+    assert stop_env["stop_pid"] == [own_service.pid]
+    assert not _signalled(stop_env, foreign_ui)
+    assert _alive(foreign_ui)
+
+
+@pytest.mark.parametrize("previous", ["stopped", None])
+def test_a_refused_desktop_start_leaves_the_status_as_it_found_it(spawn, caller, capsys, monkeypatch, previous):
+    # The service this start spawned is stopped again, and nothing it announced remains.
+    foreign_ui = spawn(OTHER_ID, "ui")
+    own_service = spawn(RUNTIME_ID)
+    paths.get_runtime_ui_pid_path().write_text(str(foreign_ui.pid), encoding="utf-8")
+    _start_config(monkeypatch)
+
+    def start_service(**kwargs):
+        paths.get_runtime_pid_path().write_text(str(own_service.pid), encoding="utf-8")
+        return kwargs["start_info"].capture(own_service.pid, reused=False)
+
+    monkeypatch.setattr(runtime, "start_service", start_service)
+    caller(RUNTIME_ID)
+    status_path = paths.get_runtime_status_path()
+    if previous is not None:
+        cli._write_status(previous)
+    recorded = runtime.read_json(status_path)
+    assert cli.cmd_start(open_browser=False) == 3
+
+    assert _stderr_lines(capsys)[-1] == i18n_t(
+        "desktopRuntime.claimRefused", "en", part="ui", reason="runtime_id_mismatch"
+    )
+    assert runtime.read_json(status_path) == recorded
+    assert not _alive(own_service)
+    assert _alive(foreign_ui)
+
+
+@pytest.mark.parametrize("taken_over", ["service", "ui"])
+def test_a_stop_asks_again_of_every_process_it_is_about_to_signal(
+    spawn, stop_env, caller, capsys, monkeypatch, taken_over
+):
+    # Another Runtime replaced a part after the stop's first check passed.
+    service = spawn(OTHER_ID if taken_over == "service" else RUNTIME_ID)
+    ui = spawn(OTHER_ID if taken_over == "ui" else RUNTIME_ID, "ui")
+    paths.get_runtime_ui_pid_path().write_text(str(ui.pid), encoding="utf-8")
+    monkeypatch.setattr(runtime, "desktop_provenance_refusal", lambda **kwargs: None)
+    caller(RUNTIME_ID)
+
+    with _service_lock_held_for(service):
+        assert cli.cmd_stop() == 3
+
+    assert _stderr_lines(capsys)[-1] == i18n_t(
+        "desktopRuntime.stopRefused", "en", part=taken_over, reason="runtime_id_mismatch"
+    )
+    foreign = service if taken_over == "service" else ui
+    assert not _signalled(stop_env, foreign)
+    assert _alive(foreign)
+    # Nor is the tunnel connector the other Runtime's UI serves stopped.
+    assert stop_env["remote_access"] == []
+    assert stop_env["status"] == []
+    assert stop_env["stop_pid"] == ([] if taken_over == "service" else [service.pid])
+
+
+def test_a_restart_job_stops_nothing_of_a_runtime_that_took_over_after_its_check(
+    spawn, stop_env, caller, monkeypatch
+):
+    foreign = spawn(OTHER_ID)
+    monkeypatch.setattr(runtime, "desktop_provenance_refusal", lambda **kwargs: None)
+    caller(RUNTIME_ID)
+
+    with _service_lock_held_for(foreign):
+        rc = restart_supervisor._run_restart_job(job_id="jobtakenover", delay_seconds=0, vibe_path=None, trigger="test")
+
+    assert rc == 3
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert (status["ok"], status["state"]) == (False, "failed")
+    assert status["error"].startswith("restart refused: ")
+    assert stop_env["stop_pid"] == []
+    assert not _signalled(stop_env, foreign)
+    assert _alive(foreign)
+
+
+@pytest.mark.parametrize("taken_over", ["service", "ui"])
+def test_a_restart_job_s_successor_claims_only_its_own_runtime_and_undoes_what_it_started(
+    spawn, stop_env, caller, monkeypatch, taken_over
+):
+    # Another Runtime came up while this job's successor was starting: its
+    # service took the lock, or its UI is on record. The job neither adopts nor
+    # stops it, and undoes only what it started itself.
+    caller(RUNTIME_ID)
+    # The job runs from this Runtime's own tree, so its successor carries the id.
+    monkeypatch.setenv(desktop_runtime.DESKTOP_RUNTIME_ROOT_ENV, str(Path(sys.executable).resolve().parent))
+    # The Runtime it replaces has already stopped.
+    monkeypatch.setattr(
+        restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: (True, {}, 0.0, None, True, 0.0)
+    )
+    started: dict[str, subprocess.Popen] = {}
+    held = contextlib.ExitStack()
+
+    def start_service(**kwargs):
+        started["service"] = spawn(RUNTIME_ID)
+        paths.get_runtime_pid_path().write_text(str(started["service"].pid), encoding="utf-8")
+        if taken_over == "service":
+            started["foreign"] = spawn(OTHER_ID)
+            held.enter_context(_service_lock_held_for(started["foreign"]))
+        else:
+            started["foreign"] = spawn(OTHER_ID, "ui")
+            paths.get_runtime_ui_pid_path().write_text(str(started["foreign"].pid), encoding="utf-8")
+        info = kwargs.get("start_info") or runtime.ProcessStartInfo()
+        return info.capture(started["service"].pid, reused=False)
+
+    def start_ui(*args, **kwargs):
+        started["ui"] = spawn(RUNTIME_ID, "ui")
+        paths.get_runtime_ui_pid_path().write_text(str(started["ui"].pid), encoding="utf-8")
+        info = kwargs.get("start_info") or runtime.ProcessStartInfo()
+        return info.capture(started["ui"].pid, reused=False)
+
+    monkeypatch.setattr(runtime, "start_service", start_service)
+    if taken_over == "service":
+        monkeypatch.setattr(runtime, "start_ui", start_ui)
+        monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: started["foreign"].pid)
+    runtime.write_status("stopped", "stopped", None, None)
+    previous = runtime.read_json(paths.get_runtime_status_path())
+
+    with held:
+        rc = restart_supervisor._run_restart_job(
+            job_id=f"jobsuccessor{taken_over}", delay_seconds=0, vibe_path=None, trigger="test"
+        )
+
+        assert rc == 3
+        status = runtime.read_json(runtime.get_restart_status_path())
+        assert (status["ok"], status["state"]) == (False, "failed")
+        assert status["error"].startswith("restart refused: ")
+        own = started["ui"] if taken_over == "service" else started["service"]
+        assert stop_env["stop_pid"] == [own.pid]
+        assert not _signalled(stop_env, started["foreign"])
+        assert _alive(started["foreign"])
+        if taken_over == "ui":
+            assert runtime.read_json(paths.get_runtime_status_path()) == previous
+
+
+def test_a_web_start_against_another_runtime_s_service_says_it_was_refused(spawn, stop_env, caller):
+    foreign = spawn(OTHER_ID)
+    caller(RUNTIME_ID)
+    client = ui_server.app.test_client()
+
+    with _service_lock_held_for(foreign):
+        response = client.post("/api/control", json={"action": "start"}, headers=csrf_headers(client))
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert (payload["code"], payload["part"], payload["reason"]) == (
+        "start_refused",
+        "service",
+        "runtime_id_mismatch",
+    )
+    assert stop_env["signals"] == []
     assert _alive(foreign)

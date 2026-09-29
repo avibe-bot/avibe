@@ -42,11 +42,12 @@ const renderPage = () => {
 
 afterEach(() => {
   cleanup();
+  statusContext.status = { state: 'running', service_pid: 4321 };
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
 
-describe('service restart refused by the server', () => {
+describe('service control refused by the server', () => {
   it('tells the person the restart did not happen and why', async () => {
     api.getConfig.mockResolvedValue({ ui: {} });
     // What StatusProvider.control throws for the 409 /api/control answers when
@@ -64,5 +65,24 @@ describe('service restart refused by the server', () => {
     expect(await screen.findByText(en.settings.restartRefused)).toBeTruthy();
     expect(screen.queryByText('PID 4321')).toBeNull();
     expect((restart as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('tells the person the start did not happen and why', async () => {
+    api.getConfig.mockResolvedValue({ ui: {} });
+    statusContext.status = { state: 'stopped', service_pid: 4321 };
+    // What StatusProvider.control throws for the 409 /api/control answers when
+    // the service running here is not this desktop Runtime's.
+    statusContext.control.mockRejectedValue(
+      Object.assign(new Error('Control action start failed with status 409'), { code: 'start_refused' }),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderPage();
+
+    const start = screen.getByRole('button', { name: en.common.start });
+    await userEvent.click(start);
+
+    expect(statusContext.control).toHaveBeenCalledWith('start');
+    expect(await screen.findByText(en.settings.startRefused)).toBeTruthy();
+    expect((start as HTMLButtonElement).disabled).toBe(false);
   });
 });
