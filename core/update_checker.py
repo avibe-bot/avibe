@@ -522,7 +522,7 @@ class UpdateChecker:
     async def _reconcile_backend_auto_updates(self) -> None:
         """Upgrade opted-in backend CLIs, each only while no turn is using it."""
         coordinator = getattr(self.controller, "backend_restart_coordinator", None)
-        if coordinator is None or not self._quiet_for_idle_window():
+        if coordinator is None:
             return
 
         from modules.agents.catalog import AGENT_BACKENDS, supports_install
@@ -531,15 +531,6 @@ class UpdateChecker:
         for backend in AGENT_BACKENDS:
             if not supports_install(backend):
                 continue
-
-            # Once the install ran, its outcome is recorded; only a failure
-            # to enter or leave the idle window is left to the next check.
-            async def install(name: str = backend) -> dict:
-                try:
-                    return await asyncio.to_thread(api.install_agent, name)
-                except Exception as exc:  # noqa: BLE001
-                    return {"ok": False, "message": str(exc) or type(exc).__name__}
-
             try:
                 runtime = await asyncio.to_thread(api.get_backend_runtime, backend)
                 latest = runtime.get("latest_version")
@@ -552,23 +543,37 @@ class UpdateChecker:
                     and latest
                 ) or self.state.backend_auto_update_attempts.get(backend) == latest:
                     continue
+                # Checked per backend: a message may arrive during an earlier install.
+                if not self._quiet_for_idle_window():
+                    return
+
+                async def install(name: str = backend, release: str = latest) -> dict:
+                    try:
+                        result = await asyncio.to_thread(api.install_agent, name)
+                    except Exception as exc:  # noqa: BLE001
+                        result = {"ok": False, "message": str(exc) or type(exc).__name__}
+                    # A failed release is not retried unattended. It is recorded
+                    # before the refresh, whose own failure must not undo that.
+                    # A success needs no record: the next check sees whether it
+                    # actually reached the release, and tries again if not.
+                    if not result.get("ok") and result.get("code") != "install_locked":
+                        self.state.backend_auto_update_attempts[name] = release
+                        self.state.save()
+                    return result
+
                 result = await coordinator.run_when_idle(backend, install)
+                if result is None:
+                    logger.info("Backend %s auto-update to %s deferred: backend is busy", backend, latest)
+                elif result.get("code") == "install_locked":
+                    logger.info("Backend %s auto-update to %s deferred: another install is running", backend, latest)
+                elif not result.get("ok"):
+                    logger.warning("Backend %s auto-update to %s failed: %s", backend, latest, result.get("message"))
+                elif (await asyncio.to_thread(api.get_backend_runtime, backend)).get("has_update"):
+                    logger.info("Backend %s installer left it behind %s; retrying on a later check", backend, latest)
+                else:
+                    logger.info("Backend %s auto-updated to %s", backend, latest)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Backend %s auto-update failed: %s", backend, exc, exc_info=True)
-                continue
-
-            if result is None:
-                logger.info("Backend %s auto-update to %s deferred: backend is busy", backend, latest)
-                continue
-            if result.get("code") == "install_locked":
-                logger.info("Backend %s auto-update to %s deferred: another install is running", backend, latest)
-                continue
-            self.state.backend_auto_update_attempts[backend] = latest
-            self.state.save()
-            if result.get("ok"):
-                logger.info("Backend %s auto-updated to %s", backend, latest)
-            else:
-                logger.warning("Backend %s auto-update to %s failed: %s", backend, latest, result.get("message"))
 
     async def _get_version_info_async(self) -> Dict[str, Any]:
         """Get version info asynchronously."""

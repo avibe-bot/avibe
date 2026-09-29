@@ -625,40 +625,53 @@ class BackendRestartCoordinator:
         async with lock:
             if backend in self._migration_backends or backend in self._blocked_backends():
                 return None
-            try:
-                self._assert_no_native_login((backend,))
-            except NativeMigrationBlockedError:
-                return None
             existing = self._tasks.get(backend)
             if existing is not None:
                 if not existing.done():
                     return None
                 self._on_done(backend, existing)
-
-            agent_service = self.controller.agent_service
-            session_turns = self.controller.session_turns
-            agent_service.begin_backend_drain(backend)
-            session_turns.begin_backend_drain(backend)
-            busy = True
             try:
-                await agent_service.prepare_backend_restart(backend)
-                busy = await self._has_active_turns(backend)
-            finally:
-                # Nothing changed, so deferred messages resume on the same runtime.
-                if busy and backend not in self._blocked_backends():
-                    agent_service.end_backend_drain(backend)
-                    await session_turns.end_backend_drain(backend)
-            if busy:
+                self._assert_no_native_login((backend,))
+                # A login in either process holds this lease for its whole flow,
+                # so owning it until the refresh keeps one off a replaced CLI.
+                lease = NativeCredentialLease((backend,), state_dir=self._native_state_dir()).acquire()
+            except NativeMigrationBlockedError:
                 return None
-            task = asyncio.create_task(self._maintain(backend, operation), name=f"backend-maintenance:{backend}")
-            self._tasks[backend] = task
-            task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
 
-        # The requester going away must not abandon a half-applied install
-        # before the refresh that picks it up.
-        return await asyncio.shield(task)
+            task: asyncio.Task[_T] | None = None
+            try:
+                agent_service = self.controller.agent_service
+                session_turns = self.controller.session_turns
+                agent_service.begin_backend_drain(backend)
+                session_turns.begin_backend_drain(backend)
+                busy = True
+                try:
+                    await agent_service.prepare_backend_restart(backend)
+                    busy = await self._has_active_turns(backend)
+                finally:
+                    # Nothing changed, so deferred messages resume on the same runtime.
+                    if busy and backend not in self._blocked_backends():
+                        agent_service.end_backend_drain(backend)
+                        await session_turns.end_backend_drain(backend)
+                if not busy:
+                    task = asyncio.create_task(
+                        self._maintain(backend, operation, lease), name=f"backend-maintenance:{backend}"
+                    )
+                    self._tasks[backend] = task
+                    task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+            finally:
+                if task is None:
+                    lease.release()
+            if task is None:
+                return None
 
-    async def _maintain(self, backend: str, operation: Callable[[], Awaitable[_T]]) -> _T:
+        # A cancelled requester, such as the update checker at shutdown, still
+        # waits for the install and the refresh that picks it up.
+        return await finish_native_operation(task)
+
+    async def _maintain(
+        self, backend: str, operation: Callable[[], Awaitable[_T]], lease: NativeCredentialLease
+    ) -> _T:
         refreshed = False
         try:
             try:
@@ -668,9 +681,12 @@ class BackendRestartCoordinator:
                 await self._refresh(backend, False)
                 refreshed = True
         finally:
-            if backend not in self._blocked_backends():
-                self.controller.agent_service.end_backend_drain(backend)
-                await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+            try:
+                if backend not in self._blocked_backends():
+                    self.controller.agent_service.end_backend_drain(backend)
+                    await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+            finally:
+                lease.release()
 
     def _on_done(self, backend: str, task: asyncio.Task[Any]) -> None:
         current = self._tasks.get(backend) is task

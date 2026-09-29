@@ -2633,6 +2633,36 @@ def test_config_reload_recovers_invalid_codex_agent_with_disabled_default(monkey
     assert config_path.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.parametrize(
+    ("stored", "recovered"),
+    [
+        pytest.param("false", (), id="spelled-off"),
+        pytest.param("garbage", ("agents.codex.auto_update",), id="unreadable"),
+    ],
+)
+def test_config_reload_reads_backend_auto_update_off_without_losing_the_backend(
+    monkeypatch, tmp_path, stored, recovered
+):
+    """Unattended backend upgrades run only on a stored value that reads as on."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["agents"]["codex"].update({"enabled": True, "cli_path": "/preserved/codex", "auto_update": stored})
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.agents.codex.auto_update is False
+    assert loaded.agents.codex.enabled is True
+    assert loaded.agents.codex.cli_path == "/preserved/codex"
+    assert loaded.agents.claude.auto_update is True
+    assert loaded.recovered_sections == recovered
+    assert loaded.whole_config_recovery is False
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_config_load_degrades_codex_relay_marker_shapes(monkeypatch, tmp_path):
     """Persisted-shape rule for the new ``oauth_relay_marker`` field:
     a config written before the field existed loads with ``None``

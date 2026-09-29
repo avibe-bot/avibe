@@ -1058,35 +1058,17 @@ def test_fetch_pypi_version_sync_ignores_prerelease_for_stable_current(monkeypat
     assert info == {"current": "2.2.7", "latest": "2.2.7", "has_update": False, "error": None}
 
 
-def test_backend_auto_update_installs_each_release_once_when_quiet_and_idle(monkeypatch, tmp_path, sqlite_schema_db_factory):
+def _backend_auto_update_checker(monkeypatch, tmp_path, sqlite_schema_db_factory, coordinator, runtimes, install):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     controller = _StubController(SettingsStore.get_instance())
-    admissions = []
-    busy = {"codex": True}
-
-    class _Coordinator:
-        async def run_when_idle(self, backend, operation):
-            admissions.append(backend)
-            return None if busy.get(backend) else await operation()
-
-    controller.backend_restart_coordinator = _Coordinator()
-    runtimes = {
-        "codex": {"auto_update": True, "has_update": True, "latest_version": "1.1.0"},
-        "claude": {"auto_update": False, "has_update": True, "latest_version": "2.0.0"},
-        "opencode": {"auto_update": True, "has_update": False, "latest_version": "1.0.0"},
-    }
+    controller.backend_restart_coordinator = coordinator
     monkeypatch.setattr(
         "vibe.api.get_backend_runtime",
         lambda name: {"ok": True, "enabled": True, "installed": True, **runtimes[name]},
     )
-    install_results = [
-        {"ok": False, "code": "install_locked", "message": "Another Codex installation is already running."},
-        {"ok": False, "code": "install_failed", "message": "Could not upgrade Codex."},
-    ]
-    installs = []
-    monkeypatch.setattr("vibe.api.install_agent", lambda name: installs.append(name) or install_results.pop(0))
+    monkeypatch.setattr("vibe.api.install_agent", install)
     monkeypatch.setattr("vibe.api.reconcile_askill_auto_update", lambda: {"ok": True, "skipped": True})
     monkeypatch.setattr(
         update_checker,
@@ -1094,6 +1076,46 @@ def test_backend_auto_update_installs_each_release_once_when_quiet_and_idle(monk
         lambda: {"current": "1.0.0", "latest": "1.0.0", "has_update": False, "error": None},
     )
     checker = UpdateChecker(controller, UpdateConfig(check_interval_minutes=60, idle_minutes=30))
+    checker.state.last_activity_at = time.time() - 3600
+    return checker
+
+
+def test_backend_auto_update_retries_a_release_until_it_lands_or_its_install_fails(
+    monkeypatch, tmp_path, sqlite_schema_db_factory
+):
+    admissions = []
+    coordinator_state = {"busy": True, "refresh_fails": False}
+
+    class _Coordinator:
+        async def run_when_idle(self, backend, operation):
+            admissions.append(backend)
+            if coordinator_state["busy"]:
+                return None
+            result = await operation()
+            if coordinator_state["refresh_fails"]:
+                raise RuntimeError("refresh failed")
+            return result
+
+    runtimes = {
+        "codex": {"auto_update": True, "has_update": True, "latest_version": "1.1.0"},
+        "claude": {"auto_update": False, "has_update": True, "latest_version": "2.0.0"},
+        "opencode": {"auto_update": True, "has_update": False, "latest_version": "1.0.0"},
+    }
+    install_results = [
+        {"ok": False, "code": "install_locked", "message": "Another Codex installation is already running."},
+        {"ok": True},
+        {"ok": False, "code": "install_failed", "message": "Could not upgrade Codex."},
+        {"ok": True},
+    ]
+    installs = []
+
+    def install(name):
+        installs.append(name)
+        return install_results.pop(0)
+
+    checker = _backend_auto_update_checker(
+        monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
+    )
 
     # A message inside the quiet window defers every backend, like Avibe's own update.
     checker.state.last_activity_at = time.time() - 60
@@ -1102,14 +1124,50 @@ def test_backend_auto_update_installs_each_release_once_when_quiet_and_idle(monk
 
     checker.state.last_activity_at = time.time() - 3600
     asyncio.run(checker._do_check())  # codex has a turn running
-    busy["codex"] = False
+    coordinator_state["busy"] = False
     asyncio.run(checker._do_check())  # a manual install holds the CLI
-    asyncio.run(checker._do_check())  # the install runs and fails
+    asyncio.run(checker._do_check())  # the installer succeeds without reaching the release
+    coordinator_state["refresh_fails"] = True
+    asyncio.run(checker._do_check())  # the install fails, then so does the refresh
+    coordinator_state["refresh_fails"] = False
     asyncio.run(checker._do_check())  # the failed release is not retried
 
-    assert admissions == ["codex", "codex", "codex"]
-    assert installs == ["codex", "codex"]
+    assert admissions == ["codex"] * 4
+    assert installs == ["codex"] * 3
     assert update_checker.UpdateState.load().backend_auto_update_attempts == {"codex": "1.1.0"}
+
+    runtimes["codex"]["latest_version"] = "1.2.0"
+    asyncio.run(checker._do_check())  # a newer release is tried again
+
+    assert installs == ["codex"] * 4
+
+
+def test_backend_auto_update_stops_admitting_backends_once_a_message_arrives(
+    monkeypatch, tmp_path, sqlite_schema_db_factory
+):
+    admissions = []
+
+    class _Coordinator:
+        async def run_when_idle(self, backend, operation):
+            admissions.append(backend)
+            return await operation()
+
+    def install(name):
+        # The first backend's install outlasts the quiet window.
+        checker.record_activity()
+        return {"ok": True}
+
+    runtimes = {
+        name: {"auto_update": True, "has_update": True, "latest_version": "9.0.0"}
+        for name in ("codex", "claude", "opencode")
+    }
+    checker = _backend_auto_update_checker(
+        monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
+    )
+
+    asyncio.run(checker._do_check())
+
+    assert len(admissions) == 1
 
 
 @pytest.mark.parametrize("attempts", [None, ["codex"]])
