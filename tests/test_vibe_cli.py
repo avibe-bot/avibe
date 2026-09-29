@@ -1417,7 +1417,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     assert not any(call == "stop" for call in calls)
 
 
-def _superseded_controller(monkeypatch, result, *, ui_running=False):
+def _superseded_controller(monkeypatch, result):
     calls = []
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "b" * 64)
     monkeypatch.setattr(
@@ -1430,7 +1430,6 @@ def _superseded_controller(monkeypatch, result, *, ui_running=False):
         "stop_desktop_runtime",
         lambda runtime_id, **kwargs: calls.append((runtime_id, kwargs)) or result,
     )
-    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: ui_running)
     return calls
 
 
@@ -1461,19 +1460,17 @@ def _left(role):
 
 
 @pytest.mark.parametrize(
-    ("result", "ui_running", "status"),
+    ("result", "status"),
     [
-        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), False, 3),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), False, 2),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), False, 2),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), False, 2),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), False, 2),
-        # Stopped, but a UI of some other Runtime still holds the pidfile.
-        (cli.runtime.DesktopRuntimeStopResult(), True, 3),
+        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), 3),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), 2),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), 2),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), 2),
+        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), 2),
     ],
 )
-def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, ui_running, status):
-    _superseded_controller(monkeypatch, result, ui_running=ui_running)
+def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, status):
+    _superseded_controller(monkeypatch, result)
 
     # 3: this start does not take the home over; 2: part of it may still run.
     assert cli._handover_superseded_desktop_runtime(allowed=True) == status

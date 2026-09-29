@@ -567,18 +567,21 @@ def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(monkeypatch, 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 @pytest.mark.parametrize("failing", ["service", "ui"])
 def test_a_full_stop_that_fails_still_reaps_the_tree_of_a_dead_owner(
-    monkeypatch, installer_tree, quiet_stop, failing
+    monkeypatch, installer_tree, quiet_stop, children, failing
 ):
     from vibe import runtime
 
     env, wait_for_tree = installer_tree
     cli, statuses = quiet_stop
     pids = _start_killed_owner(env, wait_for_tree)
-    # The stop reports this half as still running.
+    # The stop reports this half, a process of the caller's own Runtime, as
+    # still running.
+    children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+    running = children[-1].pid
     if failing == "service":
-        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: os.getpid())
+        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: running)
     else:
-        config_paths.get_runtime_ui_pid_path().write_text(str(os.getpid()), encoding="utf-8")
+        config_paths.get_runtime_ui_pid_path().write_text(str(running), encoding="utf-8")
         monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
 
     assert cli.cmd_stop() == 2

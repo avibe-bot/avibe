@@ -846,7 +846,9 @@
     "handoverNotRequested": "Another desktop-managed Avibe Runtime is running here; this start does not replace it.",
     "handoverRefused": "Refused to stop the superseded desktop-managed Avibe Runtime: {reason}",
     "handoverFailed": "Failed to stop the superseded desktop-managed Avibe Runtime: {part}",
-    "handoverForeignUi": "A UI server that is not the superseded desktop-managed Avibe Runtime's is still running."
+    "claimRefused": "Another Avibe Runtime is running here and does not belong to this desktop app; nothing was stopped ({part}: {reason}).",
+    "stopRefused": "Nothing was stopped: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Stop it from the Avibe that started it.",
+    "restartRefused": "Nothing was restarted: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Restart it from the Avibe that started it."
   },
   "agentInstall": {
     "installFailed": "Could not install {backend}.",

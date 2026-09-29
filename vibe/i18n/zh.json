@@ -846,7 +846,9 @@
     "handoverNotRequested": "此处正在运行另一个桌面托管的 Avibe Runtime；本次启动不会替换它。",
     "handoverRefused": "已拒绝停止被取代的桌面托管 Avibe Runtime：{reason}",
     "handoverFailed": "未能停止被取代的桌面托管 Avibe Runtime：{part}",
-    "handoverForeignUi": "仍有一个不属于被取代的桌面托管 Avibe Runtime 的 UI 服务在运行。"
+    "claimRefused": "此处正在运行另一个不属于本桌面应用的 Avibe Runtime；未停止任何进程（{part}：{reason}）。",
+    "stopRefused": "未停止任何进程：此命令来自桌面托管的 Avibe Runtime，而正在运行的 {part} 不属于该 Runtime（{reason}）。请从启动它的 Avibe 停止它。",
+    "restartRefused": "未重启任何进程：此命令来自桌面托管的 Avibe Runtime，而正在运行的 {part} 不属于该 Runtime（{reason}）。请从启动它的 Avibe 重启它。"
   },
   "agentInstall": {
     "installFailed": "无法安装 {backend}。",

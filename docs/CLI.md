@@ -68,6 +68,7 @@ vibe start --allow-downgrade
 - With `--no-open-browser`, keeps the service/UI lifecycle the same but does not launch a system browser window
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
 - Refuses to run an install older than the last activated one, for example an old `vibe` earlier on `PATH`. The error names both versions and the launcher to run instead; `--allow-downgrade` runs the older build on purpose. The desktop app only warns.
+- Started by the desktop app, reuses or replaces only a service and Web UI of that app's own Runtime. If another Avibe is running here, it exits with status 3, says so, and leaves that Avibe running.
 
 ### `vibe stop`
 
@@ -81,6 +82,7 @@ vibe stop
 - Stops the main service
 - Stops the web UI server
 - **Terminates OpenCode server** — Use this when you need to restart OpenCode
+- Run from inside a desktop app's Runtime (for example, by an agent it started), stops only that Runtime. If the Avibe running here is another one, it stops nothing, explains why, and exits with status 3.
 
 ### `vibe restart`
 
@@ -97,6 +99,7 @@ vibe restart --allow-downgrade
 - Terminates the OpenCode server
 - With `--delay-seconds N`, schedules the restart `N` seconds in the future so an active conversation can receive its reply before the restart lands. Prefer this form when an agent is triggering the restart from inside Slack, Discord, Telegram, Lark/Feishu, or WeChat.
 - Refuses, like `vibe start`, to restart onto an install older than the last activated one unless you pass `--allow-downgrade`
+- Run from inside a desktop app's Runtime, restarts only that Runtime; otherwise it stops nothing, explains why, and exits with status 3. A restart from the Web UI shows the same refusal instead of restarting.
 
 ### `vibe status`
 

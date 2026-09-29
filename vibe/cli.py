@@ -13670,11 +13670,8 @@ def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
     if result.failure is not None:
         print(i18n_t("desktopRuntime.handoverFailed", language, part=result.failure), file=sys.stderr)
         return 2
-    # A UI still running is not the superseded Runtime's. Starting would reuse
-    # it, or replace it with an unscoped stop.
-    if runtime.ui_pid_file_points_to_running_ui():
-        print(i18n_t("desktopRuntime.handoverForeignUi", language), file=sys.stderr)
-        return 3
+    # Anything still running is not the superseded Runtime's; the start claims
+    # only what carries this Runtime's id.
     return 0
 
 
@@ -13764,6 +13761,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         )
         service_ready = resolved_pid is not None
         if resolved_pid is not None:
+            runtime.claim_ready_service(resolved_pid, started_pid=service_pid, start_info=service_start)
             service_pid = resolved_pid
         if service_ready:
             runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
@@ -13791,7 +13789,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
             if not opened:
                 print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
                 print("")
-    except BaseException:
+    except BaseException as exc:
         # The invariant is that this invocation leaves running nothing it
         # created -- not just the service. The region starts two processes, and
         # a guard that undid one left the other exactly as orphaned: a UI this
@@ -13828,6 +13826,12 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
             # logs any pid it could not stop, so a rollback that itself fails
             # still leaves evidence; either way the start has failed.
             runtime.stop_service()
+        if isinstance(exc, runtime.DesktopRuntimeClaimRefused):
+            print(
+                i18n_t("desktopRuntime.claimRefused", _configured_cli_language(), part=exc.part, reason=exc.reason),
+                file=sys.stderr,
+            )
+            return 3
         raise
     if service_ready:
         from vibe.install_generations import collect_install_generations
@@ -14007,9 +14011,24 @@ def _stop_the_home_s_connector() -> int:
     return outcome[0]
 
 
+def _desktop_provenance_refused(key: str, *, include_ui: bool = True) -> bool:
+    """Print why a desktop caller may not act on the Avibe running here, if it may not."""
+
+    refusal = runtime.desktop_provenance_refusal(include_ui=include_ui)
+    if refusal is None:
+        return False
+    print(
+        i18n_t(key, _configured_cli_language(), part=refusal.part, reason=refusal.reason),
+        file=sys.stderr,
+    )
+    return True
+
+
 def cmd_stop(*, expect_runtime_id: str | None = None):
     if expect_runtime_id is not None:
         return _stop_expected_desktop_runtime(expect_runtime_id)
+    if _desktop_provenance_refused("desktopRuntime.stopRefused"):
+        return 3
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
@@ -16589,6 +16608,9 @@ def _generation_downgrade_blocks(command: str | None, *, allow_downgrade: bool =
 
 
 def _cmd_restart_with_delay(delay_seconds: float) -> int:
+    # Checked again by the restart job, which acts on whatever runs by then.
+    if _desktop_provenance_refused("desktopRuntime.restartRefused"):
+        return 3
     if delay_seconds > 0:
         return _schedule_delayed_restart(delay_seconds)
 

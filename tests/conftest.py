@@ -230,6 +230,11 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
         "AVIBE_SKILL_XDG_CONFIG_HOME",
         "AVIBE_BUILTIN_SKILLS_ROOT",
         "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
+        # A pytest started from a desktop Runtime's terminal would otherwise
+        # act as that Runtime, and every stop, restart and start refuses or
+        # claims by its id.
+        "AVIBE_DESKTOP_RUNTIME_ID",
+        "AVIBE_DESKTOP_RUNTIME_ROOT",
     ):
         monkeypatch.delenv(name, raising=False)
     isolated_home = tmp_path / "home"

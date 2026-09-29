@@ -81,6 +81,7 @@ from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 if TYPE_CHECKING:
     from core.show_runtime import ShowRuntimeUnavailableError
+    from vibe.runtime import DesktopRuntimeClaimRefused
 
 logger = logging.getLogger(__name__)
 
@@ -6750,9 +6751,25 @@ def _restart_in_flight() -> bool:
     return age < _RESTART_SEED_GRACE_SECONDS
 
 
+def _restart_refusal_payload(refusal: "DesktopRuntimeClaimRefused") -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": f"restart refused: {refusal}",
+        "code": "restart_refused",
+        "part": refusal.part,
+        "reason": refusal.reason,
+    }
+
+
 def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
     from vibe import runtime
     from vibe.restart_supervisor import mark_pending_restart, schedule_restart
+
+    # The restart job refuses too; asking first keeps the runtime from being
+    # marked restarting for a restart that will not happen.
+    refusal = runtime.desktop_provenance_refusal(include_ui=False)
+    if refusal is not None:
+        return _restart_refusal_payload(refusal)
 
     def _schedule_restart() -> dict[str, Any]:
         status = runtime.read_status()
@@ -6890,6 +6907,12 @@ def control():
                             "status": runtime.read_status(),
                         }
                     ),
+                    409,
+                )
+            refusal = runtime.desktop_provenance_refusal(include_ui=scope != "service")
+            if refusal is not None:
+                return (
+                    jsonify({**_restart_refusal_payload(refusal), "action": action, "status": runtime.read_status()}),
                     409,
                 )
             runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))

@@ -1,7 +1,8 @@
 # Desktop Runtime scoped stop and installer ownership
 
 Refs #2135, #2131. PR 2a is the Python half; PR 2b is the desktop host and
-removes the startup receipt from both sides.
+removes the startup receipt from both sides; PR 3 makes the start, plain stop
+and restart boundaries claim only by provenance.
 
 ## Outcome and boundaries
 
@@ -9,8 +10,10 @@ A desktop app must update smoothly and never stop a Runtime it did not start.
 Authority to stop follows provenance: the desktop host knows which Runtime id its
 bundle started, and asks Python to stop only processes that carry that id. The
 scoped stop reads no file: no pidfile, lock record or installer record decides
-what is signalled. `/ready` and `/internal/health` are unchanged, and so is
-plain `vibe stop`. The startup receipt (`@avibe-start-receipt:` and
+what is signalled. `/ready` and `/internal/health` are unchanged. Plain
+`vibe stop` is unchanged for a caller without desktop provenance; a desktop
+caller refuses it for any Runtime but its own (see "Start and restart claim").
+The startup receipt (`@avibe-start-receipt:` and
 `vibe stop --receipt`) is gone: provenance is the Runtime id, not a receipt the
 host has to keep.
 
@@ -107,15 +110,63 @@ controller whose health names another desktop Runtime id:
 
 - without `--hand-over` it exits 3 and leaves that Runtime running;
 - with it, it calls the same `runtime.stop_desktop_runtime` with that observed
-  id, and exits 3 if the stop is refused and 2 if it fails;
-- it also exits 3 if the UI pidfile still names a running UI afterwards: that
-  UI is not the superseded Runtime's, and the start would otherwise reuse it or
-  replace it with an unscoped stop.
+  id, and exits 3 if the stop is refused and 2 if it fails.
+
+Whatever is still running afterwards is not the superseded Runtime's; the start
+claim below decides whether this start may reuse or replace it.
 
 Exit 3 means this start did not take the home over; exit 2 means the superseded
 Runtime may be left partly running. `runtime.stop_desktop_runtime` never stops
 the tunnel connector, so the successor adopts it. These errors go through
 `vibe/i18n/` (`desktopRuntime.handover*`).
+
+## Start and restart claim (PR 3)
+
+No actor stops, reuses, adopts or replaces a Runtime it has no provenance over.
+A refusal says why, exits 3, and leaves everything running.
+
+**Start claim.** With `E = desktop_runtime_id()` of the caller's environment,
+`vibe start` claims a service or UI only when the process carries
+`AVIBE_DESKTOP_RUNTIME_ID == E` (`runtime.claim_desktop_runtime_process`).
+The claim points are every reuse return of `_resolve_service_pid` and the pid
+`wait_for_service_ready` ends with (`claim_ready_service`), and the UI reuse or
+replace decision in `start_ui`. There, under `E`, a UI pid whose command line
+cannot be read is refused rather than taken for a stale pidfile; a readable UI
+command is claimed by its environment; a readable non-UI command is still a
+stale pidfile. A refusal raises `DesktopRuntimeClaimRefused(part, reason)`,
+`cmd_start` rolls back only what it spawned, and it exits 3 with
+`desktopRuntime.claimRefused`. A start without `E` claims as before.
+
+**Provenance.** `desktop_runtime.desktop_caller_provenance()` is the set of the
+caller's environment id and the id of the private tree its interpreter runs
+from. The tree id is read from the install marker `.avibe-runtime.json` that
+the host writes at the tree root (`write_marker` in
+`desktop/runtime-host/src/private_runtime.rs`): the nearest marker within three
+directories above the resolved interpreter decides, and it counts only when its
+`archive_sha256` is 64 lowercase hex and its relative `python_entrypoint`
+resolves back to that interpreter. Anything else, including a marker further
+up, names no tree. Against a service carrying Runtime B:
+
+| Caller env | Caller tree | Result |
+| --- | --- | --- |
+| A | A | refuse |
+| B | B | allow |
+| B | A | refuse |
+| none | A | refuse |
+| none | B | allow |
+| none | none | as before |
+
+With provenance, nothing running proceeds; a service, an extra service process
+or a live UI pidfile pid that cannot be read, or that carries another id or
+none, refuses. The check (`runtime.desktop_provenance_refusal`) runs on plain
+`vibe stop` (exit 3, `desktopRuntime.stopRefused`), in `vibe restart` before
+anything is scheduled (exit 3, `desktopRuntime.restartRefused`), and in the
+restart job before it stops anything or carries the desktop identity (rc 3,
+status `failed`, error `restart refused: …`). The Web restart (`/api/control`
+restart, 409 `restart_refused`) and the config-save fallback restart
+(`platform_runtime.restart_code = restart_refused`) ask first, so the status is
+never set to `restarting` for a restart that will not happen, and the UI shows
+the refusal.
 
 ## Backend installer ownership (#2131)
 
@@ -239,11 +290,23 @@ the tunnel connector, so the successor adopts it. These errors go through
 - argparse usage errors also exit 2, so a `vibe start` too old to know
   `--hand-over` reads as a handover that may have left the predecessor partly
   running. The bundled launcher is always the same version, so this cannot
-  happen, and the reading fails closed. No other `vibe start` path exits 2 or 3.
-- A `vibe restart` or plain `vibe stop` run by a process a superseded Runtime
-  left running still acts on the Controller unscoped, because its desktop
-  identity was stripped with its old root. Claiming by the caller's own id
-  belongs at the start and restart boundary, tracked in #2135 for PR 3.
+  happen, and the reading fails closed. Besides the handover, only a start
+  claim refusal exits 3: another Runtime serves this home and the start did
+  not replace it, which the host reads as the same `HandoverRefused` →
+  `runtime_ownership_lost`. No other `vibe start` path exits 2 or 3.
+- The Web `/api/control` stop is not checked for provenance: it is the person
+  at this Runtime's own Workbench stopping the service it serves.
+- The Web restart and config-save pre-checks are check-then-act. A Runtime
+  that replaces this one in between is still refused by the restart job
+  (rc 3). The job records that failure in its own restart status and, as
+  after any failed restart job, the runtime state stays `restarting`; the Web
+  UI's fast poll stops after 45 s.
+- A Runtime that lost its desktop identity (a terminal restart on a TEST
+  prerelease before the G15 carry-over, or a deliberate manual run) is adopted
+  as external by the host and managed from a terminal as before. Telling it
+  from a non-desktop Avibe would need `/ready` to report its root and version.
+- A caller whose environment and tree name two different ids acts for
+  neither.
 - A role process in the stop's own lineage is never signalled and fails the
   stop; a program without a role in the lineage is not listed.
 - The scoped stop path reads no file: no pidfile, lock record or installer
@@ -261,13 +324,6 @@ the tunnel connector, so the successor adopts it. These errors go through
   code would widen this change beyond the desktop. A test pins both.
 - A non-desktop `vibe start` still replaces an unhealthy UI through `stop_ui`,
   unchanged.
-- The start side of the handover claims by pidfile, lock and command line, as
-  on master. A service another desktop Runtime starts after the scan can be
-  reused under the wrong id, and a live foreign UI whose command line cannot be
-  read passes the UI check. A handover check is check-then-act, so the fix
-  belongs at the start claim points (`_resolve_service_pid`, `start_ui` reuse
-  or replace): with an expected id, claim only processes that carry this
-  Runtime id. Tracked in #2135.
 - If this stop's ancestors cannot all be read, its lineage falls back to its
   pid and parent pid, with a warning; a role process of this Runtime further up
   the chain could then be signalled.
@@ -312,5 +368,10 @@ spawn error → `Unrunnable`. The host never stops a predecessor itself.
   offers "Delete Anyway" or "Keep Files".
 - B8, Stop and Quit: offered only while the last presence is `Mine`. A refusal
   shows `runtime_ownership_lost`; a failure shows `runtime_stop_failed`.
-- `Unknown` → launch relies on the start boundary, tracked in
-  https://github.com/avibe-bot/avibe/issues/2135#issuecomment-5877263657.
+- `Unknown` → launch relies on the start claim: the start reuses or replaces
+  only processes carrying this bundle's id and otherwise exits 3.
+- A failed return to the bootstrap page after a Stop or a failed removal
+  keeps no lifecycle owner (`lib.rs` `recover_after_runtime_removal_failure`).
+  On these paths it fails only when the event loop has exited, so no owner is
+  left to restore; see
+  https://github.com/avibe-bot/avibe/pull/2269#discussion_r4131364951.

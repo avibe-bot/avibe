@@ -2068,6 +2068,7 @@ def start_service(
     ready_pid = wait_for_service_ready(pid, timeout=max(0.0, deadline - time.monotonic()))
     if ready_pid is None:
         _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    claim_ready_service(ready_pid, started_pid=pid, start_info=start_info)
     if start_info is not None:
         start_info.capture(ready_pid, reused=start_info.reused)
     from vibe.install_generations import collect_install_generations
@@ -2093,6 +2094,10 @@ def _resolve_service_pid(
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
     def result(pid: int, *, reused: bool) -> int:
+        # A process this call did not start is reused only when it is the
+        # caller's own desktop Runtime's; see claim_desktop_runtime_process.
+        if reused:
+            claim_desktop_runtime_process(pid, "service")
         return start_info.capture(pid, reused=reused) if start_info is not None else pid
 
     guard_source_checkout_default_state_bootstrap()
@@ -2184,6 +2189,7 @@ def _resolve_service_pid(
                 initial_ready_timeout=initial_ready_timeout,
                 wait_for_ready=wait_for_ready,
             )
+            claim_ready_service(resolved_pid, started_pid=pid, start_info=start_info)
             return result(resolved_pid, reused=False)
         if initial_ready_timeout > 0 and wait_for_service_pid(pid, timeout=initial_ready_timeout):
             return pid
@@ -2427,11 +2433,20 @@ def start_ui(
         except Exception:
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
-            if _pid_matches_ui_server(existing_pid) and _ui_server_compatible(host, port):
+            from vibe.desktop_runtime import desktop_runtime_id
+
+            is_ui_server = _pid_matches_ui_server(existing_pid)
+            if not is_ui_server and desktop_runtime_id() is not None and not get_process_command(existing_pid):
+                # A desktop start cannot tell whose this is, so it neither
+                # reuses it nor starts a UI over it.
+                raise DesktopRuntimeClaimRefused("ui", "identity_unavailable")
+            if is_ui_server:
+                claim_desktop_runtime_process(existing_pid, "ui")
+            if is_ui_server and _ui_server_compatible(host, port):
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
                 return existing_pid
-            if _pid_matches_ui_server(existing_pid):
+            if is_ui_server:
                 logger.warning(
                     "Stopping stale UI process pid=%s because required listener or identity checks failed for %s",
                     existing_pid,
@@ -2745,6 +2760,104 @@ def is_desktop_ui(pid: int, runtime_id: str | None) -> bool | None:
         return False
     except (psutil.Error, OSError):
         return None
+
+
+class DesktopRuntimeClaimRefused(RuntimeError):
+    """A start or stop found a running ``part`` that is not its own Runtime's.
+
+    ``reason`` is ``runtime_id_mismatch`` for a process carrying another id or
+    none, and ``identity_unavailable`` when nothing can tell whose it is. The
+    process is left as it is.
+    """
+
+    def __init__(self, part: str, reason: str) -> None:
+        super().__init__(f"the running {part} is not this desktop Runtime's ({reason})")
+        self.part = part
+        self.reason = reason
+
+
+def _desktop_runtime_mismatch(pid: int, runtime_ids: frozenset[str]) -> str | None:
+    """Why ``pid`` is not a process of the one Runtime ``runtime_ids`` names, or None.
+
+    A caller that can act for two Runtimes acts for neither. A process that has
+    exited is nobody's.
+    """
+
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    try:
+        carried = desktop_runtime_id(psutil.Process(pid).environ())
+    except psutil.NoSuchProcess:
+        return None
+    except (psutil.Error, OSError):
+        return "identity_unavailable"
+    if carried is None or runtime_ids != {carried}:
+        return "runtime_id_mismatch"
+    return None
+
+
+def claim_desktop_runtime_process(pid: int, part: str) -> None:
+    """Raise ``DesktopRuntimeClaimRefused`` unless ``pid`` is this desktop Runtime's own.
+
+    A start carrying a desktop Runtime id reuses, adopts or replaces only
+    processes carrying the same id. A start without one claims as it always has.
+    """
+
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    runtime_id = desktop_runtime_id()
+    if runtime_id is None:
+        return
+    reason = _desktop_runtime_mismatch(pid, frozenset({runtime_id}))
+    if reason is not None:
+        raise DesktopRuntimeClaimRefused(part, reason)
+
+
+def claim_ready_service(ready_pid: int, *, started_pid: int, start_info: ProcessStartInfo | None) -> None:
+    """Claim the lock holder a start ended up with when it is not the process it asked about.
+
+    A service of another Runtime can take the lock first. It is not this
+    start's to undo, so it is recorded as reused before the refusal.
+    """
+
+    if ready_pid == started_pid:
+        return
+    try:
+        claim_desktop_runtime_process(ready_pid, "service")
+    except DesktopRuntimeClaimRefused:
+        if start_info is not None:
+            start_info.capture(ready_pid, reused=True)
+        raise
+
+
+def desktop_provenance_refusal(*, include_ui: bool = True) -> DesktopRuntimeClaimRefused | None:
+    """Why this caller may not stop or restart the Avibe running here, or None when it may.
+
+    A caller with no desktop provenance manages whatever runs here, as it always
+    has. A desktop caller acts only for its own Runtime: every service process,
+    and with ``include_ui`` the recorded UI, must carry exactly its id. With
+    nothing running there is nothing to refuse.
+    """
+
+    from vibe.desktop_runtime import desktop_caller_provenance
+
+    provenance = desktop_caller_provenance()
+    if not provenance:
+        return None
+    owner_pid = resolve_service_owner_pid()
+    service_pids = set(extra_service_process_pids(owner_pid=owner_pid))
+    if owner_pid is not None:
+        service_pids.add(owner_pid)
+    parts = [("service", pid) for pid in sorted(service_pids)]
+    if include_ui:
+        ui_pid = _read_pid_file(paths.get_runtime_ui_pid_path())
+        if ui_pid and pid_alive(ui_pid):
+            parts.append(("ui", ui_pid))
+    for part, pid in parts:
+        reason = _desktop_runtime_mismatch(pid, provenance)
+        if reason is not None:
+            return DesktopRuntimeClaimRefused(part, reason)
+    return None
 
 
 def _scan_desktop_runtime(fingerprint: str, lineage: frozenset[int]) -> list[_ScannedDesktopProcess]:

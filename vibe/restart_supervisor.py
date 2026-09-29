@@ -431,6 +431,11 @@ def _run_restart_job(
             write("restart job started after delay")
             restart_started_at = time.monotonic()
 
+        # Whoever asked, a desktop caller restarts only its own Runtime. Nothing
+        # has been stopped yet, and nothing is.
+        refusal = runtime.desktop_provenance_refusal(include_ui=restart_ui)
+        if refusal is not None:
+            return fail(f"restart refused: {refusal}", 3, started_at=restart_started_at)
         write(f"relaunching {_carry_desktop_identity()}")
         write("stopping UI and service" if restart_ui else "stopping service (Web UI kept running)")
         stop_runtime_started_at = time.monotonic()
