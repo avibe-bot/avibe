@@ -687,6 +687,25 @@ def test_a_plain_stop_from_another_desktop_runtime_stops_nothing(running_runtime
     assert all(_alive(child) for child in running_runtime)
 
 
+def test_a_plain_stop_refuses_while_nothing_names_the_service_lock_holder(spawn, caller, stop_env, capsys):
+    # The UI and the tunnel connector serve whichever service holds the lock.
+    ui = spawn(RUNTIME_ID, "ui")
+    paths.get_runtime_ui_pid_path().write_text(str(ui.pid), encoding="utf-8")
+    caller(RUNTIME_ID)
+
+    with _service_lock_held_for(None):
+        assert cli.cmd_stop() == 3
+
+    assert _stderr_lines(capsys)[-1] == i18n_t(
+        "desktopRuntime.stopRefused", "en", part="service", reason="identity_unavailable"
+    )
+    assert stop_env["signals"] == []
+    assert stop_env["stop_pid"] == []
+    assert stop_env["remote_access"] == []
+    assert stop_env["status"] == []
+    assert _alive(ui)
+
+
 @pytest.mark.parametrize("server_id", [RUNTIME_ID, OTHER_ID])
 def test_a_plain_stop_stops_only_its_own_runtime_s_opencode_server(spawn, caller, stop_env, server_id):
     # The server record may still name one another Runtime's service started.
@@ -699,6 +718,34 @@ def test_a_plain_stop_stops_only_its_own_runtime_s_opencode_server(spawn, caller
     assert stop_env["stop_pid"] == ([server.pid] if server_id == RUNTIME_ID else [])
     assert stop_env["status"] == [("stopped",)]
     assert _alive(server)
+
+
+@pytest.mark.parametrize("entry", ["stop", "restart-job"])
+def test_a_stop_from_a_runtime_s_own_tree_reaps_its_abandoned_installers(spawn, caller, stop_env, monkeypatch, entry):
+    # Only the interpreter names the Runtime; the environment names none.
+    owner = spawn(RUNTIME_ID, "ui")
+    installer = spawn(RUNTIME_ID, "installer", owner=owner)
+    owner.kill()
+    owner.wait(timeout=10)
+    caller(None, RUNTIME_ID)
+
+    if entry == "stop":
+        assert cli.cmd_stop() == 0
+    else:
+        reaped_before_the_successor = []
+
+        def start_runtime_processes(**kwargs):
+            reaped_before_the_successor.append(_signalled(stop_env, installer))
+            raise RuntimeError("the successor is not started here")
+
+        monkeypatch.setattr(
+            restart_supervisor, "_stop_runtime_for_restart", lambda **kwargs: (True, {}, 0.0, None, True, 0.0)
+        )
+        monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start_runtime_processes)
+        restart_supervisor._run_restart_job(job_id="jobreap", delay_seconds=0, vibe_path=None, trigger="test")
+        assert reaped_before_the_successor == [True]
+
+    assert (installer.pid, signal.SIGTERM) in stop_env["signals"]
 
 
 def test_a_plain_restart_from_another_desktop_runtime_schedules_nothing(

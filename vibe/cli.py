@@ -14070,8 +14070,9 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs
-    # whichever stop above failed.
-    installers_reaped = reap_abandoned_desktop_backend_installs()
+    # whichever stop above failed. It reaps the trees of the Runtime this stop
+    # acts for; a caller naming two Runtimes acts for neither.
+    installers_reaped = len(provenance) > 1 or reap_abandoned_desktop_backend_installs(*provenance)
 
     # Also terminate OpenCode server on full stop
     if _stop_opencode_server(provenance):

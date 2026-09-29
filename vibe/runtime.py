@@ -2886,10 +2886,9 @@ def claim_desktop_runtime_start(*, include_ui: bool = True) -> None:
     """Raise ``DesktopRuntimeClaimRefused`` unless what a desktop start would reuse or replace is its Runtime's.
 
     Asked before the start announces anything, so a refused start leaves the
-    status as it found it. Every service process must carry the start's id, a
-    service lock held by a process nothing names is refused, and with
-    ``include_ui`` the recorded UI is judged as ``start_ui`` judges it. A start
-    without a desktop Runtime id claims as it always has.
+    status as it found it. The service is judged as a stop judges it, and with
+    ``include_ui`` the recorded UI as ``start_ui`` judges it. A start without a
+    desktop Runtime id claims as it always has.
     """
 
     from vibe.desktop_runtime import desktop_runtime_id
@@ -2900,8 +2899,6 @@ def claim_desktop_runtime_start(*, include_ui: bool = True) -> None:
     refusal = desktop_provenance_refusal(include_ui=False, runtime_ids=frozenset({runtime_id}))
     if refusal is not None:
         raise refusal
-    if resolve_service_owner_pid() is None and not service_instance_lock_available()[0]:
-        raise DesktopRuntimeClaimRefused("service", "identity_unavailable")
     ui_pid = _read_pid_file(paths.get_runtime_ui_pid_path())
     if include_ui and ui_pid and pid_alive(ui_pid):
         _claim_recorded_ui(ui_pid)
@@ -2961,9 +2958,10 @@ def desktop_provenance_refusal(
 
     A caller with no desktop provenance manages whatever runs here, as it always
     has. A desktop caller acts only for its own Runtime: every service process,
-    and with ``include_ui`` the recorded UI, must carry exactly its id. With
-    nothing running there is nothing to refuse. ``runtime_ids`` defaults to
-    this caller's ``desktop_caller_provenance()``.
+    and with ``include_ui`` the recorded UI, must carry exactly its id, and a
+    service lock held, or not probed, with no process named as its holder is
+    refused. With nothing running there is nothing to refuse. ``runtime_ids``
+    defaults to this caller's ``desktop_caller_provenance()``.
     """
 
     from vibe.desktop_runtime import desktop_caller_provenance
@@ -2972,6 +2970,8 @@ def desktop_provenance_refusal(
     if not provenance:
         return None
     owner_pid = resolve_service_owner_pid()
+    if owner_pid is None and desktop_service_lock_presence() is not DesktopRuntimePresence.ABSENT:
+        return DesktopRuntimeClaimRefused("service", "identity_unavailable")
     service_pids = set(extra_service_process_pids(owner_pid=owner_pid))
     if owner_pid is not None:
         service_pids.add(owner_pid)

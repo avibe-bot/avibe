@@ -478,8 +478,9 @@ def _run_restart_job(
 
             # The UI owns backend installs. One killed before it drained them
             # leaves the installer tree running, and the successor must not
-            # start while it is.
-            if not reap_abandoned_desktop_backend_installs():
+            # start while it is. The trees reaped are those of the Runtime the
+            # job acts for; a caller naming two Runtimes acts for neither.
+            if len(provenance) < 2 and not reap_abandoned_desktop_backend_installs(*provenance):
                 return fail("desktop backend installer processes did not stop", 2, started_at=restart_started_at)
         if stopped is False:
             remaining_service_pids = _remaining_service_pids_after_stop()
