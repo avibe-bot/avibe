@@ -1559,6 +1559,7 @@ class AgentAuthService:
             CLAUDE_MEMORY_DISABLED_SETTINGS,
             CLAUDE_SETTING_SOURCES,
             build_claude_subprocess_env,
+            normalize_claude_cli_path,
         )
 
         # ``force_oauth=True`` because this code path IS the OAuth
@@ -1596,9 +1597,7 @@ class AgentAuthService:
             # session handler. Fall back to the configured backend binary so
             # OAuth uses the same Claude Code version as normal Agent turns
             # instead of silently selecting the SDK's bundled CLI.
-            configured_cli = self._get_cli_binary("claude")
-            if configured_cli != "claude":
-                cli_override = os.path.expanduser(configured_cli)
+            cli_override = normalize_claude_cli_path(self._get_cli_binary("claude"))
         if cli_override:
             option_kwargs["cli_path"] = cli_override
 

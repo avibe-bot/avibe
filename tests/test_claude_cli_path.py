@@ -167,8 +167,18 @@ def test_to_app_config_preserves_claude_cli_path() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured_cli", "expected_cli"),
+    [
+        ("/usr/local/bin/claude-new", "/usr/local/bin/claude-new"),
+        ("  /usr/local/bin/claude-new  ", "/usr/local/bin/claude-new"),
+        ("  claude  ", None),
+    ],
+)
 async def test_web_auth_uses_configured_claude_cli_path_without_session_handler(
     monkeypatch,
+    configured_cli: str,
+    expected_cli: str | None,
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -193,7 +203,7 @@ async def test_web_auth_uses_configured_claude_cli_path_without_session_handler(
         config=SimpleNamespace(
             agents=SimpleNamespace(
                 claude=SimpleNamespace(
-                    cli_path="/usr/local/bin/claude-new",
+                    cli_path=configured_cli,
                     auth_mode="oauth",
                     api_key=None,
                     base_url=None,
@@ -207,7 +217,7 @@ async def test_web_auth_uses_configured_claude_cli_path_without_session_handler(
     await service._create_claude_control_client()
 
     assert captured["connected"] is True
-    assert captured["options"].cli_path == "/usr/local/bin/claude-new"
+    assert captured["options"].cli_path == expected_cli
 
 
 def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp_path: Path) -> None:

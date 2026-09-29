@@ -1071,18 +1071,9 @@ class SessionHandler(BaseHandler):
         return disallowed
 
     def _get_claude_cli_path_override(self) -> Optional[str]:
-        cli_path = getattr(getattr(self.config, "claude", None), "cli_path", None)
-        if cli_path is None:
-            return None
+        from vibe.claude_config import normalize_claude_cli_path
 
-        normalized = str(cli_path).strip()
-        if not normalized:
-            return None
-
-        if normalized == "claude":
-            return None
-
-        return os.path.expanduser(normalized)
+        return normalize_claude_cli_path(getattr(getattr(self.config, "claude", None), "cli_path", None))
 
     def _load_agent_file(self, agent_name: str, working_path: str) -> Optional[Dict[str, Any]]:
         """Load an agent file and return its parsed content.

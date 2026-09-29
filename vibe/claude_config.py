@@ -423,6 +423,21 @@ def read_claude_credential_from_settings(
     return None, None
 
 
+def normalize_claude_cli_path(cli_path: Any) -> Optional[str]:
+    """Return the configured Claude CLI to launch, or ``None`` for the SDK default.
+
+    Every Claude SDK launch site shares this so one saved ``cli_path`` selects
+    the same executable everywhere: surrounding whitespace is ignored, and an
+    empty value or the bare ``claude`` name keeps the SDK's own resolution.
+    """
+    if cli_path is None:
+        return None
+    normalized = str(cli_path).strip()
+    if not normalized or normalized == "claude":
+        return None
+    return os.path.expanduser(normalized)
+
+
 def build_claude_subprocess_env(
     claude_cfg: Any,
     base_env: Optional[Dict[str, str]] = None,
