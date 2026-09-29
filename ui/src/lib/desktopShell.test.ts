@@ -28,7 +28,8 @@ beforeEach(() => {
   document.documentElement.style.setProperty('--shell-titlebar-inset', '28px');
   document.body.innerHTML = `
     <div id="pane">
-      <header id="setup" data-shell-title-bar=""><span id="brand">Avibe</span><button id="language"><svg id="icon"></svg></button></header>
+      <header id="setup" data-shell-title-bar=""><span id="brand">Avibe</span><button id="language"><svg id="icon"></svg></button><div id="menu" role="listbox"><button role="option">English</button></div></header>
+      <div id="popover" role="dialog"><p id="popover-text">Details</p></div>
       <div id="resizer" role="separator"></div>
     </div>`;
 });
@@ -64,9 +65,11 @@ describe('desktop title bar', () => {
 
   it('never takes a press a control owns, on the band or in a marked row', () => {
     inShell();
-    for (const id of ['language', 'icon', 'resizer']) {
-      const event = press(byId(id), { clientY: 12 });
-      expect(event.defaultPrevented, id).toBe(false);
+    for (const id of ['language', 'icon', 'resizer', 'menu', 'popover-text']) {
+      for (const clientY of [12, 60]) {
+        const event = press(byId(id), { clientY });
+        expect(event.defaultPrevented, `${id}@${clientY}`).toBe(false);
+      }
     }
     const handled = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, detail: 1, clientY: 12 });
     handled.preventDefault();
@@ -75,10 +78,10 @@ describe('desktop title bar', () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it('answers a double-click on mouseup only when the pointer did not move', () => {
+  it('answers a double-click on mouseup when the pointer only jittered, not when it dragged', () => {
     inShell();
     press(byId('pane'), { clientX: 400, clientY: 10, detail: 2 });
-    press(byId('pane'), { type: 'mouseup', clientX: 400, clientY: 10, detail: 2 });
+    press(byId('pane'), { type: 'mouseup', clientX: 402, clientY: 11, detail: 2 });
     expect(postMessage).toHaveBeenCalledTimes(1);
     expect(postMessage).toHaveBeenLastCalledWith('double-click');
 
@@ -99,6 +102,9 @@ describe('desktop title bar', () => {
     document.documentElement.style.setProperty('--shell-titlebar-inset', '0px');
     inShell();
     press(byId('pane'), { clientY: 12 });
+    press(byId('brand'), { clientY: 60 });
+    press(byId('brand'), { clientY: 60, detail: 2 });
+    press(byId('brand'), { type: 'mouseup', clientY: 60, detail: 2 });
     expect(postMessage).not.toHaveBeenCalled();
   });
 });

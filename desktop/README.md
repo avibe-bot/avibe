@@ -267,9 +267,13 @@ top-level document, so a Show Page in a subframe can post neither. The
 Workbench (`ui/src/lib/desktopShell.ts`) sends them for a left press on the
 overlay band, or on an element marked `data-shell-title-bar` such as setup's
 brand and language row, unless a control claims it — links, buttons, form
-fields, focusable, draggable, and ARIA-interactive elements (the sidebar
-resizer included) — or a page handler already consumed it. The bootstrap page
-sends them for its whole band. A page that never posts keeps just the strip,
+fields, focusable, draggable, and ARIA-interactive elements including the
+composites and dialogs that hold them (an open language listbox, the sidebar
+resizer) — or a page handler already consumed it. Both need the overlay: once
+the shell falls back to the standard title bar and publishes a `0px` inset, a
+marked element is plain content again. A double-click counts when the pointer
+drifted at most 4px between press and release. The bootstrap page sends them
+for its whole band. A page that never posts keeps just the strip,
 and a Workbench under an older shell without the handler changes nothing.
 
 Links that ask for a new browsing context (`target="_blank"` or

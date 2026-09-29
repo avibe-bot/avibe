@@ -227,7 +227,9 @@ function installTitleBar(): void {
   document.addEventListener('mouseup', (event) => {
     const origin = doubleClickAt
     doubleClickAt = null
-    if (origin && event.detail === 2 && event.clientX === origin.x && event.clientY === origin.y && onBand(event)) {
+    // Hand jitter, not a drag: the same 4px slop the Workbench allows.
+    const still = origin !== null && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) <= 4
+    if (still && event.detail === 2 && onBand(event)) {
       handler.postMessage('double-click')
     }
   })
