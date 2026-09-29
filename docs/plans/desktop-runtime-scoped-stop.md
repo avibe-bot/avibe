@@ -269,7 +269,8 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
 
 `HealthProbe::presence` classifies the origin: `Mine{ready}` (this bundle's id),
 `Foreign{id, ready}`, `Unmanaged` (no id), `Absent` (connection refused) or
-`Unknown` (any other failure). The host runs one stop verb,
+`Unknown` (any other failure). Each probe has 5 s, because Windows refuses a
+loopback connect only after about 2 s of SYN resends. The host runs one stop verb,
 `vibe stop --expect-runtime-id <id> [--keep-remote-access]`, mapped as exit 0 →
 `Completed`, 3 → `Refused{reason}`, 2 → `Failed{part}`, any other exit →
 `Failed{unknown}`, and a spawn error → `Unrunnable`.
@@ -281,6 +282,9 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
   shows `runtime_ownership_lost` instead.
 - B4, polling: `Mine{ready}` → Ready; `Unmanaged` → Adopted. B5: the first
   `Foreign` while polling stops it and relaunches; a second one fails.
+- No handover runs while this app's `vibe start` helper is still running: the
+  helper may still act on the predecessor, and a second helper would race its
+  completion or rollback. Polling hands over once it settles.
 - B6, monitor: the Runtime is serving while presence stays the adopted class.
 - B7, uninstall: only `Mine`, or `Absent` with no launch in flight, is stopped
   by the bundle's id, then its backends and bundle are removed. Any other
