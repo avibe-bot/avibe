@@ -331,15 +331,19 @@ uv_python_install_mirror() {
     if [ -n "${UV_PYTHON_INSTALL_MIRROR+set}" ] || [ -n "${UV_PYTHON_DOWNLOADS_JSON_URL+set}" ]; then
         return 0
     fi
-    # `uv tool` reads UV_CONFIG_FILE or the user and system uv.toml, never a project's.
-    local config config_dir config_dirs
-    local configs=("${UV_CONFIG_FILE:-}" "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml)
-    IFS=':' read -r -a config_dirs <<< "${XDG_CONFIG_DIRS:-/etc/xdg}"
-    for config_dir in "${config_dirs[@]}"; do
-        configs+=("$config_dir/uv/uv.toml")
-    done
+    # `uv tool` reads UV_CONFIG_FILE alone when set, else the user and system uv.toml.
+    local config config_dir config_dirs configs
+    if [ -n "${UV_CONFIG_FILE:-}" ]; then
+        configs=("$UV_CONFIG_FILE")
+    else
+        configs=("${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml)
+        IFS=':' read -r -a config_dirs <<< "${XDG_CONFIG_DIRS:-/etc/xdg}"
+        for config_dir in "${config_dirs[@]}"; do
+            configs+=("$config_dir/uv/uv.toml")
+        done
+    fi
     for config in "${configs[@]}"; do
-        if [ -n "$config" ] && grep -qsE 'python-(install-mirror|downloads-json-url)' "$config"; then
+        if grep -qsE 'python-(install-mirror|downloads-json-url)' "$config"; then
             return 0
         fi
     done
@@ -619,23 +623,12 @@ uv_tool_install() {
 install_package_candidate() {
     local package_spec="$1"
     shift
-    local install_args=("$package_spec" --force)
 
     if [ "$package_spec" = "$PACKAGE_NAME" ]; then
-        install_args+=(--refresh)
+        uv_tool_install "$package_spec" --force --refresh "$@"
+    else
+        uv_tool_install "$package_spec" --force "$@"
     fi
-    install_args+=("$@")
-    if uv_tool_install "${install_args[@]}"; then
-        return 0
-    fi
-    # The mirror replaces uv's GitHub source instead of adding one. After it
-    # fails once, retry and continue without it; a Python it installed stays.
-    if [ -z "$UV_INSTALL_PYTHON_MIRROR" ]; then
-        return 1
-    fi
-    UV_INSTALL_PYTHON_MIRROR=""
-    info "Retrying without Astral's CDN for the Python download..."
-    uv_tool_install "${install_args[@]}"
 }
 
 resolve_vibe_on_original_path() {
@@ -727,15 +720,34 @@ install_vibe() {
         info "This uv downloads Python from GitHub; using Astral's CDN for any Python download instead"
     fi
 
-    if [ -n "$install_package_spec" ]; then
-        if install_package_candidate "$install_package_spec"; then
-            success "avibe-os installed successfully (from custom package spec)"
+    if install_vibe_from_sources "$install_package_spec"; then
+        return 0
+    fi
+    # The mirror replaces uv's GitHub source instead of adding one, so when no
+    # package source worked through it, try them all once more without it.
+    if [ -n "$UV_INSTALL_PYTHON_MIRROR" ]; then
+        UV_INSTALL_PYTHON_MIRROR=""
+        info "Retrying without Astral's CDN for the Python download..."
+        if install_vibe_from_sources "$install_package_spec"; then
             return 0
         fi
+    fi
 
+    if [ -n "$install_package_spec" ]; then
         error "Failed to install avibe-os from custom package spec: $install_package_spec"
     fi
-    
+    error "Failed to install avibe-os from all sources"
+}
+
+install_vibe_from_sources() {
+    local install_package_spec="$1"
+
+    if [ -n "$install_package_spec" ]; then
+        install_package_candidate "$install_package_spec" || return 1
+        success "avibe-os installed successfully (from custom package spec)"
+        return 0
+    fi
+
     # uv tool install will auto-download Python if not available
     # --force: reinstall even if already installed
     # --refresh: refresh package cache to get latest version
@@ -747,7 +759,7 @@ install_vibe() {
     elif install_package_candidate "git+https://github.com/${REPO}.git"; then
         success "avibe-os installed successfully (from GitHub)"
     else
-        error "Failed to install avibe-os from all sources"
+        return 1
     fi
 }
 

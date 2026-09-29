@@ -100,6 +100,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         if [ "${{VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR:-}}" = "1" ] && [ -n "${{UV_PYTHON_INSTALL_MIRROR+set}}" ]; then
             exit 1
         fi
+        if [ "${{VIBE_TEST_UV_FAIL_WITHOUT_INDEX_URL:-}}" = "1" ] && [[ " $* " != *" --index-url "* ]]; then
+            exit 1
+        fi
 
         bin_dir="${{UV_TOOL_BIN_DIR:-$HOME/.local/bin}}"
         tool_env="${{UV_TOOL_DIR:-$HOME/.local/share/uv/tools}}/avibe-os"
@@ -380,30 +383,46 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
 
 
 ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-standalone/releases/download"
+MIRROR_CONFIG = 'python-install-mirror = "https://mirror.example.test/python"\n'
 
 
 @pytest.mark.parametrize(
-    ("uv_version", "user_env", "user_config", "cdn_down", "expected_mirrors"),
+    ("uv_version", "env_overrides", "user_config", "config_file", "expected_mirrors"),
     [
-        ("uv 0.10.7 (8e2c9a1 2026-03-02)", {}, None, False, [ASTRAL_PYTHON_INSTALL_MIRROR]),
-        ("uv 0.10.8", {}, None, False, ["<unset>"]),
+        ("uv 0.10.7 (8e2c9a1 2026-03-02)", {}, None, None, [ASTRAL_PYTHON_INSTALL_MIRROR]),
+        ("uv 0.10.8", {}, None, None, ["<unset>"]),
         (
             "uv 0.9.8",
             {"UV_PYTHON_INSTALL_MIRROR": "https://mirror.example.test/python"},
             None,
-            False,
+            None,
             ["https://mirror.example.test/python"],
         ),
-        ("uv 0.9.8", {}, 'python-install-mirror = "https://mirror.example.test/python"\n', False, ["<unset>"]),
+        ("uv 0.9.8", {}, MIRROR_CONFIG, None, ["<unset>"]),
         (
             "uv 0.9.8",
             {"UV_PYTHON_DOWNLOADS_JSON_URL": "https://mirror.example.test/downloads.json"},
             None,
-            False,
+            None,
             ["<unset>"],
         ),
-        ("uv 0.9.8", {}, 'python-downloads-json-url = "https://mirror.example.test/downloads.json"\n', False, ["<unset>"]),
-        ("uv 0.9.8", {}, None, True, [ASTRAL_PYTHON_INSTALL_MIRROR, "<unset>"]),
+        ("uv 0.9.8", {}, 'python-downloads-json-url = "https://mirror.example.test/downloads.json"\n', None, ["<unset>"]),
+        ("uv 0.9.8", {}, None, MIRROR_CONFIG, ["<unset>"]),
+        ("uv 0.9.8", {}, MIRROR_CONFIG, "", [ASTRAL_PYTHON_INSTALL_MIRROR]),
+        (
+            "uv 0.9.8",
+            {"VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR": "1"},
+            None,
+            None,
+            [ASTRAL_PYTHON_INSTALL_MIRROR] * 3 + ["<unset>"],
+        ),
+        (
+            "uv 0.9.8",
+            {"VIBE_TEST_UV_FAIL_WITHOUT_INDEX_URL": "1"},
+            None,
+            None,
+            [ASTRAL_PYTHON_INSTALL_MIRROR] * 2,
+        ),
     ],
     ids=[
         "uv-without-cdn",
@@ -412,11 +431,14 @@ ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-s
         "user-config-mirror",
         "user-env-downloads-json",
         "user-config-downloads-json",
-        "cdn-down-falls-back-to-github",
+        "config-file-mirror",
+        "config-file-replaces-user-config",
+        "cdn-down-retries-every-source-without-it",
+        "pypi-down-keeps-cdn-for-tsinghua",
     ],
 )
 def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(
-    tmp_path, uv_version, user_env, user_config, cdn_down, expected_mirrors
+    tmp_path, uv_version, env_overrides, user_config, config_file, expected_mirrors
 ):
     home_dir = tmp_path / "home"
     home_dir.mkdir()
@@ -437,9 +459,10 @@ def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(
     env["XDG_CONFIG_HOME"] = str(config_home)
     env["XDG_CONFIG_DIRS"] = str(tmp_path / "system-config")
     env["VIBE_TEST_UV_VERSION"] = uv_version
-    env.update(user_env)
-    if cdn_down:
-        env["VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR"] = "1"
+    env.update(env_overrides)
+    if config_file is not None:
+        (tmp_path / "uv-config.toml").write_text(config_file, encoding="utf-8")
+        env["UV_CONFIG_FILE"] = str(tmp_path / "uv-config.toml")
 
     install_result = _install(env)
 
