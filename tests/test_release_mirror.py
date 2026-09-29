@@ -102,6 +102,38 @@ def test_a_completed_reconcile_is_a_no_op_on_the_next_run():
     assert again.index == first.index
 
 
+class RecordingBucket:
+    def __init__(self, objects, index):
+        self._objects, self._index, self.writes = objects, index, []
+
+    def objects(self):
+        return dict(self._objects)
+
+    def read(self, key):
+        return self._index
+
+    def put(self, key, path, **metadata):
+        self.writes.append(key)
+
+    def delete(self, key):
+        self.writes.append(key)
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_published_bytes_changing_upstream_fails_the_run_even_as_a_dry_run(monkeypatch, dry_run):
+    item = github_release("v1.0.0", published_at="2026-01-01T00:00:00Z")
+    (release,) = releases(item)
+    (asset,) = release.assets
+    prior = mirror.render_index(REPOSITORY, [replace(release, assets=(replace(asset, sha256="f" * 64),))])
+    bucket = RecordingBucket({release.key(asset): asset.size, mirror.INDEX_KEY: len(prior)}, prior)
+    monkeypatch.setattr(mirror, "github_releases", lambda repository: [item])
+    monkeypatch.setattr(mirror, "tag_commits", lambda repository: {"v1.0.0": "0" * 40})
+    monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
+
+    assert mirror.reconcile(REPOSITORY, bucket, keep_prereleases=20, dry_run=dry_run) == 1
+    assert bucket.writes == ([] if dry_run else ["releases/v1.0.0/a.tgz", mirror.INDEX_KEY])
+
+
 def test_an_empty_release_listing_never_plans_deleting_the_mirror():
     with pytest.raises(mirror.MirrorError, match="no published releases"):
         mirror.plan(REPOSITORY, [], {"releases/v1.0.0/a.tgz": 1}, None)

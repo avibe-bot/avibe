@@ -99,11 +99,13 @@ and fall back to GitHub.
 
 Triggers: completion of the release-publishing workflows (assets are uploaded
 with `GITHUB_TOKEN`, which does not emit release events), an hourly schedule
-as the safety net, and manual dispatch with an optional dry run. Pull requests
-that change the mirror run a dry run against the live bucket.
+as the safety net, and manual dispatch with an optional dry run. A dry run
+reports the plan without writing and still fails when published bytes changed.
 
 Credentials are the `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and
-`R2_SECRET_ACCESS_KEY` repository secrets.
+`R2_SECRET_ACCESS_KEY` repository secrets. They can write and delete every
+object, so the workflow has no `pull_request` trigger: only code already on the
+default branch receives them.
 
 ## Zone configuration
 

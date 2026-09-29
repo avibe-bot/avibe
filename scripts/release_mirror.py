@@ -293,28 +293,27 @@ def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run
             print(f"would upload {key}")
         for key in result.deletions:
             print(f"would delete {key}")
-        return 0
-
-    with tempfile.TemporaryDirectory(prefix="avibe-release-mirror-") as temporary:
-        path = Path(temporary) / "asset"
-        for key, asset in result.uploads:
-            download(asset, path)
-            bucket.put(
-                key, path, content_type=asset.content_type,
-                cache_control=IMMUTABLE_CACHE_CONTROL, sha256=asset.sha256,
-            )
-            print(f"uploaded {key}")
-        if result.index != previous_index:
-            path.write_bytes(result.index)
-            bucket.put(
-                INDEX_KEY, path, content_type="application/json",
-                cache_control=INDEX_CACHE_CONTROL, sha256=hashlib.sha256(result.index).hexdigest(),
-            )
-            print(f"wrote {INDEX_KEY}")
-    # Delete only after the index stops listing these objects.
-    for key in result.deletions:
-        bucket.delete(key)
-        print(f"deleted {key}")
+    else:
+        with tempfile.TemporaryDirectory(prefix="avibe-release-mirror-") as temporary:
+            path = Path(temporary) / "asset"
+            for key, asset in result.uploads:
+                download(asset, path)
+                bucket.put(
+                    key, path, content_type=asset.content_type,
+                    cache_control=IMMUTABLE_CACHE_CONTROL, sha256=asset.sha256,
+                )
+                print(f"uploaded {key}")
+            if result.index != previous_index:
+                path.write_bytes(result.index)
+                bucket.put(
+                    INDEX_KEY, path, content_type="application/json",
+                    cache_control=INDEX_CACHE_CONTROL, sha256=hashlib.sha256(result.index).hexdigest(),
+                )
+                print(f"wrote {INDEX_KEY}")
+        # Delete only after the index stops listing these objects.
+        for key in result.deletions:
+            bucket.delete(key)
+            print(f"deleted {key}")
     if result.changed:
         print("error: purge the changed URLs from the dl.avibe.bot cache", file=sys.stderr)
         return 1
