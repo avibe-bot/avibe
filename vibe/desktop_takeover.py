@@ -19,7 +19,7 @@ from pathlib import Path
 import psutil
 
 from config import paths
-from config.v2_config import V2Config
+from config.v2_config import UiConfig, V2Config, VibeCloudRemoteAccessConfig
 from vibe import internal_client, runtime
 from vibe.desktop_runtime import desktop_origin, desktop_runtime_id
 
@@ -32,7 +32,7 @@ def _lock_owner(home: Path) -> int | None:
     """Probe an existing lock without ensure_dirs, config writes, or migrations."""
     try:
         with (home / "runtime" / "service.lock").open("r+", encoding="utf-8") as stream:
-            if runtime._try_lock_file(stream):
+            if runtime._take_lock_file(stream):
                 runtime._unlock_file(stream)
                 return None
             return runtime._lock_file_pid(stream)
@@ -138,7 +138,15 @@ def _idle() -> None:
 
 def inspect_runtime() -> dict:
     home = paths.get_vibe_remote_dir().resolve()
-    config = V2Config.load() if paths.get_config_path().is_file() else V2Config.default()
+    # V2Config.load() creates directories and may write recovery backups. Only
+    # the endpoint fields are needed before consent; parse those in memory.
+    config = V2Config.default()
+    if paths.get_config_path().is_file():
+        payload = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
+        ui = payload.get("ui") or {}
+        cloud = (payload.get("remote_access") or {}).get("vibe_cloud") or {}
+        config.ui = UiConfig(setup_host=ui.get("setup_host", "127.0.0.1"), setup_port=ui.get("setup_port", 5123))
+        config.remote_access.vibe_cloud = VibeCloudRemoteAccessConfig(enabled=cloud.get("enabled", False))
     result = {"home": str(home), "origin": desktop_origin(runtime.effective_ui_bind_host(config), config.ui.setup_port),
               "external": None}
     # Do not create service.lock or a fresh data directory merely to discover it.
@@ -159,6 +167,8 @@ def inspect_runtime() -> dict:
         if not runtime.ui_pid_file_points_to_running_ui():
             raise TakeoverRefused("identity_unknown")
         ui_pid = int(paths.get_runtime_ui_pid_path().read_text().strip())
+        if runtime.is_desktop_ui(ui_pid, None) is not True:
+            raise TakeoverRefused("identity_unknown")
         external["ui"] = _identity(ui_pid)
         if _supervised(pid) or _supervised(ui_pid):
             raise TakeoverRefused("supervised")
@@ -185,22 +195,18 @@ def take_over(confirmed: dict) -> None:
         if process.create_time() != identity["created"]:
             raise TakeoverRefused("identity_changed")
     _idle()
-    runtime.write_shutdown_intent(service.pid, reason="desktop_takeover")
-    try:
-        service.terminate()
-        service.wait(timeout=30)
-        # The UI record may have changed while the Controller shut down.
+    # Share the scoped-stop signal and PID-reuse rules. An independent service
+    # has no Desktop Runtime id, so its confirmed identities supply authority;
+    # it must never enter the id-based scan or the full CLI stop.
+    runtime._stop_desktop_processes([service], timeout=30, force=False)
+    if not runtime._desktop_process_gone(service):
+        raise TakeoverRefused("stop_failed")
+    if not runtime._desktop_process_gone(ui):
         if _identity(ui.pid) != current["ui"]:
             raise TakeoverRefused("identity_changed")
-        ui.terminate()
-        ui.wait(timeout=10)
-    except psutil.NoSuchProcess:
-        # A peer exiting during the operation is safe only if neither captured
-        # process remains alive. Never turn partial shutdown into success.
-        if service.is_running() or ui.is_running():
-            raise TakeoverRefused("stop_failed") from None
-    except (psutil.TimeoutExpired, psutil.AccessDenied):
-        raise TakeoverRefused("stop_failed") from None
+        runtime._stop_desktop_processes([ui], timeout=10, force=False)
+    if not runtime._desktop_process_gone(ui):
+        raise TakeoverRefused("stop_failed")
 
 
 def main() -> int:
@@ -222,7 +228,7 @@ def main() -> int:
     except TakeoverRefused as error:
         print(json.dumps({"error": str(error)}))
         return 3
-    except (psutil.Error, OSError, ValueError, subprocess.SubprocessError):
+    except (psutil.Error, OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
         print(json.dumps({"error": "identity_unknown"}))
         return 3
 

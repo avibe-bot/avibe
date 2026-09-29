@@ -23,6 +23,7 @@ struct Instance {
     refuse: bool,
     race: bool,
     unavailable: bool,
+    other_desktop: bool,
 }
 
 impl RuntimeLauncher for Instance {
@@ -44,6 +45,15 @@ impl ResolvedRuntimeLauncher for Instance {
     }
     fn expected_runtime_id(&self) -> Option<&str> {
         Some("bundled")
+    }
+    fn handover(&self) -> Result<(), LaunchError> {
+        panic!("an independent connection cannot hand over its service")
+    }
+    fn prune_superseded(&self) {
+        assert!(
+            !self.independent.load(Ordering::SeqCst),
+            "an independent connection cannot prune installations"
+        );
     }
     fn external_runtime(&self) -> Option<ExternalRuntime> {
         (!self.managed.load(Ordering::SeqCst) && !self.race).then(|| ExternalRuntime {
@@ -83,7 +93,11 @@ impl HealthProbe for Instance {
             return None;
         }
         Some(RuntimeReadiness {
-            desktop_runtime_id: self.managed.load(Ordering::SeqCst).then(|| "bundled".into()),
+            desktop_runtime_id: if self.other_desktop {
+                Some("other-desktop".into())
+            } else {
+                self.managed.load(Ordering::SeqCst).then(|| "bundled".into())
+            },
             desktop_ui_runtime_id: None,
         })
     }
@@ -165,6 +179,21 @@ async fn independent_mode_does_not_start_a_bundled_replacement_when_its_service_
     assert_eq!(
         host(&instance).bootstrap(&DiscardStatus).await.notice.code,
         BootstrapNoticeCode::IndependentUnavailable
+    );
+    assert_eq!(instance.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(instance.stops.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn independent_mode_does_not_replace_another_desktop_version() {
+    let instance = Instance {
+        other_desktop: true,
+        ..Instance::default()
+    };
+    instance.independent.store(true, Ordering::SeqCst);
+    assert_eq!(
+        host(&instance).bootstrap(&DiscardStatus).await.notice.code,
+        BootstrapNoticeCode::Adopted
     );
     assert_eq!(instance.starts.load(Ordering::SeqCst), 0);
     assert_eq!(instance.stops.load(Ordering::SeqCst), 0);

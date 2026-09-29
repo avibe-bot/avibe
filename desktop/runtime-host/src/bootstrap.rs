@@ -359,6 +359,26 @@ impl RuntimeHost {
             .and_then(|launcher| launcher.expected_runtime_id().map(str::to_owned));
         let mut handover_performed = false;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
+        // An independent connection grants no launch, handover, or cleanup
+        // authority, even if a different Desktop build now serves that home.
+        if resolved_launcher
+            .as_ref()
+            .is_some_and(|launcher| launcher.connect_only())
+        {
+            return publish(
+                sink,
+                if self.probe.readiness(&origin).await.is_some() {
+                    BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted)
+                } else {
+                    BootstrapStatus::failed(
+                        &origin,
+                        attempt,
+                        BootstrapNotice::new(BootstrapNoticeCode::IndependentUnavailable),
+                        true,
+                    )
+                },
+            );
+        }
         if let Some(launcher) = &resolved_launcher {
             if !launcher.allows_external() && launcher.external_runtime().is_some() {
                 return self.require_management_choice(launcher, &origin, sink, attempt);
@@ -451,21 +471,6 @@ impl RuntimeHost {
                     &origin,
                     attempt,
                     BootstrapNotice::new(BootstrapNoticeCode::RuntimeNotFound),
-                    true,
-                ),
-            );
-        }
-
-        if resolved_launcher
-            .as_ref()
-            .is_some_and(|launcher| launcher.connect_only())
-        {
-            return publish(
-                sink,
-                BootstrapStatus::failed(
-                    &origin,
-                    attempt,
-                    BootstrapNotice::new(BootstrapNoticeCode::IndependentUnavailable),
                     true,
                 ),
             );

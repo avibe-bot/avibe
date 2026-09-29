@@ -14,6 +14,10 @@ the confirmation. The helper revalidates the exact snapshot before stopping
 anything, refuses active work or an external supervisor, and stops only the
 captured processes. Starting and database migration remain in the existing
 `vibe start` path. Readiness must prove the bundled Controller and UI identity.
+The stop shares the PID-safe signal primitive introduced in #2242, with forced
+termination disabled on POSIX. It does not use the id-scoped scan because an
+independent predecessor has no Desktop Runtime id. A predecessor that fails to
+exit blocks the transition and leaves its UI running.
 
 The selected home and independent-connection choice live in Desktop's existing
 application data directory. An explicit AVIBE_HOME takes precedence. Automatic
@@ -40,3 +44,9 @@ formatting/Clippy, and changed Python Ruff before PR delivery.
 
 Native packaged takeover and OS-login acceptance are residual manual checks;
 this implementation must not modify the developer's running service or data.
+
+Local validation after integrating #2242: 128 Python tests passed across the
+takeover, Desktop Runtime, and scoped-stop files; 264 Rust tests/doc-tests
+passed across the workspace with all features; all four VersionBadge tests,
+both frontend builds, desktop localization, changed Python Ruff, Rust formatting,
+and Clippy passed. The old process and IPC fixtures use only test-owned state.

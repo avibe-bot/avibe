@@ -2793,14 +2793,14 @@ def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None
     return DesktopRuntimePresence.ABSENT
 
 
-def _stop_desktop_processes(processes: list[psutil.Process], timeout: float = 5) -> None:
+def _stop_desktop_processes(processes: list[psutil.Process], timeout: float = 5, *, force: bool = True) -> None:
     """Stop ``processes`` gracefully, then forcefully, through the handles the scan returned.
 
     ``is_running()`` holds right before every signal, and psutil itself
     refuses to signal a handle whose pid has been reused since the scan.
     """
 
-    phases = (None,) if os.name == "nt" else (signal.SIGTERM, signal.SIGKILL)
+    phases = (None,) if os.name == "nt" else ((signal.SIGTERM, signal.SIGKILL) if force else (signal.SIGTERM,))
     alive = list(processes)
     for sig in phases:
         for process in alive:

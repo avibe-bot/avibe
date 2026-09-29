@@ -20,7 +20,9 @@ import pytest
 
 from config import paths
 from config.v2_config import V2Config
-from vibe import desktop_takeover
+from vibe import desktop_takeover, runtime
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX predecessor IPC fixture")
 
 
 @pytest.fixture
@@ -56,7 +58,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.wfile.write(b'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: ' + str(len(body)).encode() + b'\\r\\n\\r\\n' + body)
 server = socketserver.UnixStreamServer(os.environ['VIBE_INTERNAL_DISPATCH_SOCKET'], Handler)
 os.chmod(os.environ['VIBE_INTERNAL_DISPATCH_SOCKET'], 0o600)
-signal.signal(signal.SIGTERM, lambda *_: exit(0))
+signal.signal(signal.SIGTERM, lambda *_: None if (home / 'runtime/test-refuse-stop').exists() else exit(0))
 print('ready', flush=True)
 server.serve_forever()
 ''', encoding="utf-8")
@@ -67,8 +69,12 @@ server.serve_forever()
             environment.pop(key, None)
         service = subprocess.Popen([sys.executable, str(script)], env=environment, stdout=subprocess.PIPE, text=True)
         assert service.stdout.readline().strip() == "ready"
-        ui = subprocess.Popen([sys.executable, "-c", "# vibe.ui_server run_ui_server\nimport time; print('ready', flush=True); time.sleep(120)"],
-                              env=environment, stdout=subprocess.PIPE, text=True)
+        ui_root = tmp_path / "old-ui"
+        (ui_root / "vibe").mkdir(parents=True)
+        (ui_root / "vibe/__init__.py").touch()
+        (ui_root / "vibe/ui_server.py").write_text("def run_ui_server():\n    import time; print('ready', flush=True); time.sleep(120)\n")
+        ui = subprocess.Popen([sys.executable, "-c", "from vibe.ui_server import run_ui_server; run_ui_server()"],
+                              cwd=ui_root, env=environment, stdout=subprocess.PIPE, text=True)
         assert ui.stdout.readline().strip() == "ready"
         paths.get_runtime_ui_pid_path().write_text(str(ui.pid))
         reapers = [threading.Thread(target=process.wait, daemon=True) for process in (service, ui)]
@@ -77,6 +83,7 @@ server.serve_forever()
         try:
             yield home, environment, service, ui
         finally:
+            (home / "runtime/test-refuse-stop").unlink(missing_ok=True)
             for process in (service, ui):
                 if process.poll() is None:
                     process.terminate()
@@ -93,6 +100,7 @@ def _helper(environment, *arguments):
 def test_native_helper_consumes_old_service_and_preserves_existing_data(old_instance):
     home, environment, service, ui = old_instance
     original = {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    original_dirs = {path.relative_to(home) for path in home.rglob("*") if path.is_dir()}
     inspected = _helper(environment, "inspect")
     assert inspected.returncode == 0, inspected.stderr + inspected.stdout
     discovery = json.loads(inspected.stdout)
@@ -100,6 +108,7 @@ def test_native_helper_consumes_old_service_and_preserves_existing_data(old_inst
     assert discovery["external"]["reason"] is None
     assert discovery["external"]["service"]["pid"] == service.pid
     assert {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()} == original
+    assert {path.relative_to(home) for path in home.rglob("*") if path.is_dir()} == original_dirs
 
     switched = _helper(environment, "takeover", "--home", str(home), "--receipt", json.dumps(discovery["external"]))
     assert switched.returncode == 0, switched.stderr + switched.stdout
@@ -150,3 +159,24 @@ def test_external_supervisor_blocks_takeover(old_instance, monkeypatch):
     with pytest.raises(desktop_takeover.TakeoverRefused, match="supervised"):
         desktop_takeover.take_over(snapshot)
     assert service.poll() is None
+
+
+def test_a_predecessor_that_does_not_exit_is_not_force_killed(old_instance, monkeypatch):
+    home, _, service, ui = old_instance
+    receipt = desktop_takeover.inspect_runtime()["external"]
+    (home / "runtime/test-refuse-stop").touch()
+    stop = runtime._stop_desktop_processes
+    monkeypatch.setattr(runtime, "_stop_desktop_processes", lambda processes, **kwargs: stop(processes, timeout=0.1, force=kwargs["force"]))
+    with pytest.raises(desktop_takeover.TakeoverRefused, match="stop_failed"):
+        desktop_takeover.take_over(receipt)
+    assert service.poll() is None and ui.poll() is None
+
+
+def test_inspection_of_a_broken_config_does_not_write_recovery_files(old_instance):
+    home, environment, service, ui = old_instance
+    paths.get_config_path().write_text("{broken")
+    before = {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    result = _helper(environment, "inspect")
+    assert result.returncode == 3
+    assert {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()} == before
+    assert service.poll() is None and ui.poll() is None
