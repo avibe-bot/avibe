@@ -164,6 +164,7 @@ describe('chat selection action gesture lifetime', () => {
     // receives pointerdown, but no pointerup/cancel/lostpointercapture.
     fireEvent.pointerDown(button, press);
     clearSelection();
+    act(() => vi.advanceTimersByTime(600));
     expect(screen.queryByRole('toolbar')).toBeNull();
 
     container.textContent = NEXT_TEXT;
@@ -173,6 +174,17 @@ describe('chat selection action gesture lifetime', () => {
     fireEvent.pointerUp(nextButton, press);
 
     expect(quote).toHaveBeenCalledExactlyOnceWith(NEXT_TEXT);
+  });
+
+  it('preserves a complete gesture across selectionchange', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+
+    fireEvent.pointerDown(button, press);
+    fireEvent(document, new Event('selectionchange'));
+    fireEvent.pointerUp(button, press);
+
+    expect(quote).toHaveBeenCalledExactlyOnceWith(TEXT);
   });
 
   it.each([
@@ -241,6 +253,26 @@ describe('chat selection action gesture lifetime', () => {
     const top = Number.parseFloat(toolbar.getAttribute('style')!.match(/top:\s*([^;]+)/)![1]);
 
     expect(top).toBeGreaterThanOrEqual(selectionBounds.bottom + 44 + 8);
+  });
+
+  it('clamps a touch toolbar when the selection is above the viewport', () => {
+    selectionBounds = { ...defaultBounds, top: -120, bottom: -84 };
+    selectionLineRects = [selectionBounds];
+    mountToolbar();
+    const toolbar = screen.getByRole('toolbar');
+    const top = Number.parseFloat(toolbar.getAttribute('style')!.match(/top:\s*([^;]+)/)![1]);
+
+    expect(top).toBe(8);
+  });
+
+  it('clamps a touch toolbar when the selection is below the viewport', () => {
+    selectionBounds = { ...defaultBounds, top: 900, bottom: 936 };
+    selectionLineRects = [selectionBounds];
+    mountToolbar();
+    const toolbar = screen.getByRole('toolbar');
+    const top = Number.parseFloat(toolbar.getAttribute('style')!.match(/top:\s*([^;]+)/)![1]);
+
+    expect(top).toBe(800);
   });
 
   it('keeps desktop placement at the original selection gap', () => {

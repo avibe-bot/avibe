@@ -27,6 +27,7 @@ type SelectionState = {
 const TOOLBAR_H = 36;
 const GAP = 8;
 const EDGE = 8;
+const PRESS_GRACE_MS = 700;
 // iOS keeps touch sequences that start within this padding around a selection
 // handle in its native selection gesture recognizer. Keep the web toolbar
 // outside that region so pointerup/touchend remains deliverable to the button.
@@ -67,7 +68,9 @@ export const SelectionQuoteToolbar: React.FC<{
   const pressRef = useRef<{
     pointerId: number;
     button: HTMLButtonElement;
+    selectionText: string;
   } | null>(null);
+  const pressExpiryRef = useRef<number | null>(null);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(TOOLBAR_H);
   // Touch (coarse pointer — phones AND tablets/iPads) is where the OS selection
@@ -108,6 +111,24 @@ export const SelectionQuoteToolbar: React.FC<{
     });
   }, [containerRef]);
 
+  const clearPress = useCallback(() => {
+    if (pressExpiryRef.current !== null) {
+      window.clearTimeout(pressExpiryRef.current);
+      pressExpiryRef.current = null;
+    }
+    pressRef.current = null;
+  }, []);
+  const armPressExpiry = useCallback(() => {
+    const press = pressRef.current;
+    if (!press || pressExpiryRef.current !== null) return;
+    pressExpiryRef.current = window.setTimeout(() => {
+      if (pressRef.current !== press) return;
+      pressRef.current = null;
+      pressExpiryRef.current = null;
+      recompute();
+    }, PRESS_GRACE_MS);
+  }, [recompute]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -117,10 +138,19 @@ export const SelectionQuoteToolbar: React.FC<{
     const onPointerDown = () => {
       // A new gesture invalidates any prior button press, including one whose
       // terminal event was delivered outside the toolbar or not delivered at all.
-      pressRef.current = null;
+      clearPress();
     };
     const onSelectionChange = () => {
-      pressRef.current = null;
+      const press = pressRef.current;
+      const currentText = window.getSelection()?.toString().trim() ?? '';
+      if (press && (!currentText || currentText === press.selectionText)) {
+        // Keep the rendered snapshot alive for a short time so a browser
+        // selectionchange between pointerdown and pointerup cannot cancel a
+        // valid tap. The expiry still releases missing terminal events.
+        armPressExpiry();
+        return;
+      }
+      clearPress();
       window.clearTimeout(timer);
       timer = window.setTimeout(recompute, 150);
     };
@@ -128,7 +158,7 @@ export const SelectionQuoteToolbar: React.FC<{
     // at the new position once it settles. The toolbar persists as long as the
     // selection exists, so the user can scroll to move it clear of the OS menu.
     const onScroll = () => {
-      pressRef.current = null;
+      clearPress();
       setSel(null);
       window.clearTimeout(timer);
       timer = window.setTimeout(recompute, 150);
@@ -138,11 +168,12 @@ export const SelectionQuoteToolbar: React.FC<{
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.clearTimeout(timer);
+      clearPress();
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('selectionchange', onSelectionChange);
       container.removeEventListener('scroll', onScroll);
     };
-  }, [containerRef, recompute]);
+  }, [armPressExpiry, clearPress, containerRef, recompute]);
 
   // Measure the rendered toolbar so we can clamp it on-screen by its real width
   // and height (label widths vary by locale + which actions are shown).
@@ -159,7 +190,7 @@ export const SelectionQuoteToolbar: React.FC<{
   if (!onQuote && !onAskInNew && !isTouch) return null;
 
   const dismiss = () => {
-    pressRef.current = null;
+    clearPress();
     window.getSelection()?.removeAllRanges();
     setSel(null);
     setCopied(false);
@@ -188,14 +219,19 @@ export const SelectionQuoteToolbar: React.FC<{
   // for a touch near a selection handle without ever delivering pointerup, so
   // state that waits for an end event must not gate selection recomputation.
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
-    pressRef.current = null;
+    clearPress();
     if (!e.isPrimary || e.button !== 0) return;
     e.preventDefault();
-    pressRef.current = { pointerId: e.pointerId, button: e.currentTarget };
+    pressRef.current = {
+      pointerId: e.pointerId,
+      button: e.currentTarget,
+      selectionText: sel.text,
+    };
+    armPressExpiry();
   };
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>, run: () => void) => {
     const press = pressRef.current;
-    pressRef.current = null;
+    clearPress();
     if (
       !press
       || !e.isPrimary
@@ -258,13 +294,7 @@ export const SelectionQuoteToolbar: React.FC<{
     : sel.first.top - toolbarHeight - placementGap;
   // Keep the toolbar on-screen vertically too, so it stays visible (and the
   // user can still act) when the selection is scrolled near a viewport edge.
-  const top = !isTouch
-    ? Math.min(Math.max(rawTop, topEdge), bottomEdge)
-    : roomAbove || roomBelow
-      ? rawTop
-      : below
-        ? bottomEdge
-        : topEdge;
+  const top = Math.min(Math.max(rawTop, topEdge), bottomEdge);
   // Clamp by the on-screen (capped) width so a toolbar wider than the viewport
   // centers + scrolls internally instead of pushing an edge off-screen.
   const half = Math.min(width, window.innerWidth - 2 * EDGE) / 2;
