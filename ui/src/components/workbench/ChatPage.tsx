@@ -1,3 +1,4 @@
+import { desktopDragRegion } from '../../lib/desktopShell';
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -3687,8 +3688,8 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
     // hairline bottom border separating it from the scrolling transcript.
     // No project-id pill and no override banner — both were noise the user
     // flagged (regression feedback #1/#3).
-    <div className="shrink-0 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur md:px-8">
-      <div className="mx-auto flex w-full max-w-[1080px] items-center gap-3">
+    <div data-tauri-drag-region={desktopDragRegion()} className="shrink-0 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur md:px-8">
+      <div data-tauri-drag-region={desktopDragRegion()} className="mx-auto flex w-full max-w-[1080px] items-center gap-3">
         <Button
           type="button"
           variant="outline"

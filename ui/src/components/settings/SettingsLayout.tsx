@@ -1,3 +1,4 @@
+import { DesktopDragRegion } from '../DesktopDragRegion';
 import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -366,7 +367,8 @@ export const SettingsLayout: React.FC = () => {
   }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">
+      <DesktopDragRegion className="absolute inset-x-0 top-0 z-10" />
       {/* The desktop shell's title bar stands in for this one. Its window never
           gets narrower than the rail breakpoint, so the rail's own Back to Avibe
           row is always on screen to leave by. */}

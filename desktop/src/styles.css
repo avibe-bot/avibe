@@ -247,3 +247,10 @@ body {
     transform: none;
   }
 }
+
+/* Occupies existing overlay clearance, without adding layout height. */
+.window-drag-region {
+  position: fixed;
+  inset: 0 0 auto;
+  height: var(--shell-titlebar-inset, 0px);
+}

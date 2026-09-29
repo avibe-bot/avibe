@@ -100,15 +100,15 @@ fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
 }
 
 #[test]
-fn the_shell_enables_no_capability_beyond_bootstrap() {
+fn the_shell_enables_only_bootstrap_and_window_drag() {
     assert_eq!(
         config()["app"]["security"]["capabilities"],
-        serde_json::json!(["bootstrap"])
+        serde_json::json!(["bootstrap", "window-drag"])
     );
 }
 
 #[test]
-fn notifications_are_native_only_without_remote_capabilities_or_workbench_callable_commands() {
+fn notifications_are_native_only_without_workbench_callable_commands() {
     let source = shipping_source("src/lib.rs");
     let native = shipping_source("src/notifications.rs");
     let build = shipping_source("build.rs");
@@ -135,7 +135,6 @@ fn notifications_are_native_only_without_remote_capabilities_or_workbench_callab
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|extension| extension == "json") {
             let capability = read_json(path);
-            assert!(capability.get("remote").is_none());
             assert!(!capability["permissions"].to_string().contains("notification:"));
         }
     }
@@ -664,11 +663,11 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
 }
 
 #[test]
-fn the_macos_overlay_title_bar_needs_no_page_permission_and_defaults_to_no_inset() {
+fn the_macos_overlay_title_bar_keeps_its_layout_and_defaults_to_no_inset() {
     let window = &config()["app"]["windows"][0];
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
-    // The strip drags natively; the page is granted no window permission for it.
+    // Bootstrap management and window gestures have separate capability grants.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
     assert!(
@@ -961,4 +960,46 @@ fn updates_have_one_native_owner_and_no_remote_install_permission() {
     assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
     assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));
     assert!(!include_str!("../build.rs").contains("update_install"));
+}
+
+#[test]
+fn workbench_window_permissions_are_narrow_and_match_literal_loopback_origins() {
+    use tauri::utils::acl::RemoteUrlPattern;
+    let grant = read_json(crate_dir().join("capabilities/window-drag.json"));
+    assert_eq!(grant["windows"], serde_json::json!(["main"]));
+    assert_eq!(grant["platforms"], serde_json::json!(["macOS"]));
+    assert_eq!(grant["local"], true);
+    assert_eq!(
+        grant["permissions"],
+        serde_json::json!([
+            "core:window:allow-start-dragging",
+            "core:window:allow-internal-toggle-maximize"
+        ])
+    );
+    let patterns: Vec<RemoteUrlPattern> = grant["remote"]["urls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pattern| pattern.as_str().unwrap().parse().unwrap())
+        .collect();
+    for origin in [
+        "http://127.0.0.1:5123",
+        "http://[::1]:5123",
+        "http://127.0.0.1",
+        "http://[::1]:6174",
+    ] {
+        for path in ["/", "/setup", "/chat/abc", "/show/abc/"] {
+            let url = url::Url::parse(&format!("{origin}{path}")).unwrap();
+            assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
+    }
+    for rejected in [
+        "https://example.com/setup",
+        "http://127.0.0.1.example.com/",
+        "http://192.168.1.2:5123/",
+        "http://localhost:5123/",
+    ] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
 }

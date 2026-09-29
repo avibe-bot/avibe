@@ -202,38 +202,4 @@ function reportUnavailable(error: unknown): void {
   document.title = catalog.notRunningTitle
 }
 
-/**
- * The overlay title bar's band moves the window here as it does over the
- * Workbench (`ui/src/lib/desktopShell.ts`): this page keeps no controls in it,
- * so any press there goes to the shell's `avibeShellTitleBar` handler, and a
- * double-click that did not move goes there on mouseup, as macOS decides it.
- */
-function installTitleBar(): void {
-  type Handlers = Record<string, { postMessage(body: 'drag' | 'double-click'): void } | undefined>
-  const handler = (window as Window & { webkit?: { messageHandlers?: Handlers } }).webkit?.messageHandlers?.avibeShellTitleBar
-  if (!handler) return
-  const onBand = (event: MouseEvent) =>
-    event.button === 0 && event.clientY < (parseFloat(getComputedStyle(root).getPropertyValue('--shell-titlebar-inset')) || 0)
-  let doubleClickAt: { x: number; y: number } | null = null
-  document.addEventListener('mousedown', (event) => {
-    doubleClickAt = null
-    if (!onBand(event)) return
-    if (event.detail === 2) doubleClickAt = { x: event.clientX, y: event.clientY }
-    else if (event.detail === 1) {
-      event.preventDefault()
-      handler.postMessage('drag')
-    }
-  })
-  document.addEventListener('mouseup', (event) => {
-    const origin = doubleClickAt
-    doubleClickAt = null
-    // Hand jitter, not a drag: the same 4px slop the Workbench allows.
-    const still = origin !== null && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) <= 4
-    if (still && event.detail === 2 && onBand(event)) {
-      handler.postMessage('double-click')
-    }
-  })
-}
-
-installTitleBar()
 void start().catch(reportUnavailable)

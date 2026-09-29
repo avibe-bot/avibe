@@ -1,3 +1,5 @@
+import { desktopDragRegion } from '../lib/desktopShell';
+import { DesktopDragRegion } from './DesktopDragRegion';
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
 import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
@@ -41,10 +43,12 @@ import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, 
  * The desktop shell keeps it too — its overlay title bar shows no title — and lets the
  * row move the window wherever the brand and the language button leave it free.
  */
-function SetupHeader() {
+export function SetupHeader() {
   const { t } = useTranslation();
   return (
-    <header data-shell-title-bar="">
+    <>
+    <DesktopDragRegion className="fixed inset-x-0 top-0 z-10" />
+    <header data-tauri-drag-region={desktopDragRegion()}>
       <div className="onboarding-brand">
         <span className="onboarding-brand-mark"><img src={logoImg} alt="" /></span>
         <span className="onboarding-brand-wordmark">
@@ -54,6 +58,7 @@ function SetupHeader() {
       </div>
       <LanguageSwitcher variant="icon-round" />
     </header>
+    </>
   );
 }
 

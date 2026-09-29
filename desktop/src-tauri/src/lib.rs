@@ -9,10 +9,11 @@
 //! * **Normal lifecycle does not stop the Runtime.** Closing or recreating a
 //!   window leaves it running. Only confirmed lifecycle actions invoke
 //!   the Runtime's own graceful stop command.
-//! * **The Workbench is not privileged.** `capabilities/bootstrap.json` grants
+//! * **Runtime management stays local.** `capabilities/bootstrap.json` grants
 //!   the two bootstrap commands to the shell's own local page only. Once the
 //!   window navigates to the Workbench origin the capability no longer matches,
-//!   and [`ensure_shell_ui`] rejects the call a second time regardless.
+//!   and [`ensure_shell_ui`] rejects the call a second time regardless. Only
+//!   the two built-in window drag commands are granted to the Workbench.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1211,7 +1212,6 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     let window = builder.build().ok()?;
     #[cfg(target_os = "macos")]
     {
-        macos_title_bar::install(&window);
         macos_new_context::install(&window);
     }
     Some(window)
