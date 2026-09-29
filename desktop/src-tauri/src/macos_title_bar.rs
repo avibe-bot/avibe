@@ -17,6 +17,14 @@
 //!   over the strip, above the WebView: a drag there moves the window and a
 //!   double-click does what the system title bar would, with no page script
 //!   involved and no capability widened.
+//! - The rest of the title bar band must move the window too, without covering
+//!   the controls the main pane keeps there. Only the page knows where those
+//!   are, so it asks: [`TITLE_BAR_MESSAGES`] is a WebKit message handler of the
+//!   window's own, outside Tauri's IPC, that understands exactly two requests —
+//!   start a window drag while the left button is down, or do what a title bar
+//!   double-click does — and only from the top-level document. The Workbench
+//!   sends them for a press on the band, or on a region it marks, that no
+//!   control claims. A page that never sends them keeps just the strip.
 //!
 //! Both only hold for a page built against this exact geometry. The shell can
 //! adopt a Runtime it did not ship, whose Workbench keeps a different region
@@ -28,8 +36,8 @@
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSEvent, NSResponder, NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
     NSWindowTitleVisibility,
@@ -37,7 +45,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     ns_string, NSError, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUserDefaults,
 };
-use objc2_web_kit::WKWebView;
+use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView};
 use tauri::{Webview, WebviewWindow};
 
 /// Height, in points, of the strip the overlay title bar occupies: the standard
@@ -125,6 +133,82 @@ impl TitleBarDragStrip {
     }
 }
 
+/// The name the page posts to: `window.webkit.messageHandlers.<name>`. The
+/// Workbench (`ui/src/lib/desktopShell.ts`) sends one of [`TitleBarRequest`].
+const TITLE_BAR_MESSAGES: &str = "avibeShellTitleBar";
+
+/// What a page may ask of the title bar. Nothing else is understood.
+#[derive(Debug, PartialEq, Eq)]
+enum TitleBarRequest {
+    /// A press on the band that no control claims: move the window with it.
+    Drag,
+    /// A double-click there: whatever the system title bar would do.
+    DoubleClick,
+}
+
+impl TitleBarRequest {
+    fn parse(body: &str) -> Option<Self> {
+        match body {
+            "drag" => Some(Self::Drag),
+            "double-click" => Some(Self::DoubleClick),
+            _ => None,
+        }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AvibeTitleBarMessages"]
+    #[ivars = WebviewWindow]
+    struct TitleBarMessages;
+
+    unsafe impl NSObjectProtocol for TitleBarMessages {}
+
+    unsafe impl WKScriptMessageHandler for TitleBarMessages {
+        #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+        fn did_receive_script_message(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
+            // SAFETY: WebKit hands over a live message on the main thread.
+            let (main_frame, body) = unsafe { (message.frameInfo().isMainFrame(), message.body()) };
+            // Show Pages run in subframes of the Workbench and never move the window.
+            if !main_frame {
+                return;
+            }
+            let Some(request) = body
+                .downcast_ref::<NSString>()
+                .and_then(|body| TitleBarRequest::parse(&body.to_string()))
+            else {
+                return;
+            };
+            // A drag follows the press the person is making right now; with the
+            // button already up there is nothing to follow.
+            if request == TitleBarRequest::Drag && NSEvent::pressedMouseButtons() & 1 == 0 {
+                return;
+            }
+            let window = self.ivars();
+            match request {
+                TitleBarRequest::Drag => {
+                    let _ = window.start_dragging();
+                }
+                TitleBarRequest::DoubleClick => {
+                    let Ok(ns_window) = window.ns_window() else {
+                        return;
+                    };
+                    // SAFETY: Tauri's live NSWindow for this webview window, used on the main thread.
+                    perform_title_bar_double_click(unsafe { &*ns_window.cast::<NSWindow>() });
+                }
+            }
+        }
+    }
+);
+
+impl TitleBarMessages {
+    fn new(mtm: MainThreadMarker, window: WebviewWindow) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(window);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
 /// The user's System Settings choice for double-clicking a title bar
 /// (Desktop & Dock > "Double-click a window's title bar to"). An unset value is
 /// the system default, zoom.
@@ -141,7 +225,8 @@ fn perform_title_bar_double_click(window: &NSWindow) {
 /// The window's content view holds the WebView for the window's whole life, and
 /// navigation replaces only the page inside it, so one strip per window suffices.
 pub fn install(window: &WebviewWindow) {
-    let _ = window.with_webview(|webview| {
+    let owner = window.clone();
+    let _ = window.with_webview(move |webview| {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -173,6 +258,22 @@ pub fn install(window: &WebviewWindow) {
         };
         strip.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMaxXMargin | pin_top);
         content.addSubview_positioned_relativeTo(&strip, NSWindowOrderingMode::Above, None);
+
+        // SAFETY: Tauri hands out the live WKWebView, on the main thread, for the
+        // duration of this closure; its configuration's controller outlives it.
+        let Some(web_view) = (unsafe { Retained::retain(webview.inner().cast::<WKWebView>()) }) else {
+            return;
+        };
+        let messages = TitleBarMessages::new(mtm, owner.clone());
+        unsafe {
+            web_view
+                .configuration()
+                .userContentController()
+                .addScriptMessageHandler_name(
+                    ProtocolObject::from_ref(&*messages),
+                    &NSString::from_str(TITLE_BAR_MESSAGES),
+                );
+        }
     });
 }
 
@@ -231,6 +332,37 @@ fn set_overlay(window: &NSWindow, overlay: bool, _mtm: MainThreadMarker) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page can ask for a drag or a double-click and nothing else; any other
+    /// body, including a near miss, is ignored rather than guessed at.
+    #[test]
+    fn the_title_bar_understands_only_its_two_requests() {
+        assert_eq!(TitleBarRequest::parse("drag"), Some(TitleBarRequest::Drag));
+        assert_eq!(
+            TitleBarRequest::parse("double-click"),
+            Some(TitleBarRequest::DoubleClick)
+        );
+        for body in ["", "Drag", "drag ", "close", "minimize", "zoom"] {
+            assert_eq!(TitleBarRequest::parse(body), None, "{body:?}");
+        }
+    }
+
+    /// Both pages post to the handler by name; renaming one side alone would
+    /// silently leave only the strip draggable.
+    #[test]
+    fn every_page_this_release_serves_posts_to_the_handler_this_shell_registers() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for script in ["../src/main.ts", "../../ui/src/lib/desktopShell.ts"] {
+            let source = std::fs::read_to_string(crate_dir.join(script)).expect("page script is readable");
+            assert!(
+                source.contains(TITLE_BAR_MESSAGES),
+                "{script} must post to the {TITLE_BAR_MESSAGES} handler"
+            );
+            for body in ["'drag'", "'double-click'"] {
+                assert!(source.contains(body), "{script} must send {body}");
+            }
+        }
+    }
 
     /// A page that keeps the strip's region free must say so for this exact
     /// geometry, or the shell falls back to the standard title bar for it. Both

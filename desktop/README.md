@@ -257,6 +257,21 @@ files do). A page that does not, or cannot answer, gets the standard title bar
 with the window title, the strip hidden, and the inset reset to `0px`. Windows
 and Linux keep the native title bar and a zero inset.
 
+The strip alone would leave the rest of the title bar inert: WKWebView takes
+every press outside it. The page knows where its controls are, so the rest of
+the band moves the window at the page's request. The shell registers one WebKit
+script message handler, `avibeShellTitleBar`, outside Tauri's IPC and its
+capabilities; it accepts only `drag` (while the left button is down) and
+`double-click` (the same system setting the strip follows), and only from the
+top-level document, so a Show Page in a subframe can post neither. The
+Workbench (`ui/src/lib/desktopShell.ts`) sends them for a left press on the
+overlay band, or on an element marked `data-shell-title-bar` such as setup's
+brand and language row, unless a control claims it — links, buttons, form
+fields, focusable, draggable, and ARIA-interactive elements (the sidebar
+resizer included) — or a page handler already consumed it. The bootstrap page
+sends them for its whole band. A page that never posts keeps just the strip,
+and a Workbench under an older shell without the handler changes nothing.
+
 Links that ask for a new browsing context (`target="_blank"` or
 `window.open`) open in the system browser when they are `http(s)`; anything
 else is dropped, and the page never gets a second webview. WKWebView first

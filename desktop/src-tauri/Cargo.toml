@@ -73,5 +73,9 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKFrameInfo",
   "WKNavigationAction",
   "WKNavigationDelegate",
+  "WKScriptMessage",
+  "WKScriptMessageHandler",
+  "WKUserContentController",
   "WKWebView",
+  "WKWebViewConfiguration",
 ] }

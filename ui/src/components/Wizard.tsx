@@ -25,7 +25,6 @@ import {
 } from './onboarding/providers/gatewayBootstrap';
 import logoImg from '@/assets/logo.png';
 import { LanguageSwitcher } from './LanguageSwitcher';
-import { isDesktopShell } from '../lib/desktopShell';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
@@ -39,14 +38,13 @@ import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, 
  * at the window's own gutter, and the shared language switcher wearing its round
  * trigger opposite it.
  *
- * The desktop shell leaves it out, and its height with it: the window's title bar
- * names the app, and language lives in General Settings behind the native menu.
+ * The desktop shell keeps it too — its overlay title bar shows no title — and lets the
+ * row move the window wherever the brand and the language button leave it free.
  */
 function SetupHeader() {
   const { t } = useTranslation();
-  if (isDesktopShell()) return null;
   return (
-    <header>
+    <header data-shell-title-bar="">
       <div className="onboarding-brand">
         <span className="onboarding-brand-mark"><img src={logoImg} alt="" /></span>
         <span className="onboarding-brand-wordmark">
