@@ -21,6 +21,7 @@ import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
 import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
+import type { VaultProtection } from '../ui/vault-secret-form';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault } from '../../lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '../../lib/vaultBrowserHandoff';
@@ -528,7 +529,8 @@ export const VaultsPage: React.FC = () => {
   const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+  // The tier of a new secret being added, or null when the Add dialog is closed.
+  const [adding, setAdding] = useState<VaultProtection | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
@@ -548,6 +550,21 @@ export const VaultsPage: React.FC = () => {
       { replace: true },
     );
   }, [setSearchParams]);
+
+  // The desktop app's protected-create handoff (`openProtectedAddInBrowser`) lands here: reopen Add
+  // on the protected tier, then drop the parameter so a reload doesn't reopen it.
+  useEffect(() => {
+    if (!canManage || searchParams.get('add') !== 'protected') return;
+    setAdding('protected');
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('add');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [canManage, searchParams, setSearchParams]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -793,7 +810,7 @@ export const VaultsPage: React.FC = () => {
               <RefreshCw className="size-4" />
             </Button>
             {canManage ? (
-              <Button className="max-sm:flex-1" onClick={() => setAdding(true)}>
+              <Button className="max-sm:flex-1" onClick={() => setAdding('standard')}>
                 <Plus className="size-4" />
                 {t('vaults.add')}
               </Button>
@@ -900,13 +917,14 @@ export const VaultsPage: React.FC = () => {
       )}
       {canManage ? <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} /> : null}
       {canManage ? <VaultSecretDialog
-        open={adding}
+        open={adding != null}
+        defaultProtection={adding ?? undefined}
         onOpenChange={(o) => {
-          if (!o) setAdding(false);
+          if (!o) setAdding(null);
         }}
         onCreated={(name, reason) => {
           if (reason === 'already_exists') return;
-          setAdding(false);
+          setAdding(null);
           showToast(t('vaults.created', { name }), 'success');
           refresh();
         }}

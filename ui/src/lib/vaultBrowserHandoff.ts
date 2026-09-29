@@ -15,8 +15,20 @@ export function vaultPasskeyNeedsBrowser(): boolean {
 
 /** Opens Vaults in the user's browser, focused on `requestId` when given. */
 export function openVaultsInBrowser(requestId?: string | null): void {
-  const url = new URL('/vaults', window.location.origin);
   // The same deep link Avibe sends to IM (`vault_request_url`): Vaults opens the request itself.
-  if (requestId) url.searchParams.set('request_id', requestId);
+  openVaults(requestId ? { request_id: requestId } : {});
+}
+
+/**
+ * Opens a new Add secret dialog on the protected tier in the user's browser. The draft stays
+ * behind: its value above all must never travel in a URL.
+ */
+export function openProtectedAddInBrowser(): void {
+  openVaults({ add: 'protected' });
+}
+
+function openVaults(params: Record<string, string>): void {
+  const url = new URL('/vaults', window.location.origin);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   openLinkInNewContext(url.toString());
 }

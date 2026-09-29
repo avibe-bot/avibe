@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { webauthnAvailable } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import type { useProtectedVault } from '@/lib/useProtectedVault';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -38,14 +38,14 @@ const PANEL = 'flex flex-col gap-4 rounded-2xl border border-border bg-surface p
  *
  * `secretName` is shown in the unlock subtitle ("<NAME> is protected …"); it is optional
  * because the create-dialog gating step has no single secret name yet. Where passkeys can't run,
- * setup and unlock continue in the browser, opened on `requestId` when a request is being answered.
+ * setup and unlock continue in the browser, where `onContinueInBrowser` reopens the caller's flow.
  */
 export const VaultProtectedUnlock: React.FC<{
   vault: Vault;
   secretName?: string;
-  requestId?: string | null;
+  onContinueInBrowser?: () => void;
   onDismiss?: () => void;
-}> = ({ vault, secretName, requestId, onDismiss }) => {
+}> = ({ vault, secretName, onContinueInBrowser, onDismiss }) => {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   // Passkey-only setup has no recovery fallback yet, so a lost passkey is
@@ -104,7 +104,7 @@ export const VaultProtectedUnlock: React.FC<{
   const browserHandoff = (
     <div className="flex flex-col items-center gap-2.5">
       <span className="text-center text-[12px] leading-snug text-muted-foreground">{t('vaults.protectedUnlock.browserNote')}</span>
-      <Button type="button" variant="brand" className="w-full" onClick={() => openVaultsInBrowser(requestId)}>
+      <Button type="button" variant="brand" className="w-full" onClick={onContinueInBrowser}>
         <ExternalLink className="size-5" />
         {t('vaults.protectedUnlock.openInBrowser')}
       </Button>

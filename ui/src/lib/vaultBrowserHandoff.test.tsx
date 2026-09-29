@@ -8,12 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { VaultRequest } from '@/context/ApiContext';
 import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
-import { VaultProtectedUnlock } from '@/components/ui/vault-protected-unlock';
 import { VaultRequestCard } from '@/components/ui/vault-request-card';
+import { VaultSecretForm } from '@/components/ui/vault-secret-form';
 import en from '@/i18n/en.json';
 
 const api = vi.hoisted(() => ({
   getVaultSettings: vi.fn(),
+  listDependencies: vi.fn(),
+  listSkills: vi.fn(),
   listVaultSecrets: vi.fn(),
   createVaultAgentBindingsBatch: vi.fn(),
   fulfillVaultAccessRequest: vi.fn(),
@@ -88,36 +90,46 @@ const protectedSign = {
 
 const onCancel = vi.fn();
 const approvalAction = { name: /^(approve|sign|continue in browser)$/i };
-const cases: Array<{ surface: string; ui: () => ReactElement; action: { name: RegExp }; requestId: string | null; setup?: () => void }> = [
+const openInBrowser = { name: /add a passkey|unlock with passkey|open in browser/i };
+const cases: Array<{ surface: string; ui: () => ReactElement; action: { name: RegExp }; search: string; setup?: () => void }> = [
   {
     surface: 'protected access approval',
     ui: () => <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={onCancel} />,
     action: approvalAction,
-    requestId: protectedAccess.id,
+    search: `?request_id=${protectedAccess.id}`,
   },
   {
     surface: 'protected sign approval',
     ui: () => <VaultApprovalCard request={protectedSign} onResolved={vi.fn()} onCancel={onCancel} />,
     action: approvalAction,
-    requestId: protectedSign.id,
+    search: `?request_id=${protectedSign.id}`,
   },
   {
     surface: 'chat request card review',
     ui: () => <VaultRequestCard request={protectedAccess} onResolved={vi.fn()} />,
     action: { name: /^review/i },
-    requestId: protectedAccess.id,
+    search: `?request_id=${protectedAccess.id}`,
   },
   {
-    surface: 'protected vault setup while answering a provision request',
-    ui: () => <VaultProtectedUnlock vault={vault as never} requestId="vrq_provision" />,
-    action: { name: /add a passkey|open in browser/i },
-    requestId: 'vrq_provision',
+    // No request to reopen, so the browser starts a new Add on the protected tier.
+    surface: 'protected vault setup while adding a secret',
+    ui: () => <VaultSecretForm defaultProtection="protected" onCancel={onCancel} onCreated={vi.fn()} />,
+    action: openInBrowser,
+    search: '?add=protected',
   },
   {
-    surface: 'protected vault unlock',
-    ui: () => <VaultProtectedUnlock vault={vault as never} secretName="OPENAI_API_KEY" />,
-    action: { name: /unlock with passkey|open in browser/i },
-    requestId: null,
+    surface: 'protected vault unlock while answering a provision request',
+    ui: () => (
+      <VaultSecretForm
+        fixedName="WALLET_PASSWORD"
+        provisionRequestId="vrq_provision"
+        defaultProtection="protected"
+        onCancel={onCancel}
+        onCreated={vi.fn()}
+      />
+    ),
+    action: openInBrowser,
+    search: '?request_id=vrq_provision',
     setup: () => {
       vault.status = 'locked';
     },
@@ -131,7 +143,7 @@ beforeEach(() => {
   vault.passkeyUsableHere.mockReturnValue(true);
   vault.approveProtectedRelease.mockResolvedValue([]);
   vault.signProtectedRequest.mockResolvedValue({ signature: 'c2ln' });
-  for (const call of Object.values(api)) call.mockResolvedValue({ ok: true, items: [], secrets: [] });
+  for (const call of Object.values(api)) call.mockResolvedValue({ ok: true, items: [], secrets: [], deps: [], skills: [] });
 });
 
 afterEach(() => {
@@ -143,23 +155,24 @@ afterEach(() => {
 
 // Contract: in the desktop shell, whose WKWebView can't run WebAuthn and whose new windows never
 // pair with the sandbox, every surface that would start a protected passkey step instead opens the
-// same Workbench's Vaults page in the browser, on the request when there is one, and starts nothing
-// here. Before this, each of these clicks began a ceremony (and, for access, issued binding
-// contexts) that could only fail, leaving dead browser tabs behind.
+// same Workbench's Vaults page in the browser, reopening the same flow there (the request, or a new
+// Add on the protected tier), and starts nothing here. Before this, each of these clicks began a
+// ceremony (and, for access, issued binding contexts) that could only fail, leaving dead browser
+// tabs behind; a bare Vaults page would strand an Add in progress with nothing to continue.
 describe('desktop shell protected-vault browser handoff', () => {
-  it.each(cases)('$surface opens Vaults in the browser without starting a passkey step', async ({ ui, action, requestId, setup }) => {
+  it.each(cases)('$surface reopens its flow in the browser without starting a passkey step', async ({ ui, action, search, setup }) => {
     setup?.();
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     render(<I18nextProvider i18n={i18n}>{ui()}</I18nextProvider>);
 
-    fireEvent.click(screen.getByRole('button', action));
+    fireEvent.click(await screen.findByRole('button', action));
     await Promise.resolve();
 
     expect(open).toHaveBeenCalledTimes(1);
     const target = new URL(String(open.mock.calls[0][0]));
     expect(target.origin).toBe(window.location.origin);
     expect(target.pathname).toBe('/vaults');
-    expect(target.searchParams.get('request_id')).toBe(requestId);
+    expect(target.search).toBe(search);
     expect(screen.queryByRole('dialog')).toBeNull();
     for (const ceremony of [vault.setupPasskey, vault.unlockPasskey, vault.approveProtectedRelease, vault.signProtectedRequest]) {
       expect(ceremony).not.toHaveBeenCalled();

@@ -39,6 +39,7 @@ import {
   type SigningKeyMaterial,
 } from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import { openProtectedAddInBrowser, openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { Badge } from './badge';
 import { Button } from './button';
 import { Input } from './input';
@@ -78,7 +79,7 @@ function normalizeHost(raw: string): string | null {
   const label = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
   return new RegExp(`^${label}(?:\\.${label})*$`).test(core) ? host : null;
 }
-type VaultProtection = 'standard' | 'protected';
+export type VaultProtection = 'standard' | 'protected';
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -930,11 +931,18 @@ export const VaultSecretForm: React.FC<{
       </div>
     ) : null;
 
+  // Where passkeys can't run, the browser reopens this flow: the provision request itself, or a new
+  // Add on the protected tier. This form stays open, so the user may still switch to Standard here.
+  const continueInBrowser = () => {
+    if (provisionRequestId) openVaultsInBrowser(provisionRequestId);
+    else openProtectedAddInBrowser();
+  };
+
   // Protected setup/unlock gating step + avault availability notices, shared by both modes.
   const gatingNotices = (
     <>
       {protection === 'protected' && !protectedCreateReady && (
-        <VaultProtectedUnlock vault={protectedVault} secretName={secretName || undefined} requestId={provisionRequestId} />
+        <VaultProtectedUnlock vault={protectedVault} secretName={secretName || undefined} onContinueInBrowser={continueInBrowser} />
       )}
       {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock vault={protectedVault} />}
       {protection === 'standard' && checkingAvault && (

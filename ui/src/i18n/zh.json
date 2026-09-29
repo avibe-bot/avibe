@@ -4858,7 +4858,7 @@
       "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
       "unlockUnavailableHere": "保护层保险库需要 passkey。请从 localhost 或你的 avibe.bot 地址打开 Vaults；127.0.0.1 这类原始 IP 无法使用 WebAuthn。",
-      "browserNote": "桌面端无法使用 passkey。请在浏览器中继续——打开的是同一个 Avibe。",
+      "browserNote": "桌面端无法使用 passkey。这张表单会在浏览器中重新打开（同一个 Avibe），请在那里完成。",
       "openInBrowser": "在浏览器中打开",
       "errors": {
         "prfUnavailable": "这个 passkey/浏览器不支持加密所需的 PRF 扩展。请改用平台 passkey(Touch ID / Windows Hello)。",
