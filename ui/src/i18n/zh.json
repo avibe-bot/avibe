@@ -16,7 +16,8 @@
       "runtime_discovery_failed": "Avibe 无法确定本地 Runtime 地址。",
       "runtime_spawn_failed": "Avibe 无法启动已安装的 Runtime。",
       "runtime_stopped": "运行时已停止。准备就绪后，点击“重试”即可启动。",
-      "runtime_ownership_lost": "运行时已更换，此应用已无法停止它。点击“重试”以检查当前运行时。",
+      "runtime_ownership_lost": "此地址上的运行时已更换，本应用未停止它。点击“重试”以检查当前运行时并重新连接。",
+      "runtime_stop_failed": "Avibe 无法确认运行时已停止，其部分或全部组件可能仍在运行。点击“重试”重新连接，如有需要可再次停止它。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
       "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
@@ -43,7 +44,6 @@
       "busyTitle": "应用正忙",
       "busyMessage": "运行时正在启动，或另一个生命周期操作正在进行。请等待完成后重试。",
       "failureTitle": "无法完成操作",
-      "stopFailure": "无法安全停止运行时，应用将保持打开。请检查运行时后重试。",
       "loginFailure": "无法读取或更改登录启动设置。请检查操作系统的登录设置后重试。"
     },
     "notifications": {
@@ -76,7 +76,13 @@
       "successTitle": "Avibe 私有文件已移除",
       "successMessage": "私有 Runtime 和 Agent 后端已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
       "failureTitle": "卸载失败",
-      "failureMessage": "Avibe 无法完整移除私有 Runtime 和后端文件。桌面应用仍保持安装状态，你的用户数据没有发生变化。"
+      "failureMessage": "Avibe 无法完整移除私有 Runtime 和后端文件。桌面应用仍保持安装状态，你的用户数据没有发生变化。",
+      "blockedTitle": "私有文件已保留",
+      "blockedMessage": "Avibe 保留了私有 Runtime 和后端文件，因为仍在运行的程序可能正在使用它们：不是本应用启动的 Runtime、仍在启动的 Runtime，或尚未完成的后端安装。请停止该 Runtime 或等待其完成，然后再次选择“卸载 Avibe”。你的用户数据没有发生变化。",
+      "unverifiedTitle": "无法确认已停止",
+      "unverifiedMessage": "Avibe 无法运行其 Runtime 来确认后台安装已停止。如果仍然删除私有文件，仍在运行的安装可能会失败或残留文件。无论如何选择，你的用户数据都不会改变。",
+      "unverifiedDelete": "仍然删除",
+      "unverifiedKeep": "保留文件"
     },
     "updater": {
       "menu": "检查桌面应用更新…",
@@ -3684,7 +3690,8 @@
     "restarting": "正在重启...",
     "autoUpdate": "自动更新",
     "autoUpdateHint": "空闲时自动安装",
-    "desktopManagedUpdate": "更新将随 Avibe 桌面应用提供"
+    "desktopManagedUpdate": "更新将随 Avibe 桌面应用提供",
+    "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}"
   },
   "doctor": {
     "title": "系统状态",

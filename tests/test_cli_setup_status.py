@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,22 +18,8 @@ def _config_with_setup_state(*, ready: bool) -> SimpleNamespace:
 
 def _start_process(pid: int, *args, start_info: ProcessStartInfo, **kwargs) -> int:
     start_info.pid = pid
-    start_info.create_unix_ms = 1789010100000.5 + pid
     start_info.reused = False
     return pid
-
-
-def _assert_start_receipt(output: str) -> None:
-    receipts = [line for line in output.splitlines() if line.startswith("@avibe-start-receipt:")]
-    assert len(receipts) == 1
-    assert json.loads(receipts[0].split(":", 1)[1]) == {
-        "schema_version": 1,
-        "outcome": "started",
-        "service_pid": 101,
-        "ui_pid": 202,
-        "service_create_unix_ms": 1789010100101.5,
-        "ui_create_unix_ms": 1789010100202.5,
-    }
 
 
 def test_cmd_vibe_marks_setup_when_no_enabled_platform_has_credentials(capsys) -> None:
@@ -59,10 +44,9 @@ def test_cmd_vibe_marks_setup_when_no_enabled_platform_has_credentials(capsys) -
     output = capsys.readouterr().out
     assert "Run: vibe remote" in output
     assert "SSH port forwarding" not in output
-    _assert_start_receipt(output)
 
 
-def test_cmd_vibe_marks_starting_when_non_slack_platform_is_configured(capsys) -> None:
+def test_cmd_vibe_marks_starting_when_non_slack_platform_is_configured() -> None:
     config = _config_with_setup_state(ready=True)
 
     with (
@@ -81,4 +65,3 @@ def test_cmd_vibe_marks_starting_when_non_slack_platform_is_configured(capsys) -
     stop_service.assert_not_called()
     stop_ui.assert_not_called()
     write_status.assert_called_once_with("starting")
-    _assert_start_receipt(capsys.readouterr().out)

@@ -9,13 +9,11 @@ configuration or broaden its navigation policy.
 from __future__ import annotations
 
 import ipaddress
-import json
-import math
 import os
 import socket
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Literal, TypedDict
 
 DESKTOP_ENDPOINT_SCHEMA_VERSION: Literal[1] = 1
 DESKTOP_RUNTIME_ID_ENV = "AVIBE_DESKTOP_RUNTIME_ID"
@@ -38,46 +36,6 @@ DESKTOP_OPENCODE_ROLE = "opencode"
 # different one is a reused pid only when the process holding it is readable and
 # is not a UI of the tree's Runtime; when it cannot be read, nobody can tell.
 DESKTOP_INSTALLER_OWNER_ENV = "AVIBE_DESKTOP_INSTALLER_OWNER"
-START_RECEIPT_PREFIX = "@avibe-start-receipt:"
-START_RECEIPT_TIME_TOLERANCE_MS = 2.0
-
-
-class StartReceipt(TypedDict):
-    schema_version: Literal[1]
-    outcome: Literal["started", "reused"]
-    service_pid: int
-    ui_pid: int
-    service_create_unix_ms: float
-    ui_create_unix_ms: float
-
-
-def validate_start_receipt(payload: object) -> StartReceipt:
-    if not isinstance(payload, dict):
-        raise ValueError("Startup receipt must be an object")
-    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
-        raise ValueError("Unsupported startup receipt schema")
-    if payload.get("outcome") not in ("started", "reused"):
-        raise ValueError("Invalid startup receipt outcome")
-    for field in ("service_pid", "ui_pid"):
-        value = payload.get(field)
-        if type(value) is not int or value <= 0:
-            raise ValueError(f"Invalid startup receipt {field}")
-    for field in ("service_create_unix_ms", "ui_create_unix_ms"):
-        value = payload.get(field)
-        if type(value) not in (int, float) or value <= 0:
-            raise ValueError(f"Invalid startup receipt {field}")
-        try:
-            finite = math.isfinite(value)
-        except OverflowError:
-            finite = False
-        if not finite:
-            raise ValueError(f"Invalid startup receipt {field}")
-    return cast(StartReceipt, payload)
-
-
-def start_receipt_line(payload: object) -> str:
-    receipt = validate_start_receipt(payload)
-    return START_RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":"), allow_nan=False)
 
 
 class DesktopEndpointPayload(TypedDict):

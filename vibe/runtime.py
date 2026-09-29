@@ -59,14 +59,10 @@ SERVICE_PHASE_RUNNING = "running"
 @dataclass
 class ProcessStartInfo:
     pid: int | None = None
-    create_unix_ms: float | None = None
     reused: bool = False
 
     def capture(self, pid: int, *, reused: bool) -> int:
-        if self.pid != pid:
-            created = process_create_time(pid)
-            self.pid = pid
-            self.create_unix_ms = created * 1000 if created is not None else None
+        self.pid = pid
         self.reused = reused
         return pid
 

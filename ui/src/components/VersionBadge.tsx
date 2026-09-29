@@ -28,6 +28,25 @@ function shortenVersion(value: string, tail = 4): string {
   return `${core}…${value.slice(-tail)}`;
 }
 
+// The shell stamps SemVer (`3.1.2-rc.3`) and the Runtime reports PEP 440
+// (`3.1.2rc3`). Normalize both to PEP 440 so only a real difference is flagged.
+const PEP440 = /^v?(\d+(?:\.\d+)*)(?:[-_.]?(a|b|c|rc|alpha|beta|pre|preview)[-_.]?(\d*))?(?:[-_.]?(post|rev|r)[-_.]?(\d*))?(?:[-_.]?(dev)[-_.]?(\d*))?(?:\+([a-z0-9]+(?:[-_.][a-z0-9]+)*))?$/;
+const PRE_RELEASE: Record<string, string> = { alpha: 'a', beta: 'b', c: 'rc', pre: 'rc', preview: 'rc' };
+
+function normalizeVersion(value: string): string {
+  const version = value.trim().toLowerCase();
+  const match = PEP440.exec(version);
+  if (!match) return version;
+  const [, release, pre, preNumber, post, postNumber, dev, devNumber, local] = match;
+  return [
+    release,
+    pre ? `${PRE_RELEASE[pre] ?? pre}${preNumber || '0'}` : '',
+    post ? `.post${postNumber || '0'}` : '',
+    dev ? `.dev${devNumber || '0'}` : '',
+    local ? `+${local.replace(/[-_]/g, '.')}` : '',
+  ].join('');
+}
+
 export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -45,8 +64,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const popupId = React.useId();
 
   React.useEffect(() => {
-    if (inDesktopShell) return;
     checkVersion();
+    // The shell owns updates; it reads the Runtime's version only to show skew.
+    if (inDesktopShell) return;
     loadAutoUpdateSetting();
   }, []);
 
@@ -120,7 +140,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   const hasUpdate = !inDesktopShell && versionInfo?.managed_by !== 'desktop' && versionInfo?.has_update === true;
   const isDesktopManaged = versionInfo?.managed_by === 'desktop';
-  const currentVersion = (inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : versionInfo?.current) || '...';
+  const shellVersion = inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : undefined;
+  const runtimeVersion = versionInfo?.current;
+  // A shell can serve a Runtime it did not start, such as one it adopted.
+  const hasVersionSkew = Boolean(
+    shellVersion && runtimeVersion && normalizeVersion(shellVersion) !== normalizeVersion(runtimeVersion),
+  );
+  const currentVersion = (hasVersionSkew ? runtimeVersion : shellVersion ?? runtimeVersion) || '...';
   const isSourceBuild = !inDesktopShell && versionInfo?.build?.kind === 'source';
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
@@ -128,9 +154,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const refreshLabel = checking
     ? t('dashboard.checking')
     : t(isSourceBuild ? 'dashboard.refreshBuildInfo' : 'dashboard.checkUpdate');
-  const badgeTitle = isSourceBuild
-    ? `${t('dashboard.sourceRevision')}: ${sourceRevision || t('dashboard.unknownRevision')}${versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}`
-    : `v${currentVersion}`;
+  const badgeTitle = hasVersionSkew
+    ? t('dashboard.runtimeVersionSkew', { app: shellVersion, runtime: runtimeVersion })
+    : isSourceBuild
+      ? `${t('dashboard.sourceRevision')}: ${sourceRevision || t('dashboard.unknownRevision')}${versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}`
+      : `v${currentVersion}`;
   // Desktop details belong in the shared floating layer, outside the sidebar.
   // Phones retain their fixed panel below the header.
   const Popup = isDesktop ? PopoverContent : 'div';
@@ -143,7 +171,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           <button
             type="button"
             className={cn(
-              badgeVariants({ variant: hasUpdate ? 'warning' : 'secondary' }),
+              badgeVariants({ variant: hasUpdate || hasVersionSkew ? 'warning' : 'secondary' }),
               interactiveBadgeTriggerClassName,
               'relative rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
             )}
@@ -154,6 +182,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               window.location.href = 'avibe://updates';
             } : undefined}
           >
+            {hasVersionSkew && <AlertCircle size={12} aria-hidden="true" />}
             {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
             {displayVersion}
             {hasUpdate && (

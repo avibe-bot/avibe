@@ -1,6 +1,7 @@
 # Desktop Runtime scoped stop and installer ownership
 
-Refs #2135 (Python half), #2131.
+Refs #2135, #2131. PR 2a is the Python half; PR 2b is the desktop host and
+removes the startup receipt from both sides.
 
 ## Outcome and boundaries
 
@@ -8,14 +9,17 @@ A desktop app must update smoothly and never stop a Runtime it did not start.
 Authority to stop follows provenance: the desktop host knows which Runtime id its
 bundle started, and asks Python to stop only processes that carry that id. The
 scoped stop reads no file: no pidfile, lock record or installer record decides
-what is signalled. `/ready` and `/internal/health` are unchanged, and so are
-plain `vibe stop` and `vibe stop --receipt`.
+what is signalled. `/ready` and `/internal/health` are unchanged, and so is
+plain `vibe stop`. The startup receipt (`@avibe-start-receipt:` and
+`vibe stop --receipt`) is gone: provenance is the Runtime id, not a receipt the
+host has to keep.
 
 ## `vibe stop --expect-runtime-id <RUNTIME_ID>`
 
 `RUNTIME_ID` is the 64-character lowercase hex `AVIBE_DESKTOP_RUNTIME_ID` the
 desktop host exports to the Runtime it launches. Every process that Runtime
-starts inherits it. The flag is mutually exclusive with `--receipt`.
+starts inherits it. `--keep-remote-access`, accepted only with it, leaves the
+tunnel connector running; without it the stop also stops the connector.
 
 ### Discovery is one scan
 
@@ -214,11 +218,15 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
 
 ## Known-by-design ledger
 
-- Programs without a role that carry the id, such as agent CLIs and the tunnel
-  connector, are listed in `left_running` and never signalled. They are either
-  children of a stopped role process or, like the connector, kept for adoption.
-- The scoped stop does not stop remote access: that path acts on the
-  connector's files. The handover leaves the tunnel for the successor.
+- Programs without a role that carry the id, such as agent CLIs, are listed in
+  `left_running` and never signalled; they are children of a stopped role
+  process.
+- The tunnel connector serves the home, not one Runtime. After a successful
+  scoped stop it is stopped through its own files, and only while the stop holds
+  the free service lock and no UI of the home is running. A held lock leaves it
+  to that service. `--keep-remote-access` leaves it running; the handover uses
+  it so the successor adopts the tunnel, and the next UI start's
+  `remote_access.reconcile()` brings a stopped tunnel back after Quit.
 - A role process in the stop's own lineage is never signalled and fails the
   stop; a program without a role in the lineage is not listed.
 - The scoped stop path reads no file: no pidfile, lock record or installer
@@ -257,15 +265,29 @@ These errors go through `vibe/i18n/` (`desktopRuntime.handover*`).
   landing on a UI. An owner launched outside the UI's `-c` shape, which Avibe
   never does, reads as reused on a shifted create time, as before this rule.
 
-## Consumer notes for the desktop host (PR2)
+## Desktop host (PR 2b)
 
-- Pass `--expect-runtime-id` for handover, Quit and uninstall. Exit 3 means
-  nothing was touched; parse the JSON reason. `service_runtime_id_mismatch` is
-  Foreign; `service_identity_unavailable` is Unknown, to be retried and never
-  treated as Absent.
-- Exit 2 means a process or installer tree of this Runtime may still be
-  running: do not replace or remove the bundle. `remaining` names each one.
-- `left_running` lists the other programs carrying the id. For Quit and
-  uninstall the tunnel connector is among them; stop it separately if the
-  tunnel should not outlive the app.
-- Uninstall should take the backend's `.install.lock` before removing its root.
+`HealthProbe::presence` classifies the origin: `Mine{ready}` (this bundle's id),
+`Foreign{id, ready}`, `Unmanaged` (no id), `Absent` (connection refused) or
+`Unknown` (any other failure). The host runs one stop verb,
+`vibe stop --expect-runtime-id <id> [--keep-remote-access]`, mapped as exit 0 →
+`Completed`, 3 → `Refused{reason}`, 2 → `Failed{part}`, any other exit →
+`Failed{unknown}`, and a spawn error → `Unrunnable`.
+
+- B1, initial: `Mine{ready}` → adopt; `Mine{!ready}`, `Absent`, `Unknown` →
+  launch; `Unmanaged` → adopt as external; `Foreign(id)` → stop that id keeping
+  the tunnel, then launch on `Completed` and fail closed otherwise. Handover
+  runs only on app launch or a user Retry, never from monitor recovery, which
+  shows `runtime_ownership_lost` instead.
+- B4, polling: `Mine{ready}` → Ready; `Unmanaged` → Adopted. B5: the first
+  `Foreign` while polling stops it and relaunches; a second one fails.
+- B6, monitor: the Runtime is serving while presence stays the adopted class.
+- B7, uninstall: only `Mine`, or `Absent` with no launch in flight, is stopped
+  by the bundle's id, then its backends and bundle are removed. Any other
+  presence, a refusal or a failure keeps every file. When the CLI cannot run
+  at all and presence is `Absent` with no launch in flight, a native dialog
+  offers "Delete Anyway" or "Keep Files".
+- B8, Stop and Quit: offered only while the last presence is `Mine`. A refusal
+  shows `runtime_ownership_lost`; a failure shows `runtime_stop_failed`.
+- `Unknown` → launch relies on the start boundary, tracked in
+  https://github.com/avibe-bot/avibe/issues/2135#issuecomment-5877263657.

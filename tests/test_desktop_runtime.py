@@ -1169,7 +1169,6 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         language="en",
     )
     spawned = []
-    process_times = {1234: 1789010100.1235, 5678: 1789010100.4565}
 
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
@@ -1177,7 +1176,6 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "process_create_time", lambda pid: process_times[pid])
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
@@ -1223,17 +1221,7 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
 
     assert cli.cmd_start(open_browser=False) == 0
 
-    receipt_line = next(
-        line for line in capsys.readouterr().out.splitlines() if line.startswith("@avibe-start-receipt:")
-    )
-    assert json.loads(receipt_line.split(":", 1)[1]) == {
-        "schema_version": 1,
-        "outcome": "reused",
-        "service_pid": 1234,
-        "ui_pid": 5678,
-        "service_create_unix_ms": process_times[1234] * 1000,
-        "ui_create_unix_ms": process_times[5678] * 1000,
-    }
+    assert "  http://127.0.0.1:5123" in capsys.readouterr().out.splitlines()
     assert len(spawned) == 1
 
 

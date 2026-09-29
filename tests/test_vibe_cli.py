@@ -1078,152 +1078,6 @@ def test_cmd_restart_schedules_supervisor_by_default(monkeypatch):
     assert calls == [{"delay_seconds": 0.0, "vibe_path": "/usr/local/bin/vibe", "trigger": "cli"}]
 
 
-def _startup_receipt_payload():
-    return {
-        "schema_version": 1, "outcome": "started",
-        "service_pid": 1234, "ui_pid": 5678,
-        "service_create_unix_ms": 1789010100.1235 * 1000,
-        "ui_create_unix_ms": 1789010100.4565 * 1000,
-    }
-
-
-@pytest.fixture
-def receipt_shutdown(monkeypatch):
-    pid_path = paths.get_runtime_pid_path()
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    pid_path.write_text("1234\n", encoding="utf-8")
-    calls = []
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 1789010100.1235)
-    monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: True)
-    monkeypatch.setattr(runtime, "stop_service", lambda: calls.append("service") or True)
-    monkeypatch.setattr(runtime, "stop_ui", lambda: calls.append("ui") or True)
-    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: calls.append("opencode") or True)
-    monkeypatch.setattr(cli, "_write_status", lambda *args: calls.append(args))
-    return SimpleNamespace(pid_path=pid_path, calls=calls)
-
-
-@pytest.mark.parametrize("delta_ms", [-2, -1.999, 0, 1.999, 2])
-@pytest.mark.parametrize("outcome", ["started", "reused"])
-def test_cmd_stop_receipt_matches_with_inclusive_tolerance(capsys, receipt_shutdown, delta_ms, outcome):
-    receipt = _startup_receipt_payload()
-    receipt["service_create_unix_ms"] += delta_ms
-    receipt["outcome"] = outcome
-
-    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 0
-
-    assert receipt_shutdown.calls == ["service", "ui", "opencode", ("stopped",)]
-    output = capsys.readouterr()
-    assert output.out == "OpenCode server stopped\n"
-    assert output.err == ""
-
-
-@pytest.mark.parametrize(
-    ("state", "reason"),
-    [
-        ("replaced", "service_pid_mismatch"),
-        ("missing", "service_pid_mismatch"),
-        ("unreadable_pid", "service_pid_mismatch"),
-        ("recycled", "service_create_time_mismatch"),
-        ("older_time", "service_create_time_mismatch"),
-        ("dead", "service_identity_unavailable"),
-        ("unreadable_time", "service_identity_unavailable"),
-        ("invalid_live_time", "service_create_time_mismatch"),
-    ],
-)
-def test_cmd_stop_receipt_refuses_without_any_shutdown_side_effect(
-    monkeypatch, capsys, receipt_shutdown, state, reason,
-):
-    receipt = _startup_receipt_payload()
-    if state == "replaced":
-        receipt_shutdown.pid_path.write_text("9012\n", encoding="utf-8")
-    elif state == "missing":
-        receipt_shutdown.pid_path.unlink()
-    elif state == "unreadable_pid":
-        receipt_shutdown.pid_path.write_bytes(b"\xff")
-    elif state in ("recycled", "older_time"):
-        receipt["service_create_unix_ms"] += 2.001 if state == "recycled" else -2.001
-    elif state == "dead":
-        monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
-    else:
-        monkeypatch.setattr(runtime, "process_create_time", lambda pid: None if state == "unreadable_time" else float("nan"))
-    before = receipt_shutdown.pid_path.read_bytes() if receipt_shutdown.pid_path.exists() else None
-
-    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 3
-
-    output = capsys.readouterr()
-    assert output.out == ""
-    assert json.loads(output.err) == {"reason": reason}
-    assert receipt_shutdown.calls == []
-    assert (receipt_shutdown.pid_path.read_bytes() if receipt_shutdown.pid_path.exists() else None) == before
-
-
-@pytest.mark.parametrize("field", list(_startup_receipt_payload()))
-def test_cmd_stop_rejects_incomplete_receipt(capsys, receipt_shutdown, field):
-    receipt = _startup_receipt_payload()
-    del receipt[field]
-
-    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 3
-
-    assert json.loads(capsys.readouterr().err) == {"reason": "invalid_receipt"}
-    assert receipt_shutdown.calls == []
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("schema_version", True), ("schema_version", 1.0), ("schema_version", 2),
-        ("outcome", "unknown"), ("outcome", ["started"]),
-        ("service_pid", True), ("service_pid", -1234), ("service_pid", 1234.0),
-        ("ui_pid", 0), ("ui_pid", "5678"),
-        ("service_create_unix_ms", None), ("service_create_unix_ms", "1789010100123.5"),
-        ("service_create_unix_ms", float("nan")), ("service_create_unix_ms", float("inf")),
-        ("ui_create_unix_ms", -1), ("ui_create_unix_ms", True),
-        ("ui_create_unix_ms", float("-inf")), ("ui_create_unix_ms", 10 ** 400),
-    ],
-)
-def test_cmd_stop_rejects_invalid_receipt_values(capsys, receipt_shutdown, field, value):
-    receipt = _startup_receipt_payload()
-    receipt[field] = value
-
-    assert cli.cmd_stop(receipt=json.dumps(receipt)) == 3
-
-    assert json.loads(capsys.readouterr().err) == {"reason": "invalid_receipt"}
-    assert receipt_shutdown.calls == []
-
-
-@pytest.mark.parametrize("receipt", ["", "{", "null", "[]", '"receipt"', "[" * 2000 + "]" * 2000])
-def test_cmd_stop_rejects_malformed_receipt(capsys, receipt_shutdown, receipt):
-    assert cli.cmd_stop(receipt=receipt) == 3
-
-    assert json.loads(capsys.readouterr().err) == {"reason": "invalid_receipt"}
-    assert receipt_shutdown.calls == []
-
-
-def test_cmd_stop_without_receipt_keeps_legacy_full_stop(monkeypatch, capsys, receipt_shutdown):
-    def unexpected_identity_read(pid):
-        raise AssertionError("Unscoped stop must not inspect receipt identity")
-
-    monkeypatch.setattr(runtime, "process_create_time", unexpected_identity_read)
-    receipt_shutdown.pid_path.unlink()
-
-    assert cli.cmd_stop() == 0
-
-    assert receipt_shutdown.calls == ["service", "ui", "opencode", ("stopped",)]
-    output = capsys.readouterr()
-    assert output.out == "OpenCode server stopped\n"
-    assert output.err == ""
-
-
-def test_cmd_stop_matched_receipt_preserves_stop_failure_exit_code(monkeypatch, capsys, receipt_shutdown):
-    monkeypatch.setattr(runtime, "stop_service", lambda: receipt_shutdown.calls.append("service") or False)
-
-    assert cli.cmd_stop(receipt=json.dumps(_startup_receipt_payload())) == 2
-
-    assert receipt_shutdown.calls == ["service", "ui", "opencode", ("error", "service stop failed")]
-    assert capsys.readouterr().err == "ERROR: Avibe service did not stop; preserving pidfile and aborting.\n"
-
-
 def test_cmd_stop_ignores_absent_services(monkeypatch):
     status = []
 
@@ -1393,24 +1247,21 @@ def _fake_start_result(pid, kwargs, *, reused=False):
     start_info = kwargs.get("start_info")
     if start_info is not None:
         start_info.pid = pid
-        start_info.create_unix_ms = 1789010100000.5 + pid
         start_info.reused = reused
     return pid
 
 
 @pytest.fixture
-def receipt_runtime(monkeypatch):
+def start_runtime(monkeypatch):
     service_path = paths.get_runtime_pid_path()
     ui_path = paths.get_runtime_ui_pid_path()
     service_path.parent.mkdir(parents=True, exist_ok=True)
     process_times = {1234: 1789010100.1235, 5678: 1789010100.4565, 9012: 1789010100.7895}
     spawned = []
-    captured = []
     opened = []
     stopped = []
 
     def fake_process(pid):
-        captured.append(pid)
         return SimpleNamespace(create_time=lambda: process_times[pid])
 
     # Both stand in for the spawn primitives, so both honour their contract:
@@ -1461,57 +1312,45 @@ def receipt_runtime(monkeypatch):
     monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: stopped.append("stop_ui") or True)
     monkeypatch.setattr(runtime, "stop_service", lambda: stopped.append("stop_service") or True)
     return SimpleNamespace(
-        service_path=service_path, ui_path=ui_path, process_times=process_times,
-        spawned=spawned, captured=captured, opened=opened, stopped=stopped,
+        service_path=service_path, ui_path=ui_path, spawned=spawned, opened=opened, stopped=stopped,
     )
 
 
 @pytest.mark.parametrize("reused", [False, True])
 @pytest.mark.parametrize("open_browser", [None, False])
-def test_cmd_start_receipt_uses_launch_provenance_and_psutil_identity(
-    monkeypatch, capsys, receipt_runtime, reused, open_browser,
+def test_cmd_start_reports_the_web_ui_whether_it_spawned_or_reused_the_runtime(
+    monkeypatch, capsys, start_runtime, reused, open_browser,
 ):
     if reused:
-        receipt_runtime.service_path.write_text("1234", encoding="utf-8")
-        receipt_runtime.ui_path.write_text("5678", encoding="utf-8")
+        start_runtime.service_path.write_text("1234", encoding="utf-8")
+        start_runtime.ui_path.write_text("5678", encoding="utf-8")
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: None if reused else 1234)
 
     assert cli.cmd_start(open_browser=open_browser) == 0
 
     output = capsys.readouterr().out
-    receipts = [line for line in output.splitlines() if line.startswith("@avibe-start-receipt:")]
-    assert len(receipts) == 1
-    assert json.loads(receipts[0].split(":", 1)[1]) == {
-        "schema_version": 1, "outcome": "reused" if reused else "started",
-        "service_pid": 1234, "ui_pid": 5678,
-        "service_create_unix_ms": receipt_runtime.process_times[1234] * 1000,
-        "ui_create_unix_ms": receipt_runtime.process_times[5678] * 1000,
-    }
-    assert receipt_runtime.spawned == ([] if reused else ["service", "ui"])
-    assert receipt_runtime.captured == [1234, 5678]
-    assert bool(receipt_runtime.opened) == (open_browser is None)
+    assert start_runtime.spawned == ([] if reused else ["service", "ui"])
+    assert bool(start_runtime.opened) == (open_browser is None)
     assert "Web UI:\n  http://127.0.0.1:5123\n" in output
     assert "Run: vibe remote" in output
 
 
 @pytest.mark.parametrize("reused", [False, True])
-def test_start_ui_captures_its_own_provenance_before_readiness(monkeypatch, receipt_runtime, reused):
+def test_start_ui_records_whether_it_reused_the_ui(start_runtime, reused):
     if reused:
-        receipt_runtime.ui_path.write_text("5678", encoding="utf-8")
-    before = receipt_runtime.process_times[5678] * 1000
-    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: receipt_runtime.process_times.update({5678: 9999}) or True)
+        start_runtime.ui_path.write_text("5678", encoding="utf-8")
     info = runtime.ProcessStartInfo()
 
     assert runtime.start_ui("127.0.0.1", 5123, start_info=info) == 5678
 
+    assert info.pid == 5678
     assert info.reused is reused
-    assert info.create_unix_ms == before
-    assert receipt_runtime.spawned == ([] if reused else ["ui"])
+    assert start_runtime.spawned == ([] if reused else ["ui"])
 
 
 @pytest.mark.parametrize("branch", ["recorded", "starting", "ready_owner", "mismatched_command", "lock_owner"])
-def test_start_service_receipt_marks_every_existing_return_as_reused(monkeypatch, receipt_runtime, branch):
-    receipt_runtime.service_path.write_text("1234", encoding="utf-8")
+def test_start_service_marks_every_existing_return_as_reused(monkeypatch, start_runtime, branch):
+    start_runtime.service_path.write_text("1234", encoding="utf-8")
     alive_checks = iter([False, True]) if branch == "lock_owner" else None
     if alive_checks is not None:
         monkeypatch.setattr(runtime, "pid_alive", lambda pid: next(alive_checks))
@@ -1527,63 +1366,19 @@ def test_start_service_receipt_marks_every_existing_return_as_reused(monkeypatch
 
     assert info.reused is True
     assert info.pid == expected_pid
-    assert info.create_unix_ms == receipt_runtime.process_times[expected_pid] * 1000
-    assert receipt_runtime.spawned == []
+    assert start_runtime.spawned == []
 
 
-def test_start_service_receipt_adopts_scoped_owner(monkeypatch, receipt_runtime):
+def test_start_service_adopts_scoped_owner(monkeypatch, start_runtime):
     monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: ["systemd-run", "--scope"])
     monkeypatch.setattr(runtime, "_start_scoped_service_result", lambda *args, **kwargs: 9012)
     info = runtime.ProcessStartInfo()
 
     assert runtime.start_service(start_info=info) == 9012
 
+    assert info.pid == 9012
     assert info.reused is False
-    assert info.create_unix_ms == receipt_runtime.process_times[9012] * 1000
-    assert receipt_runtime.captured == [1234, 9012]
-    assert receipt_runtime.spawned == ["service"]
-
-
-def test_start_service_receipt_keeps_identity_captured_before_readiness(monkeypatch, receipt_runtime):
-    before = receipt_runtime.process_times[1234] * 1000
-    monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: receipt_runtime.process_times.update({1234: 9999}) or True)
-    info = runtime.ProcessStartInfo()
-
-    assert runtime.start_service(start_info=info) == 1234
-
-    assert info.reused is False
-    assert info.create_unix_ms == before
-    assert receipt_runtime.captured == [1234]
-
-
-def test_cmd_start_receipt_tracks_late_authoritative_service_pid(monkeypatch, capsys, receipt_runtime):
-    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: False)
-    monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: False)
-    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 9012)
-
-    assert cli.cmd_start(open_browser=False) == 0
-
-    receipt_line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("@avibe-start-receipt:"))
-    receipt = json.loads(receipt_line.split(":", 1)[1])
-    assert receipt["service_pid"] == 9012
-    assert receipt["service_create_unix_ms"] == receipt_runtime.process_times[9012] * 1000
-    assert receipt["outcome"] == "started"
-    assert receipt_runtime.captured == [1234, 5678, 9012]
-
-
-def test_cmd_start_does_not_emit_a_receipt_with_unreadable_identity(monkeypatch, capsys, receipt_runtime):
-    monkeypatch.setattr(runtime, "process_create_time", lambda pid: None)
-
-    with pytest.raises(ValueError, match="service_create_unix_ms"):
-        cli.cmd_start(open_browser=False)
-
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
-    # The far end of the pre-receipt region, and the only failure in it that
-    # needs no monkeypatched failure to reach: the receipt builder rejects an
-    # identity it cannot read, with the service this command started already up.
-    assert receipt_runtime.stopped == ["stop_ui", "stop_service"], (
-        f"a start that could not build its receipt must stop its UI, then its service: {receipt_runtime.stopped}"
-    )
+    assert start_runtime.spawned == ["service"]
 
 
 def test_cmd_start_ensures_services_without_stopping(monkeypatch):
@@ -1917,7 +1712,6 @@ def _ui_refuses_to_start(
     ui_outcome=None,
     on_wait=None,
     ui_reused: bool = False,
-    on_receipt=None,
 ):
     """Wire cmd_start for a start that cannot finish, with every stop recorded.
 
@@ -1928,8 +1722,7 @@ def _ui_refuses_to_start(
     stale process kept serving -- and keeps the pid record naming the process
     that has to be stopped. An exception instance is raised instead, which is
     what an unwritable or malformed ``vibe-ui.pid`` or a failing process spawn
-    does. ``on_wait`` fails later still, once the UI is already up, and
-    ``on_receipt`` fails last of all, inside the receipt builder.
+    does. ``on_wait`` fails later still, once the UI is already up.
 
     ``ui_reused`` is the other half of the picture: ``start_ui`` returns a pid
     both when it spawns one and when it adopts a live, compatible UI, and only
@@ -1939,8 +1732,6 @@ def _ui_refuses_to_start(
     assert on it: a rollback reaching the real one would stop the developer's
     own UI and its remote access from a unit test.
     """
-
-    from vibe.desktop_runtime import start_receipt_line as real_receipt_line
 
     calls: list[str] = []
     statuses: list[tuple] = []
@@ -1975,13 +1766,6 @@ def _ui_refuses_to_start(
             raise on_wait
         return pid
 
-    def build_receipt(payload):
-        calls.append("start_receipt_line")
-        if on_receipt is not None:
-            raise on_receipt
-        return real_receipt_line(payload)
-
-    monkeypatch.setattr("vibe.desktop_runtime.start_receipt_line", build_receipt)
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
@@ -1996,14 +1780,13 @@ def _ui_refuses_to_start(
     return SimpleNamespace(calls=calls, statuses=statuses, stop_ui_kwargs=stop_ui_kwargs)
 
 
-def test_cmd_start_does_not_leave_its_own_service_running_when_the_ui_refuses(monkeypatch, capsys):
+def test_cmd_start_does_not_leave_its_own_service_running_when_the_ui_refuses(monkeypatch):
     """A start that cannot finish must not leave a service nobody can stop.
 
-    No UI pid ends the start: the status writes carry that pid and
-    ``validate_start_receipt`` rejects a receipt without one. Carrying on
-    regardless left the service this command had just started alive with no
-    receipt ever printed -- and an unreceipted service is adopted as ``reused``
-    on the next attempt, so the desktop shell never owns the stop again.
+    No UI pid ends the start: the status writes carry that pid. Carrying on
+    regardless left the service this command had just started alive after a
+    start that failed -- and a service left behind is adopted as ``reused`` on
+    the next attempt, so nothing ever undoes it.
 
     Deliberately fix-agnostic: rolling the service back and refusing to start it
     at all both satisfy the invariant below.
@@ -2018,9 +1801,8 @@ def test_cmd_start_does_not_leave_its_own_service_running_when_the_ui_refuses(mo
         failure = error
 
     assert failure is not None, "cmd_start reported success after the UI refused to start"
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
     assert "start_service" not in started.calls or "stop_service" in started.calls, (
-        f"cmd_start left the service it started running with no start receipt: {started.calls}"
+        f"cmd_start left the service it started running after a failed start: {started.calls}"
     )
     assert started.calls.count("stop_service") <= 1, (
         f"cmd_start rolled the same failed start back more than once: {started.calls}"
@@ -2030,11 +1812,11 @@ def test_cmd_start_does_not_leave_its_own_service_running_when_the_ui_refuses(mo
     )
 
 
-def test_cmd_start_never_stops_a_service_it_did_not_start_when_the_ui_refuses(monkeypatch, capsys):
+def test_cmd_start_never_stops_a_service_it_did_not_start_when_the_ui_refuses(monkeypatch):
     """The rollback is scoped to this command's own start, and nothing else.
 
     A reused service belongs to whoever started it. The UI refusing still fails
-    the command, because there is no pid to receipt, but it must not touch the
+    the command, because the start cannot finish without a UI, but it must not touch the
     service and must not restate the pair's status -- the stale UI is still
     running with its pid record preserved, so a write naming no UI pid would
     contradict it.
@@ -2047,17 +1829,16 @@ def test_cmd_start_never_stops_a_service_it_did_not_start_when_the_ui_refuses(mo
 
     assert "stop_service" not in started.calls, "cmd_start stopped a service it did not start"
     assert started.statuses == [], f"cmd_start restated the status of a reused pair: {started.statuses}"
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("reused", [False, True])
-def test_cmd_start_rolls_its_own_service_back_when_the_ui_start_raises(monkeypatch, capsys, reused):
+def test_cmd_start_rolls_its_own_service_back_when_the_ui_start_raises(monkeypatch, reused):
     """The refusal is not the only way the UI start ends without a pid.
 
     ``start_ui`` also raises -- an unwritable or malformed ``vibe-ui.pid`` fails
     while it cleans or writes that record, and the process spawn itself can fail.
     The orphan is identical either way, so the rollback cannot belong to the
-    ``None`` branch; it belongs to the whole pre-receipt region. And it stays
+    ``None`` branch; it belongs to the whole start region. And it stays
     scoped: a reused service belongs to whoever started it.
     """
 
@@ -2071,18 +1852,17 @@ def test_cmd_start_rolls_its_own_service_back_when_the_ui_start_raises(monkeypat
     assert started.calls.count("stop_service") == (0 if reused else 1), (
         f"a raising UI start left the wrong service state behind (reused={reused}): {started.calls}"
     )
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
 
 
-def test_cmd_start_rolls_back_when_an_interrupt_arrives_before_the_receipt(monkeypatch, capsys):
+def test_cmd_start_rolls_back_when_an_interrupt_arrives_before_the_start_finishes(monkeypatch):
     """Ctrl-C during the readiness wait orphans both processes, not just one.
 
     The wait is the longest thing in the region -- it runs to
     ``SERVICE_SLOW_START_TIMEOUT_SECONDS`` against a service that is still
     migrating its database -- so it is the likeliest moment for a user to give
     up. ``KeyboardInterrupt`` is not an ``Exception``, which is why the guard
-    catches ``BaseException``: an interrupted start that leaves a running,
-    unreceipted service is adopted as ``reused`` next time just the same, and a
+    catches ``BaseException``: an interrupted start that leaves a running
+    service behind is adopted as ``reused`` next time just the same, and a
     UI left behind keeps its pid file, its listener and the port that the next
     attempt then has to fight.
 
@@ -2111,10 +1891,9 @@ def test_cmd_start_rolls_back_when_an_interrupt_arrives_before_the_receipt(monke
     assert started.stop_ui_kwargs == [{"stop_remote_access": False}], (
         f"the rollback destroyed a remote URL it did not create: {started.stop_ui_kwargs}"
     )
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
 
 
-def test_cmd_start_leaves_a_ui_and_service_it_only_adopted_alone(monkeypatch, capsys):
+def test_cmd_start_leaves_a_ui_and_service_it_only_adopted_alone(monkeypatch):
     """Adoption is not creation, and the same failure must undo nothing.
 
     ``start_ui`` returns a pid both when it spawns a UI and when it finds a live,
@@ -2139,34 +1918,34 @@ def test_cmd_start_leaves_a_ui_and_service_it_only_adopted_alone(monkeypatch, ca
     assert "stop_service" not in started.calls, (
         f"cmd_start stopped a service it did not start: {started.calls}"
     )
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
 
 
-def test_cmd_start_rolls_both_back_when_the_receipt_builder_fails(monkeypatch, capsys):
+def test_cmd_start_rolls_both_back_when_opening_the_browser_is_interrupted(monkeypatch):
     """The last statement of the region can fail too, and it orphans the most.
 
-    By this point both processes are up and the status says ``running``; only the
-    receipt is missing. That is the worst orphan of the set, because everything
-    except the one line the desktop shell needs to own the stop succeeded.
+    By this point both processes are up and the status says ``running``; only
+    the browser is still opening. A Ctrl-C there ends a start that never
+    finished, so it must undo both processes like any earlier failure.
     """
 
-    started = _ui_refuses_to_start(
-        monkeypatch,
-        reused=False,
-        ui_outcome=5678,
-        on_receipt=RuntimeError("receipt payload is not serializable"),
-    )
+    started = _ui_refuses_to_start(monkeypatch, reused=False, ui_outcome=5678)
+    monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
 
-    with pytest.raises(RuntimeError, match="receipt payload"):
-        cli.cmd_start()
+    def interrupted_open(url):
+        raise KeyboardInterrupt
 
+    monkeypatch.setattr(cli, "_open_browser", interrupted_open)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_start(open_browser=True)
+
+    assert ("running", "pid=1234", 1234, 5678) in started.statuses, started.statuses
     assert started.calls.count("stop_ui") == 1, (
-        f"a failed receipt left the UI this command started running: {started.calls}"
+        f"an interrupted browser open left the UI this command started running: {started.calls}"
     )
     assert started.calls.count("stop_service") == 1, (
-        f"a failed receipt left the service this command started running: {started.calls}"
+        f"an interrupted browser open left the service this command started running: {started.calls}"
     )
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -2181,7 +1960,7 @@ def test_cmd_start_rolls_both_back_when_the_receipt_builder_fails(monkeypatch, c
     ],
 )
 def test_cmd_start_undoes_a_service_it_created_even_when_start_service_itself_raises(
-    monkeypatch, capsys, captured, reused, expected
+    monkeypatch, captured, reused, expected
 ):
     """`start_service` spawns and then waits, and the wait can be interrupted.
 
@@ -2204,7 +1983,6 @@ def test_cmd_start_undoes_a_service_it_created_even_when_start_service_itself_ra
         cli.cmd_start()
 
     assert started.calls == expected
-    assert "@avibe-start-receipt:" not in capsys.readouterr().out
 
 
 def test_cmd_start_leaves_no_ui_running_when_the_ui_pid_record_cannot_be_written(monkeypatch, tmp_path):
@@ -2273,7 +2051,7 @@ def _kill_children(children) -> None:
 
 
 def test_cmd_start_leaves_no_ui_running_when_interrupted_between_the_ui_record_and_its_capture(
-    monkeypatch, capsys, tmp_path
+    monkeypatch, tmp_path
 ):
     """The last gap in the UI handover, end to end, with a real UI child.
 
@@ -2309,13 +2087,12 @@ def test_cmd_start_leaves_no_ui_running_when_interrupted_between_the_ui_record_a
         # The service this start created is still undone, and nothing claims success.
         assert started.calls.count("stop_service") == 1, started.calls
         assert "running" not in [entry[0] for entry in started.statuses], started.statuses
-        assert "@avibe-start-receipt:" not in capsys.readouterr().out
     finally:
         _kill_children(children)
 
 
 def test_cmd_start_leaves_no_service_running_when_interrupted_between_its_reservation_and_its_capture(
-    monkeypatch, capsys, tmp_path
+    monkeypatch, tmp_path
 ):
     """The service side of the same boundary, through the real `start_service`.
 
@@ -2367,12 +2144,11 @@ def test_cmd_start_leaves_no_service_running_when_interrupted_between_its_reserv
         # Nothing was captured, so nothing is left for the rollback, and the UI
         # was never reached.
         assert started.calls == [], started.calls
-        assert "@avibe-start-receipt:" not in capsys.readouterr().out
     finally:
         _kill_children(children)
 
 
-def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypatch, capsys, tmp_path):
+def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypatch, tmp_path):
     """Once captured, the UI is the rollback's to stop, and the rollback finds it.
 
     The other side of the handover boundary: a Ctrl-C after `start_ui` returned
@@ -2402,17 +2178,15 @@ def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypat
         assert children[0].wait(timeout=5) == -signal.SIGTERM
         assert not ui_pid_path.exists()
         assert started.calls.index("stop_ui") < started.calls.index("stop_service"), started.calls
-        assert "@avibe-start-receipt:" not in capsys.readouterr().out
     finally:
         _kill_children(children)
 
 
-def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypatch, capsys):
-    """The region ends at the receipt, and a finished start is never undone.
+def test_cmd_start_keeps_the_service_it_started_once_the_start_finished(monkeypatch):
+    """The region ends with the start, and a finished start is never undone.
 
-    This is the boundary the guard must not overrun: the receipt is the last
-    statement in the region, so a start that printed one has handed the desktop
-    shell everything it needs to own the stop itself -- both processes stay up.
+    This is the boundary the guard must not overrun: a start that returned has
+    handed its Runtime over to whoever asked for it -- both processes stay up.
     """
 
     started = _ui_refuses_to_start(monkeypatch, reused=False, ui_outcome=5678)
@@ -2432,7 +2206,6 @@ def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypa
     assert "stop_ui" not in started.calls, (
         f"cmd_start stopped the UI of a start that had already succeeded: {started.calls}"
     )
-    assert "@avibe-start-receipt:" in capsys.readouterr().out
     assert len(collected) == 1
 
 
@@ -4333,7 +4106,6 @@ def test_start_parser_accepts_no_open_browser():
     ("arguments", "expected"),
     [
         (["stop"], {}),
-        (["stop", "--receipt", json.dumps(_startup_receipt_payload())], {"receipt": json.dumps(_startup_receipt_payload())}),
         (["stop", "--expect-runtime-id", "a" * 64], {"expect_runtime_id": "a" * 64, "keep_remote_access": False}),
         (
             ["stop", "--expect-runtime-id", "a" * 64, "--keep-remote-access"],
@@ -4352,13 +4124,6 @@ def test_stop_parser_and_main_route_each_stop_mode(monkeypatch, arguments, expec
 
     assert exited.value.code == 3
     assert calls == [expected]
-
-
-def test_stop_parser_rejects_a_receipt_with_an_expected_runtime_id():
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(
-            ["stop", "--receipt", json.dumps(_startup_receipt_payload()), "--expect-runtime-id", "a" * 64]
-        )
 
 
 def test_only_a_scoped_stop_can_keep_remote_access(monkeypatch):

@@ -16,7 +16,8 @@
       "runtime_discovery_failed": "Avibe could not determine the local Runtime address.",
       "runtime_spawn_failed": "Avibe could not start the installed Runtime.",
       "runtime_stopped": "The Runtime was stopped. Choose Try again to start it when you are ready.",
-      "runtime_ownership_lost": "The Runtime changed and this app can no longer stop it. Choose Try again to check the current Runtime.",
+      "runtime_ownership_lost": "The Runtime at this address changed, so this app left it running. Choose Try again to check the current Runtime and reconnect.",
+      "runtime_stop_failed": "Avibe could not confirm that the Runtime stopped, so some or all of it may still be running. Choose Try again to reconnect to it, then stop it again if you need to.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
       "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
@@ -43,7 +44,6 @@
       "busyTitle": "Avibe Is Busy",
       "busyMessage": "The Runtime is starting or another lifecycle action is in progress. Please try again when it finishes.",
       "failureTitle": "Action Could Not Be Completed",
-      "stopFailure": "The Runtime could not be stopped safely. Avibe remains open. Try again after checking the Runtime.",
       "loginFailure": "The login setting could not be read or changed. Check your operating system's login settings and try again."
     },
     "notifications": {
@@ -76,7 +76,13 @@
       "successTitle": "Avibe Private Files Removed",
       "successMessage": "The private Runtime and agent backends were removed. Avibe will now quit. You can delete the application or run the system uninstaller.",
       "failureTitle": "Uninstall Failed",
-      "failureMessage": "Avibe could not remove all private Runtime and backend files. The desktop app remains installed and your user data was not changed."
+      "failureMessage": "Avibe could not remove all private Runtime and backend files. The desktop app remains installed and your user data was not changed.",
+      "blockedTitle": "Private Files Kept",
+      "blockedMessage": "Avibe kept the private Runtime and backend files because something still running may use them: a Runtime this app did not start, a Runtime that is still starting, or a backend install that has not finished. Stop that Runtime or wait for it to finish, then choose Uninstall Avibe again. Your user data was not changed.",
+      "unverifiedTitle": "Stop Could Not Be Verified",
+      "unverifiedMessage": "Avibe could not run its Runtime to confirm that background installs have stopped. If you delete the private files anyway, an install that is still running may fail or leave files behind. Your user data is not changed either way.",
+      "unverifiedDelete": "Delete Anyway",
+      "unverifiedKeep": "Keep Files"
     },
     "updater": {
       "menu": "Check for Desktop Updates…",
@@ -3684,7 +3690,8 @@
     "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
-    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app"
+    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app",
+    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
   },
   "doctor": {
     "title": "System Status",

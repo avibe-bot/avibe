@@ -462,7 +462,7 @@ fn product_packages_expose_an_explicit_private_runtime_uninstall_path() {
     for required in [
         "UNINSTALL_MENU_ID",
         "fn request_private_runtime_removal",
-        "host.remove_private_runtime(active_origin.as_ref()).await",
+        "remove_private_runtime_with_consent(&host, active_origin.as_ref(),",
         "native_uninstall_catalog()",
         "sys_locale::get_locales()",
         "../../../ui/src/i18n/en.json",
@@ -496,16 +496,22 @@ fn product_packages_expose_an_explicit_private_runtime_uninstall_path() {
 fn post_navigation_recovery_stays_in_the_unprivileged_rust_shell() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "host.is_ready(&origin).await",
+        "host.is_serving(&origin).await",
         "release_after_readiness_loss",
         "return_to_bootstrap(&app)",
-        "spawn_owned_bootstrap(app)",
+        "spawn_owned_bootstrap(app, BootstrapTrigger::Recovery)",
     ] {
         assert!(
             source.contains(required),
             "the post-navigation recovery path must retain {required:?}"
         );
     }
+    // Handing a predecessor's Runtime over stops it, so only the app launch and
+    // the user's Try again may ask for it; every recovery path must not.
+    assert_eq!(source.matches("BootstrapTrigger::Launch").count(), 1);
+    assert!(source.contains("spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch)"));
+    assert_eq!(source.matches("BootstrapTrigger::Retry").count(), 1);
+    assert!(source.contains("Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))"));
     assert!(
         source.contains("compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR")
             && source.contains("compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP"),
@@ -521,7 +527,7 @@ fn macos_reopen_recreates_or_refocuses_the_main_window() {
         "fn focus_or_restore_main_window",
         "RunEvent::Reopen",
         "claim_recreated_window_bootstrap(&activity)",
-        "spawn_owned_bootstrap(app.clone())",
+        "spawn_owned_bootstrap(app.clone(), BootstrapTrigger::Recovery)",
         "WebviewWindowBuilder::from_config",
     ] {
         assert!(
@@ -545,7 +551,7 @@ fn recreated_windows_transfer_monitor_ownership_before_bootstrapping() {
         );
     }
     let awaited_probe = source
-        .find("let ready = host.is_ready(&origin).await;")
+        .find("let ready = host.is_serving(&origin).await;")
         .expect("the monitor awaits readiness");
     let ownership_recheck = source[awaited_probe..]
         .find("activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR")
@@ -696,8 +702,8 @@ fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
     let source = shipping_source("src/lib.rs");
     for required in [
         "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String>",
-        "Ok(spawn_bootstrap(app))",
-        "fn spawn_bootstrap(app: AppHandle) -> bool",
+        "Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))",
+        "fn spawn_bootstrap(app: AppHandle, trigger: BootstrapTrigger) -> bool",
         "return false",
     ] {
         assert!(
@@ -751,7 +757,7 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
 }
 
 #[test]
-fn native_lifecycle_authority_requires_a_receipt_not_a_launch_attempt() {
+fn native_lifecycle_authority_requires_the_runtime_identity_not_a_launch_attempt() {
     let source = shipping_source("src/lib.rs");
     assert!(source.contains("shell.host.has_owned_runtime()"));
     assert!(!source.contains("host.has_launched()"));
@@ -762,17 +768,22 @@ fn native_lifecycle_authority_requires_a_receipt_not_a_launch_attempt() {
         .split("fn toggle_start_at_login")
         .next()
         .expect("stop body");
-    let refusal = stop
-        .split("Err(LaunchError::OwnershipLost | LaunchError::NotOwned)")
-        .nth(1)
-        .expect("receipt refusal")
-        .split("Err(_)")
-        .next()
-        .expect("refusal handling");
-    assert!(refusal.contains("BootstrapNoticeCode::RuntimeOwnershipLost"));
-    assert!(refusal.contains("ACTIVITY_IDLE"));
-    assert!(refusal.contains("focus_or_restore_main_window(&app)"));
-    assert!(!refusal.contains("start_runtime_monitor("));
+    // Quit exits only after the Runtime's own CLI confirmed the stop.
+    assert!(stop.contains("if quit && outcome == CliOutcome::Completed"));
+    let arm = |pattern: &str| {
+        stop.split(pattern)
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .unwrap_or_else(|| panic!("the stop maps {pattern}"))
+            .to_owned()
+    };
+    assert!(arm("CliOutcome::Refused { .. } =>").contains("BootstrapNoticeCode::RuntimeOwnershipLost"));
+    assert!(
+        arm("CliOutcome::Failed { .. } | CliOutcome::Unrunnable =>").contains("BootstrapNoticeCode::RuntimeStopFailed")
+    );
+    assert!(stop.contains("ACTIVITY_IDLE"));
+    assert!(stop.contains("focus_or_restore_main_window(&app)"));
+    assert!(!stop.contains("start_runtime_monitor("));
     assert!(!stop.contains("spawn_bootstrap("));
 }
 

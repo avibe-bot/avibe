@@ -1,5 +1,9 @@
 # Desktop startup receipt and service-owner stop gate
 
+> Superseded. PR 2b of #2135 removed the startup receipt and `vibe stop
+> --receipt`; the desktop host now proves provenance with its Runtime id. See
+> `desktop-runtime-scoped-stop.md`. This file records the retired design.
+
 ## Outcome and boundaries
 
 The desktop shell needs to distinguish a Runtime it started from one it adopted.

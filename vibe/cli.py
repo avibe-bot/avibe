@@ -13684,13 +13684,12 @@ def cmd_start(*, open_browser: bool | None = None):
 
     service_start = runtime.ProcessStartInfo()
     ui_start = runtime.ProcessStartInfo()
-    # Everything from here to the receipt line is one region under one invariant:
-    # nothing THIS invocation created may survive a start that never printed a
-    # receipt. Both processes count. An unreceipted service is adopted as
-    # `reused` on the next attempt, so the desktop shell never owns its stop
-    # again; an unreceipted UI keeps its pid file and its listener, which the
-    # next attempt then has to fight. Every failure in the region produces those
-    # orphans, whichever line raised.
+    # Everything from here to the end of the start is one region under one
+    # invariant: nothing THIS invocation created may survive a start that did not
+    # finish. Both processes count. A service left behind is adopted as `reused`
+    # on the next attempt, so nothing ever undoes it; a UI left behind keeps its
+    # pid file and its listener, which the next attempt then has to fight. Every
+    # failure in the region produces those orphans, whichever line raised.
     #
     # The guard is regional on purpose. Undoing one named failure inside its own
     # branch -- which is what the `ui_pid is None` refusal below used to do --
@@ -13701,8 +13700,8 @@ def cmd_start(*, open_browser: bool | None = None):
     # `BaseException`, not `Exception`: a Ctrl-C during the readiness wait, the
     # longest thing in here, orphans the service exactly like a crash does.
     # `SystemExit` is included deliberately -- nothing in the region exits on
-    # purpose, and an exit before the receipt is indistinguishable, to the next
-    # launch, from any other start that never finished. The bare `raise` keeps
+    # purpose, and an exit before the start finished is indistinguishable, to
+    # the next launch, from any other start that never finished. The bare `raise` keeps
     # the original failure and its traceback unchanged.
     #
     # The region opens before `start_service`, not after it: that call spawns
@@ -13723,10 +13722,8 @@ def cmd_start(*, open_browser: bool | None = None):
         if ui_pid is None:
             # No pid means start_ui found a stale UI it could not stop and refused
             # to start a replacement that would only die on bind. Nothing below can
-            # complete without that pid: the status writes carry it and
-            # validate_start_receipt rejects a receipt missing it. Fail here rather
-            # than further down in the receipt builder, and let the region's guard
-            # undo the start.
+            # complete without that pid: the status writes carry it. Fail here and
+            # let the region's guard undo the start.
             raise RuntimeError("Vibe UI could not be started because a stale UI process could not be stopped")
         # The WAIT below is asked unconditionally. The predicate that used to guard
         # it is the lock, which is taken before the database is migrated -- so it is
@@ -13753,7 +13750,6 @@ def cmd_start(*, open_browser: bool | None = None):
         service_ready = resolved_pid is not None
         if resolved_pid is not None:
             service_pid = resolved_pid
-            service_start.capture(service_pid, reused=service_reused)
         if service_ready:
             runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
         elif runtime.pid_alive(service_pid):
@@ -13762,18 +13758,6 @@ def cmd_start(*, open_browser: bool | None = None):
             runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
             raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
-        from vibe.desktop_runtime import start_receipt_line
-
-        receipt_line = start_receipt_line(
-            {
-                "schema_version": 1,
-                "outcome": "reused" if service_reused else "started",
-                "service_pid": service_pid,
-                "ui_pid": ui_pid,
-                "service_create_unix_ms": service_start.create_unix_ms,
-                "ui_create_unix_ms": ui_start.create_unix_ms,
-            }
-        )
         ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
 
         # Always print Web UI access instructions.
@@ -13792,8 +13776,6 @@ def cmd_start(*, open_browser: bool | None = None):
             if not opened:
                 print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
                 print("")
-
-        print(receipt_line, flush=True)
     except BaseException:
         # The invariant is that this invocation leaves running nothing it
         # created -- not just the service. The region starts two processes, and
@@ -13923,29 +13905,6 @@ def _runtime_process_was_running() -> bool:
     return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
-def _stop_receipt_refusal(receipt_json: str) -> str | None:
-    from vibe.desktop_runtime import START_RECEIPT_TIME_TOLERANCE_MS, validate_start_receipt
-
-    try:
-        receipt = validate_start_receipt(json.loads(receipt_json))
-    except (ValueError, RecursionError):
-        return "invalid_receipt"
-    try:
-        recorded_pid = int(paths.get_runtime_pid_path().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return "service_pid_mismatch"
-    if recorded_pid != receipt["service_pid"]:
-        return "service_pid_mismatch"
-    if not runtime.pid_alive(recorded_pid):
-        return "service_identity_unavailable"
-    created = runtime.process_create_time(recorded_pid)
-    if created is None:
-        return "service_identity_unavailable"
-    if not abs(created * 1000 - receipt["service_create_unix_ms"]) <= START_RECEIPT_TIME_TOLERANCE_MS:
-        return "service_create_time_mismatch"
-    return None
-
-
 # The part of a stop that did not stop: its localized diagnostic and the
 # status detail, which stays English for machine readers.
 _STOP_FAILURES = {
@@ -14037,14 +13996,9 @@ def _stop_the_home_s_connector() -> int:
     return outcome[0]
 
 
-def cmd_stop(*, receipt: str | None = None, expect_runtime_id: str | None = None, keep_remote_access: bool = False):
+def cmd_stop(*, expect_runtime_id: str | None = None, keep_remote_access: bool = False):
     if expect_runtime_id is not None:
         return _stop_expected_desktop_runtime(expect_runtime_id, keep_remote_access=keep_remote_access)
-    if receipt is not None:
-        reason = _stop_receipt_refusal(receipt)
-        if reason is not None:
-            print(json.dumps({"reason": reason}, separators=(",", ":")), file=sys.stderr)
-            return 3
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
@@ -16639,12 +16593,7 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command")
 
     stop_parser = subparsers.add_parser("stop", help="Stop all services")
-    stop_scope = stop_parser.add_mutually_exclusive_group()
-    stop_scope.add_argument(
-        "--receipt",
-        help="Stop only if the service identity matches this startup receipt JSON.",
-    )
-    stop_scope.add_argument(
+    stop_parser.add_argument(
         "--expect-runtime-id",
         metavar="RUNTIME_ID",
         help="Stop only the processes the desktop Runtime with this id started.",
@@ -18801,8 +18750,6 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
     if args.command == "stop":
         if args.keep_remote_access and args.expect_runtime_id is None:
             parser.error("--keep-remote-access requires --expect-runtime-id")
-        if args.receipt is not None:
-            sys.exit(cmd_stop(receipt=args.receipt))
         if args.expect_runtime_id is not None:
             sys.exit(
                 cmd_stop(expect_runtime_id=args.expect_runtime_id, keep_remote_access=args.keep_remote_access)
