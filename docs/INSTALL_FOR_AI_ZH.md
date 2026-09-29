@@ -169,13 +169,17 @@ vibe doctor
 只有用户明确要删除 Avibe 时才运行：
 
 ```bash
-vibe_bin="$(command -v vibe)"   # 卸载前先记下 Avibe 的启动器
-"$vibe_bin" stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
+vibe_bin="$(command -v vibe)"   # 卸载前先记下 Avibe 的启动器
+if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
+  "$vibe_bin" stop
+else
+  echo "跳过 ${vibe_bin}：不是 Avibe 的启动器"; vibe_bin=""
+fi
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # 旧版安装
-rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```

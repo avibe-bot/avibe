@@ -194,13 +194,17 @@ does not need an IM chat to complete this smoke test.
 Only run this if the user asks to remove Avibe:
 
 ```bash
-vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
-"$vibe_bin" stop
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"
+vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
+if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
+  "$vibe_bin" stop
+else
+  echo "Skipping ${vibe_bin}: not Avibe's launcher"; vibe_bin=""
+fi
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # legacy install
-rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
 rm -rf "$avibe_home/runtime/install-generations"
 rm -rf "$avibe_home" ~/.vibe_remote
 ```
