@@ -318,6 +318,8 @@ OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.j
 
 ## Uninstall
 
+The snippet removes the first `vibe` on your `PATH`. If `which -a vibe` lists more than one Avibe launcher, remove the others too.
+
 ```bash
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"

@@ -318,6 +318,8 @@ bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
 
 ## 卸载
 
+这段命令只删除 `PATH` 上排在最前面的 `vibe`。如果 `which -a vibe` 列出了不止一个 Avibe 启动器，其余的也要一并删掉。
+
 ```bash
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
 avibe_home="${avibe_home/#\~/$HOME}"

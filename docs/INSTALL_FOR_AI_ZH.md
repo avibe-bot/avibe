@@ -166,7 +166,7 @@ vibe doctor
 
 ## 卸载
 
-只有用户明确要删除 Avibe 时才运行：
+只有用户明确要删除 Avibe 时才运行。它只删除 `PATH` 上排在最前面的 `vibe`；如果 `which -a vibe` 列出了不止一个 Avibe 启动器，其余的也要一并删掉：
 
 ```bash
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"

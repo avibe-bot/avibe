@@ -191,7 +191,7 @@ does not need an IM chat to complete this smoke test.
 
 ## Uninstall
 
-Only run this if the user asks to remove Avibe:
+Only run this if the user asks to remove Avibe. It removes the first `vibe` on `PATH`; if `which -a vibe` lists more than one Avibe launcher, remove the others too:
 
 ```bash
 avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
