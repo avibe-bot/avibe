@@ -155,10 +155,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const sharedRouteReady = () => active && activeRef.current && routeRead.done && !routeRead.failed
     && routeRead.confirmed?.epoch === activation.current
     && routeRead.confirmed?.token === routeReadToken.current;
+  const sharedRouteFailed = () => active && activeRef.current && routeRead.failed
+    && routeRead.failure?.epoch === activation.current
+    && routeRead.failure?.token === routeReadToken.current;
   const routeTargetReady = (backend: RuntimeBackendId) => sharedRouteReady() && routeRead.backendReads[backend] === 'ready';
   const routeFailureCurrent = (backend: RuntimeBackendId) => active && activeRef.current && (
-    (routeRead.failed && routeRead.failure?.epoch === activation.current
-      && routeRead.failure?.token === routeReadToken.current)
+    sharedRouteFailed()
     || (sharedRouteReady() && routeRead.backendReads[backend] === 'failed'));
   const readCardRoutes = useCallback(async (target?: RuntimeBackendId) => {
     if (!agentReads) return false;
@@ -595,15 +597,20 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   };
 
   const opencodeAgent = agents['opencode'];
-  const needsSource = canEditSetupRoute && modelHubEnabled && sharedRouteReady()
-    && !routeRead.sources.some(usableSource);
+  const requiresSource = canEditSetupRoute && modelHubEnabled;
+  const hasSource = sharedRouteReady() && routeRead.sources.some(usableSource);
+  const needsSource = requiresSource && sharedRouteReady() && !hasSource;
+  const sourceReadFailed = requiresSource && sharedRouteFailed();
+  const sourceReadPending = requiresSource && !sharedRouteReady() && !sourceReadFailed;
   const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
     && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
-  const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : !needsSource && readyBackends.length > 0;
+  const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled)
+    : (!requiresSource || hasSource) && readyBackends.length > 0;
+  const actionBusy = syncing || entering || isAnyInstalling || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
   const primaryPending = useRef(false);
   const handlePrimaryAction = async () => {
-    if (!active || entering || primaryPending.current) return;
+    if (!active || !canContinue || actionBusy || primaryPending.current) return;
     primaryPending.current = true;
     if (isPage && onSave) { try { await onSave({ agents }); } finally { primaryPending.current = false; } return; }
     setEntering(true); setEntryError('');
@@ -615,8 +622,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   };
 
 
-  const actionBusy = syncing || entering || isAnyInstalling || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
-  useImperativeHandle(ref, () => ({ activate: () => { if (canContinue && !actionBusy) void handlePrimaryAction(); } }));
+  useImperativeHandle(ref, () => ({ activate: () => { void handlePrimaryAction(); } }));
   // A layout effect, so the shell's action label lands in the same commit as the state
   // it describes: a passive publish would leave one render where the screen already
   // shows a settled state while the shared button still carries the previous label.
@@ -658,18 +664,25 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
            beside it — inside one centred line it pulled the sentence off the
            action's axis by half its own width. */
         <p className="onboarding-setup-hint-line text-muted">
-          <span>{t(needsSource ? 'onboarding.connection.sourceRequired' : 'onboarding.connection.entryHint')}</span>
+          <span>{t(sourceReadPending ? 'onboarding.providers.actionChecking'
+            : sourceReadFailed ? 'onboarding.connection.readFailed'
+              : needsSource ? 'onboarding.connection.sourceRequired' : 'onboarding.connection.entryHint')}</span>
           {needsSource ? (
             <Button type="button" variant="link" size="xs" className="h-auto p-0"
               disabled={actionBusy} onClick={() => onNavigate?.('providers')}>
               {t('onboarding.connection.addSource')}
             </Button>
-          ) : rescan}
+          ) : sourceReadFailed ? (
+            <Button type="button" variant="link" size="xs" className="h-auto p-0"
+              disabled={actionBusy} onClick={() => void readCardRoutes()}>
+              {t('common.retry')}
+            </Button>
+          ) : sourceReadPending ? null : rescan}
         </p>
   );
   const hintInner = (hintSentence || entryError) ? (<>
         {hintSentence}
-        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
+        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={!canContinue || actionBusy} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
   </>) : null;
   // Hosted in one place so the order under the pair is the same every time, and so the
   // standalone host keeps the arrangement it already had.
@@ -689,7 +702,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     : (
       <div className="onboarding-setup-footer">
         <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
-          disabled={!canContinue || syncing || entering}>
+          disabled={!canContinue || actionBusy}>
           {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
           <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
         </Button>

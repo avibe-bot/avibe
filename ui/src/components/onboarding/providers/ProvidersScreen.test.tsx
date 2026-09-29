@@ -335,6 +335,18 @@ afterEach(() => {
 });
 
 describe('ProvidersScreen — the stage', () => {
+  it.each(['active', 'standby'] as const)('AUTH-SETUP-126: native %s subscriptions cannot supply the Hub setup step', async (status) => {
+    serve({ sources: [source({ id: 'src_native', vendor: 'anthropic', kind: 'subscription',
+      supply_channel: 'native_cli', state: { status } })] });
+    const { handle } = renderScreen();
+    await settled();
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionAdd', disabled: false });
+    expect(cardFor('anthropic').dataset.state).toBe('empty');
+    await activate(handle);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(navigated).toEqual([]);
+  });
+
   it('opens on the shortlist and always offers a third way in', async () => {
     serve();
     renderScreen();

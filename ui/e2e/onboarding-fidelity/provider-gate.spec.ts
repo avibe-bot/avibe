@@ -21,7 +21,9 @@ for (const [lang, copy, width] of [['en', en, 1440], ['zh', zh, 390]] as const) 
       protocol: 'openai_chat', supply_channel: 'hub', billing: 'metered',
       state: { status: 'active' }, models: [], last_discovered_at: null,
     };
-    let sources: typeof source[] = [];
+    const initialSources = lang === 'zh'
+      ? [{ ...source, kind: 'subscription', supply_channel: 'native_cli' }] : [];
+    let sources: typeof source[] = initialSources;
     let creates = 0;
     await page.route('**/api/agents?*', (route) => route.fulfill({ json: { ok: true, agents: [], default_agent_name: null } }));
     await page.route('**/api/models/sources', (route) => {
@@ -50,7 +52,7 @@ for (const [lang, copy, width] of [['en', en, 1440], ['zh', zh, 390]] as const) 
     await dialog.getByRole('button', { name: copy.onboarding.providers.addFooterAddKey, exact: true }).click();
     await expect(dialog.getByText(copy.onboarding.providers.addErrorPreserved)).toBeVisible();
     await expect(step).toHaveAttribute('data-setup-screen', 'providers');
-    expect(sources).toEqual([]);
+    expect(sources).toEqual(initialSources);
     await dialog.getByRole('button', { name: copy.common.retry, exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await expect(primary).toHaveText(copy.onboarding.providers.actionContinue);

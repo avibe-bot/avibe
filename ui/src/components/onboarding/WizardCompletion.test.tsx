@@ -933,6 +933,8 @@ describe('the registered journey', () => {
 
   it('holds the journey on a failed establishment, and its own Retry gives it back', async () => {
     mock.models.getRuntimeStatus.mockRejectedValueOnce(new Error('runtime unreadable'));
+    let releaseSources!: (sources: Source[]) => void;
+    mock.models.listSources.mockReturnValue(new Promise<Source[]>((resolve) => { releaseSources = resolve; }));
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
     await waitFor(() => expect(gateway().getAttribute('data-state')).toBe('failed'));
@@ -940,7 +942,12 @@ describe('the registered journey', () => {
     // step, and the one Retry on screen is the card's rather than the footer's.
     expect(gateway().hasAttribute('data-failed-step')).toBe(false);
     expect(flowError()).toBeNull();
-    expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue);
+    // Runtime failure does not settle the independent inventory read. Keep that
+    // boundary controlled so the assertion cannot race its source response in CI.
+    expect(primaryAction().textContent).toContain(en.onboarding.providers.actionChecking);
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    await act(async () => releaseSources([HUB_SOURCE]));
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
     const retry = gateway().querySelector('.setup-gateway-retry') as HTMLButtonElement;
     expect(retry.textContent).toContain(en.common.retry);

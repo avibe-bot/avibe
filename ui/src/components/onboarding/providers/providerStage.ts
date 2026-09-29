@@ -52,7 +52,7 @@ import {
 export const PROVIDER_SLOT_COUNT = 2;
 
 /**
- * Whether a source counts as connected.
+ * Whether a source can supply setup's Model Hub route.
  *
  * `active` and `standby` are the two healthy statuses; the shipped resolver already
  * routes through standby, so treating it as anything less would under-report a source
@@ -61,7 +61,8 @@ export const PROVIDER_SLOT_COUNT = 2;
  * exists and the person did add it.
  */
 export const usableSource = (source: Source): boolean =>
-  source.state.status === 'active' || source.state.status === 'standby';
+  source.supply_channel === 'hub'
+  && (source.state.status === 'active' || source.state.status === 'standby');
 
 /**
  * How many of the sources added through Add more are still there.

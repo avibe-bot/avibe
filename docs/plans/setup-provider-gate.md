@@ -7,7 +7,8 @@ hint or a declined migration. Assistant entry then required a model connection
 that none of its controls could establish.
 
 - The provider screen can continue only after its source read confirms an
-  `active` or `standby` source, using the existing source policy.
+  `active` or `standby` Hub source. Native CLI subscriptions cannot supply
+  setup's Hub route and do not satisfy this prerequisite.
 - Without a source, the primary action opens the subscription/API-key dialog.
   Declining migration preserves the dismissal and keeps the Add action.
 - A detected key is an import offer, not a connected source. Reading failures
@@ -33,3 +34,26 @@ against a live instance.
 
 Required checks: affected component files, source API scenario harness, browser
 provider/assistant journeys, UI lint, TypeScript checks and production build.
+
+## Review diagnosis and scope decision
+
+The full PR #2265 review inventory contains two findings-bearing heads:
+`c48088e37b` and `e67a2aafd1`. Both exposed the same entry-admission class:
+backend eligibility was treated as sufficient when provider evidence was empty
+or unknown. The second head also exposed a retry handler that bypassed the
+button's guard and a native-CLI source incorrectly admitted as Hub supply.
+This triggered the review-loop circuit breaker before another implementation edit.
+
+Inspection of both screen actions, their handlers, the retained-screen lifecycle,
+the source projection and `entryGate.routeRunnable` confirms a local ownership
+gap, not a missing persistence model. Completion already requires Hub mode.
+The smallest complete fix is to require a successful current inventory with a
+usable Hub source for all setup entry actions, including retry; display an
+inventory-read retry for failed reads; and apply the same Hub-source predicate
+to the provider diagram and its Continue action. Pending/failed reads must never
+be mistaken for a confirmed empty list or successful provider evidence.
+
+The existing route-read epoch/token, provider read authority and completion gate
+remain the owners. No parallel state store or new backend policy is needed.
+Consumer validation covers pending/failing reads and retry recovery, native-only
+inventory, stale completion retry, current-visit readback and ordinary Hub entry.
