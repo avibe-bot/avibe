@@ -757,7 +757,33 @@ def prune_payload(payload: Path) -> None:
         file.unlink()
 
 
-def compile_payload(private_python: Path, payload: Path) -> None:
+def python_library(private_python: Path, payload: Path) -> Path:
+    """Return the payload directory the Runtime imports its Python from.
+
+    Only this directory is compiled. Other `.py` files in the tree are not
+    imported, and some are not Python: the Windows interpreter ships Tix
+    preference files under `tcl/` that compileall rejects.
+    """
+    completed = subprocess.run(
+        [
+            str(private_python),
+            "-I",
+            "-B",
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('purelib'))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stdlib, purelib = (Path(line).resolve() for line in completed.stdout.splitlines())
+    if not purelib.is_relative_to(stdlib):
+        raise SystemExit(f"Runtime site-packages is outside its standard library: {purelib}")
+    # Under the payload path compileall is given, so `-s` matches its paths.
+    return payload / stdlib.relative_to(payload.resolve())
+
+
+def compile_payload(private_python: Path, library: Path) -> None:
     """Ship the Runtime's bytecode inside its verified tree.
 
     The installed Runtime runs with `-B`: a `.pyc` written at run time would
@@ -766,7 +792,6 @@ def compile_payload(private_python: Path, payload: Path) -> None:
     bytecode stays valid wherever the tree is extracted, since it records no
     source mtime, and the tree hash already binds each `.pyc` to its source.
     """
-    python_root = payload / "python"
     run(
         [
             str(private_python),
@@ -781,18 +806,18 @@ def compile_payload(private_python: Path, payload: Path) -> None:
             "0",
             "--invalidation-mode",
             "unchecked-hash",
-            # Record paths relative to the tree, not this build's work dir. The
-            # import system rewrites them to the installed location on load.
+            # Record paths relative to the library, not this build's work dir.
+            # The import system rewrites them to the installed location on load.
             "-s",
-            str(python_root),
-            str(python_root),
+            str(library),
+            str(library),
         ]
     )
     # A Runtime that quietly compiles at run time again is the cost this step
     # removes, and nothing downstream would notice it, so check what shipped.
-    sources = {source.parent / source.stem for source in python_root.rglob("*.py")}
+    sources = {source.parent / source.stem for source in library.rglob("*.py")}
     compiled = set()
-    for bytecode in python_root.rglob("__pycache__/*.pyc"):
+    for bytecode in library.rglob("__pycache__/*.pyc"):
         with bytecode.open("rb") as header:
             # The flags word follows the magic number; 1 is unchecked-hash.
             if int.from_bytes(header.read(8)[4:], "little") != 1:
@@ -861,7 +886,8 @@ def main() -> int:
         payload.rename(installed_payload)
         payload = installed_payload
         prune_payload(payload)
-        compile_payload(payload / target_config["python_entrypoint"], payload)
+        private_python = payload / target_config["python_entrypoint"]
+        compile_payload(private_python, python_library(private_python, payload))
         # Probe the tree as it ships, bytecode included.
         verify_payload(target_config, payload, work_dir, sources["npm_version"])
 
