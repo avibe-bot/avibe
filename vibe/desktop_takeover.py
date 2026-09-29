@@ -15,13 +15,14 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psutil
 
 from config import paths
-from config.v2_config import UiConfig, V2Config, VibeCloudRemoteAccessConfig
+from config.v2_config import V2Config
 from vibe import internal_client, runtime
-from vibe.desktop_runtime import desktop_origin, desktop_runtime_id
+from vibe.desktop_runtime import START_RECEIPT_TIME_TOLERANCE_MS, desktop_origin, desktop_runtime_id
 
 
 class TakeoverRefused(Exception):
@@ -74,18 +75,31 @@ def discover_home(selected: str | None) -> Path:
     homes: set[Path] = set()
     username = psutil.Process().username()
     for process in psutil.process_iter(["pid", "cmdline"]):
+        recognized = False
         try:
             if process.pid == os.getpid() or process.username() != username:
                 continue
-            command = shlex.join(process.info.get("cmdline") or [])
-            if not runtime._command_looks_like_service_entry(command, cwd=process.cwd(), include_scope_wrapper=False):
-                continue
+            argv = process.info.get("cmdline") or []
+            command = shlex.join(argv)
+            entry = runtime._service_entry_arg_from_argv(argv)
+            # An absolute entry can be identified even when cwd is unreadable.
+            recognized = bool(entry and Path(entry).is_absolute() and runtime._command_looks_like_service_entry(
+                command, include_scope_wrapper=False,
+            ))
+            if not recognized:
+                if not runtime._command_looks_like_service_entry(command, cwd=process.cwd(), include_scope_wrapper=False):
+                    continue
+            recognized = True
             home = _process_home(process)
             if home is None:
                 raise TakeoverRefused("identity_unknown")
-            if (home / "config" / "config.json").is_file() and _lock_owner(home) == process.pid:
+            if _lock_owner(home) == process.pid:
+                if not (home / "config" / "config.json").is_file():
+                    raise TakeoverRefused("invalid_home")
                 homes.add(home)
         except (psutil.Error, OSError):
+            if recognized:
+                raise TakeoverRefused("identity_unknown") from None
             continue
     if len(homes) > 1:
         raise TakeoverRefused("ambiguous_home")
@@ -122,9 +136,17 @@ def _supervised(pid: int) -> bool:
     return False
 
 
-def _idle() -> None:
+def _idle(service: psutil.Process) -> None:
+    # The GUI can inherit an IPC override for a different instance. Read the
+    # confirmed Controller's endpoint, never the helper caller's socket.
+    socket_path = None
+    if os.name != "nt":
+        override = service.environ().get("VIBE_INTERNAL_DISPATCH_SOCKET")
+        socket_path = Path(override).expanduser() if override else paths.get_state_dir() / "dispatch.sock"
+        if not socket_path.is_absolute():
+            socket_path = Path(service.cwd()) / socket_path
     try:
-        snapshot = asyncio.run(internal_client.list_running_agents())
+        snapshot = asyncio.run(internal_client.list_running_agents(socket_path=socket_path))
     except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
         raise TakeoverRefused("activity_unknown") from None
     body = snapshot.get("body")
@@ -136,17 +158,51 @@ def _idle() -> None:
         raise TakeoverRefused("busy")
 
 
-def inspect_runtime() -> dict:
-    home = paths.get_vibe_remote_dir().resolve()
+def _endpoint_config() -> V2Config:
     # V2Config.load() creates directories and may write recovery backups. Only
-    # the endpoint fields are needed before consent; parse those in memory.
+    # endpoint projection is needed before consent. Reuse the existing pure
+    # recovery parser so malformed optional sections cannot block discovery.
     config = V2Config.default()
     if paths.get_config_path().is_file():
         payload = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
-        ui = payload.get("ui") or {}
-        cloud = (payload.get("remote_access") or {}).get("vibe_cloud") or {}
-        config.ui = UiConfig(setup_host=ui.get("setup_host", "127.0.0.1"), setup_port=ui.get("setup_port", 5123))
-        config.remote_access.vibe_cloud = VibeCloudRemoteAccessConfig(enabled=cloud.get("enabled", False))
+        config = V2Config._recover_payload(payload)
+        for warning in config.load_warnings:
+            runtime.logger.warning("Desktop discovery: %s", warning)
+    return config
+
+
+def verify_connection() -> None:
+    """Verify this home's Controller and the process serving its UI endpoint.
+
+    A healthy HTTP response alone cannot distinguish two homes configured for
+    the same port. This also runs while monitoring independent connections.
+    """
+    home = paths.get_vibe_remote_dir().resolve()
+    pid = _lock_owner(home)
+    if pid is None:
+        raise TakeoverRefused("identity_unknown")
+    _identity(pid)
+    if runtime._desktop_process_role(psutil.Process(pid)) != "service":
+        raise TakeoverRefused("identity_unknown")
+    ui_pid = int(paths.get_runtime_ui_pid_path().read_text().strip())
+    _identity(ui_pid)
+    ui = psutil.Process(ui_pid)
+    if runtime._desktop_process_role(ui) != "ui":
+        raise TakeoverRefused("identity_unknown")
+    config = _endpoint_config()
+    origin = urlsplit(desktop_origin(runtime.effective_ui_bind_host(config), config.ui.setup_port))
+    if not any(
+        connection.status == psutil.CONN_LISTEN
+        and connection.laddr.port == origin.port
+        and connection.laddr.ip in {origin.hostname, "0.0.0.0" if origin.hostname == "127.0.0.1" else "::"}
+        for connection in ui.net_connections(kind="inet")
+    ):
+        raise TakeoverRefused("identity_unknown")
+
+
+def inspect_runtime() -> dict:
+    home = paths.get_vibe_remote_dir().resolve()
+    config = _endpoint_config()
     result = {"home": str(home), "origin": desktop_origin(runtime.effective_ui_bind_host(config), config.ui.setup_port),
               "external": None}
     # Do not create service.lock or a fresh data directory merely to discover it.
@@ -156,7 +212,7 @@ def inspect_runtime() -> dict:
     if pid is None:
         return result
     process = psutil.Process(pid)
-    if not runtime._command_looks_like_service_entry(shlex.join(process.cmdline()), cwd=process.cwd(), include_scope_wrapper=False):
+    if runtime._desktop_process_role(process) != "service":
         raise TakeoverRefused("identity_unknown")
     if desktop_runtime_id(process.environ()) is not None:
         return result
@@ -172,7 +228,7 @@ def inspect_runtime() -> dict:
         external["ui"] = _identity(ui_pid)
         if _supervised(pid) or _supervised(ui_pid):
             raise TakeoverRefused("supervised")
-        _idle()
+        _idle(process)
     except TakeoverRefused as error:
         external["reason"] = str(error)
     except (psutil.Error, OSError, ValueError):
@@ -180,11 +236,22 @@ def inspect_runtime() -> dict:
     return result
 
 
+def _same_identity(actual: dict | None, expected: dict | None) -> bool:
+    try:
+        return actual["pid"] == expected["pid"] and (
+            abs(actual["created"] * 1000 - expected["created"] * 1000) <= START_RECEIPT_TIME_TOLERANCE_MS
+        )
+    except (TypeError, KeyError):
+        return False
+
+
 def take_over(confirmed: dict) -> None:
     if not isinstance(confirmed, dict) or confirmed.get("home") != str(paths.get_vibe_remote_dir().resolve()):
         raise TakeoverRefused("identity_changed")
     current = inspect_runtime()["external"]
-    if current is None or current != confirmed:
+    if current is None or current["reason"] != confirmed.get("reason") or not all(
+        _same_identity(current[role], confirmed.get(role)) for role in ("service", "ui")
+    ):
         raise TakeoverRefused("identity_changed")
     if current["reason"]:
         raise TakeoverRefused(current["reason"])
@@ -192,9 +259,9 @@ def take_over(confirmed: dict) -> None:
     service = psutil.Process(current["service"]["pid"])
     ui = psutil.Process(current["ui"]["pid"])
     for process, identity in ((service, current["service"]), (ui, current["ui"])):
-        if process.create_time() != identity["created"]:
+        if not _same_identity({"pid": process.pid, "created": process.create_time()}, identity):
             raise TakeoverRefused("identity_changed")
-    _idle()
+    _idle(service)
     # Share the scoped-stop signal and PID-reuse rules. An independent service
     # has no Desktop Runtime id, so its confirmed identities supply authority;
     # it must never enter the id-based scan or the full CLI stop.
@@ -202,7 +269,7 @@ def take_over(confirmed: dict) -> None:
     if not runtime._desktop_process_gone(service):
         raise TakeoverRefused("stop_failed")
     if not runtime._desktop_process_gone(ui):
-        if _identity(ui.pid) != current["ui"]:
+        if not _same_identity(_identity(ui.pid), current["ui"]):
             raise TakeoverRefused("identity_changed")
         runtime._stop_desktop_processes([ui], timeout=10, force=False)
     if not runtime._desktop_process_gone(ui):
@@ -211,7 +278,7 @@ def take_over(confirmed: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("inspect", "takeover"))
+    parser.add_argument("action", choices=("inspect", "takeover", "verify-connection"))
     parser.add_argument("--home")
     parser.add_argument("--receipt")
     args = parser.parse_args()
@@ -220,6 +287,9 @@ def main() -> int:
         os.environ[paths.AVIBE_HOME_ENV] = str(home)
         if args.action == "takeover":
             take_over(json.loads(args.receipt or "null"))
+            result = {"ok": True}
+        elif args.action == "verify-connection":
+            verify_connection()
             result = {"ok": True}
         else:
             result = inspect_runtime()

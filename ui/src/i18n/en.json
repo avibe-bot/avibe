@@ -115,7 +115,7 @@
       "homeMessage": "The existing Avibe data folder could not be identified. Select the folder containing your Avibe config and state. No new instance will be created from this selection.",
       "busy": "Avibe is still working in {{home}}. Let the current work finish, then choose Manage Local Service from the application menu. You can open it independently now.",
       "supervised": "The service in {{home}} is started by an external service manager. Disable that startup registration and stop its service before letting Desktop manage this data folder. You can keep connecting independently.",
-      "unavailable": "Desktop cannot safely verify the service or active work in {{home}}. Stop the old service using its existing installation, then retry. You can keep connecting independently.",
+      "unavailable": "Desktop cannot safely verify the service or active work in {{home}}. Stop the old service using its existing installation, then retry. You can also keep managing the service independently.",
       "managed": "This local service is managed by Desktop and follows application updates."
     }
   },

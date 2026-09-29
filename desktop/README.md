@@ -126,6 +126,9 @@ identifies the service version separately from the Desktop version, and its
 entry opens native management. Use **Manage Local Service…** in the application
 menu to revisit the choice. Older Workbenches may still show their original
 version entry; the native menu remains available independently of that page.
+Independent connections require the selected home's service and UI listener to
+be verifiable. An unrelated instance answering on the same port does not count
+as that home being online.
 
 Active work postpones takeover. Stop a service with its original installation
 when its version cannot report activity, or disable its external supervisor

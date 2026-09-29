@@ -45,8 +45,21 @@ formatting/Clippy, and changed Python Ruff before PR delivery.
 Native packaged takeover and OS-login acceptance are residual manual checks;
 this implementation must not modify the developer's running service or data.
 
-Local validation after integrating #2242: 128 Python tests passed across the
-takeover, Desktop Runtime, and scoped-stop files; 264 Rust tests/doc-tests
+Local validation after integrating #2242 and review fixes: 138 Python tests
+passed across the takeover, Desktop Runtime, and scoped-stop files; 265 Rust tests/doc-tests
 passed across the workspace with all features; all four VersionBadge tests,
 both frontend builds, desktop localization, changed Python Ruff, Rust formatting,
 and Clippy passed. The old process and IPC fixtures use only test-owned state.
+
+## Review inventory
+
+The first reviewed head, `10e2b6e6b9`, received five findings: optional config
+recovery, independent connection/data-home binding, adopted managed-menu state,
+process timestamp drift, and discovery failure mistaken for absence. No class
+has appeared on two reviewed heads. The fixes reuse the pure V2 recovery parser
+and existing 2 ms receipt tolerance, verify the selected home's service and
+actual UI listener before independent navigation and during monitoring, and
+retain native ownership checks for stop authority. The consuming fixtures cover
+malformed released shapes without file writes, another listener at the expected
+port, an offline selected service, custom-home inspection failures, inherited
+IPC overrides, and bounded timestamp differences.

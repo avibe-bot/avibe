@@ -224,6 +224,9 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn connect_only(&self) -> bool {
         false
     }
+    fn verify_independent_connection(&self) -> bool {
+        true
+    }
     fn choose_management(&self, _take_over: bool) -> Result<(), LaunchError> {
         Err(LaunchError::TakeoverRefused)
     }
@@ -435,6 +438,11 @@ impl RuntimeLauncher for BundledVibeLauncher {
         command
             .environment
             .push((OsString::from("AVIBE_HOME"), discovery.home.clone().into_os_string()));
+        // The selected home's successor owns its own IPC endpoint. An override
+        // inherited from the shell that opened Desktop may name another home.
+        command
+            .environment
+            .push((OsString::from("VIBE_INTERNAL_DISPATCH_SOCKET"), OsString::new()));
         Ok(Arc::new(ResolvedVibeExecutable {
             command,
             expected_runtime_id: Some(runtime_id),
@@ -611,6 +619,12 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
             independent: !take_over,
         }
         .write(preference_path)
+    }
+
+    fn verify_independent_connection(&self) -> bool {
+        self.local_runtime.as_ref().is_some_and(|(discovery, _, _)| {
+            takeover_helper(&self.command, "verify-connection", Some(&discovery.home), None).is_ok()
+        })
     }
 
     fn prune_superseded(&self) {

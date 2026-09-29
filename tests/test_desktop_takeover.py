@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -72,11 +73,23 @@ server.serve_forever()
         ui_root = tmp_path / "old-ui"
         (ui_root / "vibe").mkdir(parents=True)
         (ui_root / "vibe/__init__.py").touch()
-        (ui_root / "vibe/ui_server.py").write_text("def run_ui_server():\n    import time; print('ready', flush=True); time.sleep(120)\n")
+        (ui_root / "vibe/ui_server.py").write_text('''def run_ui_server():
+    import os, socket, time
+    from pathlib import Path
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen()
+    (Path(os.environ['AVIBE_HOME']) / 'runtime/test-ui-port').write_text(str(listener.getsockname()[1]))
+    print('ready', flush=True)
+    time.sleep(120)
+''')
         ui = subprocess.Popen([sys.executable, "-c", "from vibe.ui_server import run_ui_server; run_ui_server()"],
                               cwd=ui_root, env=environment, stdout=subprocess.PIPE, text=True)
         assert ui.stdout.readline().strip() == "ready"
         paths.get_runtime_ui_pid_path().write_text(str(ui.pid))
+        config = V2Config.default()
+        config.ui.setup_port = int((home / "runtime/test-ui-port").read_text())
+        config.save(paths.get_config_path())
         reapers = [threading.Thread(target=process.wait, daemon=True) for process in (service, ui)]
         for reaper in reapers:
             reaper.start()
@@ -151,6 +164,28 @@ def test_unknown_selected_home_is_not_created(tmp_path):
     assert not home.exists()
 
 
+@pytest.mark.parametrize("failure", ["unreadable_environment", "unreadable_lock", "missing_config"])
+def test_an_identified_custom_instance_never_falls_back_to_an_empty_default(old_instance, monkeypatch, failure):
+    home, _, service, _ = old_instance
+    process = psutil.Process(service.pid)
+    process.info = {"pid": service.pid, "cmdline": process.cmdline()}
+    monkeypatch.delenv("AVIBE_HOME")
+    monkeypatch.setattr(desktop_takeover.psutil, "process_iter", lambda *_: iter([process]))
+    if failure == "unreadable_environment":
+        def unreadable():
+            raise psutil.AccessDenied(process.pid)
+        monkeypatch.setattr(process, "environ", unreadable)
+    elif failure == "unreadable_lock":
+        def unreadable_lock(_home):
+            raise PermissionError("test-owned unreadable lock")
+        monkeypatch.setattr(desktop_takeover, "_lock_owner", unreadable_lock)
+    else:
+        (home / "config/config.json").unlink()
+    with pytest.raises(desktop_takeover.TakeoverRefused):
+        desktop_takeover.discover_home(None)
+    assert service.poll() is None
+
+
 def test_external_supervisor_blocks_takeover(old_instance, monkeypatch):
     _, _, service, _ = old_instance
     monkeypatch.setattr(desktop_takeover, "_supervised", lambda _pid: True)
@@ -180,3 +215,66 @@ def test_inspection_of_a_broken_config_does_not_write_recovery_files(old_instanc
     assert result.returncode == 3
     assert {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()} == before
     assert service.poll() is None and ui.poll() is None
+
+
+def test_activity_belongs_to_the_selected_service_not_the_gui_environment(old_instance):
+    home, environment, service, _ = old_instance
+    inherited = dict(environment, VIBE_INTERNAL_DISPATCH_SOCKET=str(home / "unrelated-socket"))
+    idle = _helper(inherited, "inspect")
+    assert idle.returncode == 0
+    assert json.loads(idle.stdout)["external"]["reason"] is None
+    (home / "runtime/test-busy").touch()
+    busy = _helper(inherited, "inspect")
+    assert busy.returncode == 0
+    assert json.loads(busy.stdout)["external"]["reason"] == "busy"
+    assert service.poll() is None
+
+
+@pytest.mark.parametrize("section,value", [
+    ("remote_access", "broken"),
+    ("remote_access", {"vibe_cloud": [1]}),
+    ("remote_access", {"vibe_cloud": {"enabled": [1]}}),
+    ("ui", [1]),
+])
+def test_optional_config_recovery_remains_read_only(old_instance, section, value):
+    home, environment, _, _ = old_instance
+    config_path = home / "config/config.json"
+    payload = json.loads(config_path.read_text())
+    payload[section] = value
+    config_path.write_text(json.dumps(payload))
+    before = {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    result = _helper(environment, "inspect")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["external"]["reason"] is None
+    assert {path.relative_to(home): path.read_bytes() for path in home.rglob("*") if path.is_file()} == before
+
+
+def test_confirmation_accepts_the_existing_bounded_create_time_tolerance(old_instance):
+    home, environment, service, ui = old_instance
+    receipt = json.loads(_helper(environment, "inspect").stdout)["external"]
+    receipt["service"]["created"] += 0.001
+    receipt["ui"]["created"] -= 0.001
+    result = _helper(environment, "takeover", "--home", str(home), "--receipt", json.dumps(receipt))
+    assert result.returncode == 0, result.stdout + result.stderr
+    service.wait(timeout=5)
+    ui.wait(timeout=5)
+
+
+def test_independent_connection_requires_the_selected_homes_actual_listener(old_instance):
+    home, environment, service, ui = old_instance
+    verified = _helper(environment, "verify-connection", "--home", str(home))
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    with socket.socket() as other_listener:
+        other_listener.bind(("127.0.0.1", 0))
+        other_listener.listen()
+        config_path = home / "config/config.json"
+        payload = json.loads(config_path.read_text())
+        payload["ui"]["setup_port"] = other_listener.getsockname()[1]
+        config_path.write_text(json.dumps(payload))
+        wrong = _helper(environment, "verify-connection", "--home", str(home))
+        assert wrong.returncode == 3
+        assert service.poll() is None and ui.poll() is None
+        service.terminate()
+        service.wait(timeout=5)
+        offline = _helper(environment, "verify-connection", "--home", str(home))
+        assert offline.returncode == 3

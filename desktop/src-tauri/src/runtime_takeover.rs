@@ -131,7 +131,7 @@ pub fn request(app: AppHandle) {
     {
         return;
     }
-    if host.has_owned_runtime() {
+    if host.manages_connection() {
         activity.store(previous, Ordering::SeqCst);
         let c = catalog();
         app.dialog().message(c.managed).title(c.title).show(|_| {});

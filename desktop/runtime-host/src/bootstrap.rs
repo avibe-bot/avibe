@@ -110,7 +110,7 @@ pub struct RuntimeHost {
     settings: RuntimeHostSettings,
     launched_runtime: Mutex<LaunchState>,
     pending_external: Mutex<Option<Arc<dyn ResolvedRuntimeLauncher>>>,
-    monitor_runtime_id: Mutex<Option<String>>,
+    monitored_launcher: Mutex<Option<Arc<dyn ResolvedRuntimeLauncher>>>,
 }
 
 struct LaunchAttempt {
@@ -160,7 +160,7 @@ impl RuntimeHost {
             settings,
             launched_runtime: Mutex::new(LaunchState::default()),
             pending_external: Mutex::new(None),
-            monitor_runtime_id: Mutex::new(None),
+            monitored_launcher: Mutex::new(None),
         }
     }
 
@@ -213,7 +213,11 @@ impl RuntimeHost {
     }
 
     pub fn manages_connection(&self) -> bool {
-        self.monitor_runtime_id.lock().is_ok_and(|identity| identity.is_some())
+        self.monitored_launcher.lock().is_ok_and(|launcher| {
+            launcher
+                .as_ref()
+                .is_some_and(|launcher| !launcher.allows_external() && launcher.expected_runtime_id().is_some())
+        })
     }
 
     pub fn settings(&self) -> &RuntimeHostSettings {
@@ -275,13 +279,23 @@ impl RuntimeHost {
         let Some(readiness) = self.probe.readiness(origin).await else {
             return false;
         };
-        let expected = self
-            .monitor_runtime_id
+        let launcher = self
+            .monitored_launcher
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        expected
-            .as_ref()
-            .is_none_or(|expected| readiness.desktop_runtime_id.as_ref() == Some(expected))
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(launcher) = launcher else {
+            return true;
+        };
+        if launcher.connect_only() {
+            return tokio::task::spawn_blocking(move || launcher.verify_independent_connection())
+                .await
+                .unwrap_or(false);
+        }
+        launcher.allows_external()
+            || launcher
+                .expected_runtime_id()
+                .is_none_or(|expected| readiness.desktop_runtime_id.as_deref() == Some(expected))
     }
 
     /// Releases only completed helper retry state after readiness loss.
@@ -351,12 +365,9 @@ impl RuntimeHost {
 
         let mut attempt = 1;
         *self
-            .monitor_runtime_id
+            .monitored_launcher
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = resolved_launcher
-            .as_ref()
-            .filter(|launcher| !launcher.allows_external())
-            .and_then(|launcher| launcher.expected_runtime_id().map(str::to_owned));
+            .unwrap_or_else(|error| error.into_inner()) = resolved_launcher.clone();
         let mut handover_performed = false;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
         // An independent connection grants no launch, handover, or cleanup
@@ -367,7 +378,7 @@ impl RuntimeHost {
         {
             return publish(
                 sink,
-                if self.probe.readiness(&origin).await.is_some() {
+                if self.is_ready(&origin).await {
                     BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted)
                 } else {
                     BootstrapStatus::failed(

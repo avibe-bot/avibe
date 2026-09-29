@@ -20,6 +20,7 @@ struct Instance {
     managed: Arc<AtomicBool>,
     starts: Arc<AtomicUsize>,
     stops: Arc<AtomicUsize>,
+    wrong_home: Arc<AtomicBool>,
     refuse: bool,
     race: bool,
     unavailable: bool,
@@ -68,6 +69,9 @@ impl ResolvedRuntimeLauncher for Instance {
     }
     fn connect_only(&self) -> bool {
         self.independent.load(Ordering::SeqCst)
+    }
+    fn verify_independent_connection(&self) -> bool {
+        !self.wrong_home.load(Ordering::SeqCst)
     }
     fn choose_management(&self, takeover: bool) -> Result<(), LaunchError> {
         if self.refuse {
@@ -194,6 +198,27 @@ async fn independent_mode_does_not_replace_another_desktop_version() {
     assert_eq!(
         host(&instance).bootstrap(&DiscardStatus).await.notice.code,
         BootstrapNoticeCode::Adopted
+    );
+    assert_eq!(instance.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(instance.stops.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn independent_readiness_cannot_adopt_or_monitor_a_different_home_at_the_same_origin() {
+    let instance = Instance::default();
+    instance.independent.store(true, Ordering::SeqCst);
+    let host = host(&instance);
+    assert_eq!(
+        host.bootstrap(&DiscardStatus).await.notice.code,
+        BootstrapNoticeCode::Adopted
+    );
+    let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+    assert!(host.is_ready(&origin).await);
+    instance.wrong_home.store(true, Ordering::SeqCst);
+    assert!(!host.is_ready(&origin).await);
+    assert_eq!(
+        host.bootstrap(&DiscardStatus).await.notice.code,
+        BootstrapNoticeCode::IndependentUnavailable
     );
     assert_eq!(instance.starts.load(Ordering::SeqCst), 0);
     assert_eq!(instance.stops.load(Ordering::SeqCst), 0);
