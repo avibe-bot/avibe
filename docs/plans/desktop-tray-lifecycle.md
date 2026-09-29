@@ -10,11 +10,11 @@ another endpoint or Webview-provided signal. Serving includes the proved
 listener; transient probe failures show unreachable while the existing
 three-failure recovery threshold remains unchanged.
 
-Stop is offered only for a shell-started Runtime. Confirmation stops it without
+Stop is offered only for this app's own Runtime. Confirmation stops it without
 exiting the shell. The bootstrap then shows a localized stopped notice and an
 explicit Retry action; automatic recovery must not undo a user's Stop.
-Quit with launch ownership offers stop-and-quit, keep-running-and-quit, or
-cancel. Quit without ownership leaves the adopted Runtime alone. Startup and
+Quit while this app's Runtime serves offers stop-and-quit, keep-running-and-quit,
+or cancel. Quit otherwise leaves the adopted Runtime alone. Startup and
 uninstall serialize against lifecycle actions; no stop may race a launch.
 
 Start at Login is a native checkable menu item backed by
@@ -23,38 +23,23 @@ The OS registration is authoritative and is read back after every toggle.
 There are no new webview commands or permissions. Workbench and Show Pages
 remain unprivileged.
 
-## Frozen stop semantics
+## Stop semantics
+
+PR 2b of #2135 retired the startup receipt this section used to freeze.
+`desktop-runtime-scoped-stop.md` owns the stop rules; the sections below that
+mention receipts record the receipt-era lane.
 
 - `avibe-runtime-host` owns the Tauri-free operation.
 - A retained launch attempt only deduplicates starts; it is never stop authority.
-  Only a successful launcher exit plus a valid schema-v1 `started` receipt grants
-  authority. `reused`, absent/malformed/duplicate receipts, failed helpers, and
-  helpers still running grant none. Readiness alone never grants authority.
-- The producer contract is `docs/plans/desktop-start-receipt.md` in the separate
-  `feat/desktop-start-receipt` lane. Its receipt is sourced from the service
-  startup function's actual spawn/reuse branch, never before/after snapshots.
-  UI reuse does not change the service's provenance outcome.
-- Startup stdout is drained without forwarding it to a webview. At most 64 KiB
-  is retained; oversized output is drained and discards authority. Exactly one
-  line beginning `@avibe-start-receipt:` is accepted. Schema, positive PIDs, and
-  finite positive creation timestamps are validated, including fractional ms.
-- Missing proven ownership is an error, never a best-effort stop.
-- The host retains the exact resolved launcher/interpreter that launched the
-  Runtime. Stopping does not resolve an executable, search PATH, or invoke a
-  shell interpreter.
-- The Runtime's own `stop --receipt <JSON>` command owns shutdown. The helper
-  uses the same process isolation as startup and null standard streams. This
-  path never falls back to an unscoped stop or re-resolves an executable.
-- Python validates the current service PID and creation time (2 ms tolerance)
-  at its service-owner gate. Exit 3, including invalid receipt, replaced PID,
-  unavailable identity, and changed creation time, revokes authority and returns
-  a localized `runtime_ownership_lost` bootstrap screen with explicit Retry.
-  Retry uses the existing endpoint discovery and `/ready` state machine; no
-  second status channel or automatic stop/restart is introduced.
-- Successful stop releases ownership. Other stop failures preserve it for an
-  explicit retry. Confirmed Runtime loss releases ownership as before.
-- Tests prove adopted refusal, launch/stop executable identity, argument shape,
-  failure retention, and stop/monitor/bootstrap exclusion.
+  Authority is the last presence: Stop is offered only while the Controller
+  serving the origin carries this bundle's Runtime id (`Mine`). Readiness alone
+  never grants authority.
+- The host stops through the Runtime's own `vibe stop --expect-runtime-id <id>`,
+  run by the exact resolved launcher. Stopping does not resolve an executable,
+  search PATH, or fall back to an unscoped stop.
+- Exit 0 releases authority. Exit 3 revokes it and shows the retryable
+  `runtime_ownership_lost`. Exit 2 or a CLI that cannot run keeps it and shows
+  `runtime_stop_failed`. No stop runs while a launch or another stop is pending.
 
 ## Scope and dependencies
 
@@ -85,17 +70,10 @@ it does not copy or stack on that lane's Python implementation.
 
 - Workbench Settings integration is deferred; the native toggle is the only
   login-item control in this slice.
-- A Runtime deliberately kept running is adopted on the next shell launch and
-  cannot then be stopped via this session's tray ownership path.
-- Receipt v1 is a service-owner gate, not a per-process capability: a matching
-  service identity invokes today's full graceful stop, including UI, service
-  sweep, OpenCode, and tunnel. UI reuse does not prevent this full stop. The
-  gate does not prevent replacement after validation or independently authorize
-  each auxiliary process. The orchestrator explicitly accepted these v1 limits
-  on 2026-09-10; no per-process guarantee is claimed.
-- Older Runtime packages without receipt support can still serve/adopt, but
-  cannot gain tray stop authority. A ready Runtime whose helper has not finished
-  is also treated conservatively until a successful receipt becomes available.
+- A Runtime deliberately kept running is adopted as this app's own on the next
+  shell launch, and Stop is offered for it again.
+- A Runtime without this bundle's id, including one without any desktop
+  identity, can be adopted but is never offered Stop.
 - Runtime version reporting is not added to `/ready`; the tray shows the
   already-proved listener and current readiness without creating a status API.
 - Native GUI/login testing remains an integration acceptance step, not a claim

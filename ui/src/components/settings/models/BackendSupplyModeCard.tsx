@@ -83,7 +83,9 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   const [agent, setAgent] = React.useState<AgentSupply | null>(null);
   const [detected, setDetected] = React.useState<MigrationItem[]>([]);
   const [switching, setSwitching] = React.useState<AgentMode | null>(null);
-  const [migrateOpen, setMigrateOpen] = React.useState(false);
+  /** Why the migration dialog is open: offered on the way to the gateway, or
+   *  asked for from the Direct strip. Only the first switches when declined. */
+  const [migrateOpen, setMigrateOpen] = React.useState<'switch' | 'import' | null>(null);
   const [agentReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
@@ -116,17 +118,19 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
     void scan();
   }, [load, scan]);
 
-  const setMode = async (mode: AgentMode) => {
+  const setMode = async (mode: AgentMode, offerMigration = true) => {
     if (!agent || agent.mode === mode || switching) return;
     setSwitching(mode);
     try {
       const next = mode === 'hub'
         ? await (async () => {
-            const result = await resumeGatewayAdoption(modelsApi, agentReads, backend);
-            if (!result.ok) throw new Error(result.failure.reason);
-            if (result.candidates.length > 0) {
-              if (aliveRef.current) setMigrateOpen(true);
-              return null;
+            if (offerMigration) {
+              const result = await resumeGatewayAdoption(modelsApi, agentReads, backend);
+              if (!result.ok) throw new Error(result.failure.reason);
+              if (result.candidates.length > 0) {
+                if (aliveRef.current) setMigrateOpen('switch');
+                return null;
+              }
             }
             return modelsApi.setAgentMode(backend, 'hub');
           })()
@@ -239,7 +243,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
                 className="shrink-0"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setMigrateOpen(true);
+                  setMigrateOpen('import');
                 }}
               >
                 <ArrowDownToLine className="size-3.5" />
@@ -250,12 +254,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
         </OptionCard>
       </CardContent>
 
+      {/* Migration is optional: declining it still makes the requested switch. */}
       <MigrationDialog
-        open={migrateOpen}
+        open={migrateOpen !== null}
         eligible={(item) => item.backend === backend}
-        onClose={() => setMigrateOpen(false)}
+        onDecline={migrateOpen === 'switch' ? () => void setMode('hub', false) : undefined}
+        onClose={() => setMigrateOpen(null)}
         onApplied={() => {
-          setMigrateOpen(false);
+          setMigrateOpen(null);
           void load();
           void scan();
         }}

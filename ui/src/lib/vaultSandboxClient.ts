@@ -14,6 +14,7 @@ import {
   VAULT_SANDBOX_PINNED_MANIFEST,
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
+import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
 import { buildVaultConfirmSurface, type VaultConfirmSurface } from './vaultConfirmSurface';
@@ -159,6 +160,41 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function randomId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export type VaultAuthorizationWindow = {
+  id: string;
+  close: () => void;
+};
+
+/**
+ * Open the top-level sandbox authorization window for one protected operation (protocol v2
+ * §6.6). Call it synchronously from the user's approval click, before any await: the window needs
+ * that gesture, and opening it here lets the sandbox skip the in-frame launcher card. Pass the id
+ * to the operation and close the handle when the operation settles. Returns null when the browser
+ * blocks the window; the sandbox then falls back to its own launcher.
+ */
+export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null {
+  const id = randomId();
+  const url = new URL(VAULT_SANDBOX_IFRAME_URL);
+  const appearance = getVaultSandboxAppearance();
+  url.searchParams.set('mode', 'authorize');
+  url.searchParams.set('id', id);
+  url.searchParams.set('locale', appearance.locale);
+  url.searchParams.set('theme', appearance.theme);
+  // No noopener: the sandbox window reaches the requesting sandbox frame through its opener.
+  const popup = openLinkInNewContext(url.toString(), 'popup,width=520,height=760');
+  if (!popup) return null;
+  return {
+    id,
+    close: () => {
+      try {
+        if (!popup.closed) popup.close();
+      } catch {
+        // The sandbox may already have closed its window.
+      }
+    },
+  };
 }
 
 function base64(bytes: ArrayBuffer): string {
@@ -587,19 +623,23 @@ export class VaultSandboxClient {
   private async request<T>(
     op: VaultSandboxOp,
     payload?: unknown,
-    options: { timeoutMs?: number; interactive?: boolean } = {},
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string } = {},
   ): Promise<T> {
     await this.readyPromise;
     const id = randomId();
     // Interactive ops expand the iframe before sending so the launcher card is visible before the
     // request reaches the sandbox. The final authorization is completed in a top-level window;
     // the optional surface evidence remains a compatibility field, never a security decision.
+    // When the caller already opened that window, the sandbox needs no launcher card, so the
+    // iframe stays collapsed until the sandbox asks for its slot with `ui.show`.
     let surface: VaultConfirmSurface | null = null;
     try {
       if (options.interactive) {
         this.interactiveRequests.add(id);
-        this.setModalVisible(true);
-        surface = await this.measureSurface();
+        if (!options.authorizationWindow) {
+          this.setModalVisible(true);
+          surface = await this.measureSurface();
+        }
       }
     } catch (error) {
       this.interactiveRequests.delete(id);
@@ -620,7 +660,15 @@ export class VaultSandboxClient {
       });
     });
     this.target.postMessage(
-      { channel: CHANNEL, version: VERSION, id, op, payload: payload ?? {}, ...(surface ? { surface } : {}) },
+      {
+        channel: CHANNEL,
+        version: VERSION,
+        id,
+        op,
+        payload: payload ?? {},
+        ...(surface ? { surface } : {}),
+        ...(options.authorizationWindow ? { authorizationWindow: options.authorizationWindow } : {}),
+      },
       VAULT_SANDBOX_ORIGIN,
     );
     return promise;
@@ -682,8 +730,15 @@ export class VaultSandboxClient {
     return this.request<VaultSandboxSealResult>('seal', wire, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
   }
 
-  reveal(payload: { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }): Promise<{ completed: boolean }> {
-    return this.request<{ completed: boolean }>('reveal', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS, interactive: true });
+  reveal(
+    payload: { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext },
+    authorizationWindow?: string,
+  ): Promise<{ completed: boolean }> {
+    return this.request<{ completed: boolean }>('reveal', payload, {
+      timeoutMs: INTERACTIVE_TIMEOUT_MS,
+      interactive: true,
+      authorizationWindow,
+    });
   }
 
   sign(payload: {
@@ -691,18 +746,19 @@ export class VaultSandboxClient {
     scheme: SignatureScheme;
     signingContext: VaultSandboxSigningContext;
     context: VaultSignedOperationContext;
-  }): Promise<SignatureResult> {
-    return this.request<SignatureResult>('sign', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS, interactive: true });
+  }, authorizationWindow?: string): Promise<SignatureResult> {
+    return this.request<SignatureResult>('sign', payload, { timeoutMs: INTERACTIVE_TIMEOUT_MS, interactive: true, authorizationWindow });
   }
 
   /**
    * Batch DEK release: one confirm card lists every member, then the sandbox emits one HPKE blind
    * box per item (order matches `items`). Replaces v1 `releaseDEK`'s per-secret ceremony.
    */
-  approveRelease(payload: { items: ApproveReleaseItem[] }): Promise<{ blindBoxes: BlindBox[] }> {
+  approveRelease(payload: { items: ApproveReleaseItem[] }, authorizationWindow?: string): Promise<{ blindBoxes: BlindBox[] }> {
     return this.request<{ blindBoxes: BlindBox[] }>('approveRelease', payload, {
       timeoutMs: INTERACTIVE_TIMEOUT_MS,
       interactive: true,
+      authorizationWindow,
     });
   }
 

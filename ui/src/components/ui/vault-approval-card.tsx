@@ -13,8 +13,9 @@ import {
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
+import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
-import { type BlindBox, type SignatureScheme } from '@/lib/vaultCrypto';
+import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -274,31 +275,38 @@ export const VaultApprovalCard: React.FC<{
           }),
         );
       } else {
-        // Protected members — ONE batch call returns signed, value-free agent-delivery contexts
-        // for the whole selector; the sandbox then releases every DEK behind ONE confirm (protocol
-        // v2 §7.1) as opaque HPKE blind boxes for the pinned resident agent.
-        const issued = await api.createVaultAgentBindingsBatch({ request_id: request.id, grant_duration: durationValue });
-        failIfNotOk(issued);
-        const materialByName = new Map(materials.map((m) => [m.name, m]));
-        const approveItems = issued.items.map((item) => {
-          const material = materialByName.get(item.name);
-          if (!material) throw new Error(t('vaults.approval.errors.missingMaterial'));
-          return { material, context: item.context };
-        });
-        // One confirm card lists every member; the blind boxes come back in item order.
-        const blindBoxes = await vault.approveProtectedRelease(approveItems);
-        if (blindBoxes.length !== issued.items.length) throw new Error(t('vaults.approval.errors.failed'));
-        const deks: Array<{ name: string; dek_blindbox: BlindBox; approval: { nonce: string; expires_at_unix: number } }> =
-          issued.items.map((item, index) => ({ name: item.name, dek_blindbox: blindBoxes[index], approval: item.approval }));
-        failIfNotOk(
-          await api.fulfillVaultAccessRequest(request.id, {
-            grant_id: grantId,
-            grant_duration: durationValue,
-            this_session_only: sessionBound,
-            agent_pubkey: issued.agent_pubkey,
-            deks,
-          }),
-        );
+        // This click is the approval gesture, so it opens the sandbox authorization window before
+        // any await; the sandbox then confirms in that window without a second launcher card.
+        const authorizationWindow = openVaultAuthorizationWindow();
+        try {
+          // Protected members — ONE batch call returns signed, value-free agent-delivery contexts
+          // for the whole selector; the sandbox then releases every DEK behind ONE confirm (protocol
+          // v2 §7.1) as opaque HPKE blind boxes for the pinned resident agent.
+          const issued = await api.createVaultAgentBindingsBatch({ request_id: request.id, grant_duration: durationValue });
+          failIfNotOk(issued);
+          const materialByName = new Map(materials.map((m) => [m.name, m]));
+          const approveItems = issued.items.map((item) => {
+            const material = materialByName.get(item.name);
+            if (!material) throw new Error(t('vaults.approval.errors.missingMaterial'));
+            return { material, context: item.context };
+          });
+          // One confirm card lists every member; the blind boxes come back in item order.
+          const blindBoxes = await vault.approveProtectedRelease(approveItems, authorizationWindow?.id);
+          if (blindBoxes.length !== issued.items.length) throw new Error(t('vaults.approval.errors.failed'));
+          const deks: Array<{ name: string; dek_blindbox: BlindBox; approval: { nonce: string; expires_at_unix: number } }> =
+            issued.items.map((item, index) => ({ name: item.name, dek_blindbox: blindBoxes[index], approval: item.approval }));
+          failIfNotOk(
+            await api.fulfillVaultAccessRequest(request.id, {
+              grant_id: grantId,
+              grant_duration: durationValue,
+              this_session_only: sessionBound,
+              agent_pubkey: issued.agent_pubkey,
+              deks,
+            }),
+          );
+        } finally {
+          authorizationWindow?.close();
+        }
       }
       // Remember the approver's choice as next time's default — but not for one-shot, where the
       // duration was forced to one-time (not chosen), so persisting it would wrongly bias the next
@@ -324,7 +332,14 @@ export const VaultApprovalCard: React.FC<{
         const operationContext =
           delivery.operation_context ?? (card as { operation_context?: VaultSignedOperationContext } | null)?.operation_context;
         if (!operationContext) throw new Error(t('vaults.approval.errors.missingMaterial'));
-        const sig = await vault.signProtectedRequest(material, signingContext, scheme as SignatureScheme, operationContext);
+        // Open the sandbox authorization window from this click, before any await (see approveAccess).
+        const authorizationWindow = openVaultAuthorizationWindow();
+        let sig: SignatureResult;
+        try {
+          sig = await vault.signProtectedRequest(material, signingContext, scheme as SignatureScheme, operationContext, authorizationWindow?.id);
+        } finally {
+          authorizationWindow?.close();
+        }
         const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
         failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme, signature }));

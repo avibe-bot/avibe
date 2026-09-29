@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import socket
+import sys
 import threading
 import urllib.error
 from pathlib import Path
@@ -23,6 +25,7 @@ from config.v2_config import (
 )
 from vibe import cli, internal_client, runtime
 from vibe.desktop_runtime import (
+    desktop_caller_provenance,
     desktop_runtime_id,
     desktop_endpoint_payload,
     desktop_origin,
@@ -142,6 +145,185 @@ def test_desktop_runtime_id_accepts_only_lowercase_sha256():
     assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "A" * 64}) is None
     assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "short"}) is None
     assert desktop_runtime_id({}) is None
+
+
+def _host_marker(runtime_id: str) -> dict[str, object]:
+    """The marker the desktop host writes into a private tree it unpacks.
+
+    `write_marker` in desktop/runtime-host/src/private_runtime.rs serialises
+    `RuntimeBundleManifest` into `.avibe-runtime.json` at the tree root,
+    `<install root>/<runtime_version>/<archive_sha256[:16]>/`. Field names and
+    values are copied from that struct and its `write_bundle` test fixture.
+    """
+
+    return {
+        "schema_version": 2,
+        "runtime_version": "3.0.0-test",
+        "os": "macos",
+        "arch": "aarch64",
+        "archive": "runtime.zip",
+        "archive_sha256": runtime_id,
+        "archive_size": 1234,
+        "unpacked_size": 21,
+        "entry_count": 3,
+        "tree_sha256": "d" * 64,
+        "python_entrypoint": "python/bin/python3",
+        "node_entrypoint": "tools/bin/node",
+        "npm_entrypoint": "tools/npm/bin/npm-cli.js",
+        "python_distribution": {"url": "https://example.invalid/python", "sha256": "a" * 64},
+        "node_distribution": {"url": "https://example.invalid/node", "sha256": "b" * 64},
+        "npm_version": "10.9.8",
+        "avibe_wheel": {"name": "avibe_os-3.0.0-py3-none-any.whl", "sha256": "c" * 64},
+    }
+
+
+def _write_marker(path: Path, marker: object) -> None:
+    # serde_json::to_vec writes compact JSON.
+    path.write_text(json.dumps(marker, separators=(",", ":")), encoding="utf-8")
+
+
+@pytest.fixture
+def desktop_tree(tmp_path):
+    """An unpacked private tree: `python/bin/python3` links to `python3.12`, as in the bundle."""
+
+    if os.name == "nt":
+        pytest.skip("the POSIX tree layout links python3 to python3.12")
+    runtime_id = "e" * 64
+    root = tmp_path / "install" / "3.0.0-test" / runtime_id[:16]
+    bin_dir = root / "python" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python3.12").write_bytes(b"")
+    (bin_dir / "python3").symlink_to("python3.12")
+    _write_marker(root / ".avibe-runtime.json", _host_marker(runtime_id))
+    return SimpleNamespace(root=root, interpreter=bin_dir / "python3", runtime_id=runtime_id)
+
+
+@pytest.mark.parametrize("name", ["python3", "python3.12"])
+def test_a_desktop_tree_interpreter_acts_for_its_tree(desktop_tree, monkeypatch, name):
+    monkeypatch.setattr(sys, "executable", str(desktop_tree.interpreter.parent / name))
+    other = "f" * 64
+
+    assert desktop_caller_provenance() == {desktop_tree.runtime_id}
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", desktop_tree.runtime_id)
+    assert desktop_caller_provenance() == {desktop_tree.runtime_id}
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", other)
+    assert desktop_caller_provenance() == {desktop_tree.runtime_id, other}
+
+
+def test_a_caller_outside_any_tree_has_only_its_env_provenance(desktop_tree, monkeypatch, tmp_path):
+    outside = tmp_path / "venv" / "bin" / "python3"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"")
+    monkeypatch.setattr(sys, "executable", str(outside))
+
+    assert desktop_caller_provenance() == frozenset()
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", desktop_tree.runtime_id)
+    assert desktop_caller_provenance() == {desktop_tree.runtime_id}
+
+
+# Every interpreter layout a desktop bundle ships, from the bundle's own sources.
+_BUNDLE_PYTHON_ENTRYPOINTS = sorted(
+    {
+        target["python_entrypoint"]
+        for target in json.loads(
+            (Path(__file__).resolve().parents[1] / "desktop" / "runtime-sources.json").read_text(encoding="utf-8")
+        )["targets"].values()
+    }
+)
+
+
+@pytest.fixture(params=_BUNDLE_PYTHON_ENTRYPOINTS)
+def bundle_tree(request, tmp_path):
+    """A private tree with the interpreter where one of the bundle targets puts it."""
+
+    runtime_id = "e" * 64
+    root = tmp_path / "install" / "3.0.0-test" / runtime_id[:16]
+    interpreter = root / request.param
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"")
+    _write_marker(root / ".avibe-runtime.json", {**_host_marker(runtime_id), "python_entrypoint": request.param})
+    return SimpleNamespace(root=root, interpreter=interpreter, entrypoint=request.param, runtime_id=runtime_id)
+
+
+def test_every_bundle_interpreter_acts_for_its_tree(bundle_tree, monkeypatch):
+    monkeypatch.setattr(sys, "executable", str(bundle_tree.interpreter))
+
+    assert desktop_caller_provenance() == {bundle_tree.runtime_id}
+
+
+def test_a_marker_above_the_tree_root_names_no_tree(bundle_tree, monkeypatch):
+    # Its entrypoint does lead to this interpreter, but from above the root.
+    (bundle_tree.root / ".avibe-runtime.json").unlink()
+    stray = {**_host_marker("f" * 64), "python_entrypoint": f"{bundle_tree.root.name}/{bundle_tree.entrypoint}"}
+    _write_marker(bundle_tree.root.parent / ".avibe-runtime.json", stray)
+    monkeypatch.setattr(sys, "executable", str(bundle_tree.interpreter))
+
+    assert desktop_caller_provenance() == frozenset()
+
+
+def _replace_marker(**fields):
+    def write(root: Path, interpreter: Path, runtime_id: str) -> None:
+        _write_marker(root / ".avibe-runtime.json", {**_host_marker(runtime_id), **fields})
+
+    return write
+
+
+def _absolute_entrypoint(root: Path, interpreter: Path, runtime_id: str) -> None:
+    _replace_marker(python_entrypoint=str(interpreter))(root, interpreter, runtime_id)
+
+
+def _missing_field(name: str):
+    def write(root: Path, interpreter: Path, runtime_id: str) -> None:
+        marker = _host_marker(runtime_id)
+        del marker[name]
+        _write_marker(root / ".avibe-runtime.json", marker)
+
+    return write
+
+
+def _raw_marker(raw: bytes):
+    def write(root: Path, interpreter: Path, runtime_id: str) -> None:
+        (root / ".avibe-runtime.json").write_bytes(raw)
+
+    return write
+
+
+def _oversized_marker(root: Path, interpreter: Path, runtime_id: str) -> None:
+    raw = json.dumps(_host_marker(runtime_id)).encode()
+    (root / ".avibe-runtime.json").write_bytes(raw + b" " * (32 * 1024 + 1 - len(raw)))
+
+
+def _symlinked_marker(root: Path, interpreter: Path, runtime_id: str) -> None:
+    elsewhere = root.parent / "marker.json"
+    _write_marker(elsewhere, _host_marker(runtime_id))
+    (root / ".avibe-runtime.json").symlink_to(elsewhere)
+
+
+@pytest.mark.parametrize(
+    "write_marker",
+    [
+        pytest.param(_replace_marker(archive_sha256="E" * 64), id="uppercase-id"),
+        pytest.param(_replace_marker(archive_sha256="e" * 63), id="short-id"),
+        pytest.param(_missing_field("archive_sha256"), id="no-id"),
+        pytest.param(_missing_field("python_entrypoint"), id="no-entrypoint"),
+        pytest.param(_replace_marker(python_entrypoint=["python", "bin", "python3"]), id="entrypoint-not-a-string"),
+        pytest.param(_replace_marker(python_entrypoint="tools/bin/node"), id="entrypoint-elsewhere"),
+        pytest.param(_absolute_entrypoint, id="absolute-entrypoint"),
+        pytest.param(_raw_marker(b"[]"), id="not-an-object"),
+        pytest.param(_raw_marker(b"{not json"), id="not-json"),
+        pytest.param(_oversized_marker, id="oversized"),
+        pytest.param(_symlinked_marker, id="symlinked"),
+    ],
+)
+def test_an_invalid_root_marker_names_no_tree(desktop_tree, monkeypatch, write_marker):
+    marker = desktop_tree.root / ".avibe-runtime.json"
+    marker.unlink()
+    write_marker(desktop_tree.root, desktop_tree.interpreter, desktop_tree.runtime_id)
+    # A marker further up does not stand in for the broken one.
+    _write_marker(desktop_tree.root.parent / ".avibe-runtime.json", _host_marker(desktop_tree.runtime_id))
+    monkeypatch.setattr(sys, "executable", str(desktop_tree.interpreter))
+
+    assert desktop_caller_provenance() == frozenset()
 
 
 def test_private_desktop_runtime_path_is_confined_to_absolute_launcher_root(tmp_path):
@@ -1169,7 +1351,6 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         language="en",
     )
     spawned = []
-    process_times = {1234: 1789010100.1235, 5678: 1789010100.4565}
 
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
@@ -1177,7 +1358,6 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "process_create_time", lambda pid: process_times[pid])
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
@@ -1214,7 +1394,7 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         return True
 
     monkeypatch.setattr(cli.runtime, "wait_for_ui_server", wait_for_ui)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda: pytest.fail("reused Controller must survive"))
+    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: pytest.fail("reused Controller must survive"))
     monkeypatch.setattr(
         cli.runtime,
         "stop_ui",
@@ -1223,17 +1403,7 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
 
     assert cli.cmd_start(open_browser=False) == 0
 
-    receipt_line = next(
-        line for line in capsys.readouterr().out.splitlines() if line.startswith("@avibe-start-receipt:")
-    )
-    assert json.loads(receipt_line.split(":", 1)[1]) == {
-        "schema_version": 1,
-        "outcome": "reused",
-        "service_pid": 1234,
-        "ui_pid": 5678,
-        "service_create_unix_ms": process_times[1234] * 1000,
-        "ui_create_unix_ms": process_times[5678] * 1000,
-    }
+    assert "  http://127.0.0.1:5123" in capsys.readouterr().out.splitlines()
     assert len(spawned) == 1
 
 

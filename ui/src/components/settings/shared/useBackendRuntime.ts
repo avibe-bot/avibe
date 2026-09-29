@@ -64,10 +64,15 @@ type BackendRuntimeApplyResult = {
   restart_scheduled?: boolean;
   apply_on_next_start?: boolean;
   restart_error?: string;
+  restart_code?: string;
   error?: string;
 };
 
-const assertBackendRuntimeApplied = (savedConfig: unknown, fallbackMessage: string) => {
+const assertBackendRuntimeApplied = (
+  savedConfig: unknown,
+  fallbackMessage: string,
+  refusedMessage: string,
+) => {
   const runtime = (
     savedConfig as { agent_backend_runtime?: BackendRuntimeApplyResult } | null
   )?.agent_backend_runtime;
@@ -79,6 +84,7 @@ const assertBackendRuntimeApplied = (savedConfig: unknown, fallbackMessage: stri
   ) {
     return;
   }
+  if (runtime.restart_code === 'restart_refused') throw new Error(refusedMessage);
   throw new Error(runtime.restart_error || runtime.error || fallbackMessage);
 };
 
@@ -223,7 +229,7 @@ export function useBackendRuntime({
         const saved = await api.mutateConfig([setConfigField(['agents', backend, 'cli_path'], path)]);
         if (!mounted.current) return;
         setSavedCliPath(path); // persistence succeeded even if application failed
-        assertBackendRuntimeApplied(saved, t('common.saveFailed'));
+        assertBackendRuntimeApplied(saved, t('common.saveFailed'), t('settings.configRestartRefused'));
         showToast(t('common.saved'), 'success');
       } catch (e) {
         if (mounted.current) showToast(errorMessage(e) || t('common.saveFailed'), 'error');
@@ -250,7 +256,7 @@ export function useBackendRuntime({
         if (!mounted.current || enabledIntent.current !== intent) return;
         const persisted = savedConfig?.agents?.[backend]?.enabled;
         setEnabled(typeof persisted === 'boolean' ? persisted : next);
-        assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
+        assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'), t('settings.configRestartRefused'));
       } catch (e) {
         if (!mounted.current || enabledIntent.current !== intent) return;
         showToast(errorMessage(e) || t('common.saveFailed'), 'error');

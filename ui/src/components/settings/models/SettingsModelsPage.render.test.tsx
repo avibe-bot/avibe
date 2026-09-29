@@ -299,9 +299,12 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
-  it('opens the consent dialog before Direct-to-Hub takeover and leaves Direct unchanged on cancel', async () => {
+  it.each([
+    ['right away', false],
+    ['after a refused takeover', true],
+  ] as const)('offers migration before Direct-to-Hub and still switches when it is declined %s', async (_, refused) => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [migrationCandidate] });
-    const apply = vi.spyOn(modelsApi, 'applyMigration');
+    const apply = vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_native_busy'));
     const setMode = vi.spyOn(modelsApi, 'setAgentMode').mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
     renderPage([], [directAgent('claude')]);
 
@@ -309,11 +312,18 @@ describe('SettingsModelsPage surface branches', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
     expect(within(dialog).getByText(/After migration|迁移后/)).toBeTruthy();
+    expect(setMode).not.toHaveBeenCalled();
+    if (refused) {
+      await userEvent.click(within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }));
+      await waitFor(() => expect(apply).toHaveBeenCalledOnce());
+      expect(screen.getByRole('dialog')).toBeTruthy();
+    }
 
     await userEvent.click(within(dialog).getByRole('button', { name: /Later|稍后/i }));
 
-    expect(apply).not.toHaveBeenCalled();
-    expect(setMode).not.toHaveBeenCalled();
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
+    expect(setMode).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledTimes(refused ? 1 : 0);
   });
 
   it('uses the ordinary mode switch when Direct has no migration candidates', async () => {

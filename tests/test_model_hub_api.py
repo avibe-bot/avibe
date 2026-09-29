@@ -1056,10 +1056,15 @@ def test_runtime_stop_returns_explicit_not_started_state(tmp_path):
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
+async def _recover_runtime(service):
+    await service.recover_runtime_intent()
+    await service._runtime_resume_task
+
+
 def test_runtime_recovery_respects_the_persisted_default_on_intent(tmp_path):
     service, store, adapter = _service(tmp_path)
 
-    asyncio.run(service.recover_runtime_intent())
+    asyncio.run(_recover_runtime(service))
 
     assert adapter.start_calls == 1
     assert adapter.ensure_calls == [False]
@@ -1074,10 +1079,75 @@ def test_runtime_recovery_respects_the_persisted_default_on_intent(tmp_path):
         migration_home=tmp_path / "restarted-native-home",
     )
 
-    asyncio.run(restarted.recover_runtime_intent())
+    asyncio.run(_recover_runtime(restarted))
 
     assert adapter.start_calls == 1
     assert adapter.ensure_calls == [False]
+
+
+@pytest.mark.parametrize("ending", ["download_completes", "runtime_stop", "shutdown"])
+def test_runtime_recovery_does_not_wait_for_the_engine_download(tmp_path, ending):
+    """MH-RUNTIME-011: readiness follows custody recovery; the engine download is background work."""
+
+    class DownloadingAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.downloading = asyncio.Event()
+            self.release = threading.Event()
+            self.calls: list[str] = []
+
+        async def ensure_installed(self, *, force=False, offline=False):
+            self.downloading.set()
+            # Like the real installer, the download runs in a worker thread
+            # that cancelling its awaiter cannot stop.
+            await asyncio.to_thread(self.release.wait, 5)
+            self.calls.append("download_done")
+            return await super().ensure_installed(force=force, offline=offline)
+
+        async def stop(self):
+            self.calls.append("adapter_stop")
+
+    async def scenario():
+        adapter = DownloadingAdapter()
+        service, store, _ = _service(tmp_path, adapter)
+
+        await asyncio.wait_for(service.recover_runtime_intent(), 1)
+        await asyncio.wait_for(adapter.downloading.wait(), 1)
+        assert adapter.start_calls == 0
+        resume = service._runtime_resume_task
+        if ending == "download_completes":
+            adapter.release.set()
+            await asyncio.wait_for(resume, 1)
+            await asyncio.wait_for(service.stop(), 1)
+            return adapter, store
+        if ending == "runtime_stop":
+            # An explicit stop is served during the download, and the resume
+            # then honors it instead of starting the engine.
+            for agent in store.config.agents.values():
+                agent.mode = "direct"
+            payload = await asyncio.wait_for(service.runtime_stop(), 1)
+            assert payload["enabled"] is False
+            adapter.release.set()
+            await asyncio.wait_for(resume, 1)
+            return adapter, store
+        # Shutdown drains the download before stopping the adapter beneath it.
+        shutdown = asyncio.create_task(service.stop())
+        await asyncio.sleep(0.2)
+        assert not shutdown.done()
+        adapter.release.set()
+        await asyncio.wait_for(shutdown, 1)
+        return adapter, store
+
+    adapter, store = asyncio.run(scenario())
+    if ending == "download_completes":
+        assert adapter.start_calls == 1
+        assert adapter.calls == ["download_done", "adapter_stop"]
+    elif ending == "runtime_stop":
+        assert adapter.start_calls == 0
+        assert store.load().enabled is False
+    else:
+        assert adapter.start_calls == 0
+        assert adapter.calls == ["download_done", "adapter_stop"]
 
 
 def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
@@ -4598,7 +4668,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
 
 
 @asynccontextmanager
-async def _idle_mode_guard(backends):
+async def _idle_mode_guard(backends, *, external_processes=True):
     async def verify_idle():
         pass
     yield verify_idle

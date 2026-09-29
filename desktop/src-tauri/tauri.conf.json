@@ -42,10 +42,6 @@
           "avibe"
         ]
       }
-    },
-    "updater": {
-      "pubkey": "",
-      "endpoints": []
     }
   },
   "bundle": {

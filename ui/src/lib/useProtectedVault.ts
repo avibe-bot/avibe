@@ -381,10 +381,11 @@ export function useProtectedVault() {
       signingContext: VaultSandboxSigningContext,
       scheme: SignatureScheme,
       context: VaultSignedOperationContext,
+      authorizationWindow?: string,
     ): Promise<SignatureResult> => {
       const sandbox = await getVaultSandboxClient();
       try {
-        return await sandbox.sign({ material, scheme, signingContext, context });
+        return await sandbox.sign({ material, scheme, signingContext, context }, authorizationWindow);
       } finally {
         void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
       }
@@ -398,11 +399,11 @@ export function useProtectedVault() {
    * per-secret `releaseProtectedDelivery` loop.
    */
   const approveProtectedRelease = useCallback(
-    async (items: ApproveReleaseItem[]): Promise<BlindBox[]> => {
+    async (items: ApproveReleaseItem[], authorizationWindow?: string): Promise<BlindBox[]> => {
       if (items.length === 0) return [];
       const sandbox = await getVaultSandboxClient();
       try {
-        const result = await sandbox.approveRelease({ items });
+        const result = await sandbox.approveRelease({ items }, authorizationWindow);
         return result.blindBoxes;
       } finally {
         const wrapMeta = items[0]?.material.envelope.wrap_meta;
@@ -418,10 +419,14 @@ export function useProtectedVault() {
    * the parent. R2: an in-sandbox confirm while unlocked, a passkey while locked or under Strict.
    */
   const revealProtectedValue = useCallback(
-    async (material: ProtectedUnlockMaterial, context: VaultSignedOperationContext): Promise<{ completed: boolean }> => {
+    async (
+      material: ProtectedUnlockMaterial,
+      context: VaultSignedOperationContext,
+      authorizationWindow?: string,
+    ): Promise<{ completed: boolean }> => {
       const sandbox = await getVaultSandboxClient();
       try {
-        return await sandbox.reveal({ material, context });
+        return await sandbox.reveal({ material, context }, authorizationWindow);
       } finally {
         void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
       }

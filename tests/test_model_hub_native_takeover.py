@@ -28,7 +28,7 @@ from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("native_present", [False, True])
 @pytest.mark.parametrize("boundary", ["entry", "verify"])
-def test_mode_only_adoption_checks_native_absence_inside_guard(
+def test_mode_only_adoption_never_imports_native_auth(
     monkeypatch, tmp_path, backend, native_present, boundary,
 ):
     home = tmp_path / "native"
@@ -49,7 +49,7 @@ def test_mode_only_adoption_checks_native_absence_inside_guard(
                        '{"openai":{"type":"api","key":"fixture-key"}}')
 
     @asynccontextmanager
-    async def guard(backends):
+    async def guard(backends, *, external_processes=True):
         assert backends == (backend,)
         assert not service._mutation_lock.locked()
         if boundary == "entry":
@@ -61,15 +61,11 @@ def test_mode_only_adoption_checks_native_absence_inside_guard(
         yield verify
 
     service.migration_guard = guard
-    if native_present:
-        with pytest.raises(ModelHubError) as failure:
-            asyncio.run(service.set_agent_mode(backend, "hub"))
-        assert failure.value.code == "mode_switch_blocked"
-        assert store.config.agents[backend].mode == "direct"
-        assert service.migration_scan()["items"]
-    else:
-        assert asyncio.run(service.set_agent_mode(backend, "hub"))["mode"] == "hub"
-        assert checks
+    # Migration is optional: native auth stays native beside the Hub and is
+    # still offered for takeover afterwards.
+    assert asyncio.run(service.set_agent_mode(backend, "hub"))["mode"] == "hub"
+    assert checks
+    assert bool(service.migration_scan()["items"]) is native_present
     assert not store.config.sources
     assert not adapter.provisioned and not adapter.oauth_provisioned
     assert service.migration_journal.load() is None
@@ -631,7 +627,7 @@ def test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse(
     assert not any(item["proposed_action"] == "import" for item in service.migration_scan()["items"])
 
     @asynccontextmanager
-    async def guard(backends):
+    async def guard(backends, *, external_processes=True):
         async def verify():
             return None
         yield verify

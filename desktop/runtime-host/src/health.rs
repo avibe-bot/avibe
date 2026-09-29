@@ -1,4 +1,4 @@
-//! Readiness probing against the Avibe Web UI server.
+//! Presence probing against the Avibe Web UI server.
 
 use std::time::Duration;
 
@@ -8,35 +8,35 @@ use crate::origin::LoopbackOrigin;
 
 const MAX_READINESS_BYTES: usize = 1024;
 
+/// What one `/ready` response proves about the Runtime serving an origin,
+/// judged against the desktop Runtime identity this shell runs.
+///
+/// The identity that decides is the Controller's: it owns the service lock, the
+/// agents, and every process a scoped stop can find. The UI identity never makes
+/// a Runtime this shell's.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeReadiness {
-    /// Identity of the Controller Runtime, when it is desktop-managed.
-    pub desktop_runtime_id: Option<String>,
-    /// Identity of the UI Runtime serving an external Controller, when the UI
-    /// is known to come from a bundled private tree.
-    pub desktop_ui_runtime_id: Option<String>,
+pub enum Presence {
+    /// The Controller carries the expected identity. `ready` is false for the
+    /// exact identity mismatch: the Controller is this shell's but the UI is not.
+    Mine { ready: bool },
+    /// The Controller carries another valid desktop identity.
+    Foreign { runtime_id: String, ready: bool },
+    /// A ready Avibe Runtime whose Controller carries no desktop identity.
+    Unmanaged,
+    /// Nothing accepted the connection.
+    Absent,
+    /// Anything else: not ready, not Avibe, or not provable.
+    Unknown,
 }
 
-/// Answers whether the Avibe UI and Controller serve this origin and, for an
-/// app-private Runtime, which immutable archive is running.
+/// Classifies one `/ready` response for a shell expecting `expected`, the
+/// identity of the Runtime it runs, if any.
 ///
 /// Transport errors and raw response bodies stay inside the probe so nothing
 /// from the network reaches the bootstrap UI.
 #[async_trait]
 pub trait HealthProbe: Send + Sync {
-    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness>;
-
-    /// Returns the Controller identity from an explicit UI/Controller mismatch.
-    ///
-    /// This is not readiness: callers may use it only to hand a superseded
-    /// desktop-managed Runtime over to its bundled successor.
-    async fn mismatched_runtime_identity(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
-        None
-    }
-
-    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
-        self.readiness(origin).await.is_some()
-    }
+    async fn presence(&self, origin: &LoopbackOrigin, expected: Option<&str>) -> Presence;
 }
 
 /// `GET <origin>/ready`, requiring UI, service ownership, and Controller IPC.
@@ -62,26 +62,44 @@ impl HttpHealthProbe {
 
 #[async_trait]
 impl HealthProbe for HttpHealthProbe {
-    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
-        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
-            return None;
+    async fn presence(&self, origin: &LoopbackOrigin, expected: Option<&str>) -> Presence {
+        let response = match self.client.get(origin.readiness_url()).send().await {
+            Ok(response) => response,
+            Err(error) if is_connection_refused(&error) => return Presence::Absent,
+            Err(_) => return Presence::Unknown,
         };
-        if !response.status().is_success() {
-            return None;
+        let status = response.status();
+        let Some(body) = bounded_response_body(response).await else {
+            return Presence::Unknown;
+        };
+        let controller = match status {
+            reqwest::StatusCode::OK => parse_readiness_body(&body).map(|runtime_id| (runtime_id, true)),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                parse_runtime_identity_mismatch_body(&body).map(|runtime_id| (Some(runtime_id), false))
+            }
+            _ => None,
+        };
+        match controller {
+            Some((runtime_id, ready)) => classify(runtime_id, ready, expected),
+            None => Presence::Unknown,
         }
-        let body = bounded_response_body(response).await?;
-        parse_avibe_readiness_body(&body)
     }
+}
 
-    async fn mismatched_runtime_identity(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
-        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
-            return None;
-        };
-        if response.status() != reqwest::StatusCode::SERVICE_UNAVAILABLE {
-            return None;
-        }
-        let body = bounded_response_body(response).await?;
-        parse_runtime_identity_mismatch_body(&body)
+/// Whether a request failed because the connection was refused, the only
+/// connect failure that proves nothing listens. A timeout, a denied socket or
+/// an unavailable local address may hide a listener.
+fn is_connection_refused(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source())
+        .filter_map(|error| error.downcast_ref::<std::io::Error>())
+        .any(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+}
+
+fn classify(controller_runtime_id: Option<String>, ready: bool, expected: Option<&str>) -> Presence {
+    match controller_runtime_id {
+        Some(runtime_id) if Some(runtime_id.as_str()) == expected => Presence::Mine { ready },
+        Some(runtime_id) => Presence::Foreign { runtime_id, ready },
+        None => Presence::Unmanaged,
     }
 }
 
@@ -108,15 +126,13 @@ async fn bounded_response_body(mut response: reqwest::Response) -> Option<String
     String::from_utf8(body).ok()
 }
 
-/// Whether a `/ready` body proves both the UI and Controller are ready.
+/// Parses the exact affirmative `/ready` payload into its Controller identity.
 ///
 /// The Python endpoint performs the authoritative service-lock and internal IPC
-/// checks. Rust accepts only its exact affirmative payload.
-pub fn is_avibe_readiness_body(body: &str) -> bool {
-    parse_avibe_readiness_body(body).is_some()
-}
-
-pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
+/// checks. Rust accepts only its exact payload: `Some(None)` is a ready
+/// Controller without a desktop identity. A UI identity alone names only where
+/// the UI runs from, so it is validated and then set aside.
+fn parse_readiness_body(body: &str) -> Option<Option<String>> {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
         return None;
     };
@@ -142,22 +158,16 @@ pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
         || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
         || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
         || object.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
-        || controller_runtime_id.or(ui_runtime_id).is_some_and(|value| {
-            value.len() != 64
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
+        || controller_runtime_id
+            .or(ui_runtime_id)
+            .is_some_and(|value| !is_runtime_id(value))
     {
         return None;
     }
-    Some(RuntimeReadiness {
-        desktop_runtime_id: controller_runtime_id.map(str::to_owned),
-        desktop_ui_runtime_id: ui_runtime_id.map(str::to_owned),
-    })
+    Some(controller_runtime_id.map(str::to_owned))
 }
 
-fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> {
+fn parse_runtime_identity_mismatch_body(body: &str) -> Option<String> {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
         return None;
     };
@@ -168,17 +178,18 @@ fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> 
         || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
         || object.get("ready").and_then(serde_json::Value::as_bool) != Some(false)
         || object.get("code").and_then(serde_json::Value::as_str) != Some("runtime_identity_mismatch")
-        || runtime_id.len() != 64
-        || !runtime_id
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !is_runtime_id(runtime_id)
     {
         return None;
     }
-    Some(RuntimeReadiness {
-        desktop_runtime_id: Some(runtime_id.to_owned()),
-        desktop_ui_runtime_id: None,
-    })
+    Some(runtime_id.to_owned())
+}
+
+fn is_runtime_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -337,37 +348,40 @@ mod tests {
         );
     }
 
+    fn tagged_ready_body(runtime_id: &str) -> String {
+        format!(r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"{runtime_id}"}}"#)
+    }
+
+    fn mismatch_body(runtime_id: &str) -> String {
+        format!(
+            r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
+        )
+    }
+
+    async fn served_presence(status: &str, body: &[u8], expected: Option<&str>) -> Presence {
+        let server = TestServer::start(response(status, &[("Content-Length", body.len().to_string())], body));
+        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+        let presence = probe.presence(&server.origin, expected).await;
+        assert!(server.finish());
+        presence
+    }
+
     #[test]
-    fn accepts_the_exact_runtime_readiness_payload() {
-        assert!(is_avibe_readiness_body(
-            r#"{"schema_version":1,"product":"avibe","ready":true}"#
-        ));
+    fn readiness_payloads_parse_to_the_controller_identity_only() {
+        let ours = "a".repeat(64);
+        assert_eq!(parse_readiness_body(READY_BODY), Some(None));
+        assert_eq!(parse_readiness_body(&tagged_ready_body(&ours)), Some(Some(ours)));
+        // A UI started from a bundled tree, serving an external Controller.
         assert_eq!(
-            parse_avibe_readiness_body(EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY),
-            Some(RuntimeReadiness {
-                desktop_runtime_id: None,
-                desktop_ui_runtime_id: Some("a".repeat(64)),
-            })
+            parse_readiness_body(EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY),
+            Some(None)
         );
         assert_eq!(
-            parse_avibe_readiness_body(&format!(
-                r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"{}"}}"#,
-                "a".repeat(64)
-            )),
-            Some(RuntimeReadiness {
-                desktop_runtime_id: Some("a".repeat(64)),
-                desktop_ui_runtime_id: None,
-            })
-        );
-        assert_eq!(
-            parse_avibe_readiness_body(&format!(
+            parse_readiness_body(&format!(
                 r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_ui_runtime_id":"{}"}}"#,
                 "b".repeat(64)
             )),
-            Some(RuntimeReadiness {
-                desktop_runtime_id: None,
-                desktop_ui_runtime_id: Some("b".repeat(64)),
-            })
+            Some(None)
         );
     }
 
@@ -375,13 +389,8 @@ mod tests {
     fn accepts_only_the_exact_runtime_identity_mismatch_payload() {
         let runtime_id = "a".repeat(64);
         assert_eq!(
-            parse_runtime_identity_mismatch_body(&format!(
-                r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
-            )),
-            Some(RuntimeReadiness {
-                desktop_runtime_id: Some(runtime_id),
-                desktop_ui_runtime_id: None,
-            })
+            parse_runtime_identity_mismatch_body(&mismatch_body(&runtime_id)),
+            Some(runtime_id)
         );
         assert_eq!(
             parse_runtime_identity_mismatch_body(
@@ -390,9 +399,7 @@ mod tests {
             None
         );
         for invalid in ["", "bad", &"A".repeat(64)] {
-            assert!(parse_runtime_identity_mismatch_body(&format!(
-                r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{invalid}"}}"#
-            )).is_none());
+            assert!(parse_runtime_identity_mismatch_body(&mismatch_body(invalid)).is_none());
         }
         assert!(parse_runtime_identity_mismatch_body(
             r#"{"schema_version":1,"product":"avibe","ready":false,"code":"controller_unavailable"}"#
@@ -423,7 +430,10 @@ mod tests {
             "[]",
         ];
         for body in bodies {
-            assert!(!is_avibe_readiness_body(body), "body {body:?} must not be adopted");
+            assert!(
+                parse_readiness_body(body).is_none(),
+                "body {body:?} must not be adopted"
+            );
         }
     }
 
@@ -433,39 +443,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_probe_accepts_the_exact_body_from_its_loopback_listener() {
-        let server = TestServer::start(response(
-            "200 OK",
-            &[("Content-Length", READY_BODY.len().to_string())],
-            READY_BODY.as_bytes(),
-        ));
-        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
-
-        assert!(probe.is_healthy(&server.origin).await);
-        assert!(server.finish());
+    async fn presence_is_decided_by_the_controller_identity_against_the_expected_one() {
+        let ours = "a".repeat(64);
+        let other = "b".repeat(64);
+        let cases = [
+            (
+                "200 OK",
+                tagged_ready_body(&ours),
+                Some(ours.as_str()),
+                Presence::Mine { ready: true },
+            ),
+            (
+                "503 Service Unavailable",
+                mismatch_body(&ours),
+                Some(ours.as_str()),
+                Presence::Mine { ready: false },
+            ),
+            (
+                "200 OK",
+                tagged_ready_body(&other),
+                Some(ours.as_str()),
+                Presence::Foreign {
+                    runtime_id: other.clone(),
+                    ready: true,
+                },
+            ),
+            (
+                "503 Service Unavailable",
+                mismatch_body(&other),
+                Some(ours.as_str()),
+                Presence::Foreign {
+                    runtime_id: other.clone(),
+                    ready: false,
+                },
+            ),
+            // A shell without a bundled Runtime has no identity of its own.
+            (
+                "200 OK",
+                tagged_ready_body(&ours),
+                None,
+                Presence::Foreign {
+                    runtime_id: ours.clone(),
+                    ready: true,
+                },
+            ),
+            (
+                "200 OK",
+                READY_BODY.to_owned(),
+                Some(ours.as_str()),
+                Presence::Unmanaged,
+            ),
+            // A UI identity never makes an external Controller this shell's.
+            (
+                "200 OK",
+                EXTERNAL_CONTROLLER_BUNDLED_UI_READY_BODY.to_owned(),
+                Some(ours.as_str()),
+                Presence::Unmanaged,
+            ),
+            // The body proves readiness only with its own status.
+            (
+                "500 Internal Server Error",
+                tagged_ready_body(&ours),
+                Some(ours.as_str()),
+                Presence::Unknown,
+            ),
+            ("200 OK", mismatch_body(&ours), Some(ours.as_str()), Presence::Unknown),
+            (
+                "503 Service Unavailable",
+                r#"{"schema_version":1,"product":"avibe","ready":false,"code":"controller_unavailable"}"#.to_owned(),
+                Some(ours.as_str()),
+                Presence::Unknown,
+            ),
+            ("200 OK", "ok".to_owned(), Some(ours.as_str()), Presence::Unknown),
+        ];
+        for (status, body, expected, presence) in cases {
+            assert_eq!(
+                served_presence(status, body.as_bytes(), expected).await,
+                presence,
+                "{status} {body}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn the_probe_recovers_identity_from_an_explicit_mismatch() {
-        let runtime_id = "a".repeat(64);
-        let body = format!(
-            r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
-        );
-        let server = TestServer::start(response(
-            "503 Service Unavailable",
-            &[("Content-Length", body.len().to_string())],
-            body.as_bytes(),
-        ));
-        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+    async fn a_refused_connection_is_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener binds");
+        let origin = LoopbackOrigin::parse(&format!("http://{}", listener.local_addr().expect("address")))
+            .expect("test origin is loopback");
+        drop(listener);
+        let probe = HttpHealthProbe::new(crate::bootstrap::DEFAULT_PROBE_TIMEOUT).expect("probe builds");
 
-        assert_eq!(
-            probe.mismatched_runtime_identity(&server.origin).await,
-            Some(RuntimeReadiness {
-                desktop_runtime_id: Some(runtime_id),
-                desktop_ui_runtime_id: None,
-            })
-        );
-        assert!(server.finish());
+        assert_eq!(probe.presence(&origin, Some(&"a".repeat(64))).await, Presence::Absent);
+    }
+
+    #[test]
+    fn no_other_connect_failure_proves_absence() {
+        // The shape reqwest reports: a connect error caused by the socket's error.
+        #[derive(Debug)]
+        struct Connect(std::io::Error);
+        impl std::fmt::Display for Connect {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("tcp connect error")
+            }
+        }
+        impl std::error::Error for Connect {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        for (kind, refused) in [
+            (std::io::ErrorKind::ConnectionRefused, true),
+            (std::io::ErrorKind::PermissionDenied, false),
+            (std::io::ErrorKind::AddrNotAvailable, false),
+            (std::io::ErrorKind::TimedOut, false),
+        ] {
+            assert_eq!(is_connection_refused(&Connect(kind.into())), refused, "{kind:?}");
+        }
     }
 
     #[tokio::test]
@@ -482,7 +576,7 @@ mod tests {
         ));
         let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
 
-        assert!(!probe.is_healthy(&redirect.origin).await);
+        assert_eq!(probe.presence(&redirect.origin, None).await, Presence::Unknown);
         assert!(redirect.finish());
         assert!(!target.finish(), "the redirected listener must never be contacted");
     }
@@ -493,7 +587,7 @@ mod tests {
         let server = TestServer::start(response("200 OK", &[], &body));
         let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
 
-        assert!(!probe.is_healthy(&server.origin).await);
+        assert_eq!(probe.presence(&server.origin, None).await, Presence::Unknown);
         assert!(server.finish());
     }
 }

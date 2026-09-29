@@ -279,8 +279,11 @@ def _start_posix_identity_anchor() -> subprocess.Popen[bytes] | None:
     marker = os.environ.get(PROCESS_IDENTITY_ENV)
     if os.name == "nt" or not marker:
         return None
+    # The anchor's environment carries only the marker, so the caller's
+    # PYTHONDONTWRITEBYTECODE is gone; -B keeps it from writing bytecode into
+    # the interpreter's tree, which a desktop Runtime verifies before each use.
     return subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "--identity-anchor"],
+        [sys.executable, "-B", os.path.abspath(__file__), "--identity-anchor"],
         env={PROCESS_IDENTITY_ENV: marker},
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,

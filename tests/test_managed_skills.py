@@ -794,13 +794,23 @@ def test_non_utf8_resolved_directory_is_not_advertised(
 
 
 def test_discovery_ignores_zero_directory_entry_identities(tmp_path: Path, monkeypatch) -> None:
-    """Windows DirEntry.stat() reports st_dev/st_ino as zero; discovery must still work."""
+    """Windows DirEntry.stat() reports st_dev/st_ino as zero; discovery must still work.
+
+    Covers every root shape the live CLI resolves -- published built-ins, a
+    project directory, and a symlinked directory -- and runs unchanged on the
+    Windows CI job, where the listing data is genuinely zeroed.
+    """
 
     _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    monkeypatch.delenv(BUILTIN_SKILLS_SNAPSHOT_ENV)
+    monkeypatch.delenv(BUILTIN_SKILLS_ROOT_ENV)
     root = cwd / ".agents" / "skills"
     _write_skill(root, "alpha", "alpha", "Alpha")
     _write_skill(root, "beta", "beta", "Beta")
+    linked = _write_skill(tmp_path / "shared", "formatter", "formatter", "Format")
+    (root / "formatter").symlink_to(linked.parent, target_is_directory=True)
     real_scandir = os.scandir
+    sequence_fields = {"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size"}
 
     class _WindowsLikeEntry:
         def __init__(self, entry: os.DirEntry) -> None:
@@ -809,10 +819,21 @@ def test_discovery_ignores_zero_directory_entry_identities(tmp_path: Path, monke
             self._entry = entry
 
         def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
-            values = list(self._entry.stat(follow_symlinks=follow_symlinks))
+            real = self._entry.stat(follow_symlinks=follow_symlinks)
+            values = list(real)
             values[1] = 0  # st_ino
             values[2] = 0  # st_dev
-            return os.stat_result(values)
+            # Only the identity differs from a Windows listing; keep the rest
+            # (st_file_attributes, *_ns, ...) so callers that read it still work.
+            extras = {
+                name: getattr(real, name)
+                for name in dir(real)
+                if name.startswith("st_") and name not in sequence_fields
+            }
+            return os.stat_result(values, extras)
+
+        def __getattr__(self, name: str):
+            return getattr(self._entry, name)
 
     class _WindowsLikeScandir:
         def __init__(self, path) -> None:
@@ -826,9 +847,11 @@ def test_discovery_ignores_zero_directory_entry_identities(tmp_path: Path, monke
 
     monkeypatch.setattr(managed_skills.os, "scandir", _WindowsLikeScandir)
 
-    assert [skill.name for skill in resolve_skills(cwd)] == ["alpha", "beta"]
-    loaded = load_skill("beta", cwd)
-    assert loaded is not None and loaded.body == "Body\n"
+    names = {skill.name for skill in resolve_skills(cwd)}
+    assert {"use-avibe", "use-avibe-vault", "alpha", "beta", "formatter"} <= names
+    for name in names:
+        loaded = load_skill(name, cwd)
+        assert loaded is not None and loaded.body, name
 
 
 def test_load_escapes_directory_attribute_controls(tmp_path: Path, monkeypatch) -> None:

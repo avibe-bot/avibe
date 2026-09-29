@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import marshal
 import os
 import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -302,6 +304,37 @@ def test_runtime_zip_is_byte_for_byte_deterministic(tmp_path):
 
     assert first_metadata == second_metadata
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_shipped_bytecode_is_valid_wherever_the_tree_is_extracted(tmp_path):
+    library = tmp_path / "payload" / "python" / "lib"
+    package = library / "package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "module.py").write_text("VALUE = 1\n")
+
+    builder.compile_payload(Path(sys.executable), library)
+
+    bytecode = next((package / "__pycache__").glob("module.*.pyc")).read_bytes()
+    # Unchecked-hash: no source mtime, so extraction time cannot invalidate it.
+    assert int.from_bytes(bytecode[4:8], "little") == 1
+    # Recorded relative to the library, not to this build's directory.
+    assert Path(marshal.loads(bytecode[16:]).co_filename) == Path("package/module.py")
+
+
+def test_only_the_python_the_runtime_imports_is_compiled(tmp_path):
+    python_root = tmp_path / "payload" / "python"
+    (python_root / "Lib").mkdir(parents=True)
+    (python_root / "Lib" / "module.py").write_text("VALUE = 1\n")
+    # The Windows interpreter ships Tix preference files that are not Python.
+    preferences = python_root / "tcl" / "tix8.4.3" / "pref"
+    preferences.mkdir(parents=True)
+    (preferences / "WmDefault.py").write_text("proc tixPref {} {\n\tset x 1\n        set y 2\n}\n")
+
+    builder.compile_payload(Path(sys.executable), python_root / "Lib")
+
+    assert list((python_root / "Lib" / "__pycache__").glob("module.*.pyc"))
+    assert not list(python_root.joinpath("tcl").rglob("*.pyc"))
 
 
 def test_probe_diagnostics_report_every_log_including_the_ones_that_are_missing(tmp_path):

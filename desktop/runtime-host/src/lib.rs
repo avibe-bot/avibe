@@ -7,10 +7,10 @@
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! use avibe_runtime_host::{default_runtime_host, BootstrapPhase, DiscardStatus};
+//! use avibe_runtime_host::{default_runtime_host, BootstrapPhase, BootstrapTrigger, DiscardStatus};
 //!
 //! let host = default_runtime_host()?;
-//! let status = host.bootstrap(&DiscardStatus).await;
+//! let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
 //! if status.phase == BootstrapPhase::Ready {
 //!     // Only now may the WebView leave the bootstrap page.
 //! }
@@ -23,6 +23,7 @@
 pub mod bootstrap;
 pub mod bootstrap_log;
 pub mod deep_link;
+pub mod download;
 pub mod health;
 pub mod launcher;
 pub mod notifications;
@@ -34,15 +35,15 @@ pub mod window_frame;
 use std::sync::Arc;
 
 pub use bootstrap::{
-    DiscardStatus, RuntimeHost, RuntimeHostSettings, StatusSink, DEFAULT_POLL_INTERVAL, DEFAULT_PROBE_TIMEOUT,
-    DEFAULT_READY_TIMEOUT, ORIGIN_ENV, READY_TIMEOUT_ENV,
+    BootstrapTrigger, DiscardStatus, RemovalOutcome, RuntimeHost, RuntimeHostSettings, StatusSink,
+    DEFAULT_POLL_INTERVAL, DEFAULT_PROBE_TIMEOUT, DEFAULT_READY_TIMEOUT, ORIGIN_ENV, READY_TIMEOUT_ENV,
 };
 pub use bootstrap_log::{BootstrapLog, BOOTSTRAP_LOG_NAME};
-pub use health::{is_avibe_readiness_body, parse_avibe_readiness_body, HealthProbe, HttpHealthProbe, RuntimeReadiness};
+pub use health::{HealthProbe, HttpHealthProbe, Presence};
 pub use launcher::{
-    vibe_executable_candidates, BundledVibeLauncher, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime,
-    ResolvedRuntimeLauncher, RuntimeLauncher, RuntimeRemovalState, DESKTOP_BACKENDS_ROOT_ENV, DESKTOP_NPM_CLI_ENV,
-    DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
+    vibe_executable_candidates, BundledVibeLauncher, CliOutcome, InstalledVibeLauncher, LaunchError, LaunchExit,
+    LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher, DESKTOP_BACKENDS_ROOT_ENV,
+    DESKTOP_NPM_CLI_ENV, DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
 pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
 pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};

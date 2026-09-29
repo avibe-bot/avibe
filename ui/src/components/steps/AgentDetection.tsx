@@ -472,7 +472,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         const saved = await api.mutateConfig([setConfigField(['agents', backend, 'enabled'], enabled)]);
         const applied = saved?.agent_backend_runtime;
         if (applied && !applied.hot_reconciled && !applied.restart_scheduled && !applied.apply_on_next_start) {
-          receiptError = applied.restart_error || applied.error || t('onboarding.connection.applyFailed');
+          receiptError = applied.restart_code === 'restart_refused'
+            ? t('settings.configRestartRefused')
+            : applied.restart_error || applied.error || t('onboarding.connection.applyFailed');
         }
       } catch (error) { receiptError = String(error); }
       if (enableIntent.current[backend] !== intent) return;

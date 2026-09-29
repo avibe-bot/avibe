@@ -4,6 +4,7 @@ import pytest
 
 from core.handlers.model_hub import reasoning_tiers
 from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
+from vibe import backend_model_catalog
 from vibe.backend_model_catalog import PROTOCOL_REASONING_EFFORT_DEFAULTS
 
 
@@ -44,6 +45,30 @@ def test_catalog_row_outranks_user_and_is_returned_verbatim() -> None:
         "ultra",
     )
     assert resolution.source == "catalog"
+
+
+@pytest.mark.parametrize("protocol", ("openai_responses", "openai_chat"))
+def test_codex_only_ultra_does_not_become_an_api_reasoning_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+) -> None:
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "_read_codex_models_cache",
+        lambda: [{
+            "id": "gpt-6.1-sol",
+            "visibility": "list",
+            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+        }],
+    )
+    native = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
+    api = resolve_reasoning_tiers(protocol=protocol, model_id="gpt-6.1-sol")
+
+    assert [option["value"] for option in native["reasoning_options"]["gpt-6.1-sol"]] == [
+        "__default__", "low", "medium", "high", "xhigh", "max", "ultra",
+    ]
+    assert api.efforts == ("low", "medium", "high", "xhigh", "max")
+    assert api.source == "catalog"
 
 
 def test_catalog_row_is_not_filtered_through_the_vocabulary(

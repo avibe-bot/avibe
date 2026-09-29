@@ -139,3 +139,14 @@ Installed logo inset follow-up evidence:
   and entry assets match the build. The desktop window was reopened on the home
   route for owner acceptance; Runtime PIDs 61799 and 61802 and /health stayed
   unchanged.
+
+## PR preparation
+
+Integrated master 99db88055 with a normal merge and preserved its Runtime,
+updater and Vault changes. The resulting candidate passed both production UI
+and bootstrap builds, 102 focused UI tests, all 12 browser cases in the chrome
+and sidebar/Dock files, and all 84 desktop Rust tests (including 35 shell boundary
+tests). UI lint baseline, browser-test TypeScript, Rust formatting, Clippy and
+diff checks passed. The chrome browser file now runs in the existing CI job.
+The accepted installed preview remains in place; these master changes have not
+been installed into the owner's local Runtime.

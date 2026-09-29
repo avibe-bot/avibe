@@ -108,6 +108,31 @@ def test_archive_download_retries_transient_network_failure(tmp_path: Path, monk
     assert attempts == 2
 
 
+def test_archive_download_stops_at_the_manifest_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    archive = _write_git_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["archives"][managed_runtime.runtime_platform_tag()]["url"] = "https://example.test/git.tar.gz"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    reads = 0
+
+    class Endless(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            nonlocal reads
+            reads += 1
+            if reads > 3:
+                pytest.fail("archive download kept reading past the manifest size")
+            return b"x" * (size or 1)
+
+    monkeypatch.setattr(managed_runtime.urllib.request, "urlopen", lambda _request, timeout: Endless())
+
+    result = GitRuntimeManager(manifest_path=manifest).ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_archive_download_failed"
+
+
 def test_packaged_manifest_matches_published_four_platform_release(tmp_path: Path) -> None:
     manager = GitRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
 

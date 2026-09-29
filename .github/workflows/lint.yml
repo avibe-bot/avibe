@@ -519,3 +519,11 @@ jobs:
       # Runtime nor an installer, so it does not have to cost a release.
       - name: Verify the process scan stays off the external shell
         run: python -m pytest tests/test_runtime_process_scan.py -q
+
+      # A Windows directory listing reports st_dev and st_ino as zero, so a
+      # Skill whose identity is taken from it fails every later identity check
+      # and the catalog comes back empty -- how gh-v3.1.2rc5's bundled
+      # `vibe skill load -- use-avibe` failed. Only a real Windows filesystem
+      # shows it, and like the steps above it needs no packaged Runtime.
+      - name: Verify Skill discovery keeps real directory identities
+        run: python -m pytest tests/test_managed_skills.py -q -k zero_directory_entry_identities

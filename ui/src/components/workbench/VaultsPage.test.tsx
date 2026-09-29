@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -15,6 +15,7 @@ type WorkbenchEventHandlers = { onVaultsUpdated?: (data: unknown) => void };
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
+  createVaultRevealContext: vi.fn(),
   getVaultAudit: vi.fn(),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
@@ -103,6 +104,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe('VaultsPage remote audit history', () => {
@@ -150,5 +152,50 @@ describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated 
     // own pending scope.
     const [query] = api.getVaultRequests.mock.calls.at(-1) ?? [];
     expect(query).toMatchObject({ status: 'pending' });
+  });
+});
+
+// A popup opened after an await has lost the click's user activation and is blocked, which would
+// silently bring back the sandbox's own launcher card and its second approval click.
+describe('VaultsPage protected reveal', () => {
+  it('opens the sandbox authorization window inside the click and hands it to the reveal', async () => {
+    const user = userEvent.setup();
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [
+        {
+          name: 'alpha',
+          tags: [],
+          kind: 'static',
+          protection: 'protected',
+          signer_kind: null,
+          source: 'user',
+          policy: {},
+          last_used_at: null,
+          use_count: 0,
+          created_at: '2026-08-11T00:00:00Z',
+          updated_at: '2026-08-11T00:00:00Z',
+        },
+      ],
+    });
+    api.createVaultRevealContext.mockResolvedValue({
+      ok: true,
+      context: { secret_name: 'alpha' },
+      envelope: { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' },
+    });
+    revealProtectedValue.mockResolvedValue(undefined);
+    const popup = { closed: false, close: vi.fn() };
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'vaults.reveal.show' }));
+
+    // Asserted synchronously after the click dispatch, before any awaited work can run.
+    expect(open).toHaveBeenCalledOnce();
+    const opened = new URL(String(open.mock.calls[0][0]));
+    expect(opened.searchParams.get('mode')).toBe('authorize');
+    await waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
+    expect(revealProtectedValue.mock.calls[0][2]).toBe(opened.searchParams.get('id'));
+    await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
   });
 });

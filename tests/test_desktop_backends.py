@@ -499,10 +499,10 @@ def quiet_stop(monkeypatch):
     # The full stop's service half scans live processes; nothing of this test
     # runs there, and the real host must not be touched. The UI half reads
     # only this test's UI pidfile.
-    monkeypatch.setattr(runtime, "stop_service", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: None)
     monkeypatch.setattr(remote_access, "stop", lambda: {"ok": True})
-    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     statuses: list[tuple] = []
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: statuses.append(args))
     return cli, statuses
@@ -567,18 +567,21 @@ def test_stop_reaps_the_tree_of_an_owner_that_died_before_draining(monkeypatch, 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 @pytest.mark.parametrize("failing", ["service", "ui"])
 def test_a_full_stop_that_fails_still_reaps_the_tree_of_a_dead_owner(
-    monkeypatch, installer_tree, quiet_stop, failing
+    monkeypatch, installer_tree, quiet_stop, children, failing
 ):
     from vibe import runtime
 
     env, wait_for_tree = installer_tree
     cli, statuses = quiet_stop
     pids = _start_killed_owner(env, wait_for_tree)
-    # The stop reports this half as still running.
+    # The stop reports this half, a process of the caller's own Runtime, as
+    # still running.
+    children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+    running = children[-1].pid
     if failing == "service":
-        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: os.getpid())
+        monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=True: running)
     else:
-        config_paths.get_runtime_ui_pid_path().write_text(str(os.getpid()), encoding="utf-8")
+        config_paths.get_runtime_ui_pid_path().write_text(str(running), encoding="utf-8")
         monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
 
     assert cli.cmd_stop() == 2
@@ -609,11 +612,11 @@ def test_the_tree_of_a_live_owner_stays_whatever_the_ui_pidfile_says(
     else:
         seen_at_start: list[list[int]] = []
 
-        def start(start_ui=True):
+        def start(start_ui=True, **kwargs):
             seen_at_start.append(_running(pids))
             raise RuntimeError("no Runtime starts in this test")
 
-        monkeypatch.setattr(restart_supervisor, "_stop_service_for_restart", lambda: (True, 0.0))
+        monkeypatch.setattr(restart_supervisor, "_stop_service_for_restart", lambda runtime_ids: (True, 0.0))
         monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
         monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
 

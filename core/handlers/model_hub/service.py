@@ -773,6 +773,18 @@ async def _rollback_replacement_before_settling(
         raise cancelled
 
 
+def _log_native_refusal(operation: str, error: Any) -> None:
+    # The client sees only a generic busy/blocked code. Keep the credential-free
+    # NativeMigrationBlockedError reason, backends and pids in the log instead.
+    logger.warning(
+        "%s refused: %s (backends=%s, pids=%s)",
+        operation,
+        error.reason,
+        ",".join(error.backends),
+        ",".join(str(pid) for pid in error.pids),
+    )
+
+
 def _binding(source: ModelHubSourceConfig) -> SourceBinding:
     if not source.credential_ref:
         raise ModelHubError("engine_down", status=503)
@@ -1000,6 +1012,7 @@ class ModelHubService:
         self._runtime_install_reconcile_lock = asyncio.Lock()
         self._runtime_install_reconciled = False
         self._runtime_lifecycle_lock = asyncio.Lock()
+        self._runtime_resume_task: asyncio.Task[None] | None = None
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -1015,7 +1028,7 @@ class ModelHubService:
 
     @staticmethod
     @asynccontextmanager
-    async def _unavailable_migration_guard(backends):
+    async def _unavailable_migration_guard(backends, *, external_processes=True):
         # A stand-alone UI service cannot retire Controller-owned credentials.
         # Tests explicitly inject a fixture-only guard; production is wired by
         # the Controller's shared backend lifecycle coordinator.
@@ -1581,7 +1594,12 @@ class ModelHubService:
             return recovered if isinstance(recovered, EngineStatus) else None
 
     async def recover_runtime_intent(self) -> None:
-        """Restore the runtime only when the user left it enabled."""
+        """Recover credential custody, then resume a runtime the user left enabled.
+
+        Only custody recovery gates service readiness. Resuming may first
+        download the engine, so it runs in the background, retired by `stop()`;
+        every consumer prepares the engine on demand in the meantime.
+        """
 
         try:
             await recover_native_migration(self)
@@ -1590,12 +1608,32 @@ class ModelHubService:
             # writer or native launch. Controller recovery preserves this gate.
             self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
             raise ModelHubError("migration_item_conflict", status=409) from None
-        async with self._runtime_lifecycle_lock:
+        task = self._runtime_resume_task
+        if task is None or task.done():
+            self._runtime_resume_task = asyncio.create_task(
+                self._resume_runtime_intent(),
+                name="model-hub-runtime-resume",
+            )
+
+    async def _resume_runtime_intent(self) -> None:
+        try:
             await self.reconcile_runtime_installation()
             if not self.store.load().enabled:
                 return
+            # Preparing may download the engine. Like every demand path, it
+            # holds no lifecycle lock, so an explicit start or stop is served
+            # meanwhile instead of after the download.
             await self._prepare_engine_for_demand()
-            await self._engine_call(self.adapter.start())
+            async with self._runtime_lifecycle_lock:
+                # An explicit stop clears the intent; `stop()` retires this
+                # resume. Either way it must not start the engine.
+                if self._runtime_resume_task is not asyncio.current_task():
+                    return
+                if not self.store.load().enabled:
+                    return
+                await self._engine_call(self.adapter.start())
+        except Exception:
+            logger.exception("Model Hub runtime resume failed; the engine is prepared on demand")
 
     async def _ensure_runtime_dependency(
         self,
@@ -1619,6 +1657,12 @@ class ModelHubService:
                 await await_owned_task(task)
             except Exception:
                 logger.warning("Native takeover remains pending during shutdown")
+        resume, self._runtime_resume_task = self._runtime_resume_task, None
+        if resume is not None and not resume.done():
+            # Drain rather than cancel: the installer runs in a worker thread
+            # that cancellation cannot stop, and the adapter must not stop
+            # beneath it. A retired resume never starts the engine.
+            await await_owned_task(resume)
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 
@@ -4779,9 +4823,10 @@ class ModelHubService:
         if mode == "hub":
             from core.backend_restart import NativeMigrationBlockedError
 
-            # A UI scan is advisory. Serialize with takeover, then recheck
-            # native absence while writers and launches are held out. Never
-            # treat mode-only consent as permission to import a new login.
+            # Serialize with takeover and retire the managed runtime so the
+            # next launch goes through the Hub. Mode-only consent never imports
+            # a login: native auth stays native beside the Hub, where the
+            # migration dialog can still take it over later.
             async with self._migration_lock:
                 async with self._mutation_lock:
                     current = self.store.load()
@@ -4789,10 +4834,9 @@ class ModelHubService:
                     if agent.mode == "hub":
                         return self._agent_payload(current, agent)
                 try:
-                    async with self.migration_guard((backend,)) as verify_idle:
+                    async with self.migration_guard((backend,), external_processes=False) as verify_idle:
                         async with self._mutation_lock:
-                            # Inventory must follow the last asynchronous drain:
-                            # a CLI may have logged in and exited during it.
+                            # Recheck idleness after the last asynchronous drain.
                             await verify_idle()
                             previous = self.store.load()
                             available = await asyncio.to_thread(
@@ -4812,22 +4856,19 @@ class ModelHubService:
                                     self.migration_journal.completed() or {}
                                 ).get("retained_native_ids"),
                             )
-                            # Retained auth stays native beside the Hub, but a
-                            # config the CLI cannot parse fails every launch.
-                            if any(
-                                item.backend == backend and (
-                                    item.proposed_action == "import"
-                                    or item.config_blocker
-                                )
-                                for item in available
-                            ):
+                            # Native auth stays beside the Hub, but a config
+                            # the CLI cannot parse fails every launch.
+                            if any(item.backend == backend and item.config_blocker for item in available):
                                 raise ModelHubError("mode_switch_blocked", status=409)
                             config = self._clone_config(previous)
                             self._agent(config, backend).mode = "hub"
                             await self._commit_synced(previous, config)
                             committed = self.store.load()
                             return self._agent_payload(committed, self._agent(committed, backend))
-                except (NativeMigrationBlockedError, TakeoverStateError, OSError):
+                except NativeMigrationBlockedError as error:
+                    _log_native_refusal("Model Hub mode switch", error)
+                    raise ModelHubError("mode_switch_blocked", status=409) from None
+                except (TakeoverStateError, OSError):
                     raise ModelHubError("mode_switch_blocked", status=409) from None
         async with self._mutation_lock:
             previous = self.store.load()
@@ -6979,7 +7020,8 @@ class ModelHubService:
             raise ModelHubError("migration_credentials_invalid", status=409) from None
         except MigrationReauthorizationRequiredError:
             raise ModelHubError("migration_reauthorization_required", status=409) from None
-        except NativeMigrationBlockedError:
+        except NativeMigrationBlockedError as error:
+            _log_native_refusal("Model Hub migration", error)
             raise ModelHubError("migration_native_busy", status=409) from None
         except (NativeOAuthPermissionError, PermissionError):
             raise ModelHubError("migration_permission_needed", status=409) from None

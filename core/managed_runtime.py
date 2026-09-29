@@ -1850,6 +1850,7 @@ class ManagedRuntimeManager:
                 archive.url,
                 temporary,
                 timeout=60,
+                size=archive.size,
                 opener=urllib.request.urlopen,
             )
             self._download_error = None

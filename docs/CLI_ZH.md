@@ -66,6 +66,7 @@ vibe start --allow-downgrade
 - 使用 `--no-open-browser` 时，服务和 Web UI 的启动/复用逻辑不变，但不会额外拉起系统浏览器窗口
 - **保留已运行的进程** — 需要明确重启时请使用 `vibe restart`
 - `vibe start` 和 `vibe restart` 会拒绝运行比最近一次激活更旧的安装，例如 `PATH` 中更靠前的旧 `vibe`。错误信息会写明两个版本以及应改用的启动器；如确实要运行旧版本，请加 `--allow-downgrade`。桌面应用只给出警告。
+- 由桌面应用启动时，只复用或替换该应用自己 Runtime 的主服务和 Web UI。如果这里运行的是另一个 Avibe，会说明原因并以状态码 3 退出，那个 Avibe 继续运行。
 
 ### `vibe stop`
 
@@ -79,6 +80,7 @@ vibe stop
 - 停止主服务
 - 停止 Web UI 服务器
 - **终止 OpenCode 服务器** — 当你需要重启 OpenCode 时使用此命令
+- 在桌面应用的 Runtime 内运行时（例如由它启动的 Agent），`vibe stop` 和 `vibe restart` 只作用于该 Runtime。如果这里运行的是另一个 Avibe，则什么都不停止，说明原因并以状态码 3 退出；在 Web UI 中重启也会显示同样的拒绝，而不会重启。
 
 ### `vibe status`
 

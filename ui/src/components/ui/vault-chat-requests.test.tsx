@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { VaultRequest } from '@/context/ApiContext';
@@ -31,17 +31,37 @@ const request = (id: string, requestType: 'access' | 'provision'): VaultRequest 
 });
 
 describe('VaultChatRequests', () => {
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
-  it('keeps provision forms out of the transcript footer', () => {
+  it('renders the given provision forms but reports only approvals off-screen', () => {
+    const observed: Element[] = [];
+    let notify: (entries: Partial<IntersectionObserverEntry>[]) => void = () => {};
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: (entries: Partial<IntersectionObserverEntry>[]) => void) {
+        notify = callback;
+      }
+      observe(element: Element) {
+        observed.push(element);
+      }
+      disconnect() {}
+    });
+    const onOffscreen = vi.fn();
     render(
       <VaultChatRequests
         requests={[request('provision', 'provision'), request('approval', 'access')]}
         onResolved={vi.fn()}
+        onOffscreenApprovalsChange={onOffscreen}
       />,
     );
 
-    expect(screen.queryByTestId('request-card-provision')).toBeNull();
+    expect(screen.getByTestId('request-card-provision')).toBeTruthy();
     expect(screen.getByTestId('request-card-approval')).toBeTruthy();
+    expect(observed.map((element) => (element as HTMLElement).dataset.requestId)).toEqual(['approval']);
+
+    act(() => notify(observed.map((target) => ({ target, isIntersecting: false }))));
+    expect(onOffscreen.mock.lastCall?.[0].map((item: VaultRequest) => item.id)).toEqual(['approval']);
   });
 });

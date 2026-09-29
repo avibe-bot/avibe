@@ -757,6 +757,76 @@ def prune_payload(payload: Path) -> None:
         file.unlink()
 
 
+def python_library(private_python: Path, payload: Path) -> Path:
+    """Return the payload directory the Runtime imports its Python from.
+
+    Only this directory is compiled. Other `.py` files in the tree are not
+    imported, and some are not Python: the Windows interpreter ships Tix
+    preference files under `tcl/` that compileall rejects.
+    """
+    completed = subprocess.run(
+        [
+            str(private_python),
+            "-I",
+            "-B",
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('purelib'))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stdlib, purelib = (Path(line).resolve() for line in completed.stdout.splitlines())
+    if not purelib.is_relative_to(stdlib):
+        raise SystemExit(f"Runtime site-packages is outside its standard library: {purelib}")
+    # Under the payload path compileall is given, so `-s` matches its paths.
+    return payload / stdlib.relative_to(payload.resolve())
+
+
+def compile_payload(private_python: Path, library: Path) -> None:
+    """Ship the Runtime's bytecode inside its verified tree.
+
+    The installed Runtime runs with `-B`: a `.pyc` written at run time would
+    fail `verify_installed_tree`. Without shipped bytecode, every Runtime
+    process therefore recompiles every module it imports. Unchecked-hash
+    bytecode stays valid wherever the tree is extracted, since it records no
+    source mtime, and the tree hash already binds each `.pyc` to its source.
+    """
+    run(
+        [
+            str(private_python),
+            "-I",
+            # compileall writes every file explicitly; `-B` only keeps its own
+            # imports from leaving timestamp bytecode that it then skips as current.
+            "-B",
+            "-m",
+            "compileall",
+            "-q",
+            "-j",
+            "0",
+            "--invalidation-mode",
+            "unchecked-hash",
+            # Record paths relative to the library, not this build's work dir.
+            # The import system rewrites them to the installed location on load.
+            "-s",
+            str(library),
+            str(library),
+        ]
+    )
+    # A Runtime that quietly compiles at run time again is the cost this step
+    # removes, and nothing downstream would notice it, so check what shipped.
+    sources = {source.parent / source.stem for source in library.rglob("*.py")}
+    compiled = set()
+    for bytecode in library.rglob("__pycache__/*.pyc"):
+        with bytecode.open("rb") as header:
+            # The flags word follows the magic number; 1 is unchecked-hash.
+            if int.from_bytes(header.read(8)[4:], "little") != 1:
+                raise SystemExit(f"Runtime bytecode is not unchecked-hash: {bytecode}")
+        compiled.add(bytecode.parent.parent / bytecode.name.rsplit(".", 2)[0])
+    if missing := sorted(sources - compiled):
+        raise SystemExit(f"{len(missing)} Runtime sources have no bytecode, including {missing[0]}.py")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
@@ -815,8 +885,11 @@ def main() -> int:
         installed_payload = work_dir / "relocated runtime"
         payload.rename(installed_payload)
         payload = installed_payload
-        verify_payload(target_config, payload, work_dir, sources["npm_version"])
         prune_payload(payload)
+        private_python = payload / target_config["python_entrypoint"]
+        compile_payload(private_python, python_library(private_python, payload))
+        # Probe the tree as it ships, bytecode included.
+        verify_payload(target_config, payload, work_dir, sources["npm_version"])
 
         output_parent = args.output.parent
         output_parent.mkdir(parents=True, exist_ok=True)

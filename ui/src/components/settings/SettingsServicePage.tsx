@@ -34,6 +34,7 @@ export const SettingsServicePage: React.FC = () => {
   const [uiMessage, setUiMessage] = useState<string | null>(null);
   const [nameSaving, setNameSaving] = useState(false);
   const [nameMessage, setNameMessage] = useState<string | null>(null);
+  const [controlMessage, setControlMessage] = useState<string | null>(null);
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(() => {});
@@ -43,10 +44,19 @@ export const SettingsServicePage: React.FC = () => {
 
   const handleAction = async (action: string) => {
     setLoading(true);
+    setControlMessage(null);
     try {
       await control(action);
     } catch (e) {
       console.error('Service control action failed', e);
+      // The server stopped and started nothing: the Avibe running here is not
+      // this desktop Runtime's, and the person needs to know the action did not happen.
+      const code = (e as { code?: unknown } | null)?.code;
+      if (code === 'restart_refused') {
+        setControlMessage(t('settings.restartRefused'));
+      } else if (code === 'start_refused') {
+        setControlMessage(t('settings.startRefused'));
+      }
     } finally {
       setLoading(false);
     }
@@ -204,7 +214,7 @@ export const SettingsServicePage: React.FC = () => {
       >
         <SettingsRow
           title={t('settings.statusNow')}
-          description={`PID ${status.service_pid || status.pid || '-'}`}
+          description={controlMessage || `PID ${status.service_pid || status.pid || '-'}`}
           control={
             <div className="flex flex-wrap gap-2">
               {!isRunning && (

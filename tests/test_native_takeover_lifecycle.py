@@ -342,14 +342,28 @@ def test_process_inventory_matches_executables_not_prompt_arguments(monkeypatch,
     assert native_cli_processes(dict.fromkeys(("claude", "codex", "opencode"), "")) == ((123,) if matched else ())
 
 
-def test_incomplete_same_user_inventory_refuses(monkeypatch):
+@pytest.mark.parametrize("name", [None, "codex", "node", "python3.12", "zsh"])
+def test_incomplete_same_user_inventory_refuses(monkeypatch, name):
     import psutil
 
     monkeypatch.setattr(psutil, "process_iter", lambda attrs: [SimpleNamespace(info={
         "pid": 123, "uids": SimpleNamespace(real=os.getuid()), "status": "running", "cmdline": None,
+        "name": name,
     })])
     with pytest.raises(NativeMigrationBlockedError, match="process_inventory_unavailable"):
         native_cli_processes({"codex": "codex"})
+
+
+def test_same_user_setuid_program_does_not_block_inventory(monkeypatch):
+    # macOS runs a setuid ``login`` behind every Terminal window; its command
+    # line is unreadable to the same user but it can never be a native CLI.
+    import psutil
+
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: [SimpleNamespace(info={
+        "pid": 123, "uids": SimpleNamespace(real=os.getuid()), "status": "sleeping", "cmdline": [],
+        "name": "login",
+    })])
+    assert native_cli_processes({"codex": "codex", "claude": "claude"}) == ()
 
 
 @pytest.mark.asyncio

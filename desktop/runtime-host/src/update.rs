@@ -58,6 +58,14 @@ impl Channel {
         }
         Ok(version)
     }
+    /// The highest SemVer release in this channel; publication order never counts.
+    pub fn latest(self, releases: Vec<Release>) -> Option<(Version, Release)> {
+        releases
+            .into_iter()
+            .filter(|release| release.prerelease == (self == Self::Test))
+            .filter_map(|release| Some((self.version(&release.tag).ok()?, release)))
+            .max_by(|a, b| a.0.cmp(&b.0))
+    }
 }
 
 pub fn target_spec(target: &str) -> Result<(&'static str, &'static str), String> {
@@ -72,6 +80,66 @@ pub fn manifest_name(target: &str) -> String {
 }
 pub fn asset_url(tag: &str, name: &str) -> String {
     format!("https://github.com/{REPOSITORY}/releases/download/{tag}/{name}")
+}
+/// Byte-identical copies of published release assets, plus the release index
+/// (`docs/plans/release-download-mirror.md`). Unauthenticated, like GitHub:
+/// every byte from either source passes the same verification.
+pub const MIRROR: &str = "https://dl.avibe.bot";
+pub const INDEX_URL: &str = "https://dl.avibe.bot/index/releases.json";
+/// Download order for a release asset URL: the mirror, then GitHub. The mirror
+/// URL is derived only by substituting the prefix, keeping percent-encoding.
+pub fn sources(url: &str) -> Vec<String> {
+    let github = format!("https://github.com/{REPOSITORY}/releases/download/");
+    match url.strip_prefix(&github) {
+        Some(path) => vec![format!("{MIRROR}/releases/{path}"), url.to_owned()],
+        None => vec![url.to_owned()],
+    }
+}
+
+/// A published release as discovery sees it, from the index or the GitHub API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Release {
+    pub tag: String,
+    pub prerelease: bool,
+    /// The peeled tag commit, when the source already lists it.
+    pub commit: Option<String>,
+    /// Asset names published under the canonical download URL.
+    pub assets: Vec<String>,
+}
+#[derive(Deserialize)]
+struct Index {
+    schema_version: u32,
+    repository: String,
+    releases: Vec<IndexRelease>,
+}
+#[derive(Deserialize)]
+struct IndexRelease {
+    tag: String,
+    prerelease: bool,
+    commit: String,
+    assets: Vec<IndexAsset>,
+}
+#[derive(Deserialize)]
+struct IndexAsset {
+    name: String,
+}
+/// Parses the mirror's release index, schema 1. Unknown fields are ignored so
+/// the producer can add some without breaking installed shells.
+pub fn index_releases(bytes: &[u8]) -> Result<Vec<Release>, String> {
+    let index: Index = serde_json::from_slice(bytes).map_err(|_| "invalid release index")?;
+    if index.schema_version != 1 || index.repository != REPOSITORY {
+        return Err("unsupported release index".into());
+    }
+    Ok(index
+        .releases
+        .into_iter()
+        .map(|release| Release {
+            tag: release.tag,
+            prerelease: release.prerelease,
+            commit: Some(release.commit),
+            assets: release.assets.into_iter().map(|asset| asset.name).collect(),
+        })
+        .collect())
 }
 pub fn artifact_name(version: &str, target: &str) -> Result<String, String> {
     Ok(format!("Avibe_{version}_{target}{}", target_spec(target)?.1))

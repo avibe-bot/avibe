@@ -305,3 +305,27 @@ async def test_real_guard_does_not_confuse_data_with_a_configured_script(monkeyp
     assert inventory.call_count == 2
     assert not admissions and not turns
     controller.agent_service.force_cancel_backend_turns.assert_not_awaited()
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_running_cli_does_not_block_a_mode_only_switch(monkeypatch, tmp_path, backend):
+    """MH-MIG-008: a running CLI never blocks the switch to the gateway.
+
+    Takeover must exclude every native reader; a mode-only switch changes no
+    native credential, so an IDE extension or terminal CLI may keep running.
+    """
+    config = V2Config.default()
+    native = getattr(config.agents, backend)
+    native.cli_path = f"/fixture/custom-{backend}"
+    config.model_hub.agents[backend].mode = "direct"
+    config.save()
+    service, _, _ = _service(tmp_path, migration_home=Path.home())
+    service.store = V2ModelHubConfigStore()
+    controller, coordinator, admissions, turns = _configured_owner(to_app_config(config))
+    controller.model_hub_service = service
+    coordinator._process_inventory = native_cli_processes
+    service.migration_guard = coordinator.migration_guard
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: [_row([native.cli_path])])
+    assert asyncio.run(service.set_agent_mode(backend, "hub"))["mode"] == "hub"
+    assert V2Config.load().model_hub.agents[backend].mode == "hub"
+    assert not admissions and not turns

@@ -23,6 +23,7 @@ import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault } from '../../lib/useProtectedVault';
+import { openVaultAuthorizationWindow } from '../../lib/vaultSandboxClient';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 import {
   useInstanceAuthorization,
@@ -670,9 +671,11 @@ export const VaultsPage: React.FC = () => {
 
   // Reveal a protected static value inside the sandbox frame (protocol v2 §7.4): fetch a signed
   // reveal context + the sealed envelope, then let the sandbox open + display it. Plaintext never
-  // returns to Avibe; the sandbox performs the in-frame confirm (and passkey when locked/Strict).
+  // returns to Avibe; the sandbox confirms in its top-level authorization window (and passkey when
+  // locked/Strict), which this click opens before any await.
   const revealSecret = useCallback(
     async (secret: VaultSecret) => {
+      const authorizationWindow = openVaultAuthorizationWindow();
       try {
         const res = await api.createVaultRevealContext(secret.name, { session_label: t('vaults.title') });
         if (!res?.ok || !res.context) throw new Error(res?.message || t('vaults.reveal.errors.contextFailed'));
@@ -684,9 +687,12 @@ export const VaultsPage: React.FC = () => {
         await vault.revealProtectedValue(
           { name: secret.name, kind: 'static', envelope: { ciphertext: res.envelope.ciphertext, nonce: res.envelope.nonce, wrap_meta: wrapMeta } },
           res.context,
+          authorizationWindow?.id,
         );
       } catch (err: unknown) {
         showToast(messageFromError(err), 'warning');
+      } finally {
+        authorizationWindow?.close();
       }
     },
     [api, vault, showToast, t],

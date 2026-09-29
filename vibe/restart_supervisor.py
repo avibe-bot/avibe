@@ -24,6 +24,7 @@ from vibe.desktop_runtime import (
     DESKTOP_RUNTIME_ID_ENV,
     DESKTOP_RUNTIME_ROOT_ENV,
     DESKTOP_SHELL_ENV,
+    desktop_caller_provenance,
     desktop_runtime_id,
     is_private_desktop_runtime_path,
 )
@@ -269,11 +270,21 @@ def _runtime_ready_for_config(config) -> bool:
 
 def _start_runtime_processes(
     start_ui: bool = True,
+    *,
+    service_start: runtime.ProcessStartInfo | None = None,
+    ui_start: runtime.ProcessStartInfo | None = None,
 ) -> StartedRuntime:
-    """Start the service, and the UI when this job owns it."""
+    """Start the service, and the UI when this job owns it.
+
+    ``service_start`` and ``ui_start`` record what the start created, for a
+    caller that has to undo it.
+    """
 
     from core.services import settings as settings_service
 
+    # Before the first status write, as `vibe start` claims: a successor that
+    # would reuse another Runtime's process is refused with nothing announced.
+    runtime.claim_desktop_runtime_start(include_ui=start_ui)
     paths.ensure_data_dirs()
     config = settings_service.load_config(default_factory=settings_service.default_config)
     # Service-only restart: the UI process was never stopped, so carry its
@@ -290,6 +301,7 @@ def _start_runtime_processes(
     service_pid = runtime.start_service(
         wait_for_ready=False,
         initial_ready_timeout=0,
+        start_info=service_start,
     )
     if start_ui:
         bind_host = runtime.effective_ui_bind_host(config)
@@ -297,6 +309,7 @@ def _start_runtime_processes(
             bind_host,
             config.ui.setup_port,
             wait_for_ready=False,
+            start_info=ui_start,
             )
     else:
         ui_pid = preserved_ui_pid
@@ -315,29 +328,32 @@ def _start_runtime_processes(
     return StartedRuntime(service_pid, ui_pid)
 
 
-def _stop_ui_for_restart() -> tuple[bool, dict[str, float | bool], float, int | None]:
+def _stop_ui_for_restart(runtime_ids: frozenset[str]) -> tuple[bool, dict[str, float | bool], float, int | None]:
     timings: dict[str, float | bool] = {}
     started_at = time.monotonic()
-    stopped = runtime.stop_ui(timings, stop_remote_access=False)
+    stopped = runtime.stop_ui(timings, stop_remote_access=False, runtime_ids=runtime_ids)
     return bool(stopped), timings, _rounded_seconds(time.monotonic() - started_at), _read_recorded_ui_pid()
 
 
-def _stop_service_for_restart() -> tuple[bool, float]:
+def _stop_service_for_restart(runtime_ids: frozenset[str]) -> tuple[bool, float]:
     started_at = time.monotonic()
-    stopped = runtime.stop_service()
+    stopped = runtime.stop_service(runtime_ids=runtime_ids)
     return bool(stopped), _rounded_seconds(time.monotonic() - started_at)
 
 
-def _stop_runtime_for_restart(stop_ui: bool = True) -> tuple[bool, dict[str, float | bool], float, int | None, bool, float]:
+def _stop_runtime_for_restart(
+    stop_ui: bool = True,
+    runtime_ids: frozenset[str] = frozenset(),
+) -> tuple[bool, dict[str, float | bool], float, int | None, bool, float]:
     if not stop_ui:
         # Service-only restart: leave the UI process untouched so the open Web
         # UI survives. Report its still-recorded pid; ``ui_stopped`` is True only
         # to satisfy the "did the UI stop" guard (we deliberately did not stop it).
-        service_stopped, stop_service_seconds = _stop_service_for_restart()
+        service_stopped, stop_service_seconds = _stop_service_for_restart(runtime_ids)
         return True, {}, 0.0, _read_recorded_ui_pid(), service_stopped, stop_service_seconds
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="avibe-restart-stop") as executor:
-        ui_future = executor.submit(_stop_ui_for_restart)
-        service_future = executor.submit(_stop_service_for_restart)
+        ui_future = executor.submit(_stop_ui_for_restart, runtime_ids)
+        service_future = executor.submit(_stop_service_for_restart, runtime_ids)
         ui_stopped, ui_timings, stop_ui_seconds, ui_pid = ui_future.result()
         service_stopped, stop_service_seconds = service_future.result()
     return ui_stopped, ui_timings, stop_ui_seconds, ui_pid, service_stopped, stop_service_seconds
@@ -431,11 +447,24 @@ def _run_restart_job(
             write("restart job started after delay")
             restart_started_at = time.monotonic()
 
+        # Whoever asked, a desktop caller restarts only its own Runtime. Nothing
+        # has been stopped yet, and nothing is. The ids it acts for are read
+        # before the carry below rewrites its environment, and each stop asks
+        # them again of the processes it is about to signal.
+        provenance = desktop_caller_provenance()
+        refusal = runtime.desktop_provenance_refusal(include_ui=restart_ui, runtime_ids=provenance)
+        if refusal is not None:
+            return fail(f"restart refused: {refusal}", 3, started_at=restart_started_at)
         write(f"relaunching {_carry_desktop_identity()}")
         write("stopping UI and service" if restart_ui else "stopping service (Web UI kept running)")
         stop_runtime_started_at = time.monotonic()
         try:
-            ui_stopped, ui_timings, stop_ui_seconds, ui_pid, stopped, stop_service_seconds = _stop_runtime_for_restart(stop_ui=restart_ui)
+            ui_stopped, ui_timings, stop_ui_seconds, ui_pid, stopped, stop_service_seconds = _stop_runtime_for_restart(
+                stop_ui=restart_ui,
+                runtime_ids=provenance,
+            )
+        except runtime.DesktopRuntimeClaimRefused as exc:
+            return fail(f"restart refused: {exc}", 3, started_at=restart_started_at)
         except Exception as exc:
             return fail(f"stop runtime failed: {exc}", 2, started_at=restart_started_at)
         stage_durations.update(ui_timings)
@@ -449,8 +478,9 @@ def _run_restart_job(
 
             # The UI owns backend installs. One killed before it drained them
             # leaves the installer tree running, and the successor must not
-            # start while it is.
-            if not reap_abandoned_desktop_backend_installs():
+            # start while it is. The trees reaped are those of the Runtime the
+            # job acts for; a caller naming two Runtimes acts for neither.
+            if len(provenance) < 2 and not reap_abandoned_desktop_backend_installs(*provenance):
                 return fail("desktop backend installer processes did not stop", 2, started_at=restart_started_at)
         if stopped is False:
             remaining_service_pids = _remaining_service_pids_after_stop()
@@ -471,9 +501,21 @@ def _run_restart_job(
 
         write("starting service")
         start_runtime_started_at = time.monotonic()
+        service_start = runtime.ProcessStartInfo()
+        ui_start = runtime.ProcessStartInfo()
+
+        def refuse_start(exc: runtime.DesktopRuntimeClaimRefused) -> int:
+            # The successor claims exactly as `vibe start` does: a process of
+            # another Runtime is neither adopted nor recorded as this one, and
+            # only what this start created is stopped.
+            runtime.roll_back_start(service_start, ui_start)
+            return fail(f"restart refused: {exc}", 3, started_at=restart_started_at)
+
         try:
-            started = _start_runtime_processes(start_ui=restart_ui)
+            started = _start_runtime_processes(start_ui=restart_ui, service_start=service_start, ui_start=ui_start)
             new_pid, ui_pid = started.service_pid, started.ui_pid
+        except runtime.DesktopRuntimeClaimRefused as exc:
+            return refuse_start(exc)
         except Exception as exc:
             return fail(f"start runtime failed: {exc}", 1, started_at=restart_started_at)
         mark_duration("start_runtime_seconds", start_runtime_started_at)
@@ -504,6 +546,11 @@ def _run_restart_job(
                 3,
                 started_at=restart_started_at,
             )
+        try:
+            runtime.claim_ready_service(resolved_pid, started_pid=new_pid)
+        except runtime.DesktopRuntimeClaimRefused as exc:
+            mark_duration("wait_service_lock_seconds", wait_lock_started_at)
+            return refuse_start(exc)
         new_pid = resolved_pid
         mark_duration("wait_service_lock_seconds", wait_lock_started_at)
         recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid

@@ -107,6 +107,10 @@ export const SettingsPlatformsPage: React.FC = () => {
       showToast(t('platform.restartedSuccess'), 'success');
       return true;
     }
+    if (runtime?.restart_code === 'restart_refused') {
+      showToast(t('settings.configRestartRefused'), 'error');
+      return false;
+    }
     if (runtime && runtime.hot_reconciled === false) {
       showToast(t('platform.restartFailed'), 'error');
       return false;

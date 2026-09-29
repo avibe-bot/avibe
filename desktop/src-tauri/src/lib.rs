@@ -35,16 +35,16 @@ use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
 use avibe_runtime_host::default_runtime_host;
 #[cfg(feature = "bundled-runtime")]
-use avibe_runtime_host::{bundled_runtime_host, BootstrapLog, BOOTSTRAP_LOG_NAME};
+use avibe_runtime_host::{bundled_runtime_host, BootstrapLog, RemovalOutcome, BOOTSTRAP_LOG_NAME};
 use avibe_runtime_host::{
-    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LaunchError,
-    LoopbackOrigin, RuntimeHost, StatusSink,
+    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, BootstrapTrigger,
+    CliOutcome, LoopbackOrigin, RuntimeHost, StatusSink,
 };
 use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::plugin::Builder as PluginBuilder;
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 use tauri::{RunEvent, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
@@ -134,7 +134,6 @@ struct NativeTrayCatalog {
     busy_title: String,
     busy_message: String,
     failure_title: String,
-    stop_failure: String,
     login_failure: String,
 }
 
@@ -153,6 +152,12 @@ struct NativeUninstallCatalog {
     success_message: String,
     failure_title: String,
     failure_message: String,
+    blocked_title: String,
+    blocked_message: String,
+    unverified_title: String,
+    unverified_message: String,
+    unverified_delete: String,
+    unverified_keep: String,
 }
 
 fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> DesktopBootstrapCatalog {
@@ -313,7 +318,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         login_state.unwrap_or(false),
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, QUIT_MENU_ID, &catalog.quit, true, None::<&str>)?;
+    let quit = quit_menu_item(app, &catalog.quit)?;
     let notifications = CheckMenuItem::with_id(
         app,
         notifications::MENU_ID,
@@ -340,7 +345,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &quit,
         ],
     )?;
-    let application_menu = application_menu(app)?;
+    let application_menu = application_menu(app, &quit)?;
     let application = application_menu.items()?.into_iter().find_map(|item| match item {
         MenuItemKind::Submenu(submenu) => Some(submenu),
         _ => None,
@@ -636,12 +641,11 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
 }
 
 fn stop_runtime(app: AppHandle, quit: bool) {
-    let (host, activity, origin, previous_status) = {
+    let (host, activity, previous_status) = {
         let shell = app.state::<Shell>();
         (
             shell.host.clone(),
             shell.activity.clone(),
-            shell.active_origin.lock().ok().and_then(|origin| origin.clone()),
             shell.latest.lock().ok().and_then(|latest| latest.clone()),
         )
     };
@@ -652,50 +656,32 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
     notifications::stop(&app);
     tauri::async_runtime::spawn(async move {
-        match host.stop_owned_runtime().await {
-            Ok(()) if quit => exit_shell(&app),
-            Ok(()) => {
-                let _ = return_to_bootstrap(&app);
-                let mut stopped = BootstrapStatus::rejected(BootstrapNoticeCode::RuntimeStopped, true);
-                if let Some(previous) = previous_status {
-                    stopped.origin = previous.origin;
-                }
-                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
-                WindowSink {
-                    app: app.clone(),
-                    latest: app.state::<Shell>().latest.clone(),
-                }
-                .publish(stopped);
-            }
-            Err(LaunchError::OwnershipLost | LaunchError::NotOwned) => {
-                let _ = return_to_bootstrap(&app);
-                let mut lost = BootstrapStatus::rejected(BootstrapNoticeCode::RuntimeOwnershipLost, true);
-                if let Some(previous) = previous_status {
-                    lost.origin = previous.origin;
-                }
-                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
-                WindowSink {
-                    app: app.clone(),
-                    latest: app.state::<Shell>().latest.clone(),
-                }
-                .publish(lost);
-                focus_or_restore_main_window(&app);
-            }
-            Err(_) => {
-                if let Some(origin) = origin {
-                    activity.store(ACTIVITY_MONITOR, Ordering::SeqCst);
-                    start_runtime_monitor(app.clone(), origin, activity);
-                } else {
-                    activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
-                }
-                refresh_latest_tray(&app);
-                let catalog = native_tray_catalog();
-                app.dialog()
-                    .message(catalog.stop_failure)
-                    .title(catalog.failure_title)
-                    .kind(MessageDialogKind::Error)
-                    .show(|_| {});
-            }
+        let outcome = host.stop_owned_runtime().await;
+        if quit && outcome == CliOutcome::Completed {
+            exit_shell(&app);
+            return;
+        }
+        // Whatever the stop did, the Workbench no longer reflects a Runtime the
+        // shell vouches for. The bootstrap page says what happened, and Try
+        // again re-checks the origin.
+        let (code, focus) = match outcome {
+            CliOutcome::Completed => (BootstrapNoticeCode::RuntimeStopped, false),
+            CliOutcome::Refused { .. } => (BootstrapNoticeCode::RuntimeOwnershipLost, true),
+            CliOutcome::Failed { .. } | CliOutcome::Unrunnable => (BootstrapNoticeCode::RuntimeStopFailed, true),
+        };
+        let _ = return_to_bootstrap(&app);
+        let mut status = BootstrapStatus::rejected(code, true);
+        if let Some(previous) = previous_status {
+            status.origin = previous.origin;
+        }
+        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+        WindowSink {
+            app: app.clone(),
+            latest: app.state::<Shell>().latest.clone(),
+        }
+        .publish(status);
+        if focus {
+            focus_or_restore_main_window(&app);
         }
     });
 }
@@ -799,7 +785,8 @@ impl ReadinessLoss {
         if generation.load(Ordering::SeqCst) != observed_generation {
             return false;
         }
-        // Three readiness misses do not prove process exit or revoke a receipt.
+        // Three serving misses do not prove the process exited, so a pending
+        // helper keeps its launch fence.
         host.release_after_readiness_loss();
         true
     }
@@ -885,7 +872,7 @@ fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<Boot
 #[tauri::command]
 fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
     ensure_shell_ui(&window)?;
-    Ok(spawn_bootstrap(app))
+    Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))
 }
 
 /// Opens installation guidance in the system browser.
@@ -903,7 +890,7 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 ///
 /// The return value is part of the retry contract: the bootstrap page must not
 /// hide its Retry action when another run still owns the activity.
-fn spawn_bootstrap(app: AppHandle) -> bool {
+fn spawn_bootstrap(app: AppHandle, trigger: BootstrapTrigger) -> bool {
     let activity = app.state::<Shell>().activity.clone();
     if activity
         .compare_exchange(ACTIVITY_IDLE, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
@@ -911,12 +898,15 @@ fn spawn_bootstrap(app: AppHandle) -> bool {
     {
         return false;
     }
-    spawn_owned_bootstrap(app);
+    spawn_owned_bootstrap(app, trigger);
     true
 }
 
 /// Runs bootstrap after the caller has atomically acquired bootstrap activity.
-fn spawn_owned_bootstrap(app: AppHandle) {
+///
+/// Only the app-launch run and the user's Try again may hand over from a
+/// predecessor Runtime; every run the shell starts by itself is a recovery.
+fn spawn_owned_bootstrap(app: AppHandle, trigger: BootstrapTrigger) {
     let (host, latest, activity) = {
         let shell = app.state::<Shell>();
         (shell.host.clone(), shell.latest.clone(), shell.activity.clone())
@@ -927,7 +917,7 @@ fn spawn_owned_bootstrap(app: AppHandle) {
             app: app.clone(),
             latest,
         };
-        let status = host.bootstrap(&sink).await;
+        let status = host.bootstrap(&sink, trigger).await;
 
         if status.phase == BootstrapPhase::Ready {
             open_workbench(&app, &status, activity);
@@ -987,7 +977,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
             let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
             if app.get_webview_window(MAIN_WINDOW).is_some() {
-                let _ = spawn_bootstrap(app.clone());
+                let _ = spawn_bootstrap(app.clone(), BootstrapTrigger::Recovery);
             }
             return;
         };
@@ -1070,10 +1060,11 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
             {
                 break;
             }
-            let ready = host.is_ready(&origin).await;
-            // Window recreation can transfer ownership while the network probe
-            // is pending. The superseded monitor must not mutate the new
-            // bootstrap run's launch ownership after the await point.
+            let ready = host.is_serving(&origin).await;
+            // Window recreation or a stop can take over while the probe is
+            // pending. The host has already dropped the probe's observation;
+            // the superseded monitor must not touch the tray or start a
+            // recovery either.
             if activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR
                 || generation.load(Ordering::SeqCst) != observed_generation
             {
@@ -1091,7 +1082,7 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 && recover_after_readiness_loss(
                     || restore_bootstrap_view(&app),
                     || notifications::stop(&app),
-                    || spawn_owned_bootstrap(app.clone()),
+                    || spawn_owned_bootstrap(app.clone(), BootstrapTrigger::Recovery),
                     || {
                         activity
                             .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
@@ -1172,7 +1163,7 @@ fn rediscover_after_runtime_rebind(app: AppHandle, origin: LoopbackOrigin) {
 
     tauri::async_runtime::spawn(async move {
         if return_to_bootstrap(&app) {
-            spawn_owned_bootstrap(app);
+            spawn_owned_bootstrap(app, BootstrapTrigger::Recovery);
             return;
         }
         if activity
@@ -1298,7 +1289,9 @@ fn focus_or_restore_main_window(app: &AppHandle) {
         .filter(|status| {
             matches!(
                 status.notice.code,
-                BootstrapNoticeCode::RuntimeStopped | BootstrapNoticeCode::RuntimeOwnershipLost
+                BootstrapNoticeCode::RuntimeStopped
+                    | BootstrapNoticeCode::RuntimeOwnershipLost
+                    | BootstrapNoticeCode::RuntimeStopFailed
             )
         });
     if let Some(status) = stopped {
@@ -1330,7 +1323,7 @@ fn focus_or_restore_main_window(app: &AppHandle) {
             if let Ok(mut latest) = latest.lock() {
                 *latest = None;
             }
-            spawn_owned_bootstrap(app.clone());
+            spawn_owned_bootstrap(app.clone(), BootstrapTrigger::Recovery);
         }
     }
 }
@@ -1394,23 +1387,48 @@ fn commit_deep_link_navigation(
     }
 }
 
-fn application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let menu = Menu::default(app)?;
-    #[cfg(feature = "bundled-runtime")]
-    {
-        use tauri::menu::{MenuItem, PredefinedMenuItem};
+/// Quit, shared by the tray and the application menu. It carries the
+/// platform's Quit chord, so every Quit the menus offer asks about the Runtime.
+fn quit_menu_item<R: Runtime>(app: &AppHandle<R>, label: &str) -> tauri::Result<MenuItem<R>> {
+    MenuItem::with_id(app, QUIT_MENU_ID, label, true, Some("CmdOrCtrl+Q"))
+}
 
-        let first_submenu = menu.items()?.into_iter().find_map(|item| match item {
-            MenuItemKind::Submenu(submenu) => Some(submenu),
-            _ => None,
-        });
-        if let Some(submenu) = first_submenu {
+/// Stop and Quit, from any menu or chord, run the Runtime lifecycle flow.
+/// `Some(true)` quits.
+fn runtime_lifecycle_request(id: &str) -> Option<bool> {
+    match id {
+        STOP_MENU_ID => Some(false),
+        QUIT_MENU_ID => Some(true),
+        _ => None,
+    }
+}
+
+fn application_menu<R: Runtime>(app: &AppHandle<R>, quit: &MenuItem<R>) -> tauri::Result<Menu<R>> {
+    let menu = Menu::default(app)?;
+    let first_submenu = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(submenu) => Some(submenu),
+        _ => None,
+    });
+    if let Some(submenu) = first_submenu {
+        // `Menu::default` ends this submenu (the macOS app menu, or File) with
+        // a predefined Quit that ends the process without `ExitRequested`, so
+        // it would leave this app's Runtime running. `quit` takes its place.
+        let predefined_quit = PredefinedMenuItem::quit(app, None)?.text()?;
+        for item in submenu.items()? {
+            if let MenuItemKind::Predefined(predefined) = &item {
+                if predefined.text()? == predefined_quit {
+                    submenu.remove(predefined)?;
+                }
+            }
+        }
+        #[cfg(feature = "bundled-runtime")]
+        {
             let catalog = native_uninstall_catalog();
             let separator = PredefinedMenuItem::separator(app)?;
             let uninstall = MenuItem::with_id(app, UNINSTALL_MENU_ID, catalog.menu_label, true, None::<&str>)?;
-            let position = submenu.items()?.len().saturating_sub(1);
-            submenu.insert_items(&[&separator, &uninstall], position)?;
+            submenu.append_items(&[&separator, &uninstall])?;
         }
+        submenu.append(quit)?;
     }
     Ok(menu)
 }
@@ -1438,18 +1456,98 @@ fn claim_runtime_removal(activity: &AtomicU8) -> bool {
 fn recover_after_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>) {
     let _ = activity.compare_exchange(ACTIVITY_UNINSTALL, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
     if return_to_bootstrap(app) {
-        let _ = spawn_bootstrap(app.clone());
+        let _ = spawn_bootstrap(app.clone(), BootstrapTrigger::Recovery);
     }
 }
 
 #[cfg(feature = "bundled-runtime")]
-fn report_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>, catalog: &NativeUninstallCatalog) {
+fn report_runtime_removal_failure(
+    app: &AppHandle,
+    activity: Arc<AtomicU8>,
+    catalog: &NativeUninstallCatalog,
+    failure: UninstallFailure,
+) {
     recover_after_runtime_removal_failure(app, activity);
+    let (title, message, kind) = match failure {
+        // The user chose to keep the files; there is nothing to report.
+        UninstallFailure::Declined => return,
+        UninstallFailure::Blocked => (
+            &catalog.blocked_title,
+            &catalog.blocked_message,
+            MessageDialogKind::Warning,
+        ),
+        UninstallFailure::Failed => (
+            &catalog.failure_title,
+            &catalog.failure_message,
+            MessageDialogKind::Error,
+        ),
+    };
     app.dialog()
-        .message(catalog.failure_message.clone())
-        .title(catalog.failure_title.clone())
-        .kind(MessageDialogKind::Error)
+        .message(message.clone())
+        .title(title.clone())
+        .kind(kind)
         .show(|_| {});
+}
+
+/// Why a confirmed uninstall kept the installation.
+#[cfg(feature = "bundled-runtime")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UninstallFailure {
+    /// Something still running may use the files, so every file was kept.
+    Blocked,
+    /// Removal failed or could not begin. Part of the files may remain.
+    Failed,
+    /// The user kept the files rather than delete them unverified.
+    Declined,
+}
+
+/// Removes this app's private Runtime for a confirmed uninstall.
+///
+/// When the Runtime's own CLI cannot run to prove its installs stopped, and
+/// nothing is seen running, only the user's explicit choice deletes the files
+/// anyway. Every other outcome that keeps the files has no override.
+#[cfg(feature = "bundled-runtime")]
+async fn remove_private_runtime_with_consent<Consent>(
+    host: &RuntimeHost,
+    origin: Option<&LoopbackOrigin>,
+    confirm_unverified: impl FnOnce() -> Consent,
+) -> Result<(), UninstallFailure>
+where
+    Consent: std::future::Future<Output = bool>,
+{
+    let outcome = match host.remove_private_runtime(origin).await {
+        RemovalOutcome::Unverified => {
+            if !confirm_unverified().await {
+                return Err(UninstallFailure::Declined);
+            }
+            host.remove_unverified_private_runtime(origin).await
+        }
+        outcome => outcome,
+    };
+    match outcome {
+        RemovalOutcome::Removed | RemovalOutcome::NotPrivate => Ok(()),
+        RemovalOutcome::Kept => Err(UninstallFailure::Blocked),
+        RemovalOutcome::Unverified | RemovalOutcome::Failed => Err(UninstallFailure::Failed),
+    }
+}
+
+/// Asks whether to delete the private files although nothing proved that the
+/// Runtime's installs have stopped. Dismissing the dialog keeps them.
+#[cfg(feature = "bundled-runtime")]
+async fn confirm_unverified_removal(app: AppHandle, catalog: NativeUninstallCatalog) -> bool {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(catalog.unverified_message)
+            .title(catalog.unverified_title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                catalog.unverified_delete,
+                catalog.unverified_keep,
+            ))
+            .blocking_show()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// The confirmed uninstall's one decision: an opt-in login registration is
@@ -1468,10 +1566,10 @@ async fn remove_runtime_after_login_cleanup<Removal>(
     disable_login: impl FnOnce() -> Result<(), String>,
     remove_runtime: impl FnOnce() -> Removal,
     restore_login: impl FnOnce() -> bool,
-    report_failure: impl FnOnce(),
+    report_failure: impl FnOnce(UninstallFailure),
 ) -> UninstallOutcome
 where
-    Removal: std::future::Future<Output = bool>,
+    Removal: std::future::Future<Output = Result<(), UninstallFailure>>,
 {
     let cleared = match login_enabled {
         Ok(true) => disable_login().map(|()| true),
@@ -1479,24 +1577,24 @@ where
         Err(error) => Err(error),
     };
     let Ok(cleared) = cleared else {
-        report_failure();
+        report_failure(UninstallFailure::Failed);
         return UninstallOutcome::Kept;
     };
-    if remove_runtime().await {
+    let Err(failure) = remove_runtime().await else {
         return UninstallOutcome::Removed;
-    }
+    };
     let outcome = if cleared && !restore_login() {
         UninstallOutcome::KeptWithoutLogin
     } else {
         UninstallOutcome::Kept
     };
-    report_failure();
+    report_failure(failure);
     outcome
 }
 
 /// How a confirmed uninstall ended. Only `Removed` reached the success dialog
 /// and the shell exit; the other two left the installation in place and
-/// reported the failure.
+/// reported why, unless the user chose to keep the files.
 #[cfg(feature = "bundled-runtime")]
 #[derive(Debug, PartialEq, Eq)]
 enum UninstallOutcome {
@@ -1557,22 +1655,23 @@ fn request_private_runtime_removal(app: AppHandle) {
                     || login_app.autolaunch().disable().map_err(|error| error.to_string()),
                     || async move {
                         notifications::stop(&confirmation_app);
-                        match host.remove_private_runtime(active_origin.as_ref()).await {
-                            Ok(true) => {
-                                let exit_app = confirmation_app.clone();
-                                confirmation_app
-                                    .dialog()
-                                    .message(removal_catalog.success_message.clone())
-                                    .title(removal_catalog.success_title.clone())
-                                    .kind(MessageDialogKind::Info)
-                                    .show(move |_| exit_shell(&exit_app));
-                                true
-                            }
-                            Ok(false) | Err(_) => false,
-                        }
+                        let consent_app = confirmation_app.clone();
+                        let consent_catalog = removal_catalog.clone();
+                        remove_private_runtime_with_consent(&host, active_origin.as_ref(), || {
+                            confirm_unverified_removal(consent_app, consent_catalog)
+                        })
+                        .await?;
+                        let exit_app = confirmation_app.clone();
+                        confirmation_app
+                            .dialog()
+                            .message(removal_catalog.success_message.clone())
+                            .title(removal_catalog.success_title.clone())
+                            .kind(MessageDialogKind::Info)
+                            .show(move |_| exit_shell(&exit_app));
+                        Ok(())
                     },
                     || set_start_at_login(&restore_app, Ok(true)),
-                    || report_runtime_removal_failure(&failure_app, activity, &catalog),
+                    |failure| report_runtime_removal_failure(&failure_app, activity, &catalog, failure),
                 )
                 .await;
             });
@@ -1599,17 +1698,17 @@ pub fn run() {
         )
         .plugin(native_frame::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
+            if let Some(quit) = runtime_lifecycle_request(event.id().as_ref()) {
+                request_runtime_lifecycle(app.clone(), quit);
+            }
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
                 updater::MENU_ID => updater::check(app.clone(), true),
                 updater::CHANNEL_ID => updater::toggle_channel(app),
-                STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
-                QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
                 notifications::MENU_ID => {
                     let notifications = app.state::<notifications::Notifications>();
@@ -1739,7 +1838,7 @@ pub fn run() {
             updater::init(app.handle())?;
             install_native_tray(app.handle())?;
             updater::check(app.handle().clone(), false);
-            let _ = spawn_bootstrap(app.handle().clone());
+            let _ = spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -1750,7 +1849,10 @@ pub fn run() {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use avibe_runtime_host::{HealthProbe, LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
+    use avibe_runtime_host::{
+        HealthProbe, LaunchError, LaunchExit, LaunchWatch, LaunchedRuntime, Presence, ResolvedRuntimeLauncher,
+        RuntimeLauncher,
+    };
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -1833,6 +1935,61 @@ mod tests {
     }
 
     #[test]
+    fn stop_and_quit_run_the_runtime_lifecycle_from_every_menu() {
+        assert_eq!(runtime_lifecycle_request(STOP_MENU_ID), Some(false));
+        assert_eq!(runtime_lifecycle_request(QUIT_MENU_ID), Some(true));
+        assert_eq!(runtime_lifecycle_request(OPEN_MENU_ID), None);
+    }
+
+    // muda builds macOS menus only on the main thread, which a test never runs
+    // on. The guest acceptance run covers the macOS app menu and its ⌘Q.
+    #[cfg(windows)]
+    #[test]
+    fn the_application_menu_quits_only_through_the_runtime_lifecycle() {
+        use tauri::menu::ContextMenu;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuStringW, HMENU, MF_BYPOSITION};
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let quit = quit_menu_item(handle, "Quit Avibe").expect("quit item");
+        let menu = application_menu(handle, &quit).expect("application menu");
+        let predefined_quit = PredefinedMenuItem::quit(handle, None)
+            .and_then(|item| item.text())
+            .expect("predefined quit text");
+        let submenus: Vec<_> = menu
+            .items()
+            .expect("menu items")
+            .into_iter()
+            .filter_map(|item| match item {
+                MenuItemKind::Submenu(submenu) => Some(submenu),
+                _ => None,
+            })
+            .collect();
+        for submenu in &submenus {
+            for item in submenu.items().expect("submenu items") {
+                if let MenuItemKind::Predefined(predefined) = item {
+                    assert_ne!(predefined.text().expect("predefined text"), predefined_quit);
+                }
+            }
+        }
+        let first = submenus.first().expect("File submenu");
+        let Some(MenuItemKind::MenuItem(last)) = first.items().expect("File items").pop() else {
+            panic!("File must end with this app's Quit");
+        };
+        assert_eq!(runtime_lifecycle_request(last.id().as_ref()), Some(true));
+
+        // muda keeps an accelerator only in the native item text.
+        let hmenu = first.hpopupmenu().expect("File HMENU") as HMENU;
+        let mut text = [0u16; 64];
+        let len = unsafe {
+            let last = u32::try_from(GetMenuItemCount(hmenu) - 1).expect("File has items");
+            GetMenuStringW(hmenu, last, text.as_mut_ptr(), text.len() as i32, MF_BYPOSITION)
+        };
+        let len = usize::try_from(len).expect("menu string");
+        assert_eq!(String::from_utf16_lossy(&text[..len]), "Quit Avibe\tCtrl+Q");
+    }
+
+    #[test]
     fn tray_status_is_a_projection_of_bootstrap_and_the_proved_listener() {
         let origin = LoopbackOrigin::parse("http://127.0.0.1:6123").expect("test listener");
         let catalog = native_catalog_for_locales(["en".to_owned()]).tray;
@@ -1868,34 +2025,28 @@ mod tests {
         assert!(loss.observe(false));
     }
 
-    struct RecoveryProbe(Mutex<std::collections::VecDeque<bool>>);
+    struct RecoveryProbe(Mutex<std::collections::VecDeque<Presence>>);
 
     #[async_trait]
     impl HealthProbe for RecoveryProbe {
-        async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<avibe_runtime_host::RuntimeReadiness> {
-            self.0
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(false)
-                .then_some(avibe_runtime_host::RuntimeReadiness {
-                    desktop_runtime_id: None,
-                    desktop_ui_runtime_id: None,
-                })
+        async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+            self.0.lock().unwrap().pop_front().unwrap_or(Presence::Absent)
         }
     }
 
     struct RecoveryLauncher {
         watches: Mutex<std::collections::VecDeque<LaunchWatch>>,
         launches: Arc<AtomicUsize>,
-        stops: Arc<Mutex<Vec<avibe_runtime_host::launcher::StartupReceipt>>>,
+        stops: Arc<Mutex<Vec<String>>>,
     }
 
     struct RecoveryExecutable {
         watch: LaunchWatch,
         launches: Arc<AtomicUsize>,
-        stops: Arc<Mutex<Vec<avibe_runtime_host::launcher::StartupReceipt>>>,
+        stops: Arc<Mutex<Vec<String>>>,
     }
+
+    const RECOVERY_RUNTIME_ID: &str = "4d";
 
     impl RuntimeLauncher for RecoveryLauncher {
         fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
@@ -1912,7 +2063,11 @@ mod tests {
             Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap())
         }
 
-        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+        fn expected_runtime_id(&self) -> Option<&str> {
+            Some(RECOVERY_RUNTIME_ID)
+        }
+
+        fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
             self.launches.fetch_add(1, Ordering::SeqCst);
             Ok(LaunchedRuntime {
                 pid: 1,
@@ -1920,34 +2075,35 @@ mod tests {
             })
         }
 
-        fn stop(&self, receipt: &avibe_runtime_host::launcher::StartupReceipt) -> Result<(), LaunchError> {
-            self.stops.lock().unwrap().push(receipt.clone());
-            Ok(())
+        fn stop(&self, runtime_id: &str) -> CliOutcome {
+            self.stops.lock().unwrap().push(runtime_id.to_owned());
+            CliOutcome::Completed
         }
     }
 
     #[test]
     fn monitor_recovery_preserves_started_authority_and_pending_helper_exclusion() {
-        use avibe_runtime_host::launcher::StartupReceipt;
         use avibe_runtime_host::{DiscardStatus, RuntimeHostSettings};
 
-        let receipt: StartupReceipt = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "outcome": "started", "service_pid": 1234, "ui_pid": 5678,
-            "service_create_unix_ms": 1789010100123.5, "ui_create_unix_ms": 1789010100456.5,
-        }))
-        .unwrap();
-        let mut reused_json = serde_json::to_value(&receipt).unwrap();
-        reused_json["outcome"] = serde_json::json!("reused");
-        let reused: StartupReceipt = serde_json::from_value(reused_json).unwrap();
+        let mine = Presence::Mine { ready: true };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .unwrap();
 
         for pending in [false, true] {
-            // Start -> ready -> three monitor misses -> recovery helper -> ready.
+            // Start -> ready -> three monitor misses -> recovery -> ready.
             let probe = Arc::new(RecoveryProbe(Mutex::new(
-                [false, true, false, false, false, false, true].into(),
+                [
+                    Presence::Absent,
+                    mine.clone(),
+                    Presence::Absent,
+                    Presence::Absent,
+                    Presence::Absent,
+                    Presence::Absent,
+                    mine.clone(),
+                ]
+                .into(),
             )));
             let launcher = Arc::new(RecoveryLauncher {
                 watches: Mutex::new(
@@ -1955,9 +2111,9 @@ mod tests {
                         if pending {
                             LaunchWatch::default()
                         } else {
-                            LaunchWatch::exited_with_receipt(true, receipt.clone())
+                            LaunchWatch::exited(LaunchExit::Started)
                         },
-                        LaunchWatch::exited_with_receipt(true, reused.clone()),
+                        LaunchWatch::exited(LaunchExit::Started),
                     ]
                     .into(),
                 ),
@@ -1974,7 +2130,7 @@ mod tests {
                 },
             );
             runtime.block_on(async {
-                let ready = host.bootstrap(&DiscardStatus).await;
+                let ready = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
                 assert_eq!(ready.phase, BootstrapPhase::Ready);
                 let origin = LoopbackOrigin::parse(&ready.origin).unwrap();
                 let activity = AtomicU8::new(ACTIVITY_MONITOR);
@@ -1997,38 +2153,44 @@ mod tests {
                 activity.store(ACTIVITY_MONITOR, Ordering::SeqCst);
                 let mut loss = ReadinessLoss::default();
                 for miss in 1..=3 {
-                    let ready = host.is_ready(&origin).await;
+                    let ready = host.is_serving(&origin).await;
                     assert!(!ready);
                     assert_eq!(loss.begin_recovery(ready, &host, &activity, &generation, 7), miss == 3);
                 }
+                // Nothing answers, so stop authority is gone, but a pending
+                // helper keeps its launch fence.
                 assert_eq!(host.has_launched(), pending);
-                assert_eq!(host.has_owned_runtime(), !pending);
+                assert!(!host.has_owned_runtime());
                 assert!(!stop_is_available(
                     host.has_owned_runtime(),
                     activity.load(Ordering::SeqCst)
                 ));
-                let recovered = host.bootstrap(&DiscardStatus).await;
+                let recovered = host.bootstrap(&DiscardStatus, BootstrapTrigger::Recovery).await;
                 assert_eq!(recovered.phase, BootstrapPhase::Ready);
                 let window_generation = AtomicU64::new(1);
                 assert_eq!(
                     complete_workbench_handoff(&activity, &window_generation, 1),
                     WorkbenchHandoff::Monitor
                 );
-                assert_eq!(
-                    stop_is_available(host.has_owned_runtime(), activity.load(Ordering::SeqCst)),
-                    !pending
-                );
+                // The recovered Controller carries this app's identity again.
+                assert!(stop_is_available(
+                    host.has_owned_runtime(),
+                    activity.load(Ordering::SeqCst)
+                ));
                 assert_eq!(launcher.launches.load(Ordering::SeqCst), if pending { 1 } else { 2 });
                 if pending {
-                    assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+                    assert_eq!(
+                        host.stop_owned_runtime().await,
+                        CliOutcome::Failed {
+                            part: "launch_pending".to_owned()
+                        }
+                    );
                     assert!(launcher.stops.lock().unwrap().is_empty());
                 } else {
-                    host.stop_owned_runtime()
-                        .await
-                        .expect("original receipt survives reused recovery");
+                    assert_eq!(host.stop_owned_runtime().await, CliOutcome::Completed);
                     assert_eq!(
                         launcher.stops.lock().unwrap().as_slice(),
-                        std::slice::from_ref(&receipt)
+                        [RECOVERY_RUNTIME_ID.to_owned()]
                     );
                     assert!(!host.has_owned_runtime());
                 }
@@ -2098,7 +2260,7 @@ mod tests {
         RestoreLogin,
         RenderLogin(bool),
         ReportLoginFailure,
-        ReportFailure,
+        ReportFailure(UninstallFailure),
     }
 
     /// A confirmed uninstall whose restore, when it runs, writes `restore_write`
@@ -2107,7 +2269,7 @@ mod tests {
     fn uninstall_run(
         login_enabled: Result<bool, String>,
         disable_login: Result<(), String>,
-        removed: bool,
+        removed: Result<(), UninstallFailure>,
         restore_write: Result<(), String>,
         restore_observed: Result<bool, String>,
     ) -> (UninstallOutcome, Vec<UninstallEffect>) {
@@ -2136,7 +2298,7 @@ mod tests {
                         || effects.borrow_mut().push(UninstallEffect::ReportLoginFailure),
                     )
                 },
-                || effects.borrow_mut().push(UninstallEffect::ReportFailure),
+                |failure| effects.borrow_mut().push(UninstallEffect::ReportFailure(failure)),
             ),
         );
         (outcome, effects.into_inner())
@@ -2147,7 +2309,7 @@ mod tests {
     fn uninstall_effects(
         login_enabled: Result<bool, String>,
         disable_login: Result<(), String>,
-        removed: bool,
+        removed: Result<(), UninstallFailure>,
     ) -> Vec<UninstallEffect> {
         uninstall_run(login_enabled, disable_login, removed, Ok(()), Ok(true)).1
     }
@@ -2156,7 +2318,7 @@ mod tests {
     #[test]
     fn uninstall_clears_an_enabled_login_item_before_removing_the_private_runtime() {
         assert_eq!(
-            uninstall_run(Ok(true), Ok(()), true, Ok(()), Ok(true)),
+            uninstall_run(Ok(true), Ok(()), Ok(()), Ok(()), Ok(true)),
             (
                 UninstallOutcome::Removed,
                 vec![UninstallEffect::DisableLogin, UninstallEffect::RemoveRuntime],
@@ -2168,14 +2330,17 @@ mod tests {
     #[test]
     fn uninstall_leaves_an_already_disabled_login_item_alone() {
         assert_eq!(
-            uninstall_effects(Ok(false), Ok(()), true),
+            uninstall_effects(Ok(false), Ok(()), Ok(())),
             vec![UninstallEffect::RemoveRuntime]
         );
         // The removal failed, but this uninstall never disabled anything, so
         // there is no registration of its own to put back.
         assert_eq!(
-            uninstall_effects(Ok(false), Ok(()), false),
-            vec![UninstallEffect::RemoveRuntime, UninstallEffect::ReportFailure],
+            uninstall_effects(Ok(false), Ok(()), Err(UninstallFailure::Blocked)),
+            vec![
+                UninstallEffect::RemoveRuntime,
+                UninstallEffect::ReportFailure(UninstallFailure::Blocked)
+            ],
         );
     }
 
@@ -2183,20 +2348,27 @@ mod tests {
     #[test]
     fn uninstall_restores_the_login_item_it_cleared_when_the_removal_does_not_happen() {
         // The application is still installed, so the login registration this
-        // uninstall cleared has to come back before the failure is reported.
-        assert_eq!(
-            uninstall_run(Ok(true), Ok(()), false, Ok(()), Ok(true)),
-            (
-                UninstallOutcome::Kept,
-                vec![
-                    UninstallEffect::DisableLogin,
-                    UninstallEffect::RemoveRuntime,
-                    UninstallEffect::RestoreLogin,
-                    UninstallEffect::RenderLogin(true),
-                    UninstallEffect::ReportFailure,
-                ],
-            ),
-        );
+        // uninstall cleared has to come back before the failure is reported,
+        // including when the user chose to keep the files.
+        for failure in [
+            UninstallFailure::Blocked,
+            UninstallFailure::Failed,
+            UninstallFailure::Declined,
+        ] {
+            assert_eq!(
+                uninstall_run(Ok(true), Ok(()), Err(failure), Ok(()), Ok(true)),
+                (
+                    UninstallOutcome::Kept,
+                    vec![
+                        UninstallEffect::DisableLogin,
+                        UninstallEffect::RemoveRuntime,
+                        UninstallEffect::RestoreLogin,
+                        UninstallEffect::RenderLogin(true),
+                        UninstallEffect::ReportFailure(failure),
+                    ],
+                ),
+            );
+        }
     }
 
     #[cfg(feature = "bundled-runtime")]
@@ -2212,23 +2384,38 @@ mod tests {
             UninstallEffect::RestoreLogin,
             UninstallEffect::RenderLogin(false),
             UninstallEffect::ReportLoginFailure,
-            UninstallEffect::ReportFailure,
+            UninstallEffect::ReportFailure(UninstallFailure::Failed),
         ];
         assert_eq!(
-            uninstall_run(Ok(true), Ok(()), false, Err("enable failed".to_owned()), Ok(false)),
+            uninstall_run(
+                Ok(true),
+                Ok(()),
+                Err(UninstallFailure::Failed),
+                Err("enable failed".to_owned()),
+                Ok(false)
+            ),
             (UninstallOutcome::KeptWithoutLogin, lost),
         );
         // A write that claims success but reads back disabled is the same loss.
         assert_eq!(
-            uninstall_run(Ok(true), Ok(()), false, Ok(()), Ok(false)).0,
+            uninstall_run(Ok(true), Ok(()), Err(UninstallFailure::Failed), Ok(()), Ok(false)).0,
             UninstallOutcome::KeptWithoutLogin,
         );
         // So is a write whose result cannot be read back; the checkbox then
         // falls back to unchecked.
-        let (outcome, effects) = uninstall_run(Ok(true), Ok(()), false, Ok(()), Err("state unavailable".to_owned()));
+        let (outcome, effects) = uninstall_run(
+            Ok(true),
+            Ok(()),
+            Err(UninstallFailure::Failed),
+            Ok(()),
+            Err("state unavailable".to_owned()),
+        );
         assert_eq!(outcome, UninstallOutcome::KeptWithoutLogin);
         assert!(effects.contains(&UninstallEffect::RenderLogin(false)));
-        assert!(effects.ends_with(&[UninstallEffect::ReportLoginFailure, UninstallEffect::ReportFailure]));
+        assert!(effects.ends_with(&[
+            UninstallEffect::ReportLoginFailure,
+            UninstallEffect::ReportFailure(UninstallFailure::Failed)
+        ]));
     }
 
     #[cfg(feature = "bundled-runtime")]
@@ -2238,17 +2425,20 @@ mod tests {
         // no exit, and the user is told the uninstall failed. Nothing was
         // disabled, so nothing is restored either.
         assert_eq!(
-            uninstall_effects(Ok(true), Err("disable failed".to_owned()), true),
-            vec![UninstallEffect::DisableLogin, UninstallEffect::ReportFailure],
+            uninstall_effects(Ok(true), Err("disable failed".to_owned()), Ok(())),
+            vec![
+                UninstallEffect::DisableLogin,
+                UninstallEffect::ReportFailure(UninstallFailure::Failed)
+            ],
         );
         // The registration could not even be inspected — same answer, and
         // nothing is disabled on a state the shell could not read.
         assert_eq!(
-            uninstall_effects(Err("state unavailable".to_owned()), Ok(()), true),
-            vec![UninstallEffect::ReportFailure],
+            uninstall_effects(Err("state unavailable".to_owned()), Ok(()), Ok(())),
+            vec![UninstallEffect::ReportFailure(UninstallFailure::Failed)],
         );
         assert_eq!(
-            uninstall_run(Ok(true), Err("disable failed".to_owned()), true, Ok(()), Ok(true)).0,
+            uninstall_run(Ok(true), Err("disable failed".to_owned()), Ok(()), Ok(()), Ok(true)).0,
             UninstallOutcome::Kept,
         );
     }
@@ -2392,6 +2582,70 @@ mod tests {
 
     #[cfg(feature = "bundled-runtime")]
     #[test]
+    fn an_unverified_removal_deletes_the_private_files_only_with_consent() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("avibe-shell-consent-{}-{unique}", std::process::id()));
+        let installs = root.join("installs");
+        let backends = root.join("backends");
+        std::fs::create_dir_all(installs.join("1.0.0")).unwrap();
+        std::fs::create_dir_all(backends.join("opencode")).unwrap();
+        std::fs::write(installs.join("1.0.0").join("python"), b"runtime bytes").unwrap();
+        std::fs::write(backends.join("opencode").join("bin"), b"backend bytes").unwrap();
+        std::fs::write(root.join("unrelated"), b"unrelated state").unwrap();
+        // The bundle is missing, so the Runtime's own CLI can never run to
+        // confirm that its installs stopped.
+        let host = bundled_runtime_host(
+            root.join("missing-bundle"),
+            installs.clone(),
+            backends.clone(),
+            BootstrapLog::disabled(),
+        )
+        .unwrap();
+        let files_remain = || installs.join("1.0.0").join("python").exists() && backends.join("opencode").exists();
+        let asked = std::cell::Cell::new(0);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // Keeping the files is the answer unless the user says otherwise.
+            let declined = remove_private_runtime_with_consent(&host, None, || {
+                asked.set(asked.get() + 1);
+                async { false }
+            })
+            .await;
+            assert_eq!(declined, Err(UninstallFailure::Declined));
+            assert_eq!(asked.get(), 1);
+            assert!(files_remain());
+
+            // Something answering at the origin keeps every file, and the user
+            // is never offered the override.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let answering = LoopbackOrigin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            std::thread::spawn(move || listener.incoming().for_each(drop));
+            let blocked = remove_private_runtime_with_consent(&host, Some(&answering), || {
+                asked.set(asked.get() + 1);
+                async { true }
+            })
+            .await;
+            assert_eq!(blocked, Err(UninstallFailure::Blocked));
+            assert_eq!(asked.get(), 1);
+            assert!(files_remain());
+
+            let removed = remove_private_runtime_with_consent(&host, None, || async { true }).await;
+            assert_eq!(removed, Ok(()));
+        });
+        assert!(!installs.exists() && !backends.exists());
+        assert_eq!(std::fs::read(root.join("unrelated")).unwrap(), b"unrelated state");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
     fn native_uninstall_copy_uses_the_first_supported_system_locale() {
         let chinese =
             native_uninstall_catalog_for_locales(["fr-FR", "zh-Hant-TW", "en-US"].into_iter().map(str::to_owned));
@@ -2400,8 +2654,21 @@ mod tests {
 
         assert_ne!(chinese.menu_label, english.menu_label);
         assert_ne!(chinese.confirm_message, english.confirm_message);
-        assert!(!chinese.failure_message.is_empty());
-        assert!(!english.failure_message.is_empty());
+        for catalog in [&chinese, &english] {
+            for copy in [
+                &catalog.failure_message,
+                &catalog.blocked_title,
+                &catalog.blocked_message,
+                &catalog.unverified_title,
+                &catalog.unverified_message,
+                &catalog.unverified_delete,
+                &catalog.unverified_keep,
+            ] {
+                assert!(!copy.is_empty());
+            }
+        }
+        assert_ne!(chinese.blocked_message, english.blocked_message);
+        assert_ne!(chinese.unverified_message, english.unverified_message);
     }
 
     #[test]

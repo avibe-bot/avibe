@@ -10,16 +10,27 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import math
 import os
 import socket
+import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Literal, TypedDict
 
 DESKTOP_ENDPOINT_SCHEMA_VERSION: Literal[1] = 1
 DESKTOP_RUNTIME_ID_ENV = "AVIBE_DESKTOP_RUNTIME_ID"
 DESKTOP_RUNTIME_ROOT_ENV = "AVIBE_DESKTOP_RUNTIME_ROOT"
+# The install marker the desktop host writes at the root of every private tree
+# it unpacks: `INSTALL_MARKER_NAME` and `write_marker` in
+# desktop/runtime-host/src/private_runtime.rs. Its `archive_sha256` is the id
+# the launcher stamps as AVIBE_DESKTOP_RUNTIME_ID; its `python_entrypoint` is the
+# tree-relative interpreter the launcher runs.
+DESKTOP_RUNTIME_MARKER_NAME = ".avibe-runtime.json"
+_DESKTOP_RUNTIME_MARKER_MAX_BYTES = 32 * 1024
+# The directories between a tree root and its interpreter, one per
+# `python_entrypoint` in desktop/runtime-sources.json: `python/bin/python3` and
+# `python/python.exe`.
+_DESKTOP_INTERPRETER_DIRS = (("python", "bin"), ("python",))
 DESKTOP_NODE_BIN_ENV = "VIBE_SHOW_RUNTIME_NODE_BIN"
 DESKTOP_NPM_CLI_ENV = "AVIBE_DESKTOP_NPM_CLI"
 DESKTOP_BACKENDS_ROOT_ENV = "AVIBE_DESKTOP_BACKENDS_ROOT"
@@ -38,46 +49,6 @@ DESKTOP_OPENCODE_ROLE = "opencode"
 # different one is a reused pid only when the process holding it is readable and
 # is not a UI of the tree's Runtime; when it cannot be read, nobody can tell.
 DESKTOP_INSTALLER_OWNER_ENV = "AVIBE_DESKTOP_INSTALLER_OWNER"
-START_RECEIPT_PREFIX = "@avibe-start-receipt:"
-START_RECEIPT_TIME_TOLERANCE_MS = 2.0
-
-
-class StartReceipt(TypedDict):
-    schema_version: Literal[1]
-    outcome: Literal["started", "reused"]
-    service_pid: int
-    ui_pid: int
-    service_create_unix_ms: float
-    ui_create_unix_ms: float
-
-
-def validate_start_receipt(payload: object) -> StartReceipt:
-    if not isinstance(payload, dict):
-        raise ValueError("Startup receipt must be an object")
-    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
-        raise ValueError("Unsupported startup receipt schema")
-    if payload.get("outcome") not in ("started", "reused"):
-        raise ValueError("Invalid startup receipt outcome")
-    for field in ("service_pid", "ui_pid"):
-        value = payload.get(field)
-        if type(value) is not int or value <= 0:
-            raise ValueError(f"Invalid startup receipt {field}")
-    for field in ("service_create_unix_ms", "ui_create_unix_ms"):
-        value = payload.get(field)
-        if type(value) not in (int, float) or value <= 0:
-            raise ValueError(f"Invalid startup receipt {field}")
-        try:
-            finite = math.isfinite(value)
-        except OverflowError:
-            finite = False
-        if not finite:
-            raise ValueError(f"Invalid startup receipt {field}")
-    return cast(StartReceipt, payload)
-
-
-def start_receipt_line(payload: object) -> str:
-    receipt = validate_start_receipt(payload)
-    return START_RECEIPT_PREFIX + json.dumps(receipt, separators=(",", ":"), allow_nan=False)
 
 
 class DesktopEndpointPayload(TypedDict):
@@ -85,14 +56,92 @@ class DesktopEndpointPayload(TypedDict):
     origin: str
 
 
+def _runtime_id_value(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    if any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value
+
+
 def desktop_runtime_id(base_env: Mapping[str, str] | None = None) -> str | None:
     """Return the validated identity of a desktop-managed Runtime."""
 
     env = os.environ if base_env is None else base_env
-    value = env.get(DESKTOP_RUNTIME_ID_ENV, "")
-    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+    return _runtime_id_value(env.get(DESKTOP_RUNTIME_ID_ENV, ""))
+
+
+def _desktop_tree_runtime_id(executable: str | os.PathLike[str] | None) -> str | None:
+    """The id of the private tree whose interpreter *executable* is, or None.
+
+    Only the marker at the root of that tree counts: the directory the
+    interpreter's own layout puts the root at, holding a valid
+    `archive_sha256`, whose `python_entrypoint` leads back to this very
+    interpreter. A marker anywhere else says nothing about who is running, and
+    neither does one that fails any of these.
+    """
+
+    if not executable:
         return None
-    return value
+    try:
+        interpreter = Path(executable).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    parents = interpreter.parents
+    for dirs in _DESKTOP_INTERPRETER_DIRS:
+        if len(parents) <= len(dirs) or tuple(parent.name for parent in parents[: len(dirs)]) != dirs[::-1]:
+            continue
+        root = parents[len(dirs)]
+        marker = root / DESKTOP_RUNTIME_MARKER_NAME
+        if os.path.lexists(marker):
+            return _desktop_marker_runtime_id(root, marker, interpreter)
+    return None
+
+
+def _desktop_marker_runtime_id(root: Path, marker: Path, interpreter: Path) -> str | None:
+    try:
+        if marker.is_symlink() or not marker.is_file():
+            return None
+        with marker.open("rb") as handle:
+            raw = handle.read(_DESKTOP_RUNTIME_MARKER_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > _DESKTOP_RUNTIME_MARKER_MAX_BYTES:
+        return None
+    try:
+        manifest = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    runtime_id = _runtime_id_value(manifest.get("archive_sha256"))
+    entrypoint = manifest.get("python_entrypoint")
+    if runtime_id is None or not isinstance(entrypoint, str) or not entrypoint:
+        return None
+    if Path(entrypoint).is_absolute():
+        return None
+    try:
+        if (root / entrypoint).resolve(strict=True) != interpreter:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return runtime_id
+
+
+def desktop_caller_provenance() -> frozenset[str]:
+    """The desktop Runtime ids this process can act for.
+
+    A process carries the id the launcher stamped into its environment, and
+    runs from the tree its interpreter was unpacked into; either one makes it a
+    desktop caller. An empty set is a caller with no desktop provenance at all:
+    a terminal user managing their own Avibe.
+    """
+
+    ids = {
+        desktop_runtime_id(),
+        _desktop_tree_runtime_id(sys.executable),
+    }
+    return frozenset(value for value in ids if value is not None)
 
 
 def private_desktop_runtime_root(base_env: Mapping[str, str] | None = None) -> Path | None:

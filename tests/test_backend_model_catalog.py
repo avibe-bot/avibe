@@ -918,7 +918,7 @@ def test_remote_hidden_tombstone_overrides_stale_local_visible(monkeypatch, tmp_
     assert "retired-model" not in snapshot["models"]
 
 
-def test_gpt_6_sol_and_luna_follow_astra_in_the_bundled_catalog():
+def test_gpt_6_sol_generations_and_luna_follow_astra_in_the_bundled_catalog():
     codex = {
         entry["id"]: entry
         for entry in backend_model_catalog.visible_backend_model_entries(
@@ -927,9 +927,12 @@ def test_gpt_6_sol_and_luna_follow_astra_in_the_bundled_catalog():
     }
     ordered = sorted(codex.values(), key=lambda entry: entry["priority"])
 
-    assert [entry["id"] for entry in ordered[:3]] == ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
-    for model in ("gpt-6-sol", "gpt-6-luna"):
+    assert [entry["id"] for entry in ordered[:4]] == [
+        "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
+    ]
+    for model in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
         assert codex[model]["visibility"] == "list"
+    for model in ("gpt-6-sol", "gpt-6-luna"):
         assert codex[model]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
 
 
@@ -1341,15 +1344,22 @@ def test_fetch_remote_catalog_rejects_unknown_backend(monkeypatch):
         backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
 
 
-def test_bundled_codex_astra_is_first_with_native_reasoning_efforts():
+@pytest.mark.parametrize(
+    ("position", "model", "label", "expected_efforts"),
+    [
+        (0, "gpt-6-astra", "GPT-6-Astra", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+        (1, "gpt-6.1-sol", "GPT-6.1-Sol", ["low", "medium", "high", "xhigh", "max"]),
+    ],
+)
+def test_bundled_codex_leading_models_have_declared_reasoning_efforts(position, model, label, expected_efforts):
     snapshot = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)
 
-    assert snapshot["models"][0] == "gpt-6-astra"
-    assert snapshot["model_labels"]["gpt-6-astra"] == "GPT-6-Astra"
+    assert snapshot["models"][position] == model
+    assert snapshot["model_labels"][model] == label
     assert [
         entry["value"]
-        for entry in snapshot["reasoning_options"]["gpt-6-astra"]
-    ] == ["__default__", "low", "medium", "high", "xhigh", "max", "ultra"]
+        for entry in snapshot["reasoning_options"][model]
+    ] == ["__default__", *expected_efforts]
 
 
 def test_codex_catalog_readers_expand_codex_home(monkeypatch, tmp_path):

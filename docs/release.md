@@ -33,3 +33,12 @@ Published managed-runtime manifests are availability contracts. Keep their
 release URLs under the scheduled manifest-verified backup/recovery guard.
 Publish replacement assets before changing a pinned manifest so the guard never
 restores bytes from a different release.
+
+## Download mirror
+
+`Mirror releases to dl.avibe.bot` copies published release assets to
+`https://dl.avibe.bot/releases/<tag>/<asset>` and writes the release index at
+`https://dl.avibe.bot/index/releases.json`. It follows the publishing
+workflows, so a renamed publishing workflow must also be renamed in its
+trigger. The contract and retention rules are in
+`docs/plans/release-download-mirror.md`.

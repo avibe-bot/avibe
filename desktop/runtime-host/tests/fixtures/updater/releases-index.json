@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "repository": "avibe-bot/avibe",
+  "releases": [
+    {
+      "tag": "gh-v3.1.2rc7",
+      "prerelease": true,
+      "published_at": "2026-09-29T16:46:30Z",
+      "commit": "1264c311df1088a8eb1efe46611ae72f5af51188",
+      "assets": [
+        {
+          "name": "Avibe_3.1.2-rc.7_aarch64-apple-darwin.SHA256SUMS",
+          "size": 464,
+          "sha256": "0b3dfba54e602669918ce90c2c48ad20963d2e42443628ffcf3a58e2880d7e40"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_aarch64-apple-darwin.SIGNATURE",
+          "size": 35,
+          "sha256": "e27df2e02236bf793fc5ba489d244300ff4eea084bff7849146a7ac407bf5d2a"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_aarch64-apple-darwin.SOURCE.json",
+          "size": 207,
+          "sha256": "70423562853e85c9d3afa6334db917a96b5e78ea850aa2490332744a2e01feba"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_aarch64-apple-darwin.app.tar.gz",
+          "size": 166803577,
+          "sha256": "fcd311cf2bffc4c1a82055c4b3da56e2debd3a3399e6b62675923e6db806cfc6"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_aarch64-apple-darwin.dmg",
+          "size": 170414173,
+          "sha256": "be104e5c79d4760633368351938012d3c549851dcc65c00085dbd4e42e3750de"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_aarch64-apple-darwin.runtime-manifest.json",
+          "size": 1171,
+          "sha256": "beef75d823389e91892ea5a3e2a7ece8d853708e0c329161a5ebec8254106391"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-apple-darwin.SHA256SUMS",
+          "size": 460,
+          "sha256": "3b350a7dbbee4673369558b473964b7b87449632b190499cc922e972a9ae8e71"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-apple-darwin.SIGNATURE",
+          "size": 35,
+          "sha256": "e27df2e02236bf793fc5ba489d244300ff4eea084bff7849146a7ac407bf5d2a"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-apple-darwin.SOURCE.json",
+          "size": 206,
+          "sha256": "b16c91e879df7c5abfa03111ab9646a8839543dc0541aaeb1c5737a99f57e30a"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-apple-darwin.app.tar.gz",
+          "size": 166358301,
+          "sha256": "b1c6faf4e8d77caaf074038842fba6e2c08ea115fc2e361ee1fd73e6aea75111"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-apple-darwin.dmg",
+          "size": 169384860,
+          "sha256": "f504969f6129843b9ad3a49e60bfb68b45b0e747ba971ebda01b95389cdedcbb"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-apple-darwin.runtime-manifest.json",
+          "size": 1167,
+          "sha256": "b058d08b76e09888623b7e24e721a06e70284614579373c9b6fa3e3b290d640d"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-pc-windows-msvc.SHA256SUMS",
+          "size": 476,
+          "sha256": "5e9e5433e53a4fd801547a43244e9bb4a566ad7d10ba95d36a84758bbb2c156e"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-pc-windows-msvc.SIGNATURE",
+          "size": 20,
+          "sha256": "f9bcf5978f0ed33f00e66451fa1d63fa91ea8c3570587ab6cd423f12d1162d97"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-pc-windows-msvc.SOURCE.json",
+          "size": 217,
+          "sha256": "6285414602acb426c517050d8b660a24b36acd87a5541d436163e44bf3b618b9"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-pc-windows-msvc.exe",
+          "size": 142318525,
+          "sha256": "362582ae854635eb55a2601b1f4aad8ef382da151734722d9aff78ec2a4d2f7e"
+        },
+        {
+          "name": "Avibe_3.1.2-rc.7_x86_64-pc-windows-msvc.runtime-manifest.json",
+          "size": 1197,
+          "sha256": "c2d20b672532d9041364723c1fc7a0796db356df23ba1941165f02f877d82796"
+        },
+        {
+          "name": "avibe_memory-3.1.2rc7-py3-none-any.whl",
+          "size": 991,
+          "sha256": "9cf1b371a4d3d5c7c5b0d441e88bf900758fd0ca68b2449c140b924af249ac70"
+        },
+        {
+          "name": "avibe_os-3.1.2rc7-py3-none-any.whl",
+          "size": 10186464,
+          "sha256": "ee24019bdec8ee146765d5db78efdc859c060a88ad9e854d2e0d88e791c77753"
+        },
+        {
+          "name": "avibe_os-3.1.2rc7.tar.gz",
+          "size": 9925198,
+          "sha256": "c9bbfca97ccdf66436f5c445b0a1a721d7c2eebd910a04ad0251709459ccfb0a"
+        },
+        {
+          "name": "desktop-update-aarch64-apple-darwin.json",
+          "size": 988,
+          "sha256": "e17dc8da151298897986ed8e4b58e1978191352af40c01e82f9db07503b8eeee"
+        },
+        {
+          "name": "desktop-update-aarch64-apple-darwin.json.sig",
+          "size": 436,
+          "sha256": "f9a10ee9b738556a3d8d0e4bce34d3329e0fe57c12d9a032b5fe6b416a28dd6f"
+        },
+        {
+          "name": "desktop-update-x86_64-apple-darwin.json",
+          "size": 985,
+          "sha256": "4138a43fc7559983f236be57a840ceff97c88675f8bd858fb85eea8a489b12c8"
+        },
+        {
+          "name": "desktop-update-x86_64-apple-darwin.json.sig",
+          "size": 432,
+          "sha256": "312dba9091c689c04ea87ecd95cd2314be10c43ce8dd26e1a4ad7098eb20cde0"
+        },
+        {
+          "name": "desktop-update-x86_64-pc-windows-msvc.json",
+          "size": 998,
+          "sha256": "b881b0baf11ba8ee621bfde437125a0e17f109005fcc1efb3b717748048a725c"
+        },
+        {
+          "name": "desktop-update-x86_64-pc-windows-msvc.json.sig",
+          "size": 436,
+          "sha256": "db70ce8c1add8dc6b43fb8ec04acb5bf0894fd3aa16d76baefac9c8c11ce2803"
+        },
+        {
+          "name": "show-runtime-manifest.json",
+          "size": 2138,
+          "sha256": "535d5dcda939f17cea3770cdab4b1b0ac4d9ebb9fc63b642919dd34de48ca012"
+        },
+        {
+          "name": "vibe-show-runtime-node-darwin-arm64.tgz",
+          "size": 23632198,
+          "sha256": "065987d6f25151c0da77fb36a64d7c9849f246f56f473f243e1fb5185b497362"
+        },
+        {
+          "name": "vibe-show-runtime-node-darwin-x64.tgz",
+          "size": 24538620,
+          "sha256": "efdd7b117f6d020ccef7b0b708237e10857e4757b0efc252565e9220aa8ddd4a"
+        },
+        {
+          "name": "vibe-show-runtime-node-linux-arm64.tgz",
+          "size": 23639689,
+          "sha256": "44b0998f7695d55c4ea92d99435285373e68ea0eb5af6448078d1d9bbb8a34bb"
+        },
+        {
+          "name": "vibe-show-runtime-node-linux-x64.tgz",
+          "size": 24582200,
+          "sha256": "87b821727417a2cda892dc222a62779e514e4afdcbb6db5dd82badf677290d84"
+        },
+        {
+          "name": "vibe-show-runtime-node-win32-arm64.tgz",
+          "size": 23610373,
+          "sha256": "95a09a954cb85c4bf6219845c89b85dc59653216800f7f84aaa8a98c4f172a94"
+        },
+        {
+          "name": "vibe-show-runtime-node-win32-x64.tgz",
+          "size": 25537347,
+          "sha256": "4d168c735030626617a587ed1b32cb444d3907f3698f5d58b234a3bc566bd795"
+        }
+      ]
+    },
+    {
+      "tag": "gh-v3.1.2rc6",
+      "prerelease": true,
+      "published_at": "2026-09-29T07:35:48Z",
+      "commit": "f1e20d49fc16af2219d45f8a26d65e8fa1147d57",
+      "assets": [
+        {
+          "name": "Avibe_3.1.2-rc.6_aarch64-apple-darwin.app.tar.gz",
+          "size": 125719920,
+          "sha256": "8e05d811c9e14c16f5a5113bf66e4b14b5f4e44baf9a0149e2efbfc11aee0e5f"
+        },
+        {
+          "name": "desktop-update-aarch64-apple-darwin.json",
+          "size": 988,
+          "sha256": "d07d37d6f2497441c74ee70bdf46388fd23772926ed1b5a7e1ab736c93859db8"
+        },
+        {
+          "name": "desktop-update-aarch64-apple-darwin.json.sig",
+          "size": 436,
+          "sha256": "6f4bf9c5950921006ebd863d35f2cfa19e8adca0c07a5ce5e43d9496c1869976"
+        }
+      ]
+    },
+    {
+      "tag": "v3.1.1",
+      "prerelease": false,
+      "published_at": "2026-09-27T12:24:51Z",
+      "commit": "198bd3e0ea4a3a4ab70e43fe3372cc520c666a21",
+      "assets": [
+        {
+          "name": "avibe_memory-3.1.1-py3-none-any.whl",
+          "size": 961,
+          "sha256": "ce4dd454850c2dba6c88792b86681a0c1ebf07a70374c7b9349604aa27003b09"
+        },
+        {
+          "name": "avibe_os-3.1.1-py3-none-any.whl",
+          "size": 10135454,
+          "sha256": "d204adaf4e7fb7831d975cf8c7e302a3a9e7801416e206bd36ab3bb572ddca68"
+        },
+        {
+          "name": "avibe_os-3.1.1.tar.gz",
+          "size": 9877216,
+          "sha256": "df5fcb74183f1163247d47cbd0dc2cc9922d156a5bfc0f530bf681b989a42e69"
+        },
+        {
+          "name": "show-runtime-manifest.json",
+          "size": 2102,
+          "sha256": "01b320ceb7eb7a92eb47505a258cc969a2c8ea6cd1812fb17801d646808c4fd9"
+        },
+        {
+          "name": "vibe-show-runtime-node-darwin-arm64.tgz",
+          "size": 23602602,
+          "sha256": "9203f9dd672d6afd36c6074f775cccf0882d588f6144a427590ab03bcbece752"
+        },
+        {
+          "name": "vibe-show-runtime-node-darwin-x64.tgz",
+          "size": 24510048,
+          "sha256": "5fa747fd5c025173737eaa5386e7068bbf7e2cda36fff36fccc8e37b0833d6fa"
+        },
+        {
+          "name": "vibe-show-runtime-node-linux-arm64.tgz",
+          "size": 23616096,
+          "sha256": "04ba6585ad9e476bbb15e32432800b998c7d3e31197b7ba7dd70fb9f0892c9e9"
+        },
+        {
+          "name": "vibe-show-runtime-node-linux-x64.tgz",
+          "size": 24554025,
+          "sha256": "67dbb0581ef4000136e16d1a0022e1541832e48b24c91a25e126ca1297240dda"
+        },
+        {
+          "name": "vibe-show-runtime-node-win32-arm64.tgz",
+          "size": 23583239,
+          "sha256": "eb25354c0809793f40727b8dac6714691792615d21c66a4b32838ab2aa934921"
+        },
+        {
+          "name": "vibe-show-runtime-node-win32-x64.tgz",
+          "size": 25513797,
+          "sha256": "87140ea50f705dc4bfa33b7b59fb80d4e3d8ae9bb8f7c92784a03b5b3b66f9bf"
+        }
+      ]
+    },
+    {
+      "tag": "model-hub-engine-v7.3.16-3",
+      "prerelease": false,
+      "published_at": "2026-09-26T03:01:46Z",
+      "commit": "df6fef95c078536c4406d1357ea676daaba7160b",
+      "assets": [
+        {
+          "name": "CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz",
+          "size": 39534924,
+          "sha256": "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754"
+        }
+      ]
+    },
+    {
+      "tag": "git-runtime-v2.55.0-1",
+      "prerelease": false,
+      "published_at": "2026-07-16T16:11:57Z",
+      "commit": "ebe0af0cc1a019d9fe46655d9b78fa507cfba3c0",
+      "assets": [
+        {
+          "name": "git-2.55.0-darwin-arm64.tar.gz",
+          "size": 1684366,
+          "sha256": "02477119b1dd0f19a10c2ec5a443417f1697b83b1b18dbca874c0b72efedebae"
+        }
+      ]
+    }
+  ]
+}

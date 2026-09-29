@@ -52,6 +52,7 @@ capabilities:
       - tests/test_model_hub_config.py
       - tests/test_model_hub_legacy_opencode_migration.py
       - tests/test_model_hub_persisted_migration.py
+      - tests/test_native_process_inventory.py
       - tests/test_member_management_parity.py
       - tests/test_model_hub_provenance.py
       - tests/test_model_hub_retention.py

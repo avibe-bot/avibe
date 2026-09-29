@@ -214,6 +214,18 @@ def _native_executable_backend(executable: str, binaries: Mapping[str, str]) -> 
     return None
 
 
+def _launcher_family(executable: str) -> str | None:
+    """Name the interpreter family that could run a native CLI as its script."""
+    name = executable.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?", name):
+        return "python"
+    if name.lstrip("-") in {"sh", "bash", "dash", "zsh", "ksh", "ash"}:
+        return "shell"
+    if name in {"node", "nodejs", "bun"}:
+        return "javascript"
+    return None
+
+
 def _native_process_backend(command: list[str], binaries: Mapping[str, str]) -> str | None:
     """Match a direct executable or interpreter entrypoint, never script arguments."""
     if not command:
@@ -222,16 +234,14 @@ def _native_process_backend(command: list[str], binaries: Mapping[str, str]) -> 
     if direct:
         return direct
     name = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
-    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?", name):
-        family = "python"
+    family = _launcher_family(command[0])
+    if family == "python":
         values = {"--check-hash-based-pycs"}
         flags = set()
-    elif name.lstrip("-") in {"sh", "bash", "dash", "zsh", "ksh", "ash"}:
-        family = "shell"
+    elif family == "shell":
         values = {"--rcfile", "--init-file"}
         flags = {"--noprofile", "--norc", "--login", "--posix", "--restricted", "--verbose", "--debugger"}
-    elif name in {"node", "nodejs", "bun"}:
-        family = "javascript"
+    elif family == "javascript":
         values = {
             "--require", "--import", "--loader", "--experimental-loader", "--conditions",
             "--env-file", "--env-file-if-exists", "--title", "--icu-data-dir",
@@ -329,11 +339,16 @@ def native_cli_processes(binaries: Mapping[str, str]) -> tuple[int, ...]:
                     continue
                 command = info.get("cmdline")
                 if not command:
-                    # A known other executable with inaccessible owner metadata
-                    # is not a CLI match; same-user unreadable command lines are
-                    # conservatively refused rather than silently skipped.
+                    # A known other executable is not a CLI match, whether its
+                    # owner metadata or its command line is what cannot be read.
+                    # The second is every same-user setuid program, such as the
+                    # ``login`` behind each macOS Terminal window. A same-user
+                    # process with no name, or a launcher that could be running
+                    # the CLI as its script, is conservatively refused instead.
                     name = str(info.get("name") or "")
-                    if owner is None and _native_process_backend([name], binaries) is None:
+                    if _native_process_backend([name], binaries) is None and (
+                        owner is None or (name and _launcher_family(name) is None)
+                    ):
                         continue
                     raise NativeMigrationBlockedError("process_inventory_unavailable", backends)
                 if _native_process_backend(command, binaries) is not None:
@@ -479,7 +494,7 @@ class BackendRestartCoordinator:
 
     @asynccontextmanager
     async def migration_guard(
-        self, backends: tuple[str, ...]
+        self, backends: tuple[str, ...], *, external_processes: bool = True
     ) -> AsyncIterator[Callable[[], Awaitable[None]]]:
         """Yield an idle recheck under the same lease and closed admissions.
 
@@ -488,6 +503,9 @@ class BackendRestartCoordinator:
         No external process is ever terminated by the check. Authentication
         reconciliation is synchronous and available only to this guard's task
         after retirement, while its existing lease and both gates remain owned.
+        A mode-only switch passes ``external_processes=False``: it changes no
+        native credential, so a CLI running outside Avibe is not a reader it
+        has to exclude.
         """
         targets = self._migration_targets(backends)
         closed: list[str] = []
@@ -534,6 +552,8 @@ class BackendRestartCoordinator:
                         if await self._has_active_turns(backend):
                             raise NativeMigrationBlockedError("native_runtime_busy", (backend,))
                     self._assert_no_native_login(targets)
+                    if not external_processes:
+                        return
                     pids = await asyncio.to_thread(self._process_inventory, self._native_binaries(targets))
                     if pids:
                         raise NativeMigrationBlockedError("external_native_processes", targets, pids=pids)
