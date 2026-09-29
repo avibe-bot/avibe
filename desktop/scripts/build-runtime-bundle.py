@@ -651,7 +651,13 @@ def _verify_payload_with_home(
             if target_config["os"] == "windows"
             else ["/bin/zsh", "-lc", shlex.join(["vibe", *args])]
         )
-        return subprocess.run(shell_command, cwd=agent_cwd, env=env, check=True, capture_output=True, text=True)
+        result = subprocess.run(shell_command, cwd=agent_cwd, env=env, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(
+                f"Bundled CLI {shlex.join(args)} exited {result.returncode}\n"
+                f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            )
+        return result
 
     for skill in ("use-avibe", "use-avibe-vault"):
         loaded = agent_cli("skill", "load", "--", skill)

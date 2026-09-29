@@ -639,7 +639,9 @@ def _root_children(
                 if entry.name in ignored_names:
                     continue
                 try:
-                    entry_stat = entry.stat(follow_symlinks=False)
+                    # DirEntry.stat() reports st_dev/st_ino as zero on Windows;
+                    # identity checks downstream need the path's real stat.
+                    entry_stat = os.stat(entry.path, follow_symlinks=False)
                 except OSError:
                     continue
                 children.append((entry.name, Path(entry.path), entry_stat))

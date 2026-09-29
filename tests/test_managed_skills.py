@@ -793,6 +793,44 @@ def test_non_utf8_resolved_directory_is_not_advertised(
     assert load_skill("raw", cwd) is None
 
 
+def test_discovery_ignores_zero_directory_entry_identities(tmp_path: Path, monkeypatch) -> None:
+    """Windows DirEntry.stat() reports st_dev/st_ino as zero; discovery must still work."""
+
+    _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    root = cwd / ".agents" / "skills"
+    _write_skill(root, "alpha", "alpha", "Alpha")
+    _write_skill(root, "beta", "beta", "Beta")
+    real_scandir = os.scandir
+
+    class _WindowsLikeEntry:
+        def __init__(self, entry: os.DirEntry) -> None:
+            self.name = entry.name
+            self.path = entry.path
+            self._entry = entry
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            values = list(self._entry.stat(follow_symlinks=follow_symlinks))
+            values[1] = 0  # st_ino
+            values[2] = 0  # st_dev
+            return os.stat_result(values)
+
+    class _WindowsLikeScandir:
+        def __init__(self, path) -> None:
+            self._iterator = real_scandir(path)
+
+        def __enter__(self):
+            return (_WindowsLikeEntry(entry) for entry in self._iterator)
+
+        def __exit__(self, *exc_info) -> None:
+            self._iterator.close()
+
+    monkeypatch.setattr(managed_skills.os, "scandir", _WindowsLikeScandir)
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["alpha", "beta"]
+    loaded = load_skill("beta", cwd)
+    assert loaded is not None and loaded.body == "Body\n"
+
+
 def test_load_escapes_directory_attribute_controls(tmp_path: Path, monkeypatch) -> None:
     _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
     working_directory = cwd / 'line\nbreak"&'
