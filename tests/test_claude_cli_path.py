@@ -255,6 +255,28 @@ def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp
     assert compat.opencode.binary == str(binaries["opencode"])
 
 
+def test_auth_service_projects_only_raw_backend_selectors(monkeypatch, tmp_path: Path) -> None:
+    installed = tmp_path / ".local" / "bin" / "claude"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("#!/bin/sh\n", encoding="utf-8")
+    installed.chmod(0o755)
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
+
+    web_service = object.__new__(AgentAuthService)
+    web_service.controller = SimpleNamespace(
+        config=SimpleNamespace(agents=SimpleNamespace(claude=SimpleNamespace(cli_path="claude")))
+    )
+    live_service = object.__new__(AgentAuthService)
+    live_service.controller = SimpleNamespace(config=SimpleNamespace(claude=SimpleNamespace(cli_path="claude")))
+
+    # The Web stub reads raw V2 selectors and projects them like to_app_config.
+    assert web_service._get_cli_binary("claude") == str(installed)
+    # A live controller's AppCompatConfig is already projected; keep it as-is.
+    assert live_service._get_cli_binary("claude") == "claude"
+
+
 def test_to_app_config_keeps_missing_private_backend_selectors_off_path(monkeypatch, tmp_path: Path) -> None:
     from vibe.cli_paths import resolve_cli_path
 

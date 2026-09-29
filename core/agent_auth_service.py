@@ -679,7 +679,15 @@ class AgentAuthService:
         # binary``. Without these fallbacks, setup / logout / test
         # flows ignore a non-default cli_path and fall through to
         # ``$PATH``, breaking installs that pin a specific binary.
-        backend_cfg = self._resolve_backend_config(backend)
+        config = getattr(getattr(self, "controller", None), "config", None)
+        # Live IM controllers hand ``AppCompatConfig``, whose top-level
+        # selector is already the runtime projection. Anything read from the
+        # V2 ``agents`` shape (the Web stub controller, or a reload below) is a
+        # raw persisted selector and is projected the same way before use.
+        backend_cfg = getattr(config, backend, None) if config is not None else None
+        runtime_projected = backend_cfg is not None
+        if backend_cfg is None:
+            backend_cfg = self._resolve_backend_config(backend)
         # Compatibility projection can erase recovery provenance, so inventory
         # validates persisted evidence even when a live backend object exists.
         if strict or backend_cfg is None:
@@ -706,7 +714,11 @@ class AgentAuthService:
                     exc_info=True,
                 )
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
-        return cli_path or backend
+        if runtime_projected:
+            return cli_path or backend
+        from config.v2_compat import runtime_agent_cli_path
+
+        return runtime_agent_cli_path(cli_path, backend, resolve_agent_paths=True)
 
     def _resolve_backend_probe_cwd(self, backend: str, *, prepare: bool = False) -> str:
         """Resolve the configured runtime cwd without mutating it by default."""

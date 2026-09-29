@@ -961,14 +961,29 @@ def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_pat
     )
 
 
-def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path):
+@pytest.mark.parametrize("selector_case", ["padded_path", "desktop_default"])
+def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path, selector_case):
     """Scenario: AUTH-SETUP-911"""
     import core.agent_auth_service as auth_module
     from vibe import api as vibe_api
 
     claude_home = tmp_path / "claude-home"
     claude_home.mkdir()
-    configured_cli = tmp_path / "bin" / "claude-new"
+    if selector_case == "padded_path":
+        # A path pasted into Settings keeps its surrounding whitespace on disk.
+        configured_cli = tmp_path / "bin" / "claude-new"
+        persisted_selector = f"  {configured_cli}  "
+    else:
+        # A GUI-launched desktop Runtime has no shell PATH; normal Agent turns
+        # resolve the default selector to the user's installed executable.
+        configured_cli = tmp_path / ".local" / "bin" / "claude"
+        configured_cli.parent.mkdir(parents=True)
+        configured_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        configured_cli.chmod(0o755)
+        persisted_selector = "claude"
+        monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setattr(auth_module, "CLAUDE_SDK_AVAILABLE", True)
 
@@ -999,7 +1014,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path)
     monkeypatch.setattr(auth_module, "ClaudeSDKClient", FakeClaudeSDKClient)
     runner = ScenarioRunner(harness)
 
-    def save_padded_cli_path(current):
+    def save_cli_selector(current):
         config = V2Config(
             mode="self_host",
             version="v2",
@@ -1007,8 +1022,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path)
             runtime=RuntimeConfig(default_cwd=str(tmp_path)),
             agents=AgentsConfig(),
         )
-        # A path pasted into Settings keeps its surrounding whitespace on disk.
-        config.agents.claude.cli_path = f"  {configured_cli}  "
+        config.agents.claude.cli_path = persisted_selector
         save_direct_auth_config(config)
 
     async def start_web_oauth(current):
@@ -1019,7 +1033,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path)
 
     asyncio.run(
         runner.run(
-            ScenarioStep("save_padded_cli_path", save_padded_cli_path),
+            ScenarioStep("save_cli_selector", save_cli_selector),
             ScenarioStep("start_web_oauth", start_web_oauth),
             ScenarioStep("cancel_web_oauth", cancel_web_oauth),
         )
@@ -1034,7 +1048,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path)
     assert harness.disconnects == 1
     ScenarioExpect.step_history(
         runner,
-        ["save_padded_cli_path", "start_web_oauth", "cancel_web_oauth"],
+        ["save_cli_selector", "start_web_oauth", "cancel_web_oauth"],
     )
 
 

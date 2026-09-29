@@ -101,7 +101,7 @@ class AppCompatConfig:
         return [self.platform]
 
 
-def _runtime_agent_cli_path(
+def runtime_agent_cli_path(
     configured: str | None,
     default: str,
     *,
@@ -140,7 +140,7 @@ def to_app_config(
         permission_mode="bypassPermissions",
         cwd=v2.runtime.default_cwd,
         system_prompt=None,
-        cli_path=_runtime_agent_cli_path(
+        cli_path=runtime_agent_cli_path(
             v2.agents.claude.cli_path,
             "claude",
             resolve_agent_paths=resolve_agent_paths,
@@ -159,7 +159,7 @@ def to_app_config(
     if v2.agents.codex.enabled:
         codex = CodexCompatConfig(
             enabled=True,
-            binary=_runtime_agent_cli_path(
+            binary=runtime_agent_cli_path(
                 v2.agents.codex.cli_path,
                 "codex",
                 resolve_agent_paths=resolve_agent_paths,
@@ -172,7 +172,7 @@ def to_app_config(
     if v2.agents.opencode.enabled:
         opencode = OpenCodeCompatConfig(
             enabled=True,
-            binary=_runtime_agent_cli_path(
+            binary=runtime_agent_cli_path(
                 v2.agents.opencode.cli_path,
                 "opencode",
                 resolve_agent_paths=resolve_agent_paths,
