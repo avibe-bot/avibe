@@ -248,26 +248,33 @@ visibility, and routes are not restored. An absent or corrupt store uses the
 centered 1200×800 default.
 
 On macOS the main window uses an overlay title bar with a hidden title. The
-traffic lights float over the existing layout, without an additional horizontal
-bar. Tauri's built-in `data-tauri-drag-region` handler owns window gestures. The
-chat header's full-width outer padding and inner blank space are direct-target
-drag regions; child controls, menus and popups keep their normal mouse input.
+traffic lights are centered in the 48px top row. The complete chat toolbar sits
+beside them, with the same 1080px content width and responsive gutters as the web
+toolbar, transcript and composer. Back, title editing, agent/model/effort selection,
+Visualize and sharing keep their existing handlers and state. There is no extra
+empty title strip above the toolbar. Home and chat use the same sidebar divider
+and clearance, with matching 16px top and left insets around the logo.
+
+Tauri's built-in `data-tauri-drag-region` handler owns window gestures. The
+toolbar's outer padding and inner blank space are direct-target drag regions;
+child controls, menus and popups keep their normal mouse input. Native window
+background dragging is disabled, so the transcript cannot move the window.
 Setup retains its language switcher and marks its existing header's empty space.
-Transparent DOM regions cover existing traffic-light clearance on the sidebar,
-Setup, Settings, ordinary Workbench pages and bootstrap, without adding height.
+DOM regions cover traffic-light clearance on the sidebar, Setup, Settings,
+ordinary Workbench pages and bootstrap. Settings hides the retained chat toolbar.
 No native hit-test overlay, WebKit message handler or custom mouse listener is
 installed. Double-click follows the bundled Tauri implementation (toggle maximize),
 not a locally emulated macOS double-click preference.
 
 The shell publishes `--shell-titlebar-inset: 28px` and
-`__AVIBE_DESKTOP_DRAG__` before page scripts run. The inset only preserves the
-existing traffic-light clearance; chat and search headers still reach the top
-edge. Pages declare `<meta name="avibe-shell-drag-regions" content="tauri">`.
-An older page without that declaration gets a standard title bar and a zero
-inset, so it remains draggable. The legacy `avibe-shell-title-strip` declaration
-is retained for older shells; pages under those shells do not activate the new
-drag attributes. Windows, Linux and ordinary browsers retain their existing
-layout and do not activate the macOS drag regions.
+`__AVIBE_DESKTOP_DRAG__` before page scripts run. The native sidebar and chat
+override that clearance to 48px for the window toolbar. The native frame stays
+transparent even when an adopted Runtime serves older UI without drag metadata;
+pages that predate drag regions need a Runtime UI update to provide those gestures.
+The metadata declarations remain for older shells, but the current Workbench
+activates native drag attributes from the shell capability marker alone.
+Windows, Linux and ordinary browsers retain their existing layout and do not
+activate the macOS drag regions.
 
 Links that ask for a new browsing context (`target="_blank"` or
 `window.open`) open in the system browser when they are `http(s)`; anything

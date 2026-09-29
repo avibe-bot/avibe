@@ -29,7 +29,8 @@ export const DESKTOP_OPEN_SETTINGS_EVENT = 'avibe:desktop-open-settings';
 
 /** Only a direct press on this layout element drags; descendants keep their input. */
 export function desktopDragRegion(): '' | undefined {
-  return isDesktopShell() && window.__AVIBE_DESKTOP_DRAG__ === true
-    && document.querySelector('meta[name="avibe-shell-drag-regions"][content="tauri"]')
-    ? '' : undefined;
+  // Dragging is granted by the native shell marker. It must not depend on the
+  // Runtime UI version: a desktop shell can load an older loopback Workbench
+  // whose HTML predates the optional metadata tag.
+  return isDesktopShell() && window.__AVIBE_DESKTOP_DRAG__ === true ? '' : undefined;
 }

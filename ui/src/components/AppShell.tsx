@@ -1,4 +1,6 @@
 import { DesktopDragRegion } from './DesktopDragRegion';
+import { DesktopWindowChrome } from './DesktopWindowChrome';
+import { desktopDragRegion } from '../lib/desktopShell';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
@@ -412,6 +414,7 @@ export const AppShell: React.FC = () => {
   // These mobile surfaces render their own top chrome, so the shell's mobile
   // brand header AND the bottom tab bar are hidden on them.
   const isChat = surfaceLocation.pathname.startsWith('/chat/');
+  const windowChrome = isDesktop && isChat && !chromeless && desktopDragRegion() !== undefined;
   const isSearch = surfaceLocation.pathname === '/search';
   const isSettings = settingsOpen;
   const isShowPageApp = surfaceLocation.pathname.startsWith('/apps/show/');
@@ -441,9 +444,11 @@ export const AppShell: React.FC = () => {
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
+    <DesktopWindowChrome enabled={windowChrome} hidden={settingsOpen}>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
     <div
+      style={windowChrome && !settingsOpen ? { '--shell-titlebar-inset': '48px' } as React.CSSProperties : undefined}
       className={clsx(
         'flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground',
         !chromeless && 'md:block md:h-auto md:min-h-screen md:overflow-visible'
@@ -452,8 +457,8 @@ export const AppShell: React.FC = () => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar Y1TiVV — 248 wide by default, 16px horizontal/bottom padding and
-          the original 10px brand top inset. The top group and bottom
+      {/* Sidebar Y1TiVV — 248 wide by default, 16px horizontal/bottom padding,
+          a 16px native brand inset and the original 10px web inset. The top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
           The width is SidebarResizer's --app-sidebar-w, shared with Workbench
@@ -464,12 +469,18 @@ export const AppShell: React.FC = () => {
       <aside
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
+        // Keep the native sidebar at the chat toolbar's height on every route.
+        // Scope the clearance here so home-page controls keep their own layout.
+        style={desktopDragRegion() !== undefined ? { '--shell-titlebar-inset': '48px' } as React.CSSProperties : undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pt-[calc(0.625rem+var(--shell-titlebar-inset))] pb-4 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pb-4 md:flex',
+          desktopDragRegion() !== undefined
+            ? 'pt-[calc(1rem+var(--shell-titlebar-inset))]'
+            : 'pt-[calc(0.625rem+var(--shell-titlebar-inset))]',
           settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >
-        <DesktopDragRegion className="absolute inset-x-0 top-0" />
+        <DesktopDragRegion className="absolute left-0 -right-px top-0 border-b border-border bg-[var(--sidebar-background)]" />
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && (
             <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
@@ -687,6 +698,7 @@ export const AppShell: React.FC = () => {
         </div>
       )}
     </div>
+    </DesktopWindowChrome>
     </ShowPageDragProvider>
     </DockProvider>
     </StandaloneAppTabContext.Provider>

@@ -1206,7 +1206,7 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
         .on_new_window(|url, _features| handle_new_window_request(url));
-    // macOS draws the page under an overlay title bar (`tauri.conf.json`).
+    // macOS draws the page under a transparent native title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
     let builder = builder.initialization_script(macos_title_bar::inset_script());
     let window = builder.build().ok()?;
@@ -1629,8 +1629,8 @@ pub fn run() {
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
-                        // Each loaded page decides whether it sits under the overlay
-                        // title bar; an older adopted Workbench gets the standard one.
+                        // The native frame is independent of the Runtime UI version;
+                        // older adopted Workbench pages must not restore a title bar.
                         #[cfg(target_os = "macos")]
                         macos_title_bar::sync(webview);
                         apply_pending_deep_link(webview.app_handle());

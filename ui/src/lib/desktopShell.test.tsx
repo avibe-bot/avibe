@@ -80,12 +80,17 @@ describe('native desktop drag surfaces', () => {
     }
   });
 
-  it('keeps the setup language switcher in browsers and older shells without enabling native dragging', () => {
-    for (const mode of ['browser', 'older-shell', 'unsupported-layout'] as const) {
-      if (mode !== 'browser') inShell({ native: mode !== 'older-shell', supported: false });
+  it.each(['browser', 'older-shell', 'without-metadata'] as const)(
+    'keeps Setup language switching and derives dragging from shell capability: %s',
+    (mode) => {
+      if (mode !== 'browser') inShell({ native: mode !== 'older-shell', supported: mode !== 'without-metadata' });
       renderHeaders();
       expect(document.querySelector('button[aria-haspopup="listbox"]')).not.toBeNull();
-      expect(document.querySelector('[data-tauri-drag-region]')).toBeNull();
-    }
-  });
+      if (mode === 'without-metadata') {
+        expect(document.querySelector('[data-tauri-drag-region]')).not.toBeNull();
+      } else {
+        expect(document.querySelector('[data-tauri-drag-region]')).toBeNull();
+      }
+    },
+  );
 });

@@ -88,7 +88,7 @@ jobs:
           npm run test:project-order
           npm run test:inbox-return
           npm run test:badge-triggers
-          npm run test:workbench-general -- sidebar-floating.spec.ts
+          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts
           npm run test:voice-shortcut
 
   show-router-integration:

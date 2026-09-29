@@ -1,4 +1,6 @@
 import { desktopDragRegion } from '../../lib/desktopShell';
+import { createPortal } from 'react-dom';
+import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -282,6 +284,7 @@ export const ChatPage: React.FC = () => {
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
   const routeSurfaceActive = useRouteSurfaceActive();
+  const windowChrome = useDesktopWindowChrome();
   const pageActive = usePageActive();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -2879,6 +2882,7 @@ export const ChatPage: React.FC = () => {
           there). */}
       <div
         ref={chatSurfaceRef}
+        style={windowChrome ? { paddingTop: '48px' } : undefined}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
         onKeyDown={annotation.handleShortcutKeyDown}
         onPointerDownCapture={focusCanvas}
@@ -3633,6 +3637,7 @@ interface ChatHeaderBarProps {
 // read-only rendering is reachable without an ApiProvider.
 export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
+  const windowChrome = useDesktopWindowChrome();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(sessionReadOnly, showPageMode);
@@ -3681,15 +3686,21 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
       }
     : undefined;
   const inheritsDefault = !session.agent_name && !session.agent_backend;
-  return (
+  const header = (
     // A single compact row (design.pen IDQ5n): back button + click-to-edit
     // title on the left, the agent/model/effort picker on the right. The bar
     // runs edge-to-edge (the page root cancels the shell padding) with a
     // hairline bottom border separating it from the scrolling transcript.
     // No project-id pill and no override banner — both were noise the user
     // flagged (regression feedback #1/#3).
-    <div data-tauri-drag-region={desktopDragRegion()} className="shrink-0 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur md:px-8">
-      <div data-tauri-drag-region={desktopDragRegion()} className="mx-auto flex w-full max-w-[1080px] items-center gap-3">
+    <div data-chat-header="" data-tauri-drag-region={desktopDragRegion()} className={clsx(
+      'shrink-0 px-4 md:px-8',
+      windowChrome ? 'h-full' : 'border-b border-border bg-surface/70 py-2.5 backdrop-blur',
+    )}>
+      <div data-tauri-drag-region={desktopDragRegion()} className={clsx(
+        'mx-auto flex w-full max-w-[1080px] items-center gap-3',
+        windowChrome && 'h-full',
+      )}>
         <Button
           type="button"
           variant="outline"
@@ -3804,6 +3815,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
       </div>
     </div>
   );
+  return windowChrome ? createPortal(header, windowChrome) : header;
 };
 
 interface TitleFieldProps {
