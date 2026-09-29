@@ -64,8 +64,8 @@ and fall back to GitHub.
 - `sha256` is GitHub's asset digest, re-verified against the downloaded bytes
   before upload. `commit` is the peeled tag target.
 - Producer: the release mirror workflow. Consumers: the desktop updater.
-  Planned: the CLI update checker and the runtime downloaders, replacing their
-  `api.github.com` discovery calls.
+  Planned: the CLI update checker, replacing its `api.github.com` discovery
+  call. Runtime downloads use pinned release URLs and need no index.
 - The index is unauthenticated metadata. A hostile index can at most withhold
   releases or name copies that then fail the consumer's existing verification.
 
@@ -146,10 +146,11 @@ archives download through `core.dependency_network.fetch_to_path`:
 2. Cache Rule, then real-file tests from the three mainland carriers at the
    evening peak.
 3. Clients, one at a time: desktop updater (done), then runtime and Show
-   Runtime downloads, then `install.sh` and `install.ps1`. Each tries the mirror
-   first, then GitHub, with a connect timeout and a stall watchdog, resumes with
-   `Range` when switching source, and remembers the last source that worked.
-   The desktop shell's `avibe_runtime_host::download` is the Rust reference.
+   Runtime downloads (done), then `install.sh` and `install.ps1`. Each tries the
+   mirror first, then GitHub, with a connect timeout and a stall watchdog,
+   resumes with `Range` when switching source, and remembers the last source
+   that worked. The references are the desktop shell's
+   `avibe_runtime_host::download` (Rust) and Client downloads above (Python).
 4. Install-script third-party dependencies (the uv installer and
    python-build-standalone) through `UV_INSTALLER_GITHUB_BASE_URL` and
    `UV_PYTHON_INSTALL_MIRROR`, if step 2 shows GitHub is still their
