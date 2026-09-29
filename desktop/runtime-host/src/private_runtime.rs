@@ -22,6 +22,7 @@ const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: u64 = 200_000;
 const TREE_HASH_DOMAIN: &[u8] = b"avibe-runtime-tree-v1\0";
+const REPAIR_SLOT_SUFFIX: &str = "-repair";
 static INSTALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,8 +118,7 @@ impl PrivateRuntimeBundle {
             .get(..16)
             .ok_or(PrivateRuntimeError::ManifestInvalid)?;
         let version_dir = self.install_root.join(&manifest.runtime_version);
-        let primary_dir = version_dir.join(digest_prefix);
-        let repair_dir = version_dir.join(format!("{digest_prefix}-repair"));
+        let [primary_dir, repair_dir] = install_slots(&version_dir, digest_prefix);
         for candidate in [&primary_dir, &repair_dir] {
             if path_present(candidate) {
                 if let Ok(runtime) = installed_runtime(candidate, &manifest) {
@@ -133,25 +133,16 @@ impl PrivateRuntimeBundle {
         let archive_path = self.bundle_dir.join(&manifest.archive);
         verify_archive(&archive_path, &manifest)?;
         fs::create_dir_all(&self.install_root).map_err(PrivateRuntimeError::Install)?;
-        let install_dir = if !path_present(&primary_dir) {
+        // Both independently installed copies failing integrity validation is
+        // not a dead end: the verified archive is reinstalled over the primary
+        // name. A daemon may still be running from that copy, since a tree that
+        // fails validation may only have gained files after it started, so the
+        // name is freed only once its replacement is fully verified (below).
+        let replaces_primary = path_present(&primary_dir) && path_present(&repair_dir);
+        let install_dir = if !path_present(&primary_dir) || replaces_primary {
             primary_dir
-        } else if !path_present(&repair_dir) {
-            repair_dir
         } else {
-            // Both independently installed copies failed integrity validation.
-            // Never execute either one — but refusing here is a dead end with no
-            // way out except deleting a directory by hand, and two copies is not
-            // a large enough margin to strand an install on.
-            //
-            // The reason the old code refused still holds: a daemon started from
-            // a copy that was valid at launch may have its files open, and a tree
-            // partially replaced underneath a running process is worse than the
-            // failure that got us here. Renaming is what satisfies both. It frees
-            // the name atomically without touching a single file the daemon
-            // holds, so the reinstall below lands on a name nothing can be
-            // reading, and the count of installed copies stays at two.
-            discard_install_path(&self.install_root, &primary_dir)?;
-            primary_dir
+            repair_dir
         };
 
         let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::SeqCst);
@@ -170,6 +161,9 @@ impl PrivateRuntimeBundle {
             write_marker(&staging, &manifest)?;
             if let Some(parent) = install_dir.parent() {
                 fs::create_dir_all(parent).map_err(PrivateRuntimeError::Install)?;
+            }
+            if replaces_primary {
+                discard_install_path(&self.install_root, &install_dir)?;
             }
             match fs::rename(&staging, &install_dir) {
                 Ok(()) => {}
@@ -196,18 +190,33 @@ impl PrivateRuntimeBundle {
     /// Removes private Runtime trees that are no longer used by the active
     /// desktop-managed daemon.
     ///
-    /// The caller invokes this only after `/ready` proves that `active_root` is
-    /// the Runtime currently serving the desktop shell. Cleanup is deliberately
-    /// outside `prepare`: an older daemon may still have its executable tree
-    /// open while the successor is being installed.
+    /// The caller invokes this only after `/ready` proves that the Runtime id of
+    /// `active_root` is the one serving the desktop shell. Cleanup is
+    /// deliberately outside `prepare`: an older daemon may still have its
+    /// executable tree open while the successor is being installed.
+    ///
+    /// `/ready` proves the id, not the slot. Both slots of one id hold the same
+    /// archive, and `vibe start` keeps a live daemon rather than restarting it,
+    /// so a daemon started from the primary can still be serving after this
+    /// launch resolved the repair slot. Both slots of the served id are
+    /// therefore kept; every other version and digest is removed.
     pub fn prune_superseded(&self, active_root: &Path) -> Result<(), PrivateRuntimeError> {
+        let outside_root = || {
+            PrivateRuntimeError::Install(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "active Runtime is outside the private install root",
+            ))
+        };
         let active_version = active_root
             .parent()
             .filter(|parent| parent.parent() == Some(self.install_root.as_path()))
-            .ok_or(PrivateRuntimeError::Install(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "active Runtime is outside the private install root",
-            )))?;
+            .ok_or_else(outside_root)?;
+        let active_slot = active_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(outside_root)?;
+        let digest_prefix = active_slot.strip_suffix(REPAIR_SLOT_SUFFIX).unwrap_or(active_slot);
+        let served_slots = install_slots(active_version, digest_prefix);
 
         let entries = match fs::read_dir(&self.install_root) {
             Ok(entries) => entries,
@@ -219,7 +228,7 @@ impl PrivateRuntimeBundle {
             if path == active_version {
                 for candidate in fs::read_dir(&path).map_err(PrivateRuntimeError::Install)? {
                     let candidate = candidate.map_err(PrivateRuntimeError::Install)?.path();
-                    if candidate != active_root {
+                    if !served_slots.contains(&candidate) {
                         remove_install_path(&candidate)?;
                     }
                 }
@@ -332,14 +341,26 @@ fn path_present(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-/// Moves an installed copy aside so its name can be reused.
+/// The primary and repair install slots of one archive digest.
+fn install_slots(version_dir: &Path, digest_prefix: &str) -> [PathBuf; 2] {
+    [
+        version_dir.join(digest_prefix),
+        version_dir.join(format!("{digest_prefix}{REPAIR_SLOT_SUFFIX}")),
+    ]
+}
+
+/// Moves an installed copy aside so its name can take a verified replacement.
 ///
 /// Deleting in place is what this avoids. `remove_dir_all` on a tree a running
 /// Runtime is executing from succeeds on Unix and fails partway through on
 /// Windows, where a mapped executable cannot be unlinked — and a half-deleted
 /// tree under a live process is a worse state than the invalid one it replaced.
-/// A rename either moves the whole thing or moves none of it, and the open
-/// handles a daemon holds keep working across it.
+/// A rename either moves the whole thing or moves none of it. On Unix the open
+/// handles a daemon holds keep working across it, and because the caller
+/// renames the replacement in immediately, the daemon's later lookups by path
+/// find the same verified bytes. On Windows the rename of a tree in use fails,
+/// so nothing is moved or deleted and the launch reports the verification
+/// failure it reported before this was recoverable.
 ///
 /// The discarded copy is then removed on a best-effort basis: it is already
 /// unreachable by name, and `prune_superseded` sweeps whatever is left after
@@ -823,15 +844,13 @@ mod tests {
     #[test]
     fn superseded_installs_are_pruned_only_after_an_active_runtime_is_selected() {
         let root = scratch("prune");
-        let manifest = write_bundle(&root, None);
+        write_bundle(&root, None);
         let install_root = root.join("installs");
         let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
         let active = bundle.prepare().expect("active install");
-        let sibling = active
-            .root
-            .with_file_name(format!("{}-repair", &manifest.archive_sha256[..16]));
-        fs::create_dir_all(&sibling).expect("sibling install");
-        fs::write(sibling.join("unused"), b"unused").expect("sibling file");
+        let other_digest = active.root.with_file_name("0123456789abcdef");
+        fs::create_dir_all(&other_digest).expect("other digest install");
+        fs::write(other_digest.join("unused"), b"unused").expect("other digest file");
         let old = install_root.join("2.9.0").join("old-digest");
         fs::create_dir_all(&old).expect("old install");
         fs::write(old.join("unused"), b"unused").expect("old file");
@@ -841,9 +860,45 @@ mod tests {
         bundle.prune_superseded(&active.root).expect("prune succeeds");
 
         assert!(active.root.is_dir());
-        assert!(!sibling.exists());
+        assert!(!other_digest.exists());
         assert!(!old.exists());
         assert!(!staging.exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// `/ready` proves which Runtime id is serving, not which of its two slots
+    /// the daemon started from. `vibe start` keeps a live daemon, so after a
+    /// relaunch resolves the repair slot the daemon can still be running from
+    /// the primary, and deleting it would pull the tree out from under it.
+    #[test]
+    fn pruning_keeps_both_slots_of_the_served_runtime() {
+        let root = scratch("prune-served-slots");
+        write_bundle(&root, None);
+        let install_root = root.join("installs");
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+        let primary = bundle.prepare().expect("primary install");
+        let old = install_root.join("2.9.0").join("old-digest");
+        fs::create_dir_all(&old).expect("old install");
+        // What a daemon running from the primary leaves behind: a file written
+        // into its own tree, which makes the next launch repair.
+        fs::write(primary.root.join("written-by-the-daemon"), b"extra").expect("tamper primary");
+        let repair = bundle.prepare().expect("repair install");
+        assert_ne!(repair.root, primary.root);
+
+        bundle
+            .prune_superseded(&repair.root)
+            .expect("prune from the repair slot");
+
+        assert_eq!(fs::read(&primary.python).expect("primary interpreter"), b"runtime");
+        assert!(repair.python.is_file());
+        assert!(!old.exists(), "another version is still superseded");
+
+        bundle
+            .prune_superseded(&primary.root)
+            .expect("prune from the primary slot");
+
+        assert!(primary.python.is_file());
+        assert!(repair.python.is_file());
         fs::remove_dir_all(root).ok();
     }
 
@@ -935,6 +990,36 @@ mod tests {
             // slot is still tampered, so only the primary has to be re-broken.
             fs::write(&recovered.python, b"tampered").expect("tamper for the next round");
         }
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Reinstalling over the primary name must not leave that name empty while
+    /// the replacement is extracted: a daemon started from the primary may
+    /// still be resolving paths inside it. A replacement that never verifies
+    /// therefore leaves the primary exactly where it was.
+    #[test]
+    fn a_failed_reinstall_leaves_the_primary_in_place() {
+        let root = scratch("installed-double-tamper-failed");
+        let mut manifest = write_bundle(&root, None);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let primary = bundle.prepare().expect("primary install");
+        fs::write(primary.root.join("written-by-the-daemon"), b"extra").expect("tamper primary");
+        let repair = bundle.prepare().expect("repair install");
+        fs::write(repair.root.join("written-by-the-daemon"), b"extra").expect("tamper repair");
+        // The archive still matches, but the tree it unpacks to does not.
+        manifest.tree_sha256 = "0".repeat(64);
+        fs::write(
+            root.join("bundle").join(MANIFEST_NAME),
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("manifest");
+
+        assert!(matches!(
+            bundle.prepare(),
+            Err(PrivateRuntimeError::ArchiveVerification)
+        ));
+        assert_eq!(fs::read(&primary.python).expect("primary interpreter"), b"runtime");
+        assert!(primary.root.join("written-by-the-daemon").is_file());
         fs::remove_dir_all(root).ok();
     }
 
