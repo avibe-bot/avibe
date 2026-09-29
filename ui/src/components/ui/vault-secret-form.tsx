@@ -39,7 +39,7 @@ import {
   type SigningKeyMaterial,
 } from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
-import { openProtectedAddInBrowser, openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { Badge } from './badge';
 import { Button } from './button';
 import { Input } from './input';
@@ -79,7 +79,7 @@ function normalizeHost(raw: string): string | null {
   const label = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
   return new RegExp(`^${label}(?:\\.${label})*$`).test(core) ? host : null;
 }
-export type VaultProtection = 'standard' | 'protected';
+type VaultProtection = 'standard' | 'protected';
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -931,12 +931,15 @@ export const VaultSecretForm: React.FC<{
       </div>
     ) : null;
 
-  // Where passkeys can't run, the browser reopens this flow: the provision request itself, or a new
-  // Add on the protected tier. This form stays open, so the user may still switch to Standard here.
-  const continueInBrowser = () => {
-    if (provisionRequestId) openVaultsInBrowser(provisionRequestId);
-    else openProtectedAddInBrowser();
-  };
+  // Where passkeys can't run, the browser reopens this flow on the Protected tier the user is on: the
+  // provision request itself, or an Add for the same name. This form stays open, so the user may
+  // still switch to Standard here.
+  const continueInBrowser = () =>
+    openVaultsInBrowser(
+      provisionRequestId
+        ? { kind: 'request', requestId: provisionRequestId, startProtected: true }
+        : { kind: 'add', name: fixedName },
+    );
 
   // Protected setup/unlock gating step + avault availability notices, shared by both modes.
   const gatingNotices = (

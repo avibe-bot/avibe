@@ -594,7 +594,7 @@ export const VaultApprovalCard: React.FC<{
             <Button
               type="button"
               onClick={() => {
-                openVaultsInBrowser(request.id);
+                openVaultsInBrowser({ kind: 'request', requestId: request.id });
                 onCancel();
               }}
               disabled={approveDisabled}

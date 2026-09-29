@@ -110,7 +110,7 @@ export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: 
         <div className="mx-3 mb-1">
           <button
             type="button"
-            onClick={() => (reviewInBrowser ? openVaultsInBrowser(oldestOffscreen.id) : setReviewing(oldestOffscreen))}
+            onClick={() => (reviewInBrowser ? openVaultsInBrowser({ kind: 'request', requestId: oldestOffscreen.id }) : setReviewing(oldestOffscreen))}
             className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
           >
             <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold-ink">

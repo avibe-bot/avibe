@@ -19,8 +19,6 @@ const api = vi.hoisted(() => ({
   getVaultAudit: vi.fn(),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
-  listDependencies: vi.fn(),
-  listSkills: vi.fn(),
   listVaultSecrets: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
@@ -55,7 +53,7 @@ vi.mock('../../context/ToastContext', () => ({
 }));
 
 vi.mock('../../lib/useProtectedVault', () => ({
-  useProtectedVault: () => ({ revealProtectedValue, status: 'checking', refresh: vi.fn() }),
+  useProtectedVault: () => ({ revealProtectedValue }),
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
@@ -76,10 +74,10 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
-function renderPage(context = remoteOwner, path = '/vaults') {
+function renderPage(context = remoteOwner) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
-      <MemoryRouter initialEntries={[path]}>
+      <MemoryRouter initialEntries={['/vaults']}>
         <VaultsPage />
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
@@ -97,8 +95,6 @@ beforeEach(() => {
   });
   api.getVaultRequests.mockResolvedValue({ requests: [] });
   api.listVaultSecrets.mockResolvedValue({ secrets: [] });
-  api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
-  api.listSkills.mockResolvedValue({ skills: [] });
   api.getVaultGrants.mockResolvedValue({ grants: [] });
   api.getVaultAudit.mockResolvedValue({
     events: [{ id: 'audit-1', event: 'grant_created', secret_name: 'alpha', ts: '2026-08-11T00:00:00Z' }],
@@ -201,18 +197,5 @@ describe('VaultsPage protected reveal', () => {
     await waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
     expect(revealProtectedValue.mock.calls[0][2]).toBe(opened.searchParams.get('id'));
     await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
-  });
-});
-
-// The desktop app hands a protected Add to the browser as `/vaults?add=protected`
-// (vaultBrowserHandoff). If this page ignored the parameter, the browser would land on a bare
-// Vaults list and the user would have to rediscover the create flow and pick the tier again.
-describe('VaultsPage protected-create handoff', () => {
-  it('opens Add on the protected tier from ?add=protected', async () => {
-    renderPage(remoteOwner, '/vaults?add=protected');
-
-    const tier = await screen.findByRole('button', { name: /vaults\.dialog\.protectedProtection/ });
-    expect(tier.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('dialog')).toBeTruthy();
   });
 });

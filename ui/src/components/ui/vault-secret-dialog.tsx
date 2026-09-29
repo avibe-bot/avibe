@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import type { VaultRequest, VaultRequestSpec, VaultSecret } from '@/context/ApiContext';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { ConfirmDialog } from './confirm-dialog';
-import { VaultSecretForm, type VaultProtection } from './vault-secret-form';
+import { VaultSecretForm } from './vault-secret-form';
 
 /**
  * The single add/provide-secret dialog: a consistent branded header (design.pen
@@ -25,8 +25,9 @@ export const VaultSecretDialog: React.FC<{
   request?: VaultRequest | null;
   /** An existing secret to edit (value-free metadata); mutually exclusive with create/provide. */
   editSecret?: VaultSecret | null;
-  /** The tier a new secret starts on; a provision request's own default wins. */
-  defaultProtection?: VaultProtection;
+  /** Start on the Protected tier even when a provision request defaults to Standard: a browser
+   *  handoff carries the user's choice of Protected. It can only raise the tier, never lower it. */
+  startProtected?: boolean;
   /** Rendered in place of the form (loading / ambiguous-provision notices from callers). */
   notice?: React.ReactNode;
   onCancel?: () => void;
@@ -43,7 +44,7 @@ export const VaultSecretDialog: React.FC<{
   name,
   request,
   editSecret,
-  defaultProtection: initialProtection,
+  startProtected = false,
   notice,
   onCancel,
   cancelLabel,
@@ -56,8 +57,11 @@ export const VaultSecretDialog: React.FC<{
   const [denyConfirmationOpen, setDenyConfirmationOpen] = useState(false);
   const card = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
   const requestSpec = (card?.spec ?? null) as VaultRequestSpec | null;
-  const defaultProtection =
-    card?.default_protection === 'standard' || card?.default_protection === 'protected' ? card.default_protection : initialProtection;
+  const defaultProtection = startProtected
+    ? 'protected'
+    : card?.default_protection === 'standard' || card?.default_protection === 'protected'
+      ? card.default_protection
+      : undefined;
   const fixedName = name ?? request?.secret_name ?? undefined;
   const isProvide = Boolean(fixedName);
   const isEdit = Boolean(editSecret);

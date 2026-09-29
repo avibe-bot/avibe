@@ -21,10 +21,14 @@ import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
 import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
-import type { VaultProtection } from '../ui/vault-secret-form';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault } from '../../lib/useProtectedVault';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '../../lib/vaultBrowserHandoff';
+import {
+  openVaultsInBrowser,
+  readVaultBrowserStep,
+  vaultPasskeyNeedsBrowser,
+  withoutVaultBrowserStep,
+} from '../../lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '../../lib/vaultRequestPlacement';
 import { openVaultAuthorizationWindow } from '../../lib/vaultSandboxClient';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
@@ -48,9 +52,10 @@ const SecretRow: React.FC<{
   onDelete: (secret: VaultSecret) => void;
   onReveal: (secret: VaultSecret) => void;
   canManage: boolean;
-}> = ({ secret: s, onEdit, onDelete, onReveal, canManage }) => {
+  menuOpen: boolean;
+  onMenuOpenChange: (open: boolean) => void;
+}> = ({ secret: s, onEdit, onDelete, onReveal, canManage, menuOpen, onMenuOpenChange: setMenuOpen }) => {
   const { t } = useTranslation();
-  const [menuOpen, setMenuOpen] = useState(false);
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
   // Reveal is only meaningful for a protected static secret: its plaintext lives sealed and can be
@@ -122,7 +127,7 @@ const SecretRow: React.FC<{
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
-                    openVaultsInBrowser();
+                    openVaultsInBrowser({ kind: 'reveal', secretName: s.name });
                   }}
                   className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
                 >
@@ -340,7 +345,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
       </div>
       <div className="ml-auto">
         {reviewInBrowser ? (
-          <Button size="sm" onClick={() => openVaultsInBrowser(r.id)}>
+          <Button size="sm" onClick={() => openVaultsInBrowser({ kind: 'request', requestId: r.id })}>
             {t('vaults.requests.reviewInBrowser')}
             <ExternalLink className="size-3.5" />
           </Button>
@@ -363,14 +368,17 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
 const PendingRequestsSection: React.FC<{
   onResolved: () => void;
   focusRequestId?: string | null;
+  /** Open a focused provision request on the Protected tier (the desktop app's handoff). */
+  focusStartProtected?: boolean;
   onFocusRequestOpened?: () => void;
-}> = ({ onResolved, focusRequestId, onFocusRequestOpened }) => {
+}> = ({ onResolved, focusRequestId, focusStartProtected = false, onFocusRequestOpened }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const [requests, setRequests] = useState<VaultRequest[]>([]);
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
   const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
+  const [provisionStartsProtected, setProvisionStartsProtected] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -403,10 +411,11 @@ const PendingRequestsSection: React.FC<{
     return () => window.clearTimeout(timer);
   }, [requests, load]);
 
-  const openRequest = useCallback((request: VaultRequest) => {
+  const openRequest = useCallback((request: VaultRequest, startProtected = false) => {
     const type = requestReviewType(request);
     if (type === 'provision') {
       setProvisioning(request);
+      setProvisionStartsProtected(startProtected);
     } else {
       setReviewing(request);
     }
@@ -416,9 +425,9 @@ const PendingRequestsSection: React.FC<{
     if (!focusRequestId) return;
     const request = requests.find((r) => r.id === focusRequestId);
     if (!request) return;
-    openRequest(request);
+    openRequest(request, focusStartProtected);
     onFocusRequestOpened?.();
-  }, [focusRequestId, onFocusRequestOpened, openRequest, requests]);
+  }, [focusRequestId, focusStartProtected, onFocusRequestOpened, openRequest, requests]);
 
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {
@@ -472,7 +481,7 @@ const PendingRequestsSection: React.FC<{
         <RequestRow
           key={r.id}
           request={r}
-          onReview={openRequest}
+          onReview={(request) => openRequest(request)}
         />
       ))}
       <VaultApprovalDialog request={reviewing} onResolved={handleOutcome} onClose={() => setReviewing(null)} />
@@ -483,6 +492,7 @@ const PendingRequestsSection: React.FC<{
             if (!o) setProvisioning(null);
           }}
           request={provisioning}
+          startProtected={provisionStartsProtected}
           onCancel={() => setProvisioning(null)}
           cancelLabel={t('vaults.approval.close')}
           onDeny={() => denyProvisionRequest(provisioning)}
@@ -529,8 +539,8 @@ export const VaultsPage: React.FC = () => {
   const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The tier of a new secret being added, or null when the Add dialog is closed.
-  const [adding, setAdding] = useState<VaultProtection | null>(null);
+  // The Add dialog while open: a new secret, or one resumed from the desktop app's handoff.
+  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
@@ -538,33 +548,29 @@ export const VaultsPage: React.FC = () => {
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
-  const focusRequestId = searchParams.get('request_id')?.trim() || null;
+  // A request linked from IM, or a step the desktop app handed to this browser (`openVaultsInBrowser`),
+  // resumed below; each drops the step from the URL once resumed so a reload doesn't resume it again.
+  const step = useMemo(() => readVaultBrowserStep(searchParams), [searchParams]);
+  // The secret whose row menu is open; a reveal handed off from the desktop app reopens it.
+  const [menuSecret, setMenuSecret] = useState<string | null>(null);
 
-  const clearFocusedRequest = useCallback(() => {
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete('request_id');
-        return next;
-      },
-      { replace: true },
-    );
+  const clearStep = useCallback(() => {
+    setSearchParams((prev) => withoutVaultBrowserStep(prev), { replace: true });
   }, [setSearchParams]);
 
-  // The desktop app's protected-create handoff (`openProtectedAddInBrowser`) lands here: reopen Add
-  // on the protected tier, then drop the parameter so a reload doesn't reopen it.
   useEffect(() => {
-    if (!canManage || searchParams.get('add') !== 'protected') return;
-    setAdding('protected');
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete('add');
-        return next;
-      },
-      { replace: true },
-    );
-  }, [canManage, searchParams, setSearchParams]);
+    if (!canManage || step?.kind !== 'add') return;
+    setAdding({ name: step.name, startProtected: true });
+    clearStep();
+  }, [canManage, step, clearStep]);
+
+  // A reveal continues from its row's menu once the list holds the secret: the sandbox window it
+  // opens needs a click in this browser.
+  useEffect(() => {
+    if (!canManage || step?.kind !== 'reveal' || !secrets.some((s) => s.name === step.secretName)) return;
+    setMenuSecret(step.secretName);
+    clearStep();
+  }, [canManage, step, secrets, clearStep]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -810,7 +816,7 @@ export const VaultsPage: React.FC = () => {
               <RefreshCw className="size-4" />
             </Button>
             {canManage ? (
-              <Button className="max-sm:flex-1" onClick={() => setAdding('standard')}>
+              <Button className="max-sm:flex-1" onClick={() => setAdding({ startProtected: false })}>
                 <Plus className="size-4" />
                 {t('vaults.add')}
               </Button>
@@ -826,7 +832,14 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
-      {canManage ? <PendingRequestsSection onResolved={refresh} focusRequestId={focusRequestId} onFocusRequestOpened={clearFocusedRequest} /> : null}
+      {canManage ? (
+        <PendingRequestsSection
+          onResolved={refresh}
+          focusRequestId={step?.kind === 'request' ? step.requestId : null}
+          focusStartProtected={step?.kind === 'request' && step.startProtected}
+          onFocusRequestOpened={clearStep}
+        />
+      ) : null}
       {canReadVaultState && grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">
@@ -893,6 +906,8 @@ export const VaultsPage: React.FC = () => {
               onDelete={onDelete}
               onReveal={revealSecret}
               canManage={canManage}
+              menuOpen={s.name === menuSecret}
+              onMenuOpenChange={(open) => setMenuSecret(open ? s.name : null)}
             />
           ))}
         </div>
@@ -918,14 +933,15 @@ export const VaultsPage: React.FC = () => {
       {canManage ? <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} /> : null}
       {canManage ? <VaultSecretDialog
         open={adding != null}
-        defaultProtection={adding ?? undefined}
+        name={adding?.name}
+        startProtected={adding?.startProtected}
         onOpenChange={(o) => {
           if (!o) setAdding(null);
         }}
         onCreated={(name, reason) => {
-          if (reason === 'already_exists') return;
           setAdding(null);
-          showToast(t('vaults.created', { name }), 'success');
+          // Only an Add for a name an agent asked for treats an existing secret as provided.
+          if (reason !== 'already_exists') showToast(t('vaults.created', { name }), 'success');
           refresh();
         }}
       /> : null}

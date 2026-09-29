@@ -157,7 +157,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           size="sm"
           className="shrink-0"
           onClick={() => {
-            if (reviewInBrowser) openVaultsInBrowser(request.id);
+            if (reviewInBrowser) openVaultsInBrowser({ kind: 'request', requestId: request.id });
             else if (externallyOwnedProvision) provisionDialog.open(request);
             else setOpen(true);
           }}
