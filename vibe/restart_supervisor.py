@@ -171,9 +171,18 @@ def _read_recorded_ui_pid() -> int | None:
 
 
 def _replaced_runtime_environ() -> Mapping[str, str] | None:
-    """The environment of the Runtime this job replaces, when one of its processes can be read."""
+    """The environment of the Runtime this job replaces, when one of its processes can be read.
 
-    for pid in (_read_recorded_pid(), _read_recorded_ui_pid()):
+    A recorded pid names that Runtime only while it still runs its role: the
+    service is the service lock's owner, and the UI runs the UI server. A pid
+    an unrelated process has reused is passed over.
+    """
+
+    service_pid = _read_recorded_pid()
+    if service_pid and not runtime.service_lock_held_by(service_pid):
+        service_pid = None
+    ui_pid = _read_recorded_ui_pid() if runtime.ui_pid_file_points_to_running_ui() else None
+    for pid in (service_pid, ui_pid):
         if not pid:
             continue
         try:

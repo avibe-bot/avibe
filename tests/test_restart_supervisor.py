@@ -396,6 +396,8 @@ _DESKTOP_IDENTITY = (
         ("untagged", "tagged", "bundle", "untagged"),
         # With no Runtime process left to read, the caller's identity stands.
         (None, "tagged", "bundle", "tagged"),
+        # The service pid now names an unrelated process; the UI still runs.
+        ("tagged-ui", "untagged", "bundle", "tagged"),
     ],
 )
 def test_a_restart_relaunches_the_replaced_runtime_s_desktop_identity(
@@ -421,12 +423,26 @@ def test_a_restart_relaunches_the_replaced_runtime_s_desktop_identity(
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     terminal = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONPATH": str(tmp_path / "caller-site")}
-    process = None
-    if replaced is not None:
+    processes = []
+    # The fake successor service, 222, and the service lock's owner.
+    alive, owners = {222}, {222}
+
+    def spawn(env, *argv):
         runtime_env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTHON", "AVIBE_DESKTOP"))}
-        runtime_env.update(launch if replaced == "tagged" else terminal)
-        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=runtime_env)
-        paths.get_runtime_pid_path().write_text(str(process.pid), encoding="utf-8")
+        runtime_env.update(env)
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *argv], env=runtime_env)
+        processes.append(process)
+        alive.add(process.pid)
+        return process.pid
+
+    if replaced in ("tagged", "untagged"):
+        service = spawn(launch if replaced == "tagged" else terminal)
+        owners.add(service)
+        paths.get_runtime_pid_path().write_text(str(service), encoding="utf-8")
+    elif replaced == "tagged-ui":
+        paths.get_runtime_pid_path().write_text(str(spawn(terminal)), encoding="utf-8")
+        ui = spawn(launch, "vibe.ui_server", "run_ui_server")
+        paths.get_runtime_ui_pid_path().write_text(str(ui), encoding="utf-8")
     python = bundle / "python" / "bin" / "python3" if executable == "bundle" else tmp_path / "other" / "python3"
     monkeypatch.setattr(sys, "executable", str(python))
     calls = []
@@ -439,8 +455,10 @@ def test_a_restart_relaunches_the_replaced_runtime_s_desktop_identity(
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in alive)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    # Holding the service lock is what makes a live pid the service.
+    monkeypatch.setattr(runtime, "service_lock_held_by", lambda pid: pid in owners)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda *args, **kwargs: 222)
     monkeypatch.setattr(install_generations, "collect_install_generations", lambda launcher: None)
     try:
@@ -450,7 +468,7 @@ def test_a_restart_relaunches_the_replaced_runtime_s_desktop_identity(
             os.environ.update(launch if caller == "tagged" else terminal)
             rc = restart_supervisor._run_restart_job(job_id="jobidentity", delay_seconds=0, vibe_path=None, trigger="test")
     finally:
-        if process is not None:
+        for process in processes:
             process.kill()
             process.wait()
 
