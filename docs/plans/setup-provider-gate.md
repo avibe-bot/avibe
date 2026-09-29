@@ -68,3 +68,13 @@ only setup's create flow to that supported custody in the shared OAuth dialog,
 retaining its explicit sign-in and disclosure step. Settings and reauthentication
 keep their existing channel choice. Validate real dialog composition through
 the browser, including the outgoing OAuth channel and post-login inventory gate.
+
+The fourth findings-bearing head, `d71d1e68fe`, repeated the evidence-lifecycle
+class at a different boundary: completion performs fresh server reads, but a
+refusal did not invalidate the assistant screen's earlier inventory. The full
+inventory still has one unresolved finding. Inspection of `Wizard.complete` and
+all entry-handler call sites confirms that its thrown refusal is the existing
+handoff boundary. Refresh the existing route/source reader after that refusal,
+without retrying completion or any write automatically. A registered-Wizard case
+removes supply while the assistant screen stays mounted, holds the recovery read,
+and then verifies the provider recovery action with no completion writes.

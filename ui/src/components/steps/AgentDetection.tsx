@@ -617,7 +617,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     try {
       await enableQueue.current;
       await onNext({ agents, readyBackends });
-    } catch (error) { setEntryError(String(error)); }
+    } catch (error) {
+      setEntryError(String(error));
+      // Completion rechecks the server. A refusal can contradict the inventory
+      // this screen still holds, so recover from current evidence before retrying.
+      if (requiresSource) void readCardRoutes();
+    }
     finally { primaryPending.current = false; setEntering(false); }
   };
 

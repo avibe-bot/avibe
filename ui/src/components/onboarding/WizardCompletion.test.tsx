@@ -204,6 +204,7 @@ describe('explicit any-one-ready completion', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     mock.control.mockImplementation(async () => { running = true; return { ok: true, action: 'start' }; });
     mock.api.mutateConfig.mockImplementation(async (mutations) => { persistConfig(mutations); return {}; });
+    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Enter workspace' })));
     await screen.findByTestId('destination');
   });
@@ -480,7 +481,10 @@ describe('the correlated entry gate', () => {
     mock.models.listAgents.mockRejectedValue(new Error('engine_down: controller socket absent'));
     mock.models.getRuntimeStatus.mockRejectedValue(new Error('engine_down: controller socket absent'));
     fireEvent.click(enter);
-    expect((await screen.findByRole('alert')).textContent).toContain(en.onboarding.connection.applyPending);
+    // The follow-up inventory read also reports its own route failure on the
+    // cards. The completion refusal remains the separate entry error.
+    await waitFor(() => expect(document.querySelector('.connection-error[role="alert"]')?.textContent)
+      .toContain(en.onboarding.connection.applyPending));
     expect(mock.control).not.toHaveBeenCalled();
     expect(mock.api.mutateConfig).not.toHaveBeenCalled();
     expect(screen.queryByTestId('destination')).toBeNull();
@@ -789,6 +793,36 @@ describe('the registered journey', () => {
   const screenId = () => document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
   const seeds = () => mock.apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
   const gateway = () => document.querySelector('.setup-gateway')!;
+
+  it('AUTH-SETUP-126: a completion refusal refreshes sources without leaving assistants', async () => {
+    const enter = await setup();
+    // Another client removes the source after the assistant screen's read. The
+    // fresh completion gate sees that its route cannot run, while this screen
+    // still holds the earlier connected source until it asks again.
+    mock.models.listAgents.mockResolvedValue([]);
+    let confirmSources!: (sources: Source[]) => void;
+    mock.models.listSources.mockReturnValue(new Promise<Source[]>((resolve) => { confirmSources = resolve; }));
+    const priorReads = mock.models.listSources.mock.calls.length;
+    fireEvent.click(enter);
+    const error = await screen.findByRole('alert');
+    expect(error.textContent).toContain(en.onboarding.connection.modelUnavailable);
+    await waitFor(() => expect(mock.models.listSources.mock.calls.length).toBeGreaterThan(priorReads));
+    expect(screenId()).toBe('assistants');
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    expect(within(error).getByRole('button', { name: 'Retry' }).hasAttribute('disabled')).toBe(true);
+    expectNoForwardWrite();
+
+    await act(async () => confirmSources([]));
+    const recover = await screen.findByRole('button', { name: 'Add model source' });
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    expect(within(error).getByRole('button', { name: 'Retry' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(recover);
+    await waitFor(() => expect(screenId()).toBe('providers'));
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionAdd));
+    fireEvent.click(primaryAction());
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expectNoForwardWrite();
+  });
 
   it('AUTH-SETUP-126: source recovery cannot reuse the previous visit while inventory readback is pending', async () => {
     await arriveAtProviders();
