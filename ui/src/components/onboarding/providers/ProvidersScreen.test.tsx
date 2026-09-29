@@ -1546,6 +1546,39 @@ describe('ProvidersScreen — the engine', () => {
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
   });
 
+  it('AUTH-SETUP-126: a write settled while hidden cannot answer the next visit', async () => {
+    serve();
+    const created = source({ id: 'src_new', vendor: 'custom' });
+    vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: created, added_to: [], adopted_by: [],
+    });
+    const { handle, show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+    await activate(handle);
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'API Key' }));
+    await user.type(within(dialog).getByLabelText('Base URL'), 'https://api.example/v1');
+    await user.type(within(dialog).getByLabelText('API key'), 'sk-fixture-only');
+
+    const receipt = deferred<Source[]>();
+    vi.mocked(modelsApi.listSources).mockReturnValue(receipt.promise);
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(2));
+    await show({ active: false });
+    await act(async () => receipt.resolve([created]));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    const current = deferred<Source[]>();
+    vi.mocked(modelsApi.listSources).mockReturnValue(current.promise);
+    await show({ active: true });
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionChecking', disabled: true });
+    await activate(handle);
+    expect(navigated).toEqual([]);
+    await act(async () => current.resolve([]));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionAdd', disabled: false }));
+  });
+
   it('refuses a write the configuration does not admit, however healthy the engine is', async () => {
     serve();
     const { handle, show } = renderScreen();

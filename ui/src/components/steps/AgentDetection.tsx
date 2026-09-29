@@ -595,10 +595,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   };
 
   const opencodeAgent = agents['opencode'];
+  const needsSource = canEditSetupRoute && modelHubEnabled && sharedRouteReady()
+    && !routeRead.sources.some(usableSource);
   const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
     && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
-  const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
+  const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : !needsSource && readyBackends.length > 0;
   const primaryPending = useRef(false);
   const handlePrimaryAction = async () => {
     if (!active || entering || primaryPending.current) return;
@@ -650,8 +652,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             <RefreshCw size={12} />{t('agentDetection.rescan')}
           </Button>
   );
-  const needsSource = canEditSetupRoute && modelHubEnabled && sharedRouteReady()
-    && !routeRead.sources.some(usableSource);
   const hintSentence = canContinue ? null : (
         /* The sentence is what the eye lines up with the action below it, so the
            sentence is what gets centred. The rescan rides in the flanking column

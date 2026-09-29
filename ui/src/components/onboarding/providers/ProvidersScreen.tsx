@@ -248,6 +248,12 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
      * the refresh is what stops that commit from existing, rather than narrowing it.
      */
     const answeredRef = React.useRef<number | null>(null);
+    // Retained screens must re-establish supply on each visit. Reset on both
+    // transitions: a write can finish its readback while this screen is hidden.
+    React.useLayoutEffect(() => {
+      answeredRef.current = null;
+      setSourceRead('reading');
+    }, [active]);
     /**
      * The runtime observation this screen's supply read is taken against.
      *

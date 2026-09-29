@@ -58,8 +58,13 @@ for (const [lang, copy, width] of [['en', en, 1440], ['zh', zh, 390]] as const) 
     expect(creates).toBe(2);
 
     // The source disappears elsewhere between steps. The assistant screen must
-    // offer a useful recovery even though entry and route editing cannot proceed.
+    // offer recovery even if a direct backend still reports itself entry-eligible.
     sources = [];
+    await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: {
+      ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2),
+      installed: true, enabled: true, auth: 'api_key', application: 'applied',
+      ready: true, entry_eligible: true, supply_mode: 'direct',
+    } }));
     await primary.click();
     await expect(step).toHaveAttribute('data-setup-screen', 'assistants');
     await expect(primary).toBeDisabled();

@@ -13,7 +13,10 @@ that none of its controls could establish.
 - A detected key is an import offer, not a connected source. Reading failures
   retain Retry; pending writes and readbacks cannot advance.
 - If a current source read on the assistant screen finds no usable source,
-  its blocked-entry hint offers Add model source and returns to providers.
+  entry stays disabled even when a direct backend reports itself eligible;
+  the hint offers Add model source and returns to providers.
+- Each return to providers requires a fresh source read. An inventory from
+  the previous visit or a write that settled while hidden cannot enable Continue.
 
 ## Scope and validation
 

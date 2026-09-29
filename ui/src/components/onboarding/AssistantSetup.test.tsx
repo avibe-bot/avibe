@@ -652,11 +652,12 @@ describe('assistant installation presentation', () => {
 });
 
 describe('Hub route refresh', () => {
-  it('AUTH-SETUP-126: returns to providers when the current inventory is empty', async () => {
+  it.each([false, true])('AUTH-SETUP-126: returns to providers with an empty inventory (direct eligible: %s)', async (directEligible) => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true, backend, installed: true, enabled: true, auth: 'none',
-      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+      application: 'applied', ready: directEligible, entry_eligible: directEligible,
+      supply_mode: directEligible ? 'direct' : 'hub',
     }));
     const listed = pending<[]>();
     mock.models.listSources.mockReturnValue(listed.promise);
@@ -669,6 +670,9 @@ describe('Hub route refresh', () => {
     const recover = await screen.findByRole<HTMLButtonElement>('button', { name: 'Add model source' });
     expect(screen.getByText(en.onboarding.connection.sourceRequired)).toBeTruthy();
     expect(recover.disabled).toBe(false);
+    const enter = screen.getByRole<HTMLButtonElement>('button', { name: 'Enter workspace' });
+    expect(enter.disabled).toBe(true);
+    fireEvent.click(enter);
     fireEvent.click(recover);
     expect(navigate).toHaveBeenCalledExactlyOnceWith('providers');
     expect(props.onNext).not.toHaveBeenCalled();

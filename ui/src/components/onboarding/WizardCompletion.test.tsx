@@ -790,6 +790,38 @@ describe('the registered journey', () => {
   const seeds = () => mock.apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
   const gateway = () => document.querySelector('.setup-gateway')!;
 
+  it('AUTH-SETUP-126: source recovery cannot reuse the previous visit while inventory readback is pending', async () => {
+    await arriveAtProviders();
+    mock.models.listSources.mockResolvedValue([]);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, enabled: true, installed: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct',
+    }));
+    fireEvent.click(primaryAction());
+    const recover = await screen.findByRole('button', { name: 'Add model source' });
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    fireEvent.click(primaryAction());
+    expect(screenId()).toBe('assistants');
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+
+    let confirmSources!: (sources: Source[]) => void;
+    mock.models.listSources.mockReturnValue(new Promise<Source[]>((resolve) => { confirmSources = resolve; }));
+    const runtimeReads = mock.models.getRuntimeStatus.mock.calls.length;
+    fireEvent.click(recover);
+    await waitFor(() => expect(screenId()).toBe('providers'));
+    await waitFor(() => expect(mock.models.getRuntimeStatus.mock.calls.length).toBeGreaterThan(runtimeReads));
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    fireEvent.click(primaryAction());
+    expect(screenId()).toBe('providers');
+
+    await act(async () => confirmSources([]));
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionAdd));
+    expect(primaryAction().hasAttribute('disabled')).toBe(false);
+    fireEvent.click(primaryAction());
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(screenId()).toBe('providers');
+  });
+
   it('AUTH-SETUP-126: requires source readback before the shell can continue to assistants', async () => {
     mock.models.listSources.mockResolvedValue([]);
     mount();
