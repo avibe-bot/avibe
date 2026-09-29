@@ -6,7 +6,7 @@
 
 ### Avibe 是本地优先的 Agent OS——你的 AI 伙伴，住在你自己的机器上。
 
-**所有 Agent，所有订阅，任意屏幕，都在你自己的机器上。**
+**所有 Agent，所有订阅，跑在你自己的机器上，揣在你的口袋里。**
 
 [![GitHub Stars](https://img.shields.io/github/stars/avibe-bot/avibe?color=ffcb47&labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/stargazers)
 [![Release](https://img.shields.io/github/v/release/avibe-bot/avibe?labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/releases/latest)
@@ -29,24 +29,24 @@
 
 ---
 
-## 你的 AI agent 很强——但被困住了
+## 你的 Agent 是个天才——却被拴在终端里
 
-Claude Code、Codex、OpenCode 都很能打。但是：
+Claude Code、Codex、OpenCode 都强得离谱。可是：
 
-- 🖥️ **困在一台机器上。** 它活在终端里，合上笔记本它就停了。
-- 📵 **够不着。** 离开工位，你连它在干什么都看不到，更别说指挥。
-- 💸 **额度总在关键时刻见底。** 一个套餐干到一半撞上限额，另一个却在吃灰；哪个值回票价，你也说不清。
-- 🔒 **被锁死。** 每个工具都想当整个栈：它的 app、它的云、它的订阅，你的代码还得传到别人的盒子里。
+- 🖥️ **合上盖子，它就歇了。** 它活在一个终端窗口里，你一走开，活儿也跟着停。
+- 📵 **离开工位，就失联。** 它在干什么你看不到，更别提指挥它。
+- 💸 **付着好几份订阅，却卡在一份额度上。** 一个套餐干到一半撞墙，另一个在吃灰；哪个真值回票价，你根本说不清。
+- 🔒 **每个工具都想把你圈起来。** 它的 app、它的云、它的订阅——还有你那份跑到别人服务器上的代码。
 
-## Avibe 把这件事反过来
+## Avibe 给它松绑
 
-**一条命令，把你自己的机器变成 AI 伙伴的家。** 从浏览器、手机或任意聊天软件驱动*官方*的 Claude Code、Codex、OpenCode；你手上的订阅和 API Key 汇进同一个本地网关。代码、密钥和 agent 进程都留在你的机器上——`avibe.bot` 只负责登录和安全隧道，从不经手你的工作区。
+**一条命令，你的机器就成了 AI 伙伴的家。** 用浏览器、手机，或者你本来就开着的聊天软件，驱动*官方*的 Claude Code、Codex、OpenCode。你手上所有的订阅和 API Key，统统汇进同一个本地网关。代码、密钥和 agent 进程都留在你的机器上——`avibe.bot` 只负责登录和安全隧道，从不碰你的工作区。
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
-浏览器自动打开，简短的设置向导会找到你已有的 agent（缺的可以一键装上）、接好模型，然后直接带你进入 Workbench。
+浏览器自动弹开，三步设置向导会找到你已有的 agent（缺的顺手装上）、接好模型，直接把你送进 Workbench。
 
 > 开源——想看可以先读一遍[安装脚本](https://github.com/avibe-bot/avibe/blob/master/install.sh)。短链只是到这个文件的 307 重定向。
 
@@ -62,24 +62,28 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 ## 你能得到什么
 
-### 💬 一个真正的 Workbench，不是又一个 Chat 框
+### 💬 不是又一个聊天框，是一整个 Workbench
 
-对话、文件、编辑器、终端都在同一个窗口化工作区里，agent 做出来的应用和 Show Page 就开在旁边。浏览器不再是一个设置面板，而是真的像一个操作系统。
+对话、文件、编辑器、终端，开成窗口并排摆在同一个浏览器标签页里；agent 做出来的应用和 Show Page 就开在旁边。用着用着你会忘了这是网页——它更像一个操作系统。
 
 <img src="assets/screenshots/v4/apps-library-zh.png" alt="Avibe 多窗口 Workbench，同时打开文件、终端和编辑器" />
 
-### 🔀 Model Hub——所有订阅，一个网关
+### 🔀 Model Hub——你付费的每一份订阅，终于能组队干活
 
-订阅登录一次、API Key 添加一次——官方厂商、中转站、聚合平台、自建服务都行。Avibe 的本地网关按你定的顺序，把每个 Agent 的模型请求路由过去。
+订阅登录一次、API Key 添加一次——官方厂商、中转站、聚合平台、自建服务，来者不拒。Avibe 的本地网关按你排好的顺序，把每个 Agent 的模型请求送过去。
 
-- **一个额度用完，自动换下一个。** 某个来源撞上额度、限流或网络故障，路由里的下一个来源立刻接手；首选来源恢复后，下一轮对话自动切回去。
-- **一个池子，所有 agent 共用。** Claude Code、Codex、OpenCode 可以共享同一批来源，每个模型各有自己的路由。
-- **钱花得值不值，一眼看清。** 按模型和来源看用量趋势，实时查看 5 小时和每周额度，再按 API 价格折算你的用量——直接告诉你每个套餐已经回本几倍。
-- **一键搬家。** 已经在支持的 CLI 里登录过？经你确认后一键迁入。凭据和路由都留在你的机器上。
+- **额度见底？下一个已经接上了。** 某个来源在开始回答前撞上额度、限流或网络故障，路由里的下一个来源直接接手这次请求——你不用重试，也不用盯着。首选来源恢复后，下一轮对话自动切回去。
+- **一个池子，三个 agent 共用。** Claude Code、Codex、OpenCode 从同一批来源取用，每个模型各走各的路由。
+- **每份套餐值多少，一清二楚。** 按模型和来源看用量趋势，实时盯住 5 小时和每周额度，再按官方 API 价格把用量折成钱——直接算出每个套餐已经回本几倍。
+- **一键搬家。** 已经在支持的 CLI 里登录过？你点头，登录就迁过来。凭据和路由都留在你的机器上。
 
-### 🧠 它有自己的时间线——Agent Harness
+*维护者机器上真实的一天：24 小时约 6.8 亿 token，按官方 API 价格折合约 $540。*
 
-大多数 AI 工具只在你打字时才动。Avibe 给 agent 四个持久化基础能力——**运行、定时、监听、查历史**——让它能自己发起工作、等到合适的时机、在后台跑完再回来汇报。定时 shell 命令成功时不打扰你，失败时可以直接交给 Agent 处理。
+<img src="assets/screenshots/v4/model-hub-usage-zh.png" alt="Model Hub 用量视图：24 小时 token 总量、请求数、缓存占比、折合 API 价格和按小时的用量趋势" />
+
+### ⏰ 你睡觉，它上班——Agent Harness
+
+大多数 AI 工具，你一停手它就停。Avibe 给 agent 四个持久化基础能力——**运行、定时、监听、查历史**——让它能自己开工、等准时机、在后台闷头干完，有值得你看的东西再回来找你。定时 shell 命令成功时一声不吭，失败时直接交给 Agent 处理。
 
 不用背参数，直接说：
 
@@ -90,40 +94,40 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 <img src="assets/screenshots/v4/harness-tasks-zh.png" alt="Agent Harness 定时任务，展示调度、Agent、会话和投递详情" />
 
-### 🤖 带上你已经信任的 Agent
+### 🤖 正版 Agent，不是山寨复刻
 
-运行的是官方 Claude Code、Codex、OpenCode CLI，不是仿制品，统一收进一套 Agent 注册表。每个 Agent 单独选模型和推理强度，把不同项目或频道交给合适的专家。Skill 写一次，Avibe 就用同一种方式把它加载给三个后端。
+Avibe 运行的是官方 Claude Code、Codex、OpenCode CLI——就是你自己会装的那几个——统一收进一套 Agent 注册表。每个 Agent 单独选模型和推理强度，每个项目、每个频道都交给最合适的专家。Skill 写一次，三个后端用同一种方式加载。
 
-一个 agent 把活儿派给另一个时，**Runs** 会把协作画成一张图：谁发起了哪个后台会话、结果汇报给谁、每个节点背后的执行历史。
+agent 之间开始互相派活时，**Runs** 把整条协作链画成一张图：谁发起了哪个后台会话、结果汇报给谁、每个节点背后的执行历史。
 
 <img src="assets/screenshots/v4/agents-graph-zh.png" alt="Avibe Agent 运行关系图，展示父会话把工作委派给 Claude Code、Codex 和 OpenCode 后台会话" />
 
-### 🎨 Show Pages——一图胜千言
+### 🎨 Show Pages——agent 直接甩给你一个网页
 
-agent 直接交给你一个活的网页——仪表盘、流程图、diff、报告，或者一个小应用。点一个元素、框一块区域、在截图上圈一圈，说一句你想要什么，agent 就会改页面，或者就在你指的地方回答。
+要仪表盘、流程图、diff、报告，还是一个小应用？agent 交给你的是一个活的网页，而不是一大段文字。点一个元素、框一块区域、在截图上随手圈一圈，说一句你想要什么，agent 就改页面，或者就在你指的地方回答。
 
-页面可以保持私有、只分享给指定的人，或者发布成一个好记的链接。常用的固定到应用栏，打开就是一个 app。
+页面可以私有、只分享给指定的人，或者发布成一个好记的链接。常用的固定到应用栏，点开就是一个 app。
 
 <img src="assets/screenshots/v4/show-page-zh.png" alt="Show Page 评审：评论锚定在页面元素上，Agent 回复在页面上" />
 
-### 📱 手机、聊天软件、任意浏览器
+### 📱 人离开工位，agent 照样在手
 
 <img src="assets/screenshots/v4/workbench-mobile-zh.png" alt="手机上的 Avibe Workbench" width="270" align="right" />
 
-活儿在你的机器上跑，你不用守在它跟前。想要窗口化操作就用 Workbench，想快就用 Slack、Discord、Telegram、微信或飞书——连到的是同一批 Agent、同一个会话。
+活儿在你的机器上跑，你不用守着它。想开窗口就用 Workbench；想快就在 Slack、Discord、Telegram、微信或飞书里发一条消息——连到的是同一批 Agent、同一个会话。
 
-- 🔔 **需要你时它会拍拍你。** 把 Workbench 装成手机或桌面 app，任务需要你的那一刻就收到推送。
-- 🎙️ **动嘴不动手。** 实时语音输入边说边出字，说完自动就地整理好。桌面上按 ⌥Z（Windows 和 Linux 上是 Alt+Z）。
-- 🌍 **你自己的 `you-app.avibe.bot`。** 运行 `vibe remote`，本地 Workbench 就能从任意浏览器访问——不用 VPN，不用端口转发。
-- 🔒 **只有你邀请的人能进。** 远程登录只对你授权的邮箱开放，认证、路由、主机校验全部默认拒绝。
+- 🔔 **需要你时，它会拍拍你。** 把 Workbench 装成手机或桌面 app，任务需要你的那一刻就收到推送。
+- 🎙️ **动嘴，不动手。** 实时语音输入边说边出字，说完自动就地整理干净。桌面上按 ⌥Z（Windows 和 Linux 上是 Alt+Z）。
+- 🌍 **你专属的 `you-app.avibe.bot`。** 一句 `vibe remote`，你的 Workbench 在任何地方、任何浏览器里都能打开——不用 VPN，不用端口转发。
+- 🔒 **只认邀请名单。** 只有你授权的邮箱能登录，认证、路由、主机校验全部默认拒绝。
 
-你在飞机上、在咖啡馆、用着借来的电脑。agent 提醒你一声，打开链接指挥几句，然后接着去忙。
+在飞机上，在咖啡馆，用着借来的电脑。agent 叫你一声，你打开链接指挥两句，转身接着忙。
 
 <br clear="all"/>
 
-### 🔐 Vaults——按名字用密钥，不碰密钥值
+### 🔐 Vaults——按名字用密钥，永远不碰密钥值
 
-API Key 或 token 添加一次。Agent 按名字申请，你在浏览器里批准，Avibe 把它交给需要它的命令、认证请求或签名操作。Vault 的响应永远不包含密钥值；接收密钥的命令仍需避免把它打印出来。passkey 保护托管目前处于预览阶段。
+API Key 或 token 添加一次。Agent 按名字申请，你在浏览器里点批准，Avibe 把它递给需要它的命令、认证请求或签名操作。Vault 的响应永远不包含密钥值；接收密钥的命令仍需避免把它打印出来。passkey 保护托管目前处于预览阶段。
 
 **还有**——thread 即会话，随处可续 · agent 需要你拍板时弹按钮和表单 · 丰富的附件，音视频直接内联播放 · 键盘快捷键 · 后端一键升级。
 
@@ -133,11 +137,11 @@ API Key 或 token 添加一次。Agent 按名字申请，你在浏览器里批�
 
 | | |
 |---|---|
-| **本地优先，归你所有** | AI 伙伴、它的执行、你的密钥和代码都留在你的机器上。`avibe.bot` 只签发身份、提供安全隧道，从不代理你的工作区。 |
+| **本地优先，真正归你** | AI 伙伴、它的执行、你的密钥和代码都留在你的机器上。`avibe.bot` 只签发身份、提供安全隧道，从不代理你的工作区。 |
 | **所有第一方 agent，一个家** | 驱动*官方*的 Claude Code、Codex、OpenCode。按任务、按项目、按频道切换，不被任何一家锁死。 |
-| **所有订阅，协同干活** | Model Hub 把你的套餐和 Key 汇成一个池子，自动故障切换，还告诉你每一份值多少。 |
+| **所有订阅，组成一支队** | Model Hub 把你的套餐和 Key 汇成一个池子，自动故障接管，还告诉你每一份到底值多少。 |
 | **浏览器和聊天，都是一等公民** | Workbench、手机、Slack、Discord、Telegram、微信、飞书——同一个 agent，同一个会话。 |
-| **没有中间商** | 你和 agent 之间没有额外的推理循环，token 直接给到你选的 agent。 |
+| **没有中间商抽成** | 你和 agent 之间没有额外的推理循环，每个 token 都直接给到你选的 agent。 |
 
 ---
 
@@ -231,7 +235,7 @@ OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自�
 
 > Avibe 是 agent 住的那个家，云团子是住在里面的那位同事。
 
-做过什么都有据可查，有自己的脾气。你修了它的 bug，它会道谢。
+什么都记得，有自己的脾气。你修了它的 bug，它会道谢。
 
 ---
 
@@ -350,8 +354,8 @@ rm -rf "$avibe_home" ~/.vibe_remote
 
 <div align="center">
 
-**拥有你的 agent。随处都能找到它。**
+**Agent 归你。走到哪，带到哪。**
 
-[立即安装](#avibe-把这件事反过来) · [文档](https://docs.avibe.bot) · [报 bug](https://github.com/avibe-bot/avibe/issues) · [关注 @alex_metacraft](https://x.com/alex_metacraft)
+[立即安装](#avibe-给它松绑) · [文档](https://docs.avibe.bot) · [报 bug](https://github.com/avibe-bot/avibe/issues) · [关注 @alex_metacraft](https://x.com/alex_metacraft)
 
 </div>
