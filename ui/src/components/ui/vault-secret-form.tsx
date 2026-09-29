@@ -934,7 +934,7 @@ export const VaultSecretForm: React.FC<{
   const gatingNotices = (
     <>
       {protection === 'protected' && !protectedCreateReady && (
-        <VaultProtectedUnlock vault={protectedVault} secretName={secretName || undefined} />
+        <VaultProtectedUnlock vault={protectedVault} secretName={secretName || undefined} requestId={provisionRequestId} />
       )}
       {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock vault={protectedVault} />}
       {protection === 'standard' && checkingAvault && (

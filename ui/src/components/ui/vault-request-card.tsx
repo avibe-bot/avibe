@@ -1,9 +1,11 @@
 import { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowRight, KeyRound, LockKeyhole, PenTool, Wallet } from 'lucide-react';
+import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest } from '@/context/ApiContext';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { partitionTags } from '@/lib/vaultTags';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -109,6 +111,9 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
     source_selector?: { env?: string[]; tags?: string[] };
   };
   const isProtected = card.protection === 'protected' || (card.protected_secret_names?.length ?? 0) > 0;
+  // An approval that needs a passkey this app can't use is reviewed once, in the browser, instead
+  // of in a dialog that could only send it there.
+  const reviewInBrowser = type !== 'provision' && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(request);
   // A selector-based access request matches multiple secrets, so `secret_name` is null and the
   // members/selector live on the card. Fall back to those so the card is never nameless.
   const { name, extra } = useMemo(() => {
@@ -152,12 +157,13 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           size="sm"
           className="shrink-0"
           onClick={() => {
-            if (externallyOwnedProvision) provisionDialog.open(request);
+            if (reviewInBrowser) openVaultsInBrowser(request.id);
+            else if (externallyOwnedProvision) provisionDialog.open(request);
             else setOpen(true);
           }}
         >
-          {meta.action}
-          <ArrowRight className="size-3.5" />
+          {reviewInBrowser ? t('vaults.requests.reviewInBrowser') : meta.action}
+          {reviewInBrowser ? <ExternalLink className="size-3.5" /> : <ArrowRight className="size-3.5" />}
         </Button>
       </div>
 

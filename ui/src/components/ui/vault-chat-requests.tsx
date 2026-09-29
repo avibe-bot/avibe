@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import type { VaultRequest } from '@/context/ApiContext';
-import { isVaultApprovalRequest } from '@/lib/vaultRequestPlacement';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { isVaultApprovalRequest, vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { buttonVariants } from './button-variants';
 import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
@@ -102,13 +103,14 @@ export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: 
   }, [pending, reviewing]);
 
   const oldestOffscreen = offscreen.length > 0 ? offscreen[offscreen.length - 1] : null;
+  const reviewInBrowser = oldestOffscreen != null && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(oldestOffscreen);
   return (
     <>
       {oldestOffscreen ? (
         <div className="mx-3 mb-1">
           <button
             type="button"
-            onClick={() => setReviewing(oldestOffscreen)}
+            onClick={() => (reviewInBrowser ? openVaultsInBrowser(oldestOffscreen.id) : setReviewing(oldestOffscreen))}
             className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
           >
             <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold-ink">
@@ -119,7 +121,7 @@ export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: 
             </span>
             {/* Decorative pill — the whole bar is the button, so this must not be interactive. */}
             <span className={cn(buttonVariants({ size: 'sm' }), 'pointer-events-none shrink-0')} aria-hidden="true">
-              {t('vaults.requests.review')}
+              {reviewInBrowser ? t('vaults.requests.reviewInBrowser') : t('vaults.requests.review')}
             </span>
           </button>
         </div>

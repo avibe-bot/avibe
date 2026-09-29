@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
+import { ExternalLink, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { webauthnAvailable } from '@/lib/useProtectedVault';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import type { useProtectedVault } from '@/lib/useProtectedVault';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -36,13 +37,15 @@ const PANEL = 'flex flex-col gap-4 rounded-2xl border border-border bg-surface p
  * {@link useProtectedVault}.
  *
  * `secretName` is shown in the unlock subtitle ("<NAME> is protected …"); it is optional
- * because the create-dialog gating step has no single secret name yet.
+ * because the create-dialog gating step has no single secret name yet. Where passkeys can't run,
+ * setup and unlock continue in the browser, opened on `requestId` when a request is being answered.
  */
-export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string; onDismiss?: () => void }> = ({
-  vault,
-  secretName,
-  onDismiss,
-}) => {
+export const VaultProtectedUnlock: React.FC<{
+  vault: Vault;
+  secretName?: string;
+  requestId?: string | null;
+  onDismiss?: () => void;
+}> = ({ vault, secretName, requestId, onDismiss }) => {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   // Passkey-only setup has no recovery fallback yet, so a lost passkey is
@@ -97,6 +100,16 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
   }
 
   const canUsePasskey = webauthnAvailable();
+  const inBrowser = vaultPasskeyNeedsBrowser();
+  const browserHandoff = (
+    <div className="flex flex-col items-center gap-2.5">
+      <span className="text-center text-[12px] leading-snug text-muted-foreground">{t('vaults.protectedUnlock.browserNote')}</span>
+      <Button type="button" variant="brand" className="w-full" onClick={() => openVaultsInBrowser(requestId)}>
+        <ExternalLink className="size-5" />
+        {t('vaults.protectedUnlock.openInBrowser')}
+      </Button>
+    </div>
+  );
 
   // ---- Setup (needs-setup): design.pen `kAmWj` ---------------------------------------
   if (vault.status === 'needs-setup') {
@@ -116,7 +129,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
 
         {/* Ack sits ABOVE the button: the natural order is read-the-risk → check → the
             (now-enabled) Add-Passkey button right below it. The button gates on `ackLoss`. */}
-        {canUsePasskey && (
+        {canUsePasskey && !inBrowser && (
           <div className="flex flex-col gap-2 rounded-xl border border-gold/40 bg-gold/10 p-3">
             <span className="text-[11.5px] leading-snug text-gold-ink">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
             <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
@@ -126,7 +139,9 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
           </div>
         )}
 
-        {canUsePasskey ? (
+        {inBrowser ? (
+          browserHandoff
+        ) : canUsePasskey ? (
           <div className="flex flex-col items-center gap-2.5 rounded-xl border-[1.5px] border-mint bg-mint-soft p-4">
             <Badge variant="success" className="border-transparent bg-mint uppercase tracking-wide text-primary-foreground">
               <Sparkles className="size-3" />
@@ -160,7 +175,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
   }
 
   // ---- Unlock (locked): design.pen `g5Q7F` -------------------------------------------
-  const showUnlockPasskey = vault.hasPasskey() && canUsePasskey && vault.passkeyUsableHere();
+  const showUnlockPasskey = !inBrowser && vault.hasPasskey() && canUsePasskey && vault.passkeyUsableHere();
   return (
     <div className={PANEL}>
       <div className="flex flex-col items-center gap-4">
@@ -187,11 +202,13 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
         </div>
       )}
 
-      {!showUnlockPasskey && (
-        <div className="rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-xs text-gold-ink">
-          {t('vaults.protectedUnlock.unlockUnavailableHere')}
-        </div>
-      )}
+      {inBrowser
+        ? browserHandoff
+        : !showUnlockPasskey && (
+          <div className="rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-xs text-gold-ink">
+            {t('vaults.protectedUnlock.unlockUnavailableHere')}
+          </div>
+        )}
 
       {/* Mint factor-safety note. */}
       <div className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5">

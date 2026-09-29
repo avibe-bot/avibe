@@ -17,6 +17,22 @@ export function isVaultApprovalRequest(request: VaultRequest): boolean {
   return type === 'access' || type === 'sign';
 }
 
+/**
+ * Whether approving this request runs the sandbox's protected ceremony: a protected sign, or an
+ * access whose fixed set includes protected members. Provision requests never approve.
+ */
+export function vaultApprovalNeedsPasskey(request: VaultRequest): boolean {
+  const type = vaultRequestType(request);
+  if (type === 'provision') return false;
+  const card = (request.card ?? {}) as {
+    protection?: string | null;
+    protected_secret_names?: string[];
+    grant_options?: Array<{ unlock_material?: unknown[] }>;
+  };
+  if (type === 'sign') return card.protection === 'protected';
+  return (card.grant_options?.[0]?.unlock_material?.length ?? 0) > 0 || (card.protected_secret_names?.length ?? 0) > 0;
+}
+
 export type VaultProvisionPlacement = {
   byMessageId: Map<string, VaultRequest[]>;
   /** Requests of the transcript's latest turn whose owning reply has not landed. */

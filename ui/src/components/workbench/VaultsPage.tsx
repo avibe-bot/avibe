@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Copy, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Copy, ExternalLink, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -23,6 +23,8 @@ import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault } from '../../lib/useProtectedVault';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '../../lib/vaultBrowserHandoff';
+import { vaultApprovalNeedsPasskey } from '../../lib/vaultRequestPlacement';
 import { openVaultAuthorizationWindow } from '../../lib/vaultSandboxClient';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 import {
@@ -53,6 +55,8 @@ const SecretRow: React.FC<{
   // Reveal is only meaningful for a protected static secret: its plaintext lives sealed and can be
   // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
   const canReveal = isProtected && !isKeypair;
+  // The sandbox reveal needs its authorization window, which only a browser can pair with.
+  const revealInBrowser = canReveal && vaultPasskeyNeedsBrowser();
   // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
   const { tags, skills } = useMemo(() => partitionTags(s.tags), [s.tags]);
   return (
@@ -110,7 +114,23 @@ const SecretRow: React.FC<{
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-44 p-1" role="menu">
-            {canReveal ? (
+            {revealInBrowser ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openVaultsInBrowser();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                >
+                  <ExternalLink className="size-4 text-muted" />
+                  {t('vaults.reveal.showInBrowser')}
+                </button>
+                <div className="my-1 h-px bg-border" />
+              </>
+            ) : canReveal ? (
               <>
                 {/* Reveal opens the value inside the sandbox frame; the plaintext is never returned
                     to Avibe. "Copy value" leads to the same sandbox card, where copying is the
@@ -292,6 +312,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
   const isProtected = card.protection === 'protected';
   const Icon = isSign || card.kind === 'keypair' ? Wallet : KeyRound;
   const session = vaultRequestSessionDisplay(r);
+  const reviewInBrowser = !isProvision && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(r);
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-gold/40 bg-gold/[0.06] px-4 py-3">
       <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold-ink">
@@ -317,9 +338,16 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
         </span>
       </div>
       <div className="ml-auto">
-        <Button size="sm" onClick={() => onReview(r)}>
-          {isProvision ? t('vaults.request.provide') : t('vaults.requests.review')}
-        </Button>
+        {reviewInBrowser ? (
+          <Button size="sm" onClick={() => openVaultsInBrowser(r.id)}>
+            {t('vaults.requests.reviewInBrowser')}
+            <ExternalLink className="size-3.5" />
+          </Button>
+        ) : (
+          <Button size="sm" onClick={() => onReview(r)}>
+            {isProvision ? t('vaults.request.provide') : t('vaults.requests.review')}
+          </Button>
+        )}
       </div>
     </div>
   );

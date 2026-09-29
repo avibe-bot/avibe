@@ -4823,6 +4823,7 @@
     "reveal": {
       "show": "查看值",
       "copy": "复制值",
+      "showInBrowser": "在浏览器中查看",
       "errors": {
         "contextFailed": "无法准备查看，请重试。",
         "unavailable": "此保护档暂不支持查看。"
@@ -4857,6 +4858,8 @@
       "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
       "unlockUnavailableHere": "保护层保险库需要 passkey。请从 localhost 或你的 avibe.bot 地址打开 Vaults；127.0.0.1 这类原始 IP 无法使用 WebAuthn。",
+      "browserNote": "桌面端无法使用 passkey。请在浏览器中继续——打开的是同一个 Avibe。",
+      "openInBrowser": "在浏览器中打开",
       "errors": {
         "prfUnavailable": "这个 passkey/浏览器不支持加密所需的 PRF 扩展。请改用平台 passkey(Touch ID / Windows Hello)。",
         "cancelled": "passkey 提示被取消了。",
@@ -4955,6 +4958,7 @@
       "subtitle": "有 Agent 正在等待——在本设备上批准或拒绝。",
       "reviewTitle": "审阅请求",
       "review": "审阅",
+      "reviewInBrowser": "在浏览器中审阅",
       "waiting": "等待批准",
       "waitingForValue": "等待填写",
       "access": "使用密钥",
@@ -4999,6 +5003,8 @@
       "ttlHours": "{{count}} 小时",
       "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
+      "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
+      "continueInBrowser": "在浏览器中继续",
       "errors": {
         "failed": "批准未能完成，请重试。",
         "loadFailed": "无法加载该请求，它可能已被处理。",

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
+import { Check, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -13,6 +13,8 @@ import {
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
 import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib/vaultCrypto';
@@ -220,9 +222,10 @@ export const VaultApprovalCard: React.FC<{
   const schemeAddresses = useMemo(() => addressesForScheme(delivery.scheme, signAddresses), [delivery.scheme, signAddresses]);
   const hasSchemeAddress = Object.values(schemeAddresses).some(Boolean);
 
-  // A request needs the sandbox protected-approval ceremony when it touches protected
-  // key material: a protected sign, or an access whose fixed set includes protected members.
-  const needsProtectedApproval = isSign ? isProtected : protectedNames.length > 0;
+  const needsProtectedApproval = useMemo(() => vaultApprovalNeedsPasskey(request), [request]);
+  // Where passkeys can't run, the approver finishes this request in the browser instead; nothing
+  // (no binding contexts, no sandbox ceremony) starts here.
+  const approveInBrowser = needsProtectedApproval && vaultPasskeyNeedsBrowser();
 
   useEffect(() => {
     if (needsProtectedApproval) void vault.refresh();
@@ -521,14 +524,17 @@ export const VaultApprovalCard: React.FC<{
       {needsProtectedApproval ? (
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
           <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
-          {isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
+          {approveInBrowser
+            ? t('vaults.approval.browserNote')
+            : isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
         </span>
       ) : null}
 
       {/* Agent access duration (access only) — the approver picks how long the agent may use the
           set (protocol v2 §7.1). "授权时长 / Agent access duration" language (§8): this is what the
-          agent receives, distinct from the browser unlock window; never a countdown pill. */}
-      {!isSign ? (
+          agent receives, distinct from the browser unlock window; never a countdown pill. It is chosen
+          where the approval happens, so a browser handoff leaves it to the browser. */}
+      {!isSign && !approveInBrowser ? (
         <div className="flex flex-col gap-1.5">
           <span className="text-[13px] font-medium text-foreground">{t('vaults.approval.grantDuration')}</span>
           <SegmentedRadio<GrantDurationChoice>
@@ -584,16 +590,30 @@ export const VaultApprovalCard: React.FC<{
           <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove}>
             {t('vaults.approval.deny')}
           </Button>
-          <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>
-            {busy ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : isSign ? (
-              <PenTool className="size-4" />
-            ) : (
-              <Check className="size-4" />
-            )}
-            {isSign ? t('vaults.approval.sign') : t('vaults.approval.approve')}
-          </Button>
+          {approveInBrowser ? (
+            <Button
+              type="button"
+              onClick={() => {
+                openVaultsInBrowser(request.id);
+                onCancel();
+              }}
+              disabled={approveDisabled}
+            >
+              <ExternalLink className="size-4" />
+              {t('vaults.approval.continueInBrowser')}
+            </Button>
+          ) : (
+            <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>
+              {busy ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : isSign ? (
+                <PenTool className="size-4" />
+              ) : (
+                <Check className="size-4" />
+              )}
+              {isSign ? t('vaults.approval.sign') : t('vaults.approval.approve')}
+            </Button>
+          )}
         </div>
       </div>
     </div>
