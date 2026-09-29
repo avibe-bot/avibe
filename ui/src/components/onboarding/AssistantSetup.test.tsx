@@ -652,6 +652,30 @@ describe('assistant installation presentation', () => {
 });
 
 describe('Hub route refresh', () => {
+  it('AUTH-SETUP-126: returns to providers when the current inventory is empty', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    const listed = pending<[]>();
+    mock.models.listSources.mockReturnValue(listed.promise);
+    const navigate = vi.fn();
+    const props = { data: saved, onNext: vi.fn(), onNavigate: navigate, agentReads: hubReads };
+    const view = render(wrap(<AgentDetection {...props} />));
+    await waitFor(() => expect(mock.models.listSources).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: 'Add model source' })).toBeNull();
+    await act(async () => listed.resolve([]));
+    const recover = await screen.findByRole<HTMLButtonElement>('button', { name: 'Add model source' });
+    expect(screen.getByText(en.onboarding.connection.sourceRequired)).toBeTruthy();
+    expect(recover.disabled).toBe(false);
+    fireEvent.click(recover);
+    expect(navigate).toHaveBeenCalledExactlyOnceWith('providers');
+    expect(props.onNext).not.toHaveBeenCalled();
+    view.rerender(wrap(<AgentDetection {...props} active={false} />));
+    expect(screen.queryByRole('button', { name: 'Add model source' })).toBeNull();
+  });
+
   it.each(['direct', 'hub'] as const)('uses current %s route ownership when the connection read fails', async (mode) => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.status = 'ok';
@@ -983,7 +1007,7 @@ describe('Hub route refresh', () => {
     mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
     mock.models.getAgentChains.mockResolvedValue([hubChain('shared-id')]);
-    mock.models.listSources.mockResolvedValue([{ id: 'src_a', models: [] }]);
+    mock.models.listSources.mockResolvedValue([{ id: 'src_a', state: { status: 'active' }, models: [] }]);
     const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
       { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
       { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const,
@@ -1080,7 +1104,7 @@ describe('Hub route refresh', () => {
       application: 'applied', ready: backend !== 'opencode' || opencodeEnabled,
       entry_eligible: backend !== 'opencode' || opencodeEnabled, supply_mode: 'hub',
     }));
-    mock.models.listSources.mockResolvedValue([{ id: 'src_a', models: [{ id: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol' }] }]);
+    mock.models.listSources.mockResolvedValue([{ id: 'src_a', state: { status: 'active' }, models: [{ id: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol' }] }]);
     mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('gpt-5.6-sol'), backend: 'opencode', model_id: 'gpt-5.6-sol',
       chain: [
         { source_id: 'src_a', model_id: 'gpt-5.6-sol', channel: 'hub', health: 'healthy', runnable: true },

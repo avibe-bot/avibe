@@ -441,4 +441,24 @@ scenarios:
       - ui/src/App.remoteAuth.test.tsx
       - ui/src/components/settings/SettingsLayout.test.tsx
       - ui/src/components/DesktopSettingsCommand.test.tsx
+  - id: AUTH-SETUP-126
+    name: Setup requires a usable provider before assistants and offers recovery when sources disappear
+    status: partial
+    kind: historical_regression
+    layer: scenario
+    missing_layer: ui-e2e
+    backend: web
+    reason: >-
+      the real source API is exercised by the Python harness, while the registered
+      Wizard and browser journey use controlled API responses. Packaged desktop
+      verification against a live instance remains separate.
+    owning_layer: L4 integrated acceptance (packaged desktop against a live instance)
+    partial_evidence:
+      covers: empty inventory, observation without persistence, usable source creation and HTTP readback
+      test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
+    supporting_tests:
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
+      - ui/src/components/onboarding/WizardCompletion.test.tsx
+      - ui/src/components/onboarding/AssistantSetup.test.tsx
+      - ui/e2e/onboarding-fidelity/provider-gate.spec.ts
 next_priority: []

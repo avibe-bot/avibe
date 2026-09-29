@@ -788,11 +788,13 @@ describe('ProvidersScreen — the action the shell renders', () => {
       icon: 'none',
     });
     expect(lastAction().labelArgs).toBeUndefined();
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
 
     await activate(handle);
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Add more model providers')).toBeTruthy();
+    expect(navigated).toEqual([]);
   });
 
   it('continues once something is really there to continue with', async () => {
@@ -872,63 +874,40 @@ describe('ProvidersScreen — the action the shell renders', () => {
   });
 });
 
-describe('ProvidersScreen — the way on when nothing is connected', () => {
-  it('states a way on beside the take-over it found, and only navigates', async () => {
+describe('ProvidersScreen — source required before continuing', () => {
+  it('offers migration without a bypass when a key is detected but not yet imported', async () => {
     serve({ scan: [CLAUDE_KEY] });
-    renderScreen();
+    const { handle } = renderScreen();
     await settled();
-
-    // The take-over keeps the footer: whoever came here to connect something is
-    // still offered the thing they came for. The way on is beside it, not instead.
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
-    const onward = screen.getByRole('button', { name: 'Continue to assistants' });
-    expect((onward as HTMLButtonElement).disabled).toBe(false);
-
-    await userEvent.setup().click(onward);
-
-    // Navigating is the whole action. Nothing was added, taken over or installed
-    // on the way out, and the review that was on offer is still only on offer.
-    expect(navigated).toEqual(['assistants']);
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+    await activate(handle);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(navigated).toEqual([]);
     expect(server.sources).toEqual([]);
     expect(modelsApi.applyMigration).not.toHaveBeenCalled();
-    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
-    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
-    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('leaves the single action alone once a source is really there', async () => {
-    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
-    renderScreen();
+  it.each(['needs_action', 'error', 'cooldown'] as const)('cannot continue with only a %s source', async (status) => {
+    serve({ sources: [source({ id: 'src_unusable', vendor: 'openai', state: { status } })] });
+    const { handle } = renderScreen();
     await settled();
-
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
-    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
-  });
-
-  it('takes the way on back when the shell hides the screen, and returns it on re-entry', async () => {
-    serve();
-    const { show } = renderScreen();
-    await settled();
-    expect(screen.getByRole('button', { name: 'Continue to assistants' })).toBeTruthy();
-
-    // It leaves the screen root to reach the shell's slot, so nothing else would
-    // take it out of reach of a reader on the step after this one.
-    await show({ active: false });
-    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
-
-    await show({ active: true });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue to assistants' })).toBeTruthy());
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
+    await activate(handle);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(navigated).toEqual([]);
   });
 
-  it('says nothing about a way on while the inventory is unread, which is not an empty one', async () => {
+  it('retries an unread inventory without offering or performing navigation', async () => {
     serve();
     vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
-    renderScreen();
+    const { handle } = renderScreen();
     await settled();
-
     await waitFor(() => expect(lastAction().labelKey).toBe('common.retry'));
     expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+    await activate(handle);
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(2));
+    expect(navigated).toEqual([]);
   });
 });
 
@@ -1046,8 +1025,8 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     expect(within(screen.getByRole('dialog')).getByText(CODEX_KEY.masked_detail!)).toBeTruthy();
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Not now' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Declining the review lets setup continue without changing the native key.
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    // Declining leaves the native key untouched and still requires a Hub source.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
     expect(modelsApi.applyMigration).not.toHaveBeenCalled();
   });
 
@@ -1057,11 +1036,11 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
     await activate(first.handle);
     await userEvent.setup().click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Not now' }));
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
     first.unmount();
 
     const again = renderScreen();
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
     again.unmount();
 
     server.scan = [CODEX_KEY, OPENCODE_KEY];
@@ -1075,7 +1054,7 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
     await activate(first.handle);
     await userEvent.setup().click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Not now' }));
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
     first.unmount();
 
     server.scan = [CODEX_KEY, { ...OPENCODE_KEY, selected: false }];
@@ -1089,7 +1068,7 @@ describe('ProvidersScreen — what an import leaves behind', () => {
 
     server.scan = [CODEX_KEY];
     renderScreen();
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
   });
 
   it('keeps A dismissed when the review unchecks A and migrates only B', async () => {

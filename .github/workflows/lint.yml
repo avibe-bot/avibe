@@ -84,7 +84,7 @@ jobs:
           npx playwright install --with-deps chromium webkit
           npm run test:model-catalog
           npm run test:model-provider
-          npm run test:onboarding-fidelity -- hub-ownership.spec.ts
+          npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts
           npm run test:project-order
           npm run test:inbox-return
           npm run test:badge-triggers

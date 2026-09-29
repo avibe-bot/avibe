@@ -15,10 +15,8 @@
 // composition, and therefore is this file's: the engine has to be up whether or not
 // there is an assistant to adopt.
 import * as React from 'react';
-import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
-import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { clearMigrationDismissed, isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import { Button } from '@/components/ui/button';
 import {
@@ -223,8 +221,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // this screen should ask for, and the action continues instead of opening a review
     // of work that is done.
     const pending = React.useMemo(() => pendingImportRows(selection), [selection]);
-    const importDeclined = selection.selectedBackends.length === 0
-      && isMigrationDismissed(offeredImportKeys(selection));
     // ── Supply ──────────────────────────────────────────────────────────────
 
     // Whether the server's own row defaults have been honoured yet. A scan is nulled
@@ -575,7 +571,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       pendingCount: pending.length,
       importFailed,
       supply: sourceRead === 'read'
-        ? { kind: 'read', hasSource: hasSource || importDeclined }
+        ? { kind: 'read', hasSource }
         : { kind: sourceRead },
       gatewayBusy,
       // The same admission the dialogs are opened and submitted against, so the footer
@@ -705,46 +701,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
           ),
         ].join(' · ');
 
-    // ── The way on when nothing is connected ────────────────────────────────
-
-    // Connecting a provider is what this screen is for, and it is still the only
-    // thing the stage and the footer offer. But an inventory that answered「none」is
-    // an answer: whoever meant to connect later — or declined the takeover on offer —
-    // has nothing here to press, and a step whose every control stays put is a dead
-    // end. So the way on is stated where the shell keeps what is ancillary to the
-    // pair, as a sentence rather than a second button competing with the one above.
-    //
-    // It navigates and does nothing else. Adding a source, taking over a credential
-    // and installing the engine each keep the control that already owns them, and
-    // none of them happens on the way to the next screen. The engine's admission is
-    // not asked about either: it gates writes, and this is not one — gating the way
-    // out on it is how the dead end got here.
-    //
-    // The slot is the shell's, reached the same way the connection step reaches it,
-    // and only while this screen is the one being read: a portal leaves the screen
-    // root and with it the `inert` the shell puts on the others, so the sentence has
-    // to answer to that activity itself.
-    const routeSurfaceActive = useRouteSurfaceActive();
-    const setupRoot = React.useRef<HTMLDivElement>(null);
-    const [actionAside, setActionAside] = React.useState<HTMLElement | null>(null);
-    React.useEffect(() => {
-      setActionAside(setupRoot.current?.closest('.onboarding-step')
-        ?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null);
-    }, [onActionChange]);
-    const onwardNode = sourceRead === 'read' && !hasSource && !importDeclined ? (
-      <div className="onboarding-setup-hint">
-        <p className="text-center text-xs text-muted">
-          {t('onboarding.providers.continueHint')}{' '}
-          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
-            onClick={() => onNavigate('assistants')}>
-            {t('onboarding.providers.actionContinue')}
-          </Button>
-        </p>
-      </div>
-    ) : null;
-
     return (
-      <div className="onboarding-setup" ref={setupRoot}>
+      <div className="onboarding-setup">
         <header className="onboarding-heading">
           {/* `h1` with a programmatic tab stop, like every other screen's heading: the
               shell moves focus here on activation, and a heading it cannot find or
@@ -879,10 +837,6 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
             onDecline={declineImport}
           />
         )}
-
-        {onwardNode && active && routeSurfaceActive && actionAside
-          ? createPortal(onwardNode, actionAside)
-          : null}
       </div>
     );
   },

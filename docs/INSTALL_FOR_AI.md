@@ -104,6 +104,12 @@ vibe
 
 This starts the local service and opens the Web UI setup wizard. If a browser does not open automatically, check the terminal output for the local URL.
 
+On **Add model providers**, add a subscription or API key, or complete migration
+of an existing key. At least one usable source must appear in Model Hub before
+**Continue to assistants** becomes available. Declining migration keeps the
+**Add subscription or API Key** action. If sources disappear before assistant
+setup completes, use **Add model source** to return to this step.
+
 In the wizard, help the user install or detect Claude Code, Codex, or OpenCode,
 then connect one assistant with a subscription or API key. Existing valid
 credentials count; starting another login preserves them until the new login

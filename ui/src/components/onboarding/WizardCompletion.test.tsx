@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -17,7 +17,7 @@ const mock = vi.hoisted(() => ({ control: vi.fn(), toast: vi.fn(), permission: v
   // the collection authority, the lifecycle helper and the take-over dialog underneath
   // them are the real ones, which is what makes the journey below the journey rather
   // than a direct mount of the third screen.
-  models: { listSources: vi.fn(), listAgents: vi.fn(), refreshAgentPresence: vi.fn(), scanMigration: vi.fn(), getRuntimeStatus: vi.fn(), getAgentChain: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn() },
+  models: { listSources: vi.fn(), listAgents: vi.fn(), refreshAgentPresence: vi.fn(), scanMigration: vi.fn(), getRuntimeStatus: vi.fn(), createApiKeySource: vi.fn(), getAgentChain: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn() },
 }));
 vi.mock('../../context/ApiContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../../context/ApiContext')>(), useApi: () => mock.api }));
 vi.mock('@/lib/apiFetch', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/apiFetch')>(), apiFetch: mock.apiFetch }));
@@ -789,6 +789,46 @@ describe('the registered journey', () => {
   const screenId = () => document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
   const seeds = () => mock.apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
   const gateway = () => document.querySelector('.setup-gateway')!;
+
+  it('AUTH-SETUP-126: requires source readback before the shell can continue to assistants', async () => {
+    mock.models.listSources.mockResolvedValue([]);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionAdd));
+    await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
+    expect(screen.queryByRole('button', { name: 'Continue to assistants' })).toBeNull();
+    fireEvent.click(primaryAction());
+    const dialog = await screen.findByRole('dialog');
+    expect(screenId()).toBe('providers');
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'API Key' }));
+    fireEvent.change(within(dialog).getByLabelText('Base URL'), { target: { value: 'https://fixture.example/v1' } });
+    fireEvent.change(within(dialog).getByLabelText('API key'), { target: { value: 'sk-fixture' } });
+    let confirmSources!: (sources: Source[]) => void;
+    const readback = new Promise<Source[]>((resolve) => { confirmSources = resolve; });
+    mock.models.createApiKeySource.mockImplementation(async () => {
+      mock.models.listSources.mockReturnValue(readback);
+      return { source: HUB_SOURCE, added_to: [], adopted_by: [] };
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(mock.models.createApiKeySource).toHaveBeenCalledOnce());
+    expect(screenId()).toBe('providers');
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    fireEvent.click(primaryAction());
+    expect(screenId()).toBe('providers');
+
+    await act(async () => {
+      mock.models.listSources.mockResolvedValue([HUB_SOURCE]);
+      confirmSources([HUB_SOURCE]);
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
+    expect(primaryAction().hasAttribute('disabled')).toBe(false);
+    expect(screenId()).toBe('providers');
+    fireEvent.click(primaryAction());
+    await waitFor(() => expect(screenId()).toBe('assistants'));
+  });
 
   it('establishes the controller on arrival at the second screen, never on mount', async () => {
     mount();

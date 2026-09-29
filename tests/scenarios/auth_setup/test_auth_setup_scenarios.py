@@ -3365,7 +3365,7 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
 
 
 def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-111"""
+    """Scenarios: AUTH-SETUP-111; AUTH-SETUP-126 source-inventory producer."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     _save_config(tmp_path)
@@ -3393,6 +3393,19 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
     harness = make_harness(tmp_path / "catalog-api-key-flow")
     runner = ScenarioRunner(harness)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: harness.service)
+
+    def read_empty_inventory(h) -> None:
+        response = h.client.get("/api/models/sources", base_url=h.base_url)
+        assert response.status_code == 200
+        assert response.get_json()["sources"] == []
+
+    def read_created_inventory(h) -> None:
+        response = h.client.get("/api/models/sources", base_url=h.base_url)
+        assert response.status_code == 200
+        sources = response.get_json()["sources"]
+        assert len(sources) == 1
+        assert sources[0]["id"] == h.store.config.sources[0].id
+        assert sources[0]["state"]["status"] in {"active", "standby"}
 
     def observe_catalog_pin(h) -> None:
         response = h.client.post(
@@ -3506,20 +3519,28 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
 
     asyncio.run(
         runner.run(
+            ScenarioStep("read_empty_inventory", read_empty_inventory),
             ScenarioStep("observe_catalog_pin", observe_catalog_pin),
+            ScenarioStep("observation_is_not_supply", read_empty_inventory),
             ScenarioStep("create_catalog_pin", create_catalog_pin),
+            ScenarioStep("read_created_inventory", read_created_inventory),
             ScenarioStep("observe_auth_failure", observe_auth_failure),
             ScenarioStep("create_auth_failure", create_auth_failure),
+            ScenarioStep("failed_create_preserves_inventory", read_created_inventory),
         )
     )
 
     ScenarioExpect.step_history(
         runner,
         [
+            "read_empty_inventory",
             "observe_catalog_pin",
+            "observation_is_not_supply",
             "create_catalog_pin",
+            "read_created_inventory",
             "observe_auth_failure",
             "create_auth_failure",
+            "failed_create_preserves_inventory",
         ],
     )
 

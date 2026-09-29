@@ -40,6 +40,7 @@ import type { AssistantRouteView } from '../onboarding/AssistantRow';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { readyRegion } from '../settings/models/regionRead';
 import { modelsApi } from '../settings/models/modelsApi';
+import { usableSource } from '../onboarding/providers/providerStage';
 
 interface AgentDetectionProps {
   active?: boolean;
@@ -649,14 +650,21 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             <RefreshCw size={12} />{t('agentDetection.rescan')}
           </Button>
   );
+  const needsSource = canEditSetupRoute && modelHubEnabled && sharedRouteReady()
+    && !routeRead.sources.some(usableSource);
   const hintSentence = canContinue ? null : (
         /* The sentence is what the eye lines up with the action below it, so the
            sentence is what gets centred. The rescan rides in the flanking column
            beside it — inside one centred line it pulled the sentence off the
            action's axis by half its own width. */
         <p className="onboarding-setup-hint-line text-muted">
-          <span>{t('onboarding.connection.entryHint')}</span>
-          {rescan}
+          <span>{t(needsSource ? 'onboarding.connection.sourceRequired' : 'onboarding.connection.entryHint')}</span>
+          {needsSource ? (
+            <Button type="button" variant="link" size="xs" className="h-auto p-0"
+              disabled={actionBusy} onClick={() => onNavigate?.('providers')}>
+              {t('onboarding.connection.addSource')}
+            </Button>
+          ) : rescan}
         </p>
   );
   const hintInner = (hintSentence || entryError) ? (<>
