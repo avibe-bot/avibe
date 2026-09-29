@@ -1053,6 +1053,72 @@ def test_removal_deletes_nothing_while_any_backend_is_being_installed(
     assert _install_lock_is_free(env)
 
 
+# An install's first steps, as `install_desktop_backend` takes them.
+_LATE_INSTALL = """
+import pathlib, sys
+from vibe import desktop_backends
+root = pathlib.Path(sys.argv[1])
+try:
+    desktop_backends._claim_backend_root(root, timeout_seconds=30)
+except desktop_backends.DesktopBackendError as exc:
+    print(exc.code, flush=True)
+else:
+    (root / ".staging-late").mkdir()
+    print("installing", flush=True)
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file locks")
+def test_an_install_waiting_on_a_removed_backend_refuses_once_it_gets_the_lock(
+    monkeypatch, capsys, tmp_path, owner_runtime_id, children
+):
+    env = _desktop_env(tmp_path)
+    _published_backends(env)
+    backend = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "claude"
+    lock_path = os.path.realpath(backend / ".install.lock")
+    remove_path = desktop_backends._remove_path
+
+    def remove_once_an_install_waits(path):
+        # Every lock is held once removal starts deleting.
+        if not children:
+            waiter = subprocess.Popen(
+                [sys.executable, "-c", _LATE_INSTALL, str(backend)], cwd=_REPO_ROOT, stdout=subprocess.PIPE, text=True
+            )
+            children.append(waiter)
+            deadline = time.monotonic() + 15
+            while lock_path not in {os.path.realpath(f.path) for f in psutil.Process(waiter.pid).open_files()}:
+                assert time.monotonic() < deadline, "the install did not wait on the lock"
+                time.sleep(0.05)
+        remove_path(path)
+
+    monkeypatch.setattr(desktop_backends, "_remove_path", remove_once_an_install_waits)
+
+    assert _remove_backends(monkeypatch, capsys, env) == (0, None)
+
+    assert children[0].communicate(timeout=30)[0] == "install_locked\n"
+    assert not os.path.lexists(env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+
+
+def test_a_backend_an_install_begins_during_removal_keeps_its_files(monkeypatch, capsys, tmp_path, owner_runtime_id):
+    env = _desktop_env(tmp_path)
+    _published_backends(env)
+    # A first install of a backend creates its directory after removal listed the root.
+    late = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "late" / ".staging-late" / "package.json"
+    remove_path = desktop_backends._remove_path
+
+    def remove_once_an_install_began(path):
+        if not late.exists():
+            late.parent.mkdir(parents=True)
+            late.write_text("{}", encoding="utf-8")
+        remove_path(path)
+
+    monkeypatch.setattr(desktop_backends, "_remove_path", remove_once_an_install_began)
+
+    assert _remove_backends(monkeypatch, capsys, env) == (2, {"failed": "backend_removal_failed"})
+
+    assert late.read_text(encoding="utf-8") == "{}"
+
+
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX file permissions")
 def test_removal_that_cannot_delete_every_file_fails(monkeypatch, capsys, tmp_path, owner_runtime_id):
     env = _desktop_env(tmp_path)

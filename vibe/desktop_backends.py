@@ -932,15 +932,36 @@ def _claim_backend_root(backend_root: Path, *, timeout_seconds: float) -> Migrat
     first; its tree is reaped by its marker and its staging removed. When the
     records cannot be listed or read, nothing is removed; then, or when a
     tree cannot be shown gone, the lock is released and ``install_locked``
-    raised.
+    raised. So is it when removal deleted the lock file while this waited.
     """
 
-    lock = MigrationFileLock(backend_root / ".install.lock", timeout_seconds=timeout_seconds)
+    lock_path = backend_root / ".install.lock"
+    removed: list[bool] = []
+
+    def names_the_lock_path(handle) -> bool:
+        # Removal deletes a lock file while it holds it, so a waiter that gets
+        # the lock then holds a file no other install would lock.
+        try:
+            same = os.path.samestat(os.fstat(handle.fileno()), os.stat(lock_path))
+        except FileNotFoundError:
+            same = False
+        if not same:
+            removed.append(True)
+        return same
+
+    lock = MigrationFileLock(lock_path, timeout_seconds=timeout_seconds, _handle_validator=names_the_lock_path)
     try:
         lock.acquire()
     except MigrationLockTimeout as exc:
         raise DesktopBackendError(
             f"Another {backend_root.name} install is already running.",
+            code="install_locked",
+        ) from exc
+    except OSError as exc:
+        if not removed:
+            raise
+        raise DesktopBackendError(
+            f"The {backend_root.name} backend directory is being removed.",
             code="install_locked",
         ) from exc
     try:
@@ -971,8 +992,10 @@ def remove_desktop_backends(base_env: Mapping[str, str] | None = None) -> None:
 
     Every backend directory is claimed the way an install claims it, which
     reaps the installer trees abandoned in it, and nothing is deleted until all
-    of them are held. Raises ``DesktopBackendError``: ``install_locked`` with
-    nothing deleted, and any other code when part of the root may remain.
+    of them are held. Nothing is deleted recursively once a lock is released,
+    so an install that begins meanwhile keeps its files, and fails the
+    removal. Raises ``DesktopBackendError``: ``install_locked`` with nothing
+    deleted, and any other code when part of the root may remain.
     """
 
     root = private_desktop_backends_root(base_env)
@@ -982,14 +1005,14 @@ def remove_desktop_backends(base_env: Mapping[str, str] | None = None) -> None:
         return
     if root.is_symlink() or not root.is_dir():
         raise DesktopBackendError("Invalid desktop backend root.", code="invalid_backend_root")
-    locks: list[MigrationFileLock] = []
+    claimed: list[tuple[Path, MigrationFileLock]] = []
     try:
         try:
             entries = sorted(root.iterdir())
             for entry in entries:
                 if entry.is_dir() and not entry.is_symlink():
-                    locks.append(_claim_backend_root(entry, timeout_seconds=DESKTOP_BACKEND_REMOVAL_LOCK_TIMEOUT_SECONDS))
-            # A held lock file stays until its lock is released.
+                    lock = _claim_backend_root(entry, timeout_seconds=DESKTOP_BACKEND_REMOVAL_LOCK_TIMEOUT_SECONDS)
+                    claimed.append((entry, lock))
             for entry in entries:
                 if entry.is_dir() and not entry.is_symlink():
                     for member in entry.iterdir():
@@ -997,10 +1020,19 @@ def remove_desktop_backends(base_env: Mapping[str, str] | None = None) -> None:
                             _remove_path(member)
                 else:
                     _remove_path(entry)
+            for entry, lock in claimed:
+                # A waiter that then gets the lock finds its file gone, and
+                # refuses. Windows deletes no open file, so the lock file goes
+                # once released, and stays while any installer has it open.
+                if os.name == "nt":
+                    lock.release()
+                (entry / ".install.lock").unlink(missing_ok=True)
+                entry.rmdir()
+            # A directory an install created since the listing keeps the root.
+            root.rmdir()
         finally:
-            for lock in reversed(locks):
+            for _entry, lock in reversed(claimed):
                 lock.release()
-        shutil.rmtree(root)
     except OSError as exc:
         raise DesktopBackendError(
             f"The desktop backend root could not be removed: {exc}",
