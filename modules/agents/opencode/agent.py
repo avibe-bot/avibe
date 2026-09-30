@@ -764,9 +764,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._session_last_activity: Dict[str, float] = {}
         self._steering_states: Dict[str, _OpenCodeSteerState] = {}
         self._restored_poll_servers: Dict[asyncio.Task, _SteeringAwareOpenCodeServer] = {}
-        # Request tasks a forced refresh interrupted; a restored poll in this set
-        # retires its own durable record when it settles.
-        self._interrupted_request_tasks: set[asyncio.Task] = set()
+        # Request tasks already settling, interrupted by a forced refresh or in
+        # their own cleanup. A forced refresh never cancels these again, and a
+        # restored poll it interrupted retires its own durable record.
+        self._settling_request_tasks: set[asyncio.Task] = set()
 
     async def _get_server(self) -> OpenCodeServerManager:
         current_task = asyncio.current_task()
@@ -1226,15 +1227,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """
         cancelled: list[asyncio.Task] = []
         for base_session_id, task in list(self._active_requests.items()):
-            # An earlier forced refresh already interrupted a task still settling;
-            # cancelling it again could abort the retirement in its cleanup.
-            if task.done() or task in self._interrupted_request_tasks:
+            # Cancelling a task that is already settling could abort the
+            # retirement in its cleanup.
+            if task.done() or task in self._settling_request_tasks:
                 continue
             state = self._steering_states.get(base_session_id)
             if state is not None and state.task is task:
                 state.closing = True
-            self._interrupted_request_tasks.add(task)
-            task.add_done_callback(self._interrupted_request_tasks.discard)
+            self._settling_request_tasks.add(task)
+            task.add_done_callback(self._settling_request_tasks.discard)
             # Cancel without the steering lock, which the task itself may hold
             # across a native call, and without a native abort: the teardown
             # that follows ends the native run.
@@ -3061,7 +3062,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     err,
                 )
         finally:
-            interrupted = current_task in self._interrupted_request_tasks
+            interrupted = current_task in self._settling_request_tasks
+            if current_task is not None:
+                # Settling from here on, however the poll ended.
+                self._settling_request_tasks.add(current_task)
+                current_task.add_done_callback(self._settling_request_tasks.discard)
             await self._stop_caller_context_binding_renewal(
                 caller_context_binding_renewal
             )

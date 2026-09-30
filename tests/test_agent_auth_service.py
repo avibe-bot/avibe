@@ -1942,7 +1942,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
         agent._active_requests = {"base-restored": restored_poll}
         agent._steering_states = {}
-        agent._interrupted_request_tasks = set()
+        agent._settling_request_tasks = set()
 
         await agent.refresh_runtime_config(new_config, force=True)
 

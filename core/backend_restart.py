@@ -388,12 +388,16 @@ class BackendRestartCoordinator:
         refresh: Callable[[str, bool], Awaitable[None]],
         *,
         drain_timeout: float | None = None,
+        settle_timeout: float = _INTERRUPT_SETTLE_SECONDS,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
         process_inventory: Callable[[Mapping[str, str]], tuple[int, ...]] = native_cli_processes,
     ) -> None:
         self.controller = controller
         self._refresh = refresh
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
+        # Independent of the drain timeout, which only decides when a restart
+        # stops waiting and interrupts; an interrupting switch never drains.
+        self._settle_timeout = max(0.0, settle_timeout)
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._request_locks: dict[str, asyncio.Lock] = {}
@@ -543,7 +547,7 @@ class BackendRestartCoordinator:
                     if await self._has_active_turns(backend):
                         restarts[backend] = self._start_restart(backend, drain_timeout=0)
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + min(self._drain_timeout, _INTERRUPT_SETTLE_SECONDS)
+                deadline = loop.time() + self._settle_timeout
                 for backend in targets:
                     restart = restarts.get(backend)
                     if restart is not None:

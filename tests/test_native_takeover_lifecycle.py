@@ -52,7 +52,8 @@ def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
         config=SimpleNamespace(),
     )
     coordinator = BackendRestartCoordinator(
-        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, poll_interval=0.001,
+        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, settle_timeout=0.01,
+        poll_interval=0.001,
     )
     controller.backend_restart_coordinator = coordinator
     return controller, coordinator, admissions, turns
@@ -174,17 +175,22 @@ async def test_guard_closes_both_admissions_before_retirement_and_retains_only_b
 
 
 @pytest.mark.asyncio
-async def test_busy_guard_interrupts_running_work_then_retires_and_yields():
+@pytest.mark.parametrize("drain_timeout", [1, 0])
+async def test_busy_guard_interrupts_running_work_then_retires_and_yields(drain_timeout):
     """MH-MIG-009: every caller applies an explicit user switch, so live work is
-    interrupted, not awaited; a guard that waits for idle leaves the switch spinning."""
+    interrupted, not awaited; a guard that waits for idle leaves the switch spinning.
+    The settle window is independent of the drain timeout, which only decides when
+    a restart stops waiting: an immediate drain must not refuse a brief teardown."""
     controller, coordinator, admissions, turns = controller_fixture(busy=True)
     service = controller.agent_service
-    coordinator._drain_timeout = 1
+    coordinator._drain_timeout = drain_timeout
+    coordinator._settle_timeout = 1
     controller.session_turns.active_runtime_session_ids_for_backend.return_value = {"session-1"}
     order = []
     service.force_cancel_backend_turns.side_effect = lambda backend: order.append(("cancel", backend))
 
-    def teardown(backend, forced):
+    async def teardown(backend, forced):
+        await asyncio.sleep(0.01)
         order.append(("refresh", backend, forced))
         service.backend_runtime_active.return_value = False
 

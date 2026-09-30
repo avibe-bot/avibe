@@ -142,7 +142,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._user_stopped_sessions = set()
     agent._steering_states = {}
     agent._restored_poll_servers = {}
-    agent._interrupted_request_tasks = set()
+    agent._settling_request_tasks = set()
 
     server = _Server()
     agent._client_manager = SimpleNamespace(_server_manager=server)
@@ -1110,13 +1110,14 @@ def test_restore_settles_incomplete_assistant_when_unknown_status_recovers_idle(
     )
 
 
-@pytest.mark.parametrize("stall", ["cleanup", "steering_lock"])
+@pytest.mark.parametrize("stall", ["cleanup", "steering_lock", "retiring"])
 def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall) -> None:
     """MH-MIG-009: switching to the gateway interrupts a restored poll. The
     teardown must not wait on the poll, whether its cancellation cleanup hangs
     or it holds its steering lock across a native call; and once the poll does
     settle it must retire its durable record, or the next restart restores a
-    run the user chose to interrupt."""
+    run the user chose to interrupt. A poll that finished on its own and is
+    already retiring must be left to finish that retirement."""
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     if stall == "steering_lock":
         poll.processing_indicator = {
@@ -1128,7 +1129,17 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
     polling, release = asyncio.Event(), asyncio.Event()
     recancelled = []
 
+    if stall == "retiring":
+        async def slow_mark_run_inactive(session_id):
+            polling.set()
+            await release.wait()
+            agent._test_inactive_runs.append(session_id)
+
+        agent._test_server.mark_run_inactive = slow_mark_run_inactive
+
     async def run_restored_poll_loop(poll_info):
+        if stall == "retiring":
+            return True
         if stall == "steering_lock":
             # A native call made through the steering-aware server holds the lock.
             async with agent._steering_states["ses_wb"].lock:
@@ -1162,7 +1173,7 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
     asyncio.run(run())
     assert recancelled == []
     assert agent._active_requests == {}
-    assert agent._interrupted_request_tasks == set()
+    assert agent._settling_request_tasks == set()
     assert agent._test_inactive_runs == ["oc-1"]
     assert removed == ["oc-1"]
     assert active_polls == {}
