@@ -296,13 +296,13 @@ def project_opencode_public_model(
         "name": model.display_name or identifier,
     }
     if model.context_window is not None or model.max_output_tokens is not None:
+        # OpenCode requires both limits once either is present and validates the
+        # whole config file on start, so one partial entry fails every launch.
+        # It reads 0 as unknown: no overflow compaction for the context, and its
+        # default cap for the output.
         projected["limit"] = {
-            key: value
-            for key, value in (
-                ("context", model.context_window),
-                ("output", model.max_output_tokens),
-            )
-            if value is not None
+            "context": model.context_window if model.context_window is not None else 0,
+            "output": model.max_output_tokens if model.max_output_tokens is not None else 0,
         }
     modalities: dict[str, list[str]] = {}
     if model.input_modalities:

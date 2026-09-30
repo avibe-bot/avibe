@@ -5743,6 +5743,50 @@ def test_opencode_public_model_hides_preserved_efforts_when_reasoning_is_disable
 
 
 @pytest.mark.parametrize("protocol", ["anthropic", "openai_responses"])
+@pytest.mark.parametrize(("context_window", "max_output_tokens"), [
+    (None, None), (200_000, None), (None, 8_192), (200_000, 8_192),
+])
+@pytest.mark.parametrize(("input_modalities", "output_modalities"), [([], []), (["text", "image"], []), ([], ["text"])])
+@pytest.mark.parametrize("supports_tools", [None, True, False])
+@pytest.mark.parametrize("supports_reasoning", [None, True, False])
+def test_every_projected_opencode_model_satisfies_the_opencode_schema(
+    protocol: str,
+    context_window: int | None,
+    max_output_tokens: int | None,
+    input_modalities: list[str],
+    output_modalities: list[str],
+    supports_tools: bool | None,
+    supports_reasoning: bool | None,
+) -> None:
+    """MH-OPENCODE-LAUNCH-002: OpenCode validates its whole config on start, so
+    one model described with only a context window (or only an output cap)
+    failed every OpenCode launch, for every model and session."""
+    from core.handlers.model_hub.migration import _OPENCODE_MODEL, _opencode_value_well_typed
+
+    model = ModelHubBackendModelConfig(
+        id="custom-模型",
+        display_name="Custom 模型",
+        native_protocol=protocol,
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
+        supports_tools=supports_tools,
+        supports_reasoning=supports_reasoning,
+        reasoning_efforts=["low", "none"],
+    )
+
+    projected = project_opencode_public_model(model)
+
+    assert _opencode_value_well_typed(_OPENCODE_MODEL, projected), projected
+    if context_window is None and max_output_tokens is None:
+        assert "limit" not in projected
+    else:
+        # A limit the catalog does not know stays OpenCode's "unknown" 0.
+        assert projected["limit"] == {"context": context_window or 0, "output": max_output_tokens or 0}
+
+
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_responses"])
 @pytest.mark.parametrize("supports_reasoning", [None, True, False])
 @pytest.mark.parametrize("efforts", [[], ["none"], ["low", "medium", "custom-tier"], ["low", "none", "custom-tier"]])
 def test_opencode_public_model_projects_only_declared_efforts(

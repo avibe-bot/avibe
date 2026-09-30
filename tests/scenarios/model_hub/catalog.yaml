@@ -480,6 +480,12 @@ scenarios:
     kind: injection
     layer: e2e
     test: tests/e2e/test_model_hub_backend_settings.py::test_opencode_native_settings_cannot_change_hub_transport
+  - id: MH-OPENCODE-LAUNCH-002
+    name: Every model the Hub projects for OpenCode satisfies OpenCode's config schema, so one incompletely described model cannot fail every launch
+    status: covered
+    kind: injection
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_every_projected_opencode_model_satisfies_the_opencode_schema
   - id: MH-AC29-001
     name: A persisted import-shaped Source survives canonical serialization and reload
     status: covered
