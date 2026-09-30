@@ -569,6 +569,10 @@ class BackendRestartCoordinator:
                         await finish_native_operation(retire())
                     except Exception:
                         raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
+                    # The runtime is retired and relaunches on demand, so a failed
+                    # earlier restart no longer describes it.
+                    if self._outcomes.get(backend, {}).get("state") == "failed":
+                        self._outcomes.pop(backend, None)
                 async def verify_idle() -> None:
                     for backend in targets:
                         lease.assert_owned(backend)

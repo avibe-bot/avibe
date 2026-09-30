@@ -1224,7 +1224,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         owner, so without this they would poll the stopped server until their
         failure limit and report a transport error for an intended interrupt.
         """
-        cancelled: list[asyncio.Task] = []
+        cancelled: dict[str, asyncio.Task] = {}
         for base_session_id, task in list(self._active_requests.items()):
             if task.done():
                 continue
@@ -1237,11 +1237,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # across a native call, and without a native abort: the teardown
             # that follows ends the native run.
             task.cancel()
-            cancelled.append(task)
-        if cancelled:
-            # Bounded like force_cancel_backend_turns: a stuck cleanup must not
-            # hold the teardown, and retirement does not depend on this wait.
-            await asyncio.wait(cancelled, timeout=2.0)
+            cancelled[base_session_id] = task
+        if not cancelled:
+            return
+        # Bounded like force_cancel_backend_turns: a stuck cleanup must not
+        # hold the teardown, and retirement does not depend on this wait.
+        await asyncio.wait(cancelled.values(), timeout=2.0)
+        for base_session_id, task in cancelled.items():
+            if task.done():
+                continue
+            # Detach the interrupted generation so the refreshed runtime owns the
+            # session; the task still retires its durable record when it settles.
+            if self._active_requests.get(base_session_id) is task:
+                self._active_requests.pop(base_session_id, None)
+                self._session_manager.pop_request_session(base_session_id)
+            state = self._steering_states.get(base_session_id)
+            if state is not None and state.task is task:
+                self._steering_states.pop(base_session_id, None)
 
     async def handle_message(self, request: AgentRequest) -> None:
         lock = self._session_manager.get_session_lock(request.base_session_id)

@@ -1147,6 +1147,9 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
         await polling.wait()
         tasks = list(agent._active_requests.values())
         await asyncio.wait_for(agent._cancel_active_requests(), timeout=5)
+        # Detached at once, so the refreshed runtime admits the session again.
+        assert agent._active_requests == {}
+        assert agent._session_manager.get_request_session("ses_wb") is None
         if stall == "cleanup":
             assert active_polls == {"oc-1": poll}
         release.set()

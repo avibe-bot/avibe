@@ -265,6 +265,29 @@ async def test_guard_fails_closed_when_interruption_does_not_settle(failure, cod
 
 
 @pytest.mark.asyncio
+async def test_successful_retry_supersedes_a_failed_forced_restart_receipt():
+    """MH-MIG-009: a forced restart that fails after stopping the runtime leaves a
+    failed receipt. A retry that finds the backend idle and retires it must clear
+    that receipt, or the switched backend keeps reporting itself not ready."""
+    controller, coordinator, _, _ = controller_fixture(busy=True)
+
+    def teardown(backend, forced):
+        controller.agent_service.backend_runtime_active.return_value = False
+        raise RuntimeError("reload failed")
+
+    coordinator._refresh.side_effect = teardown
+    with pytest.raises(NativeMigrationBlockedError, match="native_retirement_failed"):
+        async with coordinator.migration_guard(("codex",)):
+            pytest.fail("mutation admitted after a failed teardown")
+    assert coordinator.snapshot("codex")["state"] == "failed"
+
+    async with coordinator.migration_guard(("codex",)):
+        pass
+    assert coordinator.snapshot("codex") == {"state": "applied"}
+    coordinator._refresh.assert_awaited_once_with("codex", True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["missing_hook", "retire_failure", "external"])
 async def test_failed_retirement_or_external_process_never_yields(failure):
     controller, coordinator, admissions, turns = controller_fixture()

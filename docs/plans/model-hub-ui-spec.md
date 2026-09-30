@@ -4787,7 +4787,7 @@ difference is not an inconsistency: that frame's entry condition is *every backe
 | `effects.1.opencode` `[derived]` | OpenCode 自己的模型配置原样保留,这次切换不改动它 | OpenCode's own model configuration is kept as it is; this switch does not change it |
 | `effects.2.opencode` `[derived]` | 它的型号从此由这一页上的来源供给;还没有来源时,先添加一个 | Its models are supplied from the sources on this page; if there are none yet, add one first |
 | `effects.3` | 型号菜单不变 | The model menu does not change |
-| `effects.4` | 正在进行的对话不受影响,下一次请求开始生效 | Conversations in progress are unaffected; the change applies from the next request |
+| `effects.4` | 正在运行的任务会被中断,下一次请求开始生效 | Tasks in progress are interrupted; the change applies from the next request |
 | `section.undo` | 可以撤回 | You can undo this |
 | `undo.1` | 随时可以切换回直连 | You can switch back to direct at any time |
 | `undo.2` | 回退入口:这一页的 {{backend}} 卡片 → 切到直连 | Where to undo: the {{backend}} card on this page → Switch to direct |
@@ -4849,9 +4849,10 @@ the least convenient one, not the one it was drafted from. A rule that counts th
 does not read what they say.
 
 **Every bullet is a consequence the user can check afterwards** `[frame]`. 型号菜单不变
-and 正在进行的对话不受影响 are there because they are the two things a cautious user
-actually fears, and both are falsifiable — which is what makes stating them worth the
-space. Nothing here explains what a gateway *is*; that argument belongs to 09's benefit
+and 正在运行的任务会被中断 are there because they are the two things a cautious user
+needs to know before confirming, and both are falsifiable — which is what makes stating
+them worth the space. The second once promised the opposite; a switch now interrupts
+running work instead of waiting for it (MH-MIG-009), so the confirm states the cost. Nothing here explains what a gateway *is*; that argument belongs to 09's benefit
 card, and repeating it in the confirm would turn a decision surface into a second pitch.
 
 **States** — §0.8, rows marked §1.9.
