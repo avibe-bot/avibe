@@ -803,6 +803,9 @@ class _FakeOpencodeServer:
     async def get_provider_auth(self):
         return self.auth_map
 
+    async def ensure_directory_ready(self, _directory):
+        return None
+
     async def get_available_models(self, _directory):
         return self.catalog
 

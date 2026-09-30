@@ -49,9 +49,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
-# A cold OpenCode process can take more than 15 seconds to load on a busy or
-# freshly provisioned host. This is a startup ceiling, not a request timeout.
-SERVER_START_TIMEOUT = 60
+# A cold OpenCode process can take close to a minute to load on a busy or
+# freshly provisioned host. This is only a ceiling: a healthy start returns as
+# soon as ``/global/health`` answers, and it is not a request timeout.
+SERVER_START_TIMEOUT = 120
 # ``/global/health`` only proves the process is serving. OpenCode bootstraps a
 # per-directory instance on that directory's first request, and with any plugin
 # configured (Avibe always installs one) the bootstrap waits for OpenCode's own

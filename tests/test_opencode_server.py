@@ -204,12 +204,12 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 create_process,
             ),
             patch.object(SERVER_MODULE.asyncio, "sleep", AsyncMock()),
-            patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 61.0]),
+            patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 121.0]),
             patch.object(SERVER_MODULE, "server_environment", return_value={}),
             patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
             patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config, "AVIBE_OPENCODE_MODEL_HUB": "1"}),
         ):
-            with self.assertRaisesRegex(RuntimeError, "failed to start within 60s"):
+            with self.assertRaisesRegex(RuntimeError, "failed to start within 120s"):
                 await manager._start_server()
 
         terminate.assert_awaited_once_with(

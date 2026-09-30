@@ -3,7 +3,7 @@
 OpenCode answers ``/global/health`` as soon as it serves, but bootstraps a
 per-directory instance on that directory's first request. On a fresh host the
 bootstrap waits for OpenCode's own npm install and outlasts Avibe's ordinary
-request timeout, so a first turn must wait for it instead of failing.
+request timeout, so a first turn or provider probe must wait for it instead of failing.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, Mock
 from aiohttp import web
 
 import modules.agents.opencode.server as server_module
+from config.v2_config import V2Config
+from core.agent_auth_service import AgentAuthService
 from modules.agents.base import AgentRequest
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.server import OpenCodeServerManager
@@ -34,7 +36,7 @@ async def _cold_opencode(bootstrap_seconds: float):
     """
 
     bootstraps: dict[str, asyncio.Task] = {}
-    created_sessions: list[str] = []
+    opencode = SimpleNamespace(port=0, created_sessions=[], prompts=[])
 
     async def bootstrapped(request: web.Request) -> None:
         directory = request.headers["x-opencode-directory"]
@@ -49,11 +51,30 @@ async def _cold_opencode(bootstrap_seconds: float):
         await bootstrapped(request)
         return web.json_response({"directory": request.headers["x-opencode-directory"]})
 
+    async def providers(request: web.Request) -> web.Response:
+        await bootstrapped(request)
+        return web.json_response({"providers": [{"id": "openai", "models": {"gpt-cold": {}}}], "default": {}})
+
     async def create_session(request: web.Request) -> web.Response:
         await bootstrapped(request)
-        session_id = f"ses_cold_{len(created_sessions) + 1}"
-        created_sessions.append(session_id)
+        session_id = f"ses_cold_{len(opencode.created_sessions) + 1}"
+        opencode.created_sessions.append(session_id)
         return web.json_response({"id": session_id})
+
+    async def prompt_async(request: web.Request) -> web.Response:
+        await bootstrapped(request)
+        opencode.prompts.append(await request.json())
+        return web.Response(status=204)
+
+    async def messages(request: web.Request) -> web.Response:
+        await bootstrapped(request)
+        if not opencode.prompts:
+            return web.json_response([])
+        reply = {
+            "info": {"id": "msg_reply", "role": "assistant", "time": {"completed": 1}, "finish": "stop"},
+            "parts": [{"type": "text", "text": "OK"}],
+        }
+        return web.json_response([reply])
 
     async def abort_session(request: web.Request) -> web.Response:
         await bootstrapped(request)
@@ -62,13 +83,17 @@ async def _cold_opencode(bootstrap_seconds: float):
     app = web.Application()
     app.router.add_get("/global/health", health)
     app.router.add_get("/path", path)
+    app.router.add_get("/config/providers", providers)
     app.router.add_post("/session", create_session)
+    app.router.add_post("/session/{session_id}/prompt_async", prompt_async)
+    app.router.add_get("/session/{session_id}/message", messages)
     app.router.add_post("/session/{session_id}/abort", abort_session)
     runner = web.AppRunner(app, handler_cancellation=True)
     await runner.setup()
     try:
         await web.TCPSite(runner, "127.0.0.1", 0).start()
-        yield runner.addresses[0][1], created_sessions
+        opencode.port = runner.addresses[0][1]
+        yield opencode
     finally:
         for task in bootstraps.values():
             task.cancel()
@@ -134,9 +159,9 @@ async def _first_turn(tmp_path, port: int, monkeypatch):
 
 def test_first_turn_waits_for_directory_bootstrap_longer_than_request_timeout(tmp_path, monkeypatch) -> None:
     async def scenario():
-        async with _cold_opencode(bootstrap_seconds=REQUEST_TIMEOUT_SECONDS + 1) as (port, created_sessions):
-            working_path, reached_prompt, failures = await _first_turn(tmp_path, port, monkeypatch)
-        return working_path, reached_prompt, failures, created_sessions
+        async with _cold_opencode(bootstrap_seconds=REQUEST_TIMEOUT_SECONDS + 1) as opencode:
+            working_path, reached_prompt, failures = await _first_turn(tmp_path, opencode.port, monkeypatch)
+        return working_path, reached_prompt, failures, opencode.created_sessions
 
     working_path, reached_prompt, failures, created_sessions = asyncio.run(scenario())
 
@@ -149,9 +174,9 @@ def test_bootstrap_past_the_readiness_ceiling_reports_first_time_setup(tmp_path,
     monkeypatch.setattr(server_module, "DIRECTORY_BOOTSTRAP_TIMEOUT", REQUEST_TIMEOUT_SECONDS, raising=False)
 
     async def scenario():
-        async with _cold_opencode(bootstrap_seconds=REQUEST_TIMEOUT_SECONDS + 2) as (port, created_sessions):
-            _working_path, reached_prompt, failures = await _first_turn(tmp_path, port, monkeypatch)
-        return reached_prompt, failures, created_sessions
+        async with _cold_opencode(bootstrap_seconds=REQUEST_TIMEOUT_SECONDS + 2) as opencode:
+            _working_path, reached_prompt, failures = await _first_turn(tmp_path, opencode.port, monkeypatch)
+        return reached_prompt, failures, opencode.created_sessions
 
     reached_prompt, failures, created_sessions = asyncio.run(scenario())
 
@@ -159,3 +184,26 @@ def test_bootstrap_past_the_readiness_ceiling_reports_first_time_setup(tmp_path,
     assert created_sessions == []
     assert failures == ["❌ OpenCode is still finishing its first-time setup. Send your message again shortly."]
 
+
+def test_provider_probe_lists_models_after_directory_bootstrap_longer_than_request_timeout(monkeypatch) -> None:
+    # The probe tests native connectivity, which only direct mode allows.
+    config = V2Config.default()
+    config.model_hub.agents["opencode"].mode = "direct"
+    config.save()
+
+    async def scenario():
+        async with _cold_opencode(bootstrap_seconds=REQUEST_TIMEOUT_SECONDS + 1) as opencode:
+            server = OpenCodeServerManager(port=opencode.port, request_timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+            service = AgentAuthService(SimpleNamespace(config=SimpleNamespace(language="en")))
+            monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=server))
+            try:
+                result = await service.test_opencode_provider("openai")
+            finally:
+                await server.close_http_session()
+        return result, opencode.prompts
+
+    result, prompts = asyncio.run(scenario())
+
+    assert result["ok"] is True, result
+    assert result["model"] == "gpt-cold"
+    assert [prompt["model"] for prompt in prompts] == [{"providerID": "openai", "modelID": "gpt-cold"}]

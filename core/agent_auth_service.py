@@ -3229,6 +3229,14 @@ class AgentAuthService:
             return {"ok": False, "error": "opencode_server_unavailable"}
 
         directory = os.path.expanduser("~")
+        # On a fresh install the first request for a directory waits while
+        # OpenCode bootstraps it, which can outlast the catalog request's
+        # timeout and read as "no models".
+        try:
+            await server.ensure_directory_ready(directory)
+        except Exception as err:  # noqa: BLE001
+            detail = str(err)
+            return {"ok": False, "error": _classify_test_failure("", detail), "detail": detail[:600]}
         try:
             catalog = await server.get_native_available_models(directory)
         except Exception:  # noqa: BLE001
