@@ -156,9 +156,11 @@ describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated 
 });
 
 // A popup opened after an await has lost the click's user activation and is blocked, which would
-// silently bring back the sandbox's own launcher card and its second approval click.
+// silently bring back the sandbox's own launcher card and its second approval click. A Home Screen
+// app on iOS is also frozen about two seconds after it opens a window, so a reveal context fetched
+// after the click often never reaches that window: the context comes from the open row menu.
 describe('VaultsPage protected reveal', () => {
-  it('opens the sandbox authorization window inside the click and hands it to the reveal', async () => {
+  it('opens the sandbox authorization window inside the click and hands it a context fetched before it', async () => {
     const user = userEvent.setup();
     api.listVaultSecrets.mockResolvedValue({
       secrets: [
@@ -188,6 +190,7 @@ describe('VaultsPage protected reveal', () => {
 
     renderPage();
     await user.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
+    await waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
     fireEvent.click(await screen.findByRole('menuitem', { name: 'vaults.reveal.show' }));
 
     // Asserted synchronously after the click dispatch, before any awaited work can run.
@@ -195,7 +198,9 @@ describe('VaultsPage protected reveal', () => {
     const opened = new URL(String(open.mock.calls[0][0]));
     expect(opened.searchParams.get('mode')).toBe('authorize');
     await waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'alpha' });
     expect(revealProtectedValue.mock.calls[0][2]).toBe(opened.searchParams.get('id'));
+    expect(api.createVaultRevealContext).toHaveBeenCalledOnce();
     await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
   });
 });

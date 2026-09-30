@@ -255,7 +255,8 @@ afterEach(() => {
 // pair with the sandbox, every surface that would start a protected passkey step instead opens the
 // same Workbench's Vaults page in the browser and starts nothing here; the browser's Vaults page
 // resumes that same step (the request, a Protected Add for the same name, or the secret's reveal)
-// and stops at the click that begins it. Each surface encodes its own step while Vaults decodes
+// and stops at the click that begins it: it may prepare the step's signed contexts, but no passkey
+// ceremony, release, or signature runs before that click. Each surface encodes its own step while Vaults decodes
 // them all, so a step the page can't resume, or resumes with a lost part (a provision answer back
 // on the request's Standard default, a reveal on a bare list, an agent's name dropped from Add),
 // strands the user in the browser; only a round trip through both ends catches that.
@@ -276,6 +277,8 @@ describe('desktop shell protected-vault browser handoff', () => {
     expect(target.origin).toBe(window.location.origin);
     expect(target.pathname).toBe('/vaults');
     expect(screen.queryByRole('dialog')).toBeNull();
+    expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
 
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
@@ -284,8 +287,7 @@ describe('desktop shell protected-vault browser handoff', () => {
 
     expect(open).toHaveBeenCalledTimes(1);
     for (const ceremony of ceremonies) expect(ceremony).not.toHaveBeenCalled();
-    expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
-    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
     expect(api.signVaultDigest).not.toHaveBeenCalled();
   });
 });

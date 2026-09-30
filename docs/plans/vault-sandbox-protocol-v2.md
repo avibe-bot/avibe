@@ -365,6 +365,12 @@ user reviews and approves the operation in one sandbox surface:
 4. A window that does not announce itself within 30 seconds, or closes, fails
    the operation with the retryable `authorization_window_closed`. The parent
    closes its handle when the operation settles.
+5. Nothing the request needs may wait on the daemon after the click. A Home
+   Screen app on iOS is frozen about two seconds after it opens a window, and
+   WebKit blocks a window opened after an await, so a daemon round trip between
+   opening the window and sending the request often leaves the window on its
+   placeholder. The parent obtains the daemon-signed contexts before the click
+   (§7.1, §7.4); the click only opens the window and sends the request.
 
 Without an id (the browser blocked the parent's window, or an older parent),
 the embedded sandbox renders a visible launcher card whose click opens the
@@ -380,11 +386,14 @@ is the browser-rendered top-level sandbox page, not the embedder's DOM.
 
 ### 7.1 Approvals (access)
 
-Parent: one click (Approve) on the request card opens the top-level sandbox
-authorization window (§6.6). Parent fetches **one** batch
-of signed contexts (`POST /vault/agent-bindings:batch` with the request id;
-daemon returns per-secret bindings sharing one display block), sends one
-`approveRelease`. Sandbox: one card — title, session label, command, egress,
+Parent: while the request card is open it keeps **one** batch of signed
+contexts (`POST /vault/agent-bindings:batch` with the request id and the chosen
+duration; daemon returns per-secret bindings sharing one display block). The
+daemon keeps only the latest issue for a request, so the card issues one batch
+at a time, re-issues when the duration changes and every 15 s while visible,
+and stops re-issuing once the approval starts. One click (Approve) opens the
+top-level sandbox authorization window (§6.6), claims the latest batch (issuing
+one only if none is at most 20 s old), and sends one `approveRelease`. Sandbox: one card — title, session label, command, egress,
 agent grant duration, and the full member list — one confirm (plus one passkey
 iff locked or Strict). Parent then submits blind boxes via the existing
 fulfill endpoint.
@@ -397,7 +406,8 @@ batching in place it has no remaining need.
 **Approver-chosen grant duration.** The card's fixed "Duration" line becomes a
 control directly above the approve button: **One-time / 5 min / 15 min**,
 defaulting to the approver's remembered last choice (persisted daemon-side in
-vault settings; first-ever default 5 min). One-time means the agent may
+vault settings when an approval completes, never when contexts are issued;
+first-ever default 5 min). One-time means the agent may
 complete the current delivery and the grant then ends — no DEK cache window
 (align with the existing `one_shot` grant semantics; the agent still gets a
 short execution window, ~60 s, to perform that single delivery). The
@@ -447,8 +457,10 @@ triggered from the create form (`setup` immediately continues into the pending
 ### 7.4 Reveal
 
 Secret detail (protected static) gains "Show value / Copy value" actions
-calling `reveal`. R2: the action click opens the top-level sandbox
-authorization window, where the user confirms; after approval, plaintext is rendered inside the sandbox iframe only. This
+calling `reveal`. R2: opening the secret's action menu fetches the signed
+reveal context, which the daemon does not store; the action click opens the
+top-level sandbox authorization window and claims that context (fetching one
+only if none is at most 30 s old), and the user confirms in the window; after approval, plaintext is rendered inside the sandbox iframe only. This
 closes the orphaned-`unseal` gap without moving plaintext into the parent.
 
 **Copy-mode caveat**: the system clipboard is a shared resource — once the

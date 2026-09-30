@@ -2765,10 +2765,10 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
         with engine.begin() as conn:
             request_payload = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_UI)
             option = _grant_option_from_request(conn, request_id)
-            grant_duration_value = _grant_duration_value_from_payload(payload)
-            remember_duration = grant_duration_value is not None
+            # The approval card issues these contexts while it is open, before the approver
+            # decides, so issuing them never changes the remembered duration; an approval does.
             duration = vault_service.normalize_grant_duration(
-                grant_duration_value,
+                _grant_duration_value_from_payload(payload),
                 default=option.get("default_grant_duration") or vault_service.get_vault_settings(conn)["last_grant_ttl"],
             )
             grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
@@ -2776,8 +2776,6 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
             member_order = {name: index for index, name in enumerate(option["member_names"])}
             grantable_members.sort(key=lambda item: member_order.get(str(item.get("name")), 10_000))
             protected_metas.sort(key=lambda item: member_order.get(str(item.get("name")), 10_000))
-            if remember_duration:
-                vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:

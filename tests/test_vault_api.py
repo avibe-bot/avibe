@@ -1399,6 +1399,7 @@ def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(mon
             "egress": "api.github.com",
         }
     )["request"]
+    remembered = api.get_vault_settings()["settings"]["last_grant_ttl"]
 
     result = api.create_vault_agent_bindings_batch(
         {
@@ -1429,7 +1430,10 @@ def test_agent_bindings_batch_covers_all_protected_selector_members_one_time(mon
             context["release"]["name"],
             60,
         )
-    assert api.get_vault_settings()["settings"]["last_grant_ttl"] == "one-time"
+    # The approval card issues contexts while it is open, before the approver decides, so an issue
+    # must leave the remembered duration alone; only the approval saves the choice.
+    assert remembered != "one-time"
+    assert api.get_vault_settings()["settings"]["last_grant_ttl"] == remembered
 
 
 def test_agent_bindings_batch_rejects_mixed_duration_fields(monkeypatch):
