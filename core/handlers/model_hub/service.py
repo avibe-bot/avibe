@@ -212,25 +212,36 @@ def _cached_models_dev_catalog() -> Mapping[str, Any]:
 def _with_text_only_models(
     bindings: list[SourceBinding],
 ) -> list[SourceBinding]:
-    """Mark each bound model that models.dev declares text-only.
+    """Mark each bound model that its upstream's own models.dev entry declares text-only.
 
-    Read at sync rather than in ``_bindings``: the cached copy changes on its
-    own, and a mutation compares the bindings it builds before and after
-    itself. The sync never fetches, and an unreadable copy leaves every model
-    undeclared, which is the engine's default.
+    Only an ``openai_chat`` Source on its vendor's official endpoint has such
+    an entry: the vendor's mapped provider describes what that endpoint
+    accepts. Read at sync rather than in ``_bindings``: the cached copy
+    changes on its own, and a mutation compares the bindings it builds before
+    and after itself. The sync never fetches, and an unreadable copy leaves
+    every model undeclared, which is the engine's default.
     """
 
+    from vibe.model_hub_runtime.api_key_vendors import official_models_dev_provider
     from vibe.models_dev_catalog import cached_models_dev_catalog, text_only_model_ids
 
-    model_ids = [
-        model
+    providers = {
+        binding.source_id: official_models_dev_provider(binding.vendor, binding.base_url)
         for binding in bindings
-        for model in (*binding.model_ids, *binding.route_model_ids)
-    ]
+        if binding.protocol == "openai_chat"
+    }
+    model_ids: dict[str, list[str]] = {}
+    for binding in bindings:
+        provider = providers.get(binding.source_id)
+        if provider is not None:
+            model_ids.setdefault(provider, []).extend((*binding.model_ids, *binding.route_model_ids))
     if not model_ids:
         return bindings
     try:
-        text_only = text_only_model_ids(model_ids, cached_models_dev_catalog())
+        catalog = cached_models_dev_catalog()
+        text_only = {
+            provider: text_only_model_ids(provider, ids, catalog) for provider, ids in model_ids.items()
+        }
     except Exception as exc:  # noqa: BLE001 - optional metadata never fails a sync
         logger.info("Model Hub engine models have no models.dev modalities: %s", type(exc).__name__)
         return bindings
@@ -240,7 +251,7 @@ def _with_text_only_models(
             text_only_model_ids=tuple(
                 model
                 for model in dict.fromkeys((*binding.model_ids, *binding.route_model_ids))
-                if model in text_only
+                if model in text_only.get(providers.get(binding.source_id) or "", ())
             ),
         )
         for binding in bindings

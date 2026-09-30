@@ -375,248 +375,96 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
     assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}
 
 
-_TEXT_ONLY_DECLARATIONS = (["text"], [" TEXT "], ["text", "pdf"], ["Text", "audio"])
-_VETO_DECLARATIONS = (
-    ["text", "image"], ["text", "Image"], ["text", " image "], ["image"], ["pdf"], [],
-    ["text", 1], "text", None, {"input": ["text"]},
-)
-
-
-def _copy(declared: object = ("text",), **fields: object) -> dict:
-    return {**fields, "modalities": {"input": list(declared) if isinstance(declared, tuple) else declared}}
+def _entry(declared: object, **fields: object) -> dict:
+    return {**fields, "modalities": {"input": declared}}
 
 
 @pytest.mark.parametrize(
-    ("relay_copies", "text_only"),
+    ("entries", "requested", "text_only"),
     [
-        ([_copy(["text", "pdf"])], True),
-        ([_copy([" TEXT "])], True),
-        ([], True),
-        ([_copy(["text", "image"])], False),
-        ([_copy(["text", "Image"])], False),
-        ([_copy(["text", " image "])], False),
-        # The picker drops a copy with an empty name; the deployment it
-        # describes still accepts images.
-        ([_copy(["text", "image"], name="")], False),
-        # A copy that is silent about input, or unreadable, is a veto.
-        ([{"name": "No modalities"}], False),
-        ([{"modalities": "text"}], False),
-        ([_copy([])], False),
-        ([_copy(["text", 1])], False),
-        ([_copy("text")], False),
-        (["not-an-object"], False),
-        ([_copy(["image"])], False),
-        ([_copy(["pdf"])], False),
-        ([_copy(["text"]), _copy(["text", "image"])], False),
+        ({"target": _entry(["text"])}, "target", True),
+        ({"target": _entry([" TEXT ", "pdf"])}, "target", True),
+        ({"target": _entry(["text", "image"])}, "target", False),
+        ({"target": _entry(["text", " Image "])}, "target", False),
+        # Undeclared or malformed input leaves the model undeclared.
+        ({"target": {"name": "No modalities"}}, "target", False),
+        ({"target": _entry([])}, "target", False),
+        ({"target": _entry(["text", 1])}, "target", False),
+        ({"target": _entry("text")}, "target", False),
+        ({"target": "not-an-object"}, "target", False),
+        ({"target": _entry(["image"])}, "target", False),
+        # Model identity is Avibe's: trimmed, case preserved.
+        ({"target": _entry(["text"])}, " target ", True),
+        ({"target": _entry(["text"])}, "TARGET", False),
+        ({"TARGET": _entry(["text", "image"]), "target": _entry(["text"])}, "TARGET", False),
+        # An entry is found by its key or its id; one that disagrees vetoes.
+        ({"hosted-7": _entry(["text"], id="target")}, "target", True),
+        ({"target": _entry(["text"]), "alias": _entry(["text", "image"], id="target")}, "target", False),
+        ({"other": _entry(["text"])}, "target", False),
     ],
 )
-def test_text_only_needs_every_raw_copy_to_declare_text_without_images(relay_copies, text_only):
-    """MH-MODALITIES-004: a text-only answer hides images, so every raw copy must declare text and no image."""
+def test_text_only_reads_the_upstream_providers_own_entry(entries, requested, text_only):
+    """MH-MODALITIES-004: a model is text-only when its upstream provider's own entry declares text and no image."""
 
-    catalog = {
-        "deepseek": {"models": {"deepseek-model": _copy(["text"])}},
-        **{f"relay-{index}": {"models": {"deepseek-model": copy}} for index, copy in enumerate(relay_copies)},
-    }
+    catalog = {"deepseek": {"models": entries}}
 
-    assert models_dev_catalog.text_only_model_ids(["deepseek-model"], catalog) == (
-        {"deepseek-model"} if text_only else set()
+    assert models_dev_catalog.text_only_model_ids("deepseek", [requested], catalog) == (
+        {requested} if text_only else set()
     )
 
 
-@pytest.mark.parametrize(
-    ("requested", "veto_key", "veto_copy"),
-    [
-        # No copy outranks another: a bare relay copy vetoes a full identity.
-        ("deepseek/target", "target", _copy(["text", "image"])),
-        ("deepseek/target", "openrouter-name", _copy(["text", "image"], id="deepseek/target")),
-        # Case and whitespace variants of the same name.
-        ("target", "TARGET", _copy(["text", "image"])),
-        ("Vendor/Target", "target ", _copy(["text", "image"])),
-        # A relay's namespaced copy vetoes a bare request, on either side.
-        ("target", "zai-org/Target", _copy(["text", "image"])),
-        ("accounts/fireworks/models/target", "relay/target", _copy(["text", "image"])),
-        # An entry is a copy under its key even when its id is malformed.
-        ("target", "target", _copy(["text", "image"], id="")),
-        ("target", "target", _copy(["text", "image"], id=" ")),
-        ("target", "target", _copy(["text", "image"], id=7)),
-        # ...and under its id when its key names something else.
-        ("target", "hosted-7", _copy(["text", "image"], id="relay/target")),
-    ],
-)
-def test_text_only_counts_every_entry_that_could_name_the_id_as_a_copy(requested, veto_key, veto_copy):
-    """MH-MODALITIES-004: an entry is a copy of every id its key or id could name, so any doubt is a veto."""
+def test_text_only_never_reads_another_providers_copy():
+    """MH-MODALITIES-004: a relay's declaration describes the relay, so it neither marks nor vetoes the vendor."""
 
-    text_only = {"deepseek": {"models": {"target": _copy(["text"])}}, "owner": {"models": {requested: _copy(["text"])}}}
-    assert models_dev_catalog.text_only_model_ids([requested], text_only) == {requested}
-
-    vetoed = {**text_only, "relay": {"models": {veto_key: veto_copy}}}
-    assert models_dev_catalog.text_only_model_ids([requested], vetoed) == set()
-
-
-@pytest.mark.parametrize(
-    ("requested", "catalog", "text_only"),
-    [
-        # A shared last segment is doubt, not evidence: another provider's
-        # ``target`` says nothing about a custom relay's ``custom/target``.
-        ("custom/target", {"openai": {"models": {"target": _copy(["text"])}}}, False),
-        ("target", {"relay": {"models": {"vendor/target": _copy(["text"])}}}, False),
-        # A copy names the id through its key, its ``id``, or its identity.
-        ("target", {"openai": {"models": {"target": _copy(["text"])}}}, True),
-        (" TARGET ", {"openai": {"models": {"target": _copy(["text"])}}}, True),
-        ("openai/target", {"openai": {"models": {"target": _copy(["text"])}}}, True),
-        ("openai/target", {"key": {"id": "OpenAI", "models": {"target": _copy(["text"])}}}, True),
-        ("vendor/target", {"relay": {"models": {"vendor/target": _copy(["text"])}}}, True),
-        ("vendor/target", {"relay": {"models": {"hosted-7": _copy(["text"], id="vendor/target")}}}, True),
-    ],
-)
-def test_text_only_needs_a_copy_that_names_the_id_itself(requested, catalog, text_only):
-    """MH-MODALITIES-004: a mark needs a copy whose key, id, or identity is the id; a shared last segment only vetoes."""
-
-    assert models_dev_catalog.text_only_model_ids([requested], catalog) == ({requested} if text_only else set())
-
-
-@pytest.mark.parametrize("seed", range(100))
-def test_text_only_never_marks_an_id_only_a_shared_last_segment_describes(seed):
-    """MH-MODALITIES-004: whatever else the catalog holds, a namespaced id no copy names stays unmarked."""
-
-    import random
-
-    rng = random.Random(seed)
-    last = rng.choice(["target", "Beta.2", "gamma-mini"])
-    requested = f"custom/{last}"
     catalog = {
-        f"provider-{index}": {"models": {
-            rng.choice([last, last.upper(), f" {last} ", f"relay/{last}", f"Org/Sub/{last.upper()}"]):
-                {"modalities": {"input": rng.choice(_TEXT_ONLY_DECLARATIONS)}}
-            for _ in range(rng.randrange(1, 4))
-        }}
-        for index in range(rng.randrange(1, 5))
+        "zhipuai": {"models": {"glm-5.2": _entry(["text"])}},
+        "baseten": {"models": {"zai-org/GLM-5.2": _entry(["text", "image"])}},
+        "relay": {"models": {"deepseek-model": _entry(["text"])}},
+        "deepseek": {"models": {}},
     }
 
-    assert models_dev_catalog.text_only_model_ids([requested], catalog) == set(), catalog
+    assert models_dev_catalog.text_only_model_ids("zhipuai", ["glm-5.2"], catalog) == {"glm-5.2"}
+    assert models_dev_catalog.text_only_model_ids("deepseek", ["deepseek-model"], catalog) == set()
 
 
-def test_text_only_declares_nothing_from_a_catalog_it_cannot_read_whole(caplog):
-    """MH-MODALITIES-004: a provider whose models cannot be read may hold a copy, so it vetoes every id."""
+def test_text_only_warns_about_an_unreadable_provider_without_touching_others(caplog):
+    """MH-MODALITIES-004: an unreadable or missing provider declares nothing and says so; other providers are unaffected."""
 
-    catalog = {"deepseek": {"models": {"target": _copy(["text"])}}, "relay": {"models": [_copy(["text"])]}}
+    catalog = {
+        "deepseek": {"models": [_entry(["text"])]},
+        "zhipuai": {"models": {"glm-5": _entry(["text"])}},
+    }
 
     with caplog.at_level("WARNING", logger=models_dev_catalog.__name__):
-        assert models_dev_catalog.text_only_model_ids(["target", "missing"], catalog) == set()
+        assert models_dev_catalog.text_only_model_ids("deepseek", ["deepseek-model"], catalog) == set()
+        assert models_dev_catalog.text_only_model_ids("zhipuai", ["glm-5"], catalog) == {"glm-5"}
+        assert models_dev_catalog.text_only_model_ids("groq", ["model"], catalog) == set()
+        # No cached copy yet is not a fault.
+        assert models_dev_catalog.text_only_model_ids("groq", ["model"], {}) == set()
 
-    # The whole feature is off, so the one provider responsible is named once.
-    [record] = [record for record in caplog.records if record.name == models_dev_catalog.__name__]
-    assert record.levelname == "WARNING"
-    assert "relay" in record.getMessage() and "deepseek" not in record.getMessage()
-
-
-def _name_variants(model_id: str) -> list[str]:
-    """Spellings a catalog entry may use for ``model_id``: the spec's association, written out."""
-
-    last = model_id.rsplit("/", 1)[-1]
-    return [
-        model_id, last, last.upper(), f" {last} ", f"relay/{last}", f"Org/Sub/{last.upper()}",
-        f"{model_id.upper()} ",
-    ]
+    messages = [record.getMessage() for record in caplog.records if record.name == models_dev_catalog.__name__]
+    assert len(messages) == 2
+    assert "deepseek" in messages[0] and "zhipuai" not in messages[0]
+    assert "groq" in messages[1]
 
 
-def _random_entry(rng, names: list[str]) -> object:
-    if rng.random() < 0.1:
-        return rng.choice(["not-an-object", 3, None, []])
-    entry: dict = {}
-    if rng.random() < 0.5:
-        entry["id"] = rng.choice([*names, "", " ", 5, None])
-    if rng.random() < 0.3:
-        entry["name"] = rng.choice(["", "Name"])
-    roll = rng.random()
-    if roll < 0.5:
-        entry["modalities"] = {"input": rng.choice(_TEXT_ONLY_DECLARATIONS)}
-    elif roll < 0.9:
-        entry["modalities"] = {"input": rng.choice(_VETO_DECLARATIONS)}
-    elif roll < 0.95:
-        entry["modalities"] = rng.choice(["text", None, {}])
-    return entry
+def test_cached_catalog_read_does_not_wait_on_a_foreground_fetch(monkeypatch, tmp_path):
+    """MH-MODALITIES-002: an engine sync reads the cached copy while a picker fetch holds the cache lock."""
 
+    import threading
 
-def _random_catalog(rng, requested: list[str], names: list[str]) -> dict:
-    catalog: dict = {}
-    # Every requested id starts with at least one copy.
-    for index, model_id in enumerate(requested):
-        catalog[f"owner-{index}"] = {"models": {model_id: {
-            "modalities": {"input": rng.choice(_TEXT_ONLY_DECLARATIONS if rng.random() < 0.8 else _VETO_DECLARATIONS)},
-        }}}
-    for index in range(rng.randrange(4)):
-        catalog[f"noise-{index}"] = {"models": {
-            rng.choice(names): _random_entry(rng, names) for _ in range(rng.randrange(1, 4))
-        }}
-    return catalog
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: tmp_path / "models_dev_catalog.json")
+    models_dev_catalog._write_cache({"url": models_dev_catalog._models_dev_url(), "fetched_at": 0, "catalog": _catalog()})
+    read: list[dict] = []
+    with models_dev_catalog._CACHE_LOCK:
+        reader = threading.Thread(target=lambda: read.append(models_dev_catalog.cached_models_dev_catalog()))
+        reader.start()
+        reader.join(timeout=5)
+        waited = reader.is_alive()
+    reader.join(timeout=5)
 
-
-def _random_case(seed: int):
-    import random
-
-    rng = random.Random(seed)
-    stems = ["target", "Beta.2", "gamma-mini", "delta"]
-    requested = list(dict.fromkeys(
-        rng.choice([stem, f"vendor/{stem}", f"accounts/fw/models/{stem}"]) for stem in rng.sample(stems, 3)
-    ))
-    names = [name for stem in stems for name in _name_variants(stem)] + ["unrelated", "vendor/unrelated"]
-    return rng, requested, names
-
-
-@pytest.mark.parametrize("seed", range(100))
-def test_text_only_marks_never_grow_as_entries_are_added(seed):
-    """MH-MODALITIES-004: for an id that has a copy, adding any entry keeps or removes its mark, never adds one."""
-
-    import copy
-
-    rng, requested, names = _random_case(seed)
-    for trial in range(25):
-        catalog = _random_catalog(rng, requested, names)
-        marked = models_dev_catalog.text_only_model_ids(requested, catalog)
-        grown = copy.deepcopy(catalog)
-        if rng.random() < 0.05:
-            grown["broken"] = {"models": [rng.choice(names)]}
-        else:
-            # A provider may spell part of a full identity, by key or by id.
-            provider_key = rng.choice(["vendor", "Vendor", "accounts", "relay", f"added-{trial}"])
-            provider = grown.setdefault(provider_key, {"models": {}})
-            if rng.random() < 0.3:
-                provider["id"] = rng.choice(["vendor", "accounts/fw/models"])
-            key = rng.choice([name for name in names if name not in provider["models"]])
-            provider["models"][key] = _random_entry(rng, names)
-        assert models_dev_catalog.text_only_model_ids(requested, grown) <= marked, (seed, catalog, grown)
-
-
-@pytest.mark.parametrize("seed", range(100))
-def test_text_only_marks_fall_to_a_veto_under_any_spelling_of_the_id(seed):
-    """MH-MODALITIES-004: a vetoing copy under any spelling that could name a marked id removes its mark."""
-
-    rng, requested, names = _random_case(seed)
-    for _trial in range(25):
-        catalog = _random_catalog(rng, requested, names)
-        for model_id in sorted(models_dev_catalog.text_only_model_ids(requested, catalog)):
-            spelling = rng.choice(_name_variants(model_id))
-            veto: object = {"modalities": {"input": rng.choice(_VETO_DECLARATIONS)}}
-            roll = rng.random()
-            if roll < 0.4:
-                key, veto = rng.choice(["hosted", *names]), {**veto, "id": spelling}
-            elif roll < 0.9:
-                key = spelling
-                if rng.random() < 0.3:
-                    veto["id"] = rng.choice(["", " ", 5])
-                if rng.random() < 0.2:
-                    veto = rng.choice(["not-an-object", None, {"name": spelling}])
-            else:
-                vetoed = {**catalog, "broken": {"models": [spelling]}}
-                assert model_id not in models_dev_catalog.text_only_model_ids(requested, vetoed), (seed, model_id)
-                continue
-            if isinstance(veto, dict) and rng.random() < 0.3:
-                veto["name"] = ""
-            vetoed = {**catalog, "veto": {"models": {key: veto}}}
-            assert model_id not in models_dev_catalog.text_only_model_ids(requested, vetoed), (
-                seed, model_id, key, veto,
-            )
+    assert not waited
+    assert read == [_catalog()]
 
 
 def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):

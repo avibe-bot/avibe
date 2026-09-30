@@ -1720,8 +1720,66 @@ def test_engine_config_declares_text_only_input_only_on_openai_compatibility_mod
         ]
 
 
-def test_engine_record_reads_an_unreadable_text_only_list_as_undeclared() -> None:
-    """Undeclared is the engine default, so a shape this release cannot read degrades to it."""
+def _rendered_text_only(tmp_path: Path, model_ids: tuple[str, ...], text_only: tuple[str, ...]) -> set[str]:
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    chat_ref = store.store_api_key("chat-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(chat_ref, model_ids=model_ids, text_only_model_ids=text_only)])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path,
+        host="127.0.0.1",
+        port=18231,
+        auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets,
+        sources=store.list_sources(),
+        state_store=store,
+    )
+    [compat] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["openai-compatibility"]
+    return {model["name"] for model in compat["models"] if model.get("input-modalities") == ["text"]}
+
+
+def test_engine_config_declares_models_the_engine_cannot_tell_apart_together_or_not_at_all(tmp_path: Path) -> None:
+    """MH-MODALITIES-001: CPA's lookup folds case and drops a (...) suffix, so such a group is marked whole or not at all."""
+
+    assert _rendered_text_only(
+        tmp_path,
+        ("target", "TARGET", "other", "other(high)", "solo"),
+        ("target", "other", "other(high)", "solo"),
+    ) == {"other", "other(high)", "solo"}
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_engine_config_never_declares_a_model_the_engine_could_confuse_with_an_unmarked_one(tmp_path: Path, seed: int) -> None:
+    """MH-MODALITIES-001: every rendered mark was asked for, and no unmarked model shares its engine name."""
+
+    import random
+
+    rng = random.Random(seed)
+    spellings = ["target", "Target", "TARGET", "target(high)", "Target (low)", "other", "OTHER(x)", "solo"]
+    model_ids = tuple(rng.sample(spellings, rng.randrange(1, len(spellings) + 1)))
+    text_only = tuple(model for model in model_ids if rng.random() < 0.7)
+
+    def engine_name(model: str) -> str:
+        # Written out from CLIProxyAPI v7.3.16's normalizeOpenAICompatibilityModelName.
+        name = model.strip()
+        if "(" in name and name.endswith(")"):
+            name = name[: name.rindex("(")]
+        return name.strip().lower()
+
+    rendered = _rendered_text_only(tmp_path / str(seed), model_ids, text_only)
+
+    assert rendered <= set(text_only)
+    unmarked_names = {engine_name(model) for model in model_ids if model not in rendered}
+    assert not {engine_name(model) for model in rendered} & unmarked_names
+    # Nothing is withheld that the guard does not require.
+    assert {model for model in text_only if engine_name(model) not in {
+        engine_name(other) for other in model_ids if other not in text_only
+    }} == rendered
+
+
+def test_engine_record_reads_an_unreadable_text_only_list_as_undeclared(caplog: pytest.LogCaptureFixture) -> None:
+    """Undeclared is the engine default, so a shape this release cannot read degrades to it, with a warning."""
 
     record = SourceRecord.from_payload(
         {
@@ -1739,6 +1797,9 @@ def test_engine_record_reads_an_unreadable_text_only_list_as_undeclared() -> Non
 
     assert record.model_ids == ("text-model",)
     assert record.text_only_model_ids == ()
+    assert any(
+        record.levelname == "WARNING" and "src_fixture123" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(

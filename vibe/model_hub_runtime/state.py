@@ -164,15 +164,21 @@ class SourceRecord:
             model_reasoning_efforts=tuple(parsed_reasoning_efforts),
             route_model_ids=tuple(route_model_ids),
             text_only_model_ids=_stored_text_only_model_ids(
-                payload.get("text_only_model_ids", [])
+                str(payload["source_id"]), payload.get("text_only_model_ids", [])
             ),
         )
 
 
-def _stored_text_only_model_ids(raw: object) -> tuple[str, ...]:
+def _stored_text_only_model_ids(source_id: str, raw: object) -> tuple[str, ...]:
     # Undeclared input is the engine's default, so a list this release cannot
-    # read degrades to that rather than failing the source.
+    # read degrades to that rather than failing the source. The next sync
+    # rewrites it; until then the Source's images are forwarded, and the log
+    # says why.
     if not isinstance(raw, list) or not all(isinstance(model, str) and model for model in raw):
+        logger.warning(
+            "Engine source %s has an unreadable text-only model list; its models are undeclared until the next sync",
+            source_id,
+        )
         return ()
     return tuple(dict.fromkeys(raw))
 

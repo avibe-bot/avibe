@@ -120,6 +120,9 @@ class APIKeyVendorCatalogEntry:
     label: str
     official_base_url: str
     protocol: str
+    # The models.dev provider whose entries describe what this vendor's
+    # official endpoint accepts; ``None`` when no mapping has been verified.
+    models_dev_provider: str | None = None
 
 
 def _catalog_path() -> Path:
@@ -141,6 +144,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
         label = item.get("label")
         protocol = item.get("protocol")
         official_base_url = normalize_model_hub_base_url(item.get("official_base_url"))
+        models_dev_provider = item.get("models_dev_provider")
         if (
             vendor_id == "custom"
             or vendor_id in seen_ids
@@ -149,6 +153,10 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
             or not isinstance(protocol, str)
             or protocol not in _SUPPORTED_PROTOCOLS
             or official_base_url is None
+            or (
+                models_dev_provider is not None
+                and (not isinstance(models_dev_provider, str) or not models_dev_provider.strip())
+            )
         ):
             raise ValueError("api-key vendor catalog is invalid")
         entries.append(
@@ -157,6 +165,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
                 label=label.strip(),
                 official_base_url=official_base_url,
                 protocol=protocol,
+                models_dev_provider=models_dev_provider.strip() if models_dev_provider else None,
             )
         )
         seen_ids.add(vendor_id)
@@ -188,6 +197,20 @@ def official_api_key_base_url(vendor: str) -> str | None:
     if entry is not None:
         return entry.official_base_url
     return _LEGACY_OFFICIAL_BASE_URLS.get(normalized_vendor)
+
+
+def official_models_dev_provider(vendor: str, base_url: str | None) -> str | None:
+    """The models.dev provider describing this Source's upstream, or ``None``.
+
+    Only a Source on its vendor's official endpoint is described by that
+    vendor's models.dev entries: a custom URL may front any deployment.
+    """
+    entry = api_key_vendor_entry(vendor)
+    if entry is None or entry.models_dev_provider is None:
+        return None
+    if base_url is not None and normalize_model_hub_base_url(base_url) != entry.official_base_url:
+        return None
+    return entry.models_dev_provider
 
 
 def official_api_key_base_urls() -> dict[str, str]:

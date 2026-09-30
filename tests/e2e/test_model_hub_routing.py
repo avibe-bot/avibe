@@ -541,22 +541,30 @@ _PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDw
 
 def test_mh_modalities_003_claude_tool_result_image_reaches_a_text_only_model_as_the_marker(tmp_path, monkeypatch):
     """MH-MODALITIES-003: a hot-reloaded text-only declaration makes the pinned CPA send the marker, not the image."""
+    from dataclasses import replace as replace_entry
+
     from vibe import models_dev_catalog
+    from vibe.model_hub_runtime import api_key_vendors
 
     async def exercise(adapter, upstream):
         text_only, undeclared = "text-only-model", "undeclared-model"
+        # DeepSeek's official endpoint is the mock, so the Source is an official
+        # DeepSeek Source that DeepSeek's own models.dev entry describes.
+        presets = api_key_vendors._catalog_by_id()
+        monkeypatch.setattr(api_key_vendors, "_catalog_by_id", lambda: {
+            **presets, "deepseek": replace_entry(presets["deepseek"], official_base_url=upstream.url),
+        })
         # Unreachable on purpose: the seeded copy is fresh, so nothing fetches it.
         monkeypatch.setenv(models_dev_catalog.MODELS_DEV_URL_ENV, "http://127.0.0.1:9/models-dev.json")
         models_dev_catalog._write_cache({
             "url": models_dev_catalog._models_dev_url(),
             "fetched_at": time.time(),
-            "catalog": {"mockvendor": {"models": {text_only: {"modalities": {"input": ["text"]}}}}},
+            "catalog": {"deepseek": {"models": {text_only: {"modalities": {"input": ["text"]}}}}},
         })
         upstream.configure(protocol="openai_chat", models=[{"id": undeclared}])
-        item = source("src_modalities1", [undeclared], vendor="custom", protocol="openai_chat")
-        item.base_url = upstream.url
+        item = source("src_modalities1", [undeclared], vendor="deepseek", protocol="openai_chat")
         item.credential_ref = adapter.state_store.store_api_key(
-            "sk-synthetic-modalities", vendor="custom", protocol="openai_chat", base_url=item.base_url,
+            "sk-synthetic-modalities", vendor="deepseek", protocol="openai_chat", base_url=None,
         )
         menu = fixed_model("claude")
         service = service_for(

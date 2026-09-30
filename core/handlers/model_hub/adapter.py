@@ -92,10 +92,10 @@ class SourceBinding:
     # Sorted API-key transport targets derived from effective routes, never
     # inventory or capability evidence. Independent of live health and mode.
     text_only_model_ids: tuple[str, ...] = ()
-    # Models among model_ids and route_model_ids that the models.dev catalog
-    # declares text-only. CLIProxyAPI replaces tool-result images for such an
-    # openai-compatibility model instead of forwarding them; every other model
-    # keeps them.
+    # Models among model_ids and route_model_ids that this Source's upstream
+    # declares text-only in its own models.dev entry. CLIProxyAPI replaces
+    # tool-result images for such an openai-compatibility model instead of
+    # forwarding them; every other model keeps them.
 
 
 class OriginNotAllowedError(Exception):

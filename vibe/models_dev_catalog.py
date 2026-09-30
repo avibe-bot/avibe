@@ -19,6 +19,7 @@ from config.v2_config import (
     normalize_storable_backend_model_text,
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
+from core.handlers.model_hub.identifiers import normalized_model_id
 
 
 logger = logging.getLogger(__name__)
@@ -280,12 +281,13 @@ def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None, b
 def cached_models_dev_catalog() -> dict[str, Any]:
     """The cached copy as it stands, stale or not, and never a fetch.
 
-    For readers that must not start network I/O, such as an engine sync. The
-    readers above keep the copy fresh.
+    For readers that must not start or wait on network I/O, such as an engine
+    sync. The foreground loader holds ``_CACHE_LOCK`` across its fetch, and the
+    copy is replaced atomically, so this read takes no lock. The readers above
+    keep the copy fresh.
     """
 
-    with _CACHE_LOCK:
-        cached = _read_cache()
+    cached = _read_cache()
     catalog = _catalog_from_cache(cached) if cached.get("url") == _models_dev_url() else None
     return catalog or {}
 
@@ -593,31 +595,35 @@ def exact_models_dev_matches(
 
 
 def text_only_model_ids(
+    provider_id: str,
     model_ids: Iterable[str],
     catalog: dict[str, Any],
 ) -> set[str]:
-    """The ids models.dev declares text-only, where any doubt is a veto.
+    """The ids one models.dev provider's own entries declare text-only.
 
-    The answer hides images from the model, so it must hold for every copy
-    that could describe the id. An entry could describe each requested id
-    whose last path segment, trimmed and case-folded, equals that of the
-    entry's key or ``id``: a full ``provider/model`` identity, a bare id, and
-    a relay's namespaced id all meet there. Raw entries are read rather than
-    the picker's admitted rows, and no copy outranks another, so such an entry
-    can only add a veto. A shared last segment is doubt, not evidence, so a
-    mark also needs a copy that names the id itself: its key, ``id``, or
-    ``provider/model`` identity equals the id, trimmed and case-folded. An id
-    is text-only when it has such a copy and every copy that could describe it
-    has a ``modalities.input`` that is a non-empty list of strings which,
-    compared as the engine compares them, contains ``text`` and not ``image``.
-    A catalog whose providers cannot all be read declares nothing.
+    A provider's entry describes what its upstream accepts; a copy under any
+    other provider describes a different deployment and is not read. An id
+    matches an entry whose key or ``id`` is the same model identity: trimmed,
+    case preserved. It is text-only when every entry it matches has a
+    ``modalities.input`` that is a non-empty list of strings which, compared
+    as the engine compares them, contains ``text`` and not ``image``. A
+    provider whose models cannot be read declares nothing, and says so.
     """
 
-    def exact_key(name: str) -> str:
-        return name.strip().lower()
-
-    def name_key(name: str) -> str:
-        return exact_key(name.rsplit("/", 1)[-1])
+    provider = catalog.get(provider_id)
+    if provider is None:
+        if catalog:
+            logger.warning(
+                "models.dev has no provider %s; none of its models is declared text-only", provider_id
+            )
+        return set()
+    models = provider.get("models") if isinstance(provider, dict) else None
+    if not isinstance(models, dict):
+        logger.warning(
+            "models.dev provider %s has no readable models map; none of its models is declared text-only",
+            provider_id,
+        )
+        return set()
 
     def declares_text_only(declared: object) -> bool:
         if not isinstance(declared, list) or not declared or not all(
@@ -627,44 +633,16 @@ def text_only_model_ids(
         values = {value.strip().lower() for value in declared}
         return "text" in values and "image" not in values
 
-    unreadable = [
-        str(provider_key)[:80]
-        for provider_key, provider in catalog.items()
-        if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict)
-    ]
-    if unreadable:
-        # This vetoes every id and so turns text-only marks off entirely; say why.
-        logger.warning(
-            "models.dev providers without a readable models map: %s; no model is declared text-only",
-            ", ".join(unreadable[:5]) + (f" and {len(unreadable) - 5} more" if len(unreadable) > 5 else ""),
-        )
-        return set()
     wanted: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
-        wanted.setdefault(name_key(model_id), []).append(model_id)
+        wanted.setdefault(normalized_model_id(model_id), []).append(model_id)
     text_only: dict[str, bool] = {}
-    named: set[str] = set()
-    for provider_key, provider in catalog.items():
-        provider_names = {str(provider_key)}
-        if isinstance(provider.get("id"), str):
-            provider_names.add(provider["id"])
-        for model_key, model in provider["models"].items():
-            names = {str(model_key)}
-            if isinstance(model, dict) and isinstance(model.get("id"), str):
-                names.add(model["id"])
-            modalities = model.get("modalities") if isinstance(model, dict) else None
-            verdict = declares_text_only(
-                modalities.get("input") if isinstance(modalities, dict) else None
-            )
-            spellings = {exact_key(name) for name in names} | {
-                exact_key(f"{provider_name}/{name}")
-                for provider_name in provider_names
-                for name in names
-            }
-            for requested in {
-                requested for name in names for requested in wanted.get(name_key(name), ())
-            }:
-                text_only[requested] = text_only.get(requested, True) and verdict
-                if exact_key(requested) in spellings:
-                    named.add(requested)
-    return {requested for requested, verdict in text_only.items() if verdict and requested in named}
+    for model_key, model in models.items():
+        names = {normalized_model_id(str(model_key))}
+        if isinstance(model, dict) and isinstance(model.get("id"), str):
+            names.add(normalized_model_id(model["id"]))
+        modalities = model.get("modalities") if isinstance(model, dict) else None
+        verdict = declares_text_only(modalities.get("input") if isinstance(modalities, dict) else None)
+        for requested in {requested for name in names for requested in wanted.get(name, ())}:
+            text_only[requested] = text_only.get(requested, True) and verdict
+    return {requested for requested, verdict in text_only.items() if verdict}

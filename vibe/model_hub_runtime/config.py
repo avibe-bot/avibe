@@ -121,9 +121,15 @@ def _append_source(
     # matching an entry by name, then alias. For one declared text-only it
     # replaces tool-result images with a marker; any other list, or none,
     # keeps images, so text-only is the only declaration worth writing.
-    text_only = set(source.text_only_model_ids) if source.protocol == "openai_chat" else set()
+    # Its name match is looser than a routed ID (see _engine_model_name) and
+    # takes the first entry that matches, so models it cannot tell apart are
+    # declared text-only together or not at all.
+    routed = tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids)))
+    marked = set(source.text_only_model_ids) if source.protocol == "openai_chat" else set()
+    unmarked_names = {_engine_model_name(model) for model in routed if model not in marked}
+    text_only = {model for model in marked if _engine_model_name(model) not in unmarked_names}
     models = []
-    for model in dict.fromkeys((*source.model_ids, *source.route_model_ids)):
+    for model in routed:
         entry: dict[str, Any] = {
             "name": model,
             "alias": model,
@@ -207,6 +213,19 @@ def expected_model_names(
         for model in (*source.model_ids, *source.route_model_ids):
             expected[f"{source.prefix}/{model}"] = reload_display_name(model, generation)
     return expected
+
+
+def _engine_model_name(model: str) -> str:
+    """The name CLIProxyAPI compares when it looks up a model's input modalities.
+
+    It trims the name, drops a trailing ``(...)`` thinking suffix, trims again,
+    and compares case-insensitively.
+    """
+    name = model.strip()
+    suffix = name.rfind("(")
+    if suffix != -1 and name.endswith(")"):
+        name = name[:suffix]
+    return name.strip().casefold()
 
 
 def reload_display_name(model: str, generation: str) -> str:
