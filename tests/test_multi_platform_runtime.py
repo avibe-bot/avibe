@@ -37,6 +37,12 @@ from modules.agents.opencode.poll_loop import (
     _settlement_assistant_message,
 )
 from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
+from core.native_dispatch_phase import prewrite_failure_evidence
+from tests.scenario_harness.model_hub import (
+    UNLISTED_MODEL,
+    unlisted_model_copy,
+    unlisted_model_runtime,
+)
 
 
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
@@ -209,6 +215,92 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
     asyncio.run(agent._process_message(request))
 
     assert calls == ["configure", "ensure", "attach", "release", "failure", "ack"]
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
+    tmp_path,
+    monkeypatch,
+    language,
+) -> None:
+    """MH-UNLISTED-001: an OpenCode Agent whose default model left the list
+    shows the shared refusal, not a wrapped exception or raw key, and keeps
+    the input for an explicit retry."""
+
+    failures: list[str] = []
+
+    async def _emit_failure(_controller, _context, _backend, _diagnostic, *, display_text, request):
+        failures.append(display_text)
+
+    monkeypatch.setattr("modules.agents.opencode.agent.emit_backend_failure", _emit_failure)
+
+    class _Server:
+        async def configure_model_hub_overlay(self, overlay):
+            return None
+
+        async def ensure_running(self):
+            return None
+
+        async def ensure_directory_ready(self, _path):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        async def abort_session(self, _session_id, _path):
+            return None
+
+    async def _get_server():
+        return server
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _session_id(*_args):
+        return "ses_unlisted"
+
+    server = _Server()
+    controller = unlisted_model_runtime(tmp_path, language)
+    controller.get_opencode_overrides = lambda _context: (None, None, None)
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent._get_server = _get_server
+    agent._delete_ack = _noop
+    agent._remove_ack_reaction = _noop
+    agent.record_model_hub_native_failure = _noop
+    agent._steering_states = {}
+    agent.sessions = type("Sessions", (), {"remove_active_poll": staticmethod(lambda _session_id: None)})()
+    agent._session_manager = type(
+        "SessionManager",
+        (),
+        {
+            "ensure_working_dir": staticmethod(_noop),
+            "get_or_create_session_id": staticmethod(_session_id),
+            "set_request_session": staticmethod(lambda *_args: None),
+            "set_agent_session_id": staticmethod(lambda *_args: None),
+        },
+    )()
+
+    context = MessageContext(user_id="user", channel_id="channel", platform="slack", platform_specific={})
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    request = AgentRequest(
+        context=context,
+        message="继续",
+        user_message="继续",
+        working_path=str(tmp_path),
+        base_session_id="base",
+        composite_session_id=f"base:{tmp_path}",
+        session_key="slack::channel",
+        vibe_agent_model=UNLISTED_MODEL,
+    )
+
+    asyncio.run(agent._process_message(request))
+
+    assert failures == [f"❌ {unlisted_model_copy('opencode', language)}"]
+    assert prewrite_failure_evidence(context) == {
+        "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
+    }
 
 
 class _StubClient(BaseIMClient):

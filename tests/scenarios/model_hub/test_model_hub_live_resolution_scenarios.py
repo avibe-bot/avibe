@@ -41,6 +41,11 @@ from core.handlers.model_hub.service import (
     ModelHubService,
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    prewrite_failure_evidence,
+    set_dispatch_phase,
+)
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import (
     ModelHubRuntimeRouter,
@@ -49,7 +54,10 @@ from modules.agents.model_hub import (
     opencode_model_for_overlay,
     opencode_requested_model_for_overlay,
     persisted_launch_identity,
+    resolve_model_hub_launch,
+    resolve_opencode_overlay_launch,
 )
+from vibe.i18n import t as i18n_t
 
 
 class MemoryStore:
@@ -462,14 +470,15 @@ def test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable(
         finally:
             await gateway.close()
 
-        # The row now runs an Agent, so removing it names that Agent.
+        # The row now runs an Agent, so removing it names that Agent under the
+        # row it runs on, not the Direct-era spelling of its selection.
         baseline = service.backend_catalog_models("opencode")
         with pytest.raises(ModelHubError) as refused:
             await service.set_agent_models(
                 "opencode", baseline, [row for row in baseline if row["id"] != "gpt-5.6-sol"],
             )
         assert refused.value.data["would_interrupt"] == [
-            {"backend": "opencode", "model_id": "openai/gpt-5.6-sol", "agents": ["opencode"]},
+            {"backend": "opencode", "model_id": "gpt-5.6-sol", "agents": ["opencode"]},
         ]
 
         # Leaving the Gateway keeps the catalog, and Direct runs each Agent's
@@ -1345,3 +1354,129 @@ def test_mh_set_003_released_launch_identity_shape_restores_without_certifying_f
             await gateway.close()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+@pytest.mark.parametrize("language", ("en", "zh"))
+def test_mh_unlisted_001_removed_model_fails_its_next_turn_with_one_clear_reason(
+    tmp_path: Path,
+    backend: str,
+    language: str,
+) -> None:
+    """MH-UNLISTED-001: after the model-list save removes a model, the next
+    Hub turn that asks for it is refused with the same localized copy on every
+    backend, naming the model and the backend, never a raw key or class name."""
+
+    async def exercise() -> None:
+        store = MemoryStore(_config(_source("src_unlisted1")))
+        model_id = _requested_model(backend)
+        if backend == "opencode":
+            # The list keeps another row, so only the removed id is unlisted.
+            agent = store.config.agents["opencode"]
+            agent.models.append(
+                ModelHubBackendModelConfig(id="model-kept", native_protocol="anthropic")
+            )
+            assert agent.menu is not None
+            agent.menu.checked.append("model-kept")
+        service = _service(
+            tmp_path, store, AdapterBoundaryFake([]),
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(
+            service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json",
+        )
+        controller = SimpleNamespace(
+            config=SimpleNamespace(language=language),
+            model_hub_runtime=router,
+        )
+
+        async def next_turn():
+            if backend != "opencode":
+                return await resolve_model_hub_launch(
+                    controller, backend, model_id, process_scope=str(tmp_path),
+                )
+            overlay = await router.prepare_opencode_overlay()
+            requested = opencode_requested_model_for_overlay(model_id, overlay)
+            return await resolve_opencode_overlay_launch(controller, requested, overlay)
+
+        try:
+            assert (await next_turn()).source_id == "src_unlisted1"
+
+            baseline = service.backend_catalog_models(backend)
+            kept = [row for row in baseline if row["id"] != model_id]
+            with pytest.raises(ModelHubError) as guarded:
+                await service.set_agent_models(backend, baseline, kept)
+            await service.set_agent_models(
+                backend, baseline, kept, force=True,
+                confirmed_remove_hops=guarded.value.data["would_remove_hops"],
+                confirmed_interruptions=guarded.value.data["would_interrupt"],
+            )
+
+            with pytest.raises(ModelHubError) as refused:
+                await next_turn()
+        finally:
+            await gateway.close()
+
+        expected = i18n_t(
+            "modelHub.launch.model_unlisted",
+            language,
+            model=model_id,
+            backend=i18n_t(f"modelHub.backends.{backend}", language),
+        )
+        assert str(refused.value) == expected
+        assert model_id in expected
+        assert "modelHub." not in expected and "ModelHubError" not in expected
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("case", "discriminator", "held"),
+    (
+        ("listed_without_route", "route_unconfigured", False),
+        ("unlisted", "model_unlisted", True),
+        ("unlisted_with_manual_route", "blocked_supply_state", False),
+    ),
+)
+def test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry(
+    tmp_path: Path,
+    case: str,
+    discriminator: str,
+    held: bool,
+) -> None:
+    """MH-UNLISTED-001: an empty chain is the list's answer only for an id the
+    list does not hold; a listed row still asks for a Route, and a retained
+    manual Route still reports its own blocker. Only the unlisted id is final."""
+
+    config = _config()
+    model_id = _requested_model("claude") if case == "listed_without_route" else "claude-gone-9"
+    if case == "unlisted_with_manual_route":
+        config.agents["claude"].routes[model_id] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig("src_deleted01", model_id),)
+        )
+    service = _service(
+        tmp_path, MemoryStore(config), AdapterBoundaryFake([]),
+        now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        model_hub_runtime=ModelHubRuntimeRouter(service=service),
+    )
+    context = SimpleNamespace(platform_specific={})
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+
+    with pytest.raises(ModelHubError) as refused:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller, "claude", model_id, process_scope=str(tmp_path), context=context,
+            )
+        )
+
+    assert refused.value.turn_outcome is not None
+    assert refused.value.turn_outcome.discriminator == discriminator
+    assert prewrite_failure_evidence(context) == (
+        {"reason": "model_hub_model_unlisted", "requires_explicit_retry": True}
+        if held
+        else {}
+    )

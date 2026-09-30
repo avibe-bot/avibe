@@ -33,8 +33,7 @@
           "error": {
             "enum": [
               "source_in_route_chain",
-              "source_model_in_route_chain",
-              "backend_model_in_route"
+              "source_model_in_route_chain"
             ]
           }
         },

@@ -1057,6 +1057,7 @@
           "removeTitle": "移除 {{model}}？",
           "guardTitle": "保存模型列表？",
           "guardSubtitle": "移除这些模型会同时移除它们的路由。",
+          "guardSubtitleInUse": "仍有 Agent 在使用这些模型。移除后，需要为这些 Agent 改选其他模型才能继续运行。",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",

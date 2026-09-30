@@ -573,6 +573,34 @@ describe('BackendModelCatalogDialog', () => {
     expect(JSON.stringify(second.would_interrupt)).toBe(JSON.stringify([]));
   });
 
+  it('MH-UNLISTED-002: names the Agents a removed row stops when the row has no route, then echoes that plan', async () => {
+    const user = userEvent.setup();
+    // No route goes with `beta`: the guard refuses only because Agents select it.
+    const gaps = [{ backend: 'claude' as const, model_id: 'beta', agents: ['pm', '写作助手'] }];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError(
+        'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, gaps, [], [], 409,
+      ))
+      .mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    const guard = await screen.findByRole('dialog', { name: 'Save the model list?' });
+    expect(guard.textContent).toContain(i18n.t('settings.models.gateway.catalog.guardSubtitleInUse'));
+    expect(guard.textContent).not.toContain(i18n.t('settings.models.gateway.catalog.guardSubtitle'));
+    expect(within(guard).getByText('Agents pinned to it: pm, 写作助手')).toBeTruthy();
+
+    await user.click(within(guard).getByRole('button', { name: 'Remove anyway' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
+    expect(write).toHaveBeenCalledTimes(2);
+    const confirmed = write.mock.calls[1][1] as Record<string, unknown>;
+    expect(confirmed.force).toBe(true);
+    expect(JSON.stringify(confirmed.would_remove_hops)).toBe(JSON.stringify([]));
+    expect(JSON.stringify(confirmed.would_interrupt)).toBe(JSON.stringify(gaps));
+  });
+
   it('keeps the confirmed guard mounted and busy until the forced save lands', async () => {
     const user = userEvent.setup();
     const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];

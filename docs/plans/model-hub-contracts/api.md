@@ -51,7 +51,7 @@ remain readable; ephemeral envelopes use only the terminal version.
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. Direct-to-Hub serializes with takeover under the shared migration guard, interrupts running work on that backend and retires the managed runtime, and returns `mode_switch_blocked` only for a native config the CLI cannot parse or a guard refusal. Native auth, including an importable login, stays native beside the Hub and remains a migration candidate; CLIs running outside Avibe do not block the switch because it changes no native credential. It does not auto-create or adopt a native Source; native custody takeover is the optional grouped migration transaction. Hub-to-Direct changes only the mode, but under the same guard: it interrupts running work on that backend and retires the managed runtime, so no turn keeps calling the Hub after the backend has left it, and a guard refusal returns `mode_switch_blocked`. |
 | GET `/api/models/agents/<backend>/models` | → `{agent: {backend, mode, catalog_models}}` | Picker-safe catalog read. It exposes no Source order, Route, or credential-bearing supplier data. Every OpenCode row carries required `native_protocol`; Claude and Codex rows omit it. |
 | GET `/api/models/agents/<backend>/models/candidates` | → `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` | Server-owned picker projection. It returns addable built-ins, deduplicated ordered-provider inventory, and every current menu row with the same exact supplier projection; it is independent of backend mode and contains no credentials. Every OpenCode Candidate carries server-derived `native_protocol`; other backends omit it. Only `in_list` candidates may carry optional `group_if_removed: "builtin" | "providers" | null`, naming the group where that id would be offered after removal. A `providers` candidate whose id names a cached models.dev model exactly also carries that match's `models_dev_id`, `context_window`, `max_output_tokens`, `input_modalities`, `output_modalities`, `supports_tools`, and `supports_reasoning` together; those seven are absent otherwise. |
-| PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[], expected_suppliers?: {<id>: [{source_id, model_id}]}, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, stale-candidate `409`, `{agent: AgentSupply}`, or `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` | Applies one full-list backend catalog edit with optimistic merge. OpenCode rows require a literal `native_protocol: openai_responses | anthropic`; rows for other backends forbid it. Each caller addition still absent from the latest list starts automatic without a route key. A listed supplier-projection mismatch refuses atomically with the separate exact shape `{ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed}`; a concurrently added row keeps its existing Route. A routeful removal uses the exact echoed-plan guard and then atomically removes its Route; empty-route removal is ordinary success. Supplier inventory remains unchanged. |
+| PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[], expected_suppliers?: {<id>: [{source_id, model_id}]}, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, stale-candidate `409`, `{agent: AgentSupply}`, or `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` | Applies one full-list backend catalog edit with optimistic merge. OpenCode rows require a literal `native_protocol: openai_responses | anthropic`; rows for other backends forbid it. Each caller addition still absent from the latest list starts automatic without a route key. A listed supplier-projection mismatch refuses atomically with the separate exact shape `{ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed}`; a concurrently added row keeps its existing Route. A removal whose row has a Route, or whose row an enabled Agent selects, uses the exact echoed-plan guard and then atomically removes that Route (see **Model-list save** under Supply guard); any other removal is ordinary success. Supplier inventory remains unchanged. |
 | GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, derive `native_protocol` from the model id's last path segment through the vendor map, cap results at 8, and never persist automatically. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
@@ -689,6 +689,20 @@ Explicit manual-hop invalidations, lost inventory matches, and newly introduced
 protected-supply gaps still use the exact-plan guard. This exception does not apply
 to Source deletion, default-membership changes, or Restore.
 
+**Model-list save.** For `PUT /api/models/agents/<backend>/models`, the producer
+`ModelHubService.set_agent_models` reports in `would_interrupt` exactly the removed menu
+rows that enabled named Vibe Agents on that backend select, one `SupplyGap` per row keyed
+by the removed menu id. Each Agent's model is matched to a row against the list before the
+save with the rule the turn path uses (`opencode_menu_model_candidates` /
+`opencode_menu_model_id`: the whole selection first, then the model part of an OpenCode
+`<provider>/<model>` selection), so an Agent on `openai/gpt-5.6-sol` names row
+`gpt-5.6-sol`. A row is reported whatever its supply before the save, because removing it
+stops those Agents either way; Direct mode reports none. Per-Session model overrides are
+not enumerated: a turn that asks for a model the list no longer holds fails once with
+`turn.no_candidate.unlisted`. The consumer is the backend catalog dialog's guard, which
+names those Agents through `GuardImpact`; a refusal with no route hops gets its own
+subtitle. Confirmation is the ordinary exact echo of both arrays.
+
 Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the complete
 `guard-refusal.schema.json` shape. The first refusal is:
 
@@ -711,7 +725,9 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 The lead error and its evidence array are inseparable: `source_in_route_chain` and
 `source_model_in_route_chain` require nonempty `would_remove_hops`, while
 `source_last_supplier` requires nonempty `would_interrupt`. The other array remains a
-complete projection and may independently be empty or nonempty.
+complete projection and may independently be empty or nonempty. `backend_model_in_route`
+requires at least one nonempty array: route hops, Agents that select a removed row, or
+both.
 
 The shared guard planner stages the complete post-mutation Source/Route result and its
 ordered guard-report arrays. On confirmation the client resends the same substantive
@@ -1669,7 +1685,7 @@ JSON Schema draft-07 cannot express cross-document or live-state relations. The
 contract harness and API-boundary tests enforce:
 
 <!-- authority-consumer: credential.refresh_once credential.refresh_failed credential.refresh_rejected credential.static_unauthorized credential.account_classified credential.request_nonfallback -->
-<!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.blocked turn.canceled -->
+<!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.unlisted turn.no_candidate.blocked turn.canceled -->
 <!-- authority-consumer: mutation.source_metadata mutation.credential_replace mutation.source_refresh mutation.model_create mutation.model_efforts mutation.model_delete mutation.source_delete mutation.route_replace mutation.route_restore mutation.default_sources -->
 <!-- authority-consumer: import.keep_native import.copy_key import.reauth import.controlled -->
 <!-- authority-consumer: protocol anthropic openai_responses openai_chat -->

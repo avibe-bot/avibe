@@ -70,6 +70,7 @@ from modules.agents.model_hub import (
     OpenCodeOverlay,
     bind_launch,
     bind_turn_mode,
+    launch_refusal_copy,
     opencode_model_for_overlay,
     opencode_model_catalog_for_overlay,
     opencode_requested_model_for_overlay,
@@ -1545,6 +1546,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     self.controller,
                     requested_model_str,
                     model_hub_overlay,
+                    context=request.context,
                 )
                 bind_launch(request.context, model_hub_launch)
             model_str = opencode_model_for_overlay(
@@ -2006,13 +2008,20 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     start_attempt_id,
                 )
 
-            message = f"OpenCode request failed: {error_text}"
+            refusal = launch_refusal_copy(self.controller, e)
+            if refusal is not None:
+                display_text = f"❌ {refusal}"
+            else:
+                display_text = (
+                    f"OpenCode request failed: {error_text}"
+                    f"{self._resource_failure_suffix(resource_failure)}"
+                )
             await emit_backend_failure(
                 self.controller,
                 request.context,
                 self.name,
                 error_text,
-                display_text=f"{message}{self._resource_failure_suffix(resource_failure)}",
+                display_text=display_text,
                 request=request,
             )
         finally:

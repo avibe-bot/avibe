@@ -343,3 +343,33 @@ def service_for(
 
 def round_trip(config: ModelHubConfig) -> ModelHubConfig:
     return ModelHubConfig.from_payload(config.to_payload())
+
+
+#: A model no backend's Model Hub list holds, as a removed row leaves it.
+UNLISTED_MODEL = "retired-模型-9"
+
+
+def unlisted_model_runtime(tmp_path: Path, language: str = "en"):
+    """A controller whose real Hub runtime refuses ``UNLISTED_MODEL`` on every backend."""
+
+    from types import SimpleNamespace
+
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+
+    store = MemoryModelHubStore(config_with_sources([]))
+    service = service_for(tmp_path, store, ModelHubScenarioAdapter())
+    router = ModelHubRuntimeRouter(service=service, overlay_path=tmp_path / "overlay.json")
+    return SimpleNamespace(config=SimpleNamespace(language=language), model_hub_runtime=router)
+
+
+def unlisted_model_copy(backend: str, language: str = "en") -> str:
+    """The one refusal every backend shows for a turn on ``UNLISTED_MODEL``."""
+
+    from vibe.i18n import t
+
+    return t(
+        "modelHub.launch.model_unlisted",
+        language,
+        model=UNLISTED_MODEL,
+        backend=t(f"modelHub.backends.{backend}", language),
+    )

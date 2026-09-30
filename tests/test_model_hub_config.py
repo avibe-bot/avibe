@@ -730,6 +730,8 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
         route_refusal,
         model_refusal,
         backend_refusal,
+        # A model-list save whose only impact is Agents that select a removed row.
+        {**backend_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
         supplier_refusal,
     ):
         validator.validate(payload)
@@ -745,7 +747,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     for payload in (
         {**route_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
         {**model_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
-        {**backend_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**backend_refusal, "would_remove_hops": [], "would_interrupt": []},
         {**supplier_refusal, "would_remove_hops": [hop], "would_interrupt": []},
         {**route_refusal, "would_remove_hops": [hop, hop]},
         {**supplier_refusal, "would_interrupt": [gap, gap]},

@@ -1338,6 +1338,7 @@ class SessionHandler(BaseHandler):
             "claude",
             launch_model or "",
             process_scope=cached_key or composite_key,
+            context=context,
         )
         bind_launch(context, model_hub_launch)
         runtime_model = model_hub_launch.runtime_model or launch_model
@@ -2742,6 +2743,16 @@ class SessionHandler(BaseHandler):
                         path=error.working_path,
                     )
                 ),
+            )
+            return False
+        from modules.agents.model_hub import launch_refusal_copy
+
+        refusal = launch_refusal_copy(self.controller, error)
+        if refusal is not None:
+            # The Hub refused this launch before any Claude process existed.
+            await self._get_im_client(context).send_message(
+                context,
+                self._get_formatter(context).format_error(refusal),
             )
             return False
 

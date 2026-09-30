@@ -32,8 +32,19 @@ from core.agent_auth_service import AgentAuthService
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    prewrite_failure_evidence,
+    set_dispatch_phase,
+)
+from core.handlers.model_hub.service import ModelHubError
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
+from tests.scenario_harness.model_hub import (
+    UNLISTED_MODEL,
+    unlisted_model_copy,
+    unlisted_model_runtime,
+)
 
 
 @dataclass
@@ -3722,3 +3733,22 @@ def test_to_app_config_never_spawns_npm_on_async_request_paths(monkeypatch, tmp_
     assert compat.claude.cli_path == "avibe-absent-claude-cli"
     assert compat.codex is not None and compat.codex.binary == "avibe-absent-codex-cli"
     assert compat.opencode is not None and compat.opencode.binary == "avibe-absent-opencode-cli"
+
+
+def test_claude_launch_on_an_unlisted_model_holds_the_input(tmp_path) -> None:
+    """MH-UNLISTED-001: the Claude launch reaches the shared refusal and hold."""
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = unlisted_model_runtime(tmp_path).model_hub_runtime
+    controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(model=UNLISTED_MODEL)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+
+    with pytest.raises(ModelHubError) as refused:
+        _run_session(handler, context)
+
+    assert str(refused.value) == unlisted_model_copy("claude")
+    assert prewrite_failure_evidence(context) == {
+        "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
+    }
+    assert controller.claude_sessions == {}

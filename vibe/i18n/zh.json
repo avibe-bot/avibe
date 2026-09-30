@@ -907,6 +907,11 @@
     "routingCanceled": "已取消更新 Agent 路由设置。"
   },
   "modelHub": {
+    "backends": {
+      "claude": "Claude Code",
+      "codex": "Codex",
+      "opencode": "OpenCode"
+    },
     "errors": {
       "source_not_found": "未找到模型供应商。",
       "flow_not_found": "未找到授权流程。",
@@ -988,6 +993,7 @@
       "waiting_without_retry": "本次请求未完成，自动恢复已结束。你可以重试模型 {model} 或切换模型。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
+      "model_unlisted": "模型 {model} 不在 {backend} 的模型列表中。请选择其他模型后继续。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
       "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"
     }

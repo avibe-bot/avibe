@@ -22,7 +22,13 @@ from modules.agents.base import AgentRequest
 from modules.agents.claude_agent import ClaudeAgent
 from storage import message_deliveries as deliveries, messages_service
 from storage.models import agent_sessions, session_turns
+from modules.agents.model_hub import resolve_model_hub_launch
 from tests.backend_failure_retry_helpers import reserve_failure_retry
+from tests.scenario_harness.model_hub import (
+    UNLISTED_MODEL,
+    unlisted_model_copy,
+    unlisted_model_runtime,
+)
 from tests.test_claude_agent_sessions import _StubController
 from tests.test_session_delivery_fsm import _context, _fsm_schema_template, managers  # noqa: F401
 from vibe.i18n import t
@@ -112,6 +118,38 @@ async def test_missing_session_delivers_localized_notice_and_terminal_failure(
     assert notices[0]["metadata"]["turn_id"] == "trn_missing"
     assert binding["native_session_id"] == NATIVE_ID
     assert binding["workdir"] == working_path
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+async def test_unlisted_hub_model_shows_the_shared_refusal_once(
+    managers, monkeypatch, tmp_path, language
+):
+    """MH-UNLISTED-001: Claude shows the shared refusal once, never a wrapped
+    exception or an auth prompt matched from words in its path."""
+    _manager, _restarted, engine, _other, _starts = managers
+    working_path = str(tmp_path / "oauth-login" / "原目录")
+    agent, controller = _agent_fixture(monkeypatch, engine, language=language, working_path=working_path)
+    controller.agent_auth_service.maybe_emit_auth_recovery_message.return_value = False
+    runtime = unlisted_model_runtime(tmp_path, language)
+
+    async def launch(_context, **_kwargs):
+        # The launch half, including the input hold, is the session handler's
+        # own test; this one covers what the agent shows for its refusal.
+        await resolve_model_hub_launch(runtime, "claude", UNLISTED_MODEL)
+
+    controller.session_handler.get_or_create_claude_session = AsyncMock(side_effect=launch)
+    context = _context()
+    context.platform_specific["turn_token"] = "trn_unlisted"
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+
+    await agent.handle_message(_request(context, "继续", working_path))
+
+    expected = f"❌ {unlisted_model_copy('claude', language)}"
+    controller.im_client.send_message.assert_awaited_once_with(context, expected)
+    controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
+    with engine.connect() as conn:
+        notices = messages_service.list_session_messages(conn, session_id="ses_fsm")["messages"]
+    assert [notice["text"] for notice in notices] == [expected]
 
 
 @pytest.mark.parametrize("retry", ["failure_notice", "send_now", "still_missing"])

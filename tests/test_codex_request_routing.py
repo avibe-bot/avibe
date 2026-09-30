@@ -21,13 +21,21 @@ from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch, resolve_model_hub_launch
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    prewrite_failure_evidence,
+    set_dispatch_phase,
+)
 from tests.scenario_harness.model_hub import (
+    UNLISTED_MODEL,
     MemoryModelHubStore,
     ModelHubScenarioAdapter,
     ScenarioCallResult,
     config_with_sources,
     service_for,
     source,
+    unlisted_model_copy,
+    unlisted_model_runtime,
 )
 
 
@@ -324,3 +332,35 @@ async def test_codex_adapter_keeps_request_metadata_on_compatibility_retry(runti
         assert call.args[0] == "turn/start"
         assert call.args[1]["responsesapiClientMetadata"] == launch.gateway_request_metadata
         assert call.args[1]["model"] == launch.runtime_model
+
+
+@pytest.mark.parametrize("language", ("en", "zh"))
+async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(tmp_path, language):
+    """MH-UNLISTED-001: Codex shows the shared refusal and holds the input."""
+    controller = unlisted_model_runtime(tmp_path, language)
+    controller.emit_agent_message = AsyncMock()
+    context = SimpleNamespace(platform_specific={})
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    request = SimpleNamespace(
+        base_session_id="session-1", working_path=str(tmp_path),
+        context=context, session_key="settings-1", ack_message_id=None,
+    )
+    agent = object.__new__(CodexAgent)
+    agent.controller = controller
+    agent._session_locks = {}
+    agent._session_mgr = SimpleNamespace(set_session_key=Mock(), set_cwd=Mock())
+    agent.ensure_agent_session_id = Mock()
+    agent._bind_runtime_agent_session_id = Mock()
+    agent._resolve_codex_agent_settings = Mock(return_value=(None, UNLISTED_MODEL, None, None))
+    agent._get_or_create_transport = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+    agent._event_handler = SimpleNamespace(_release_stream_turn=Mock())
+
+    await agent.handle_message(request)
+
+    agent._get_or_create_transport.assert_not_awaited()
+    notify = controller.emit_agent_message.await_args_list[0]
+    assert notify.args[1:3] == ("notify", f"❌ {unlisted_model_copy('codex', language)}")
+    assert prewrite_failure_evidence(context) == {
+        "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
+    }

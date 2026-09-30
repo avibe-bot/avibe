@@ -1057,6 +1057,7 @@
           "removeTitle": "Remove {{model}}?",
           "guardTitle": "Save the model list?",
           "guardSubtitle": "Removing these models also removes their routes.",
+          "guardSubtitleInUse": "Agents still use these models. They cannot run until you choose another model for them.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",

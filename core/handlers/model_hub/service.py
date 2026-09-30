@@ -135,6 +135,7 @@ from .provenance import (
     ExactHopBlocker,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
+    no_candidate_decision,
     produce_turn_outcome,
 )
 from .request import ModelHubRequest
@@ -3891,6 +3892,33 @@ class ModelHubService:
                 add(model_id)
         return protected
 
+    def _removed_agent_models(
+        self,
+        previous: ModelHubConfig,
+        backend: BackendName,
+        removed_model_ids: set[str],
+    ) -> list[dict]:
+        """The removed menu rows that enabled Agents still select, as supply gaps.
+
+        A removed row stops every Agent that selects it, whatever supply the row
+        had before, so each such row is reported under its own menu id. The
+        selection is matched against the list before the save, the same way the
+        turn path matches it, because after the save it names no row at all.
+        """
+
+        agent = previous.agents[backend]
+        if agent.mode != "hub" or self.named_agents_override is None:
+            return []
+        agents_by_model: dict[str, set[str]] = {}
+        for name, selected in self.named_agents_override(backend):
+            model_id = self._menu_model_for_selection(agent, str(selected or "").strip())
+            if model_id in removed_model_ids:
+                agents_by_model.setdefault(model_id, set()).add(name)
+        return [
+            {"backend": backend, "model_id": model_id, "agents": sorted(names)}
+            for model_id, names in sorted(agents_by_model.items())
+        ]
+
     def _would_interrupt(
         self,
         config: ModelHubConfig,
@@ -5504,9 +5532,10 @@ class ModelHubService:
                 if model.id not in removed_model_id_set
             ]
 
-            interrupted = self._introduced_interruptions(
+            interrupted = self._removed_agent_models(
                 previous,
-                config,
+                agent_backend,
+                removed_model_id_set,
             )
             self._require_guard_plan(
                 force=force,
@@ -7502,11 +7531,7 @@ class ModelHubService:
         resolution: ModelHubTurnResolution,
     ) -> TurnOutcomeProjectionInput:
         return produce_turn_outcome(
-            (
-                "turn.no_candidate.unconfigured"
-                if resolution.route_unconfigured
-                else "turn.no_candidate.blocked"
-            ),
+            no_candidate_decision(config, resolution),
             config=config,
             resolution=resolution,
         )

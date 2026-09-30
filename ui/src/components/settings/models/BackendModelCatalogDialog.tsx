@@ -960,7 +960,11 @@ export const BackendModelCatalogDialog: React.FC<{
           <GuardDialog
             open={guardPlan !== null}
             title={t('settings.models.gateway.catalog.guardTitle')}
-            subtitle={t('settings.models.gateway.catalog.guardSubtitle')}
+            // With no route hops, the plan is only the Agents that still select a
+            // removed row, so the route sentence would describe nothing it shows.
+            subtitle={guardPlan && guardPlan.hops.length === 0
+              ? t('settings.models.gateway.catalog.guardSubtitleInUse')
+              : t('settings.models.gateway.catalog.guardSubtitle')}
             confirmLabel={t('settings.models.guard.confirm.removeModel')}
             busy={busy}
             onCancel={() => setGuardPlan(null)}

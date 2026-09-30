@@ -439,6 +439,11 @@ class ClaudeAgent(BaseAgent):
         client=None,
     ) -> str:
         """Return the durable notify text for Claude terminal errors."""
+        from modules.agents.model_hub import launch_refusal_copy
+
+        refusal = launch_refusal_copy(self.controller, error)
+        if refusal is not None:
+            return f"❌ {refusal}"
         if isinstance(error, ClaudeInputNotSentError):
             return f"❌ {self._translate_error(error.message_key)}"
         if isinstance(error, ClaudeSessionNotFoundError):
@@ -663,8 +668,11 @@ class ClaudeAgent(BaseAgent):
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
+            from modules.agents.model_hub import launch_refusal_copy
+
             missing_session = isinstance(e, ClaudeSessionNotFoundError)
             input_not_sent = isinstance(e, ClaudeInputNotSentError)
+            hub_refusal = launch_refusal_copy(self.controller, e) is not None
             stop_owned = bool(getattr(request, "_claude_stop_owned", False))
             if missing_session:
                 mark_prewrite_recovery_required(context, "native_session_not_found")
@@ -706,10 +714,10 @@ class ClaudeAgent(BaseAgent):
                         runtime_session_key,
                     )
                     return
-                # A typed local resume failure takes precedence over incidental
-                # auth words in the working path or captured process diagnostic.
+                # A typed local resume failure or Hub refusal takes precedence
+                # over incidental auth words in a path, model id, or diagnostic.
                 handled = False
-                if not missing_session and not input_not_sent:
+                if not missing_session and not input_not_sent and not hub_refusal:
                     handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
                         context,
                         "claude",

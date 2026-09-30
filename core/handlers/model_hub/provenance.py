@@ -194,6 +194,11 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         discriminator="route_unconfigured",
         copy_keys=(("interrupted", "modelHub.launch.route_unconfigured"),),
     ),
+    "turn.no_candidate.unlisted": TurnOutcomeRenderingRule(
+        outcome="no_candidate",
+        discriminator="model_unlisted",
+        copy_keys=(("interrupted", "modelHub.launch.model_unlisted"),),
+    ),
     "turn.no_candidate.blocked": TurnOutcomeRenderingRule(
         outcome="no_candidate",
         discriminator="blocked_supply_state",
@@ -364,6 +369,27 @@ def produce_turn_outcome(
     return projection
 
 
+def no_candidate_decision(
+    config: ModelHubConfig,
+    resolution: ModelHubTurnResolution,
+) -> str:
+    """Choose the matrix row for a turn that has no runnable hop.
+
+    An id the backend's model list does not hold has an empty effective Route
+    unless a manual Route row was retained for it, so an empty chain for such
+    an id is the list's answer rather than a Route the user can configure.
+    """
+
+    if not resolution.route_unconfigured:
+        return "turn.no_candidate.blocked"
+    requested = resolution.requested_model
+    if requested and all(
+        model.id != requested for model in config.agents[resolution.backend].models
+    ):
+        return "turn.no_candidate.unlisted"
+    return "turn.no_candidate.unconfigured"
+
+
 REQUEST_NONFALLBACK_TURN_OUTCOME = produce_turn_outcome(
     "turn.request_nonfallback"
 )
@@ -520,6 +546,8 @@ def render_turn_outcome_copy(
                 f"{blocker.source}: {label}" if blocker.source else label
             )
         params["blockers"] = ", ".join(rendered)
+    if params.get("backend"):
+        params["backend"] = i18n_t(f"modelHub.backends.{params['backend']}", language)
     return i18n_t(copy.key, language, **params)
 
 

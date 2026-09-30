@@ -3789,6 +3789,103 @@ def test_backend_catalog_guarded_removal_excludes_removed_model_and_accepts_echo
     } == before_other_agents
 
 
+@pytest.mark.parametrize(
+    ("backend", "agent_model", "supplied", "mode"),
+    (
+        ("claude", None, False, "hub"),
+        ("codex", None, False, "hub"),
+        ("opencode", "openai/gpt-5.6-sol", False, "hub"),
+        ("opencode", "openai/gpt-5.6-sol", True, "hub"),
+        ("codex", None, False, "direct"),
+    ),
+)
+def test_mh_unlisted_002_model_list_save_names_the_agents_a_removed_row_stops(
+    monkeypatch,
+    tmp_path,
+    backend,
+    agent_model,
+    supplied,
+    mode,
+):
+    """MH-UNLISTED-002: removing a row an enabled Agent selects names that Agent
+    under the removed menu id, whatever the row's supply was before the save."""
+
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents[backend]
+    agent.mode = mode
+    if backend == "opencode":
+        agent.models = [
+            ModelHubBackendModelConfig(id=model_id, native_protocol="openai_responses")
+            for model_id in ("gpt-5.6-sol", "gpt-kept")
+        ]
+        agent.menu.checked = ["gpt-5.6-sol", "gpt-kept"]
+    model_id = agent.models[0].id
+    if supplied:
+        store.config.sources = [
+            ModelHubSourceConfig(
+                id="src_unlisted02",
+                kind="api_key",
+                vendor="openai",
+                display_name="Unlisted source",
+                protocol="openai_responses",
+                supply_channel="hub",
+                billing="metered",
+                state=ModelHubSourceStateConfig(status="standby"),
+                models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+                credential_ref="cred_unlisted02",
+            )
+        ]
+        agent.sources.order = ["src_unlisted02"]
+    service.named_agents_override = lambda name: (
+        [("写作助手", agent_model or model_id), ("pm", agent_model or model_id), ("other", "gpt-kept")]
+        if name == backend
+        else []
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    endpoint = f"/api/models/agents/{backend}/models"
+    baseline = next(item["catalog_models"] for item in service.list_agents() if item["backend"] == backend)
+    request_body = {
+        "baseline": baseline,
+        "models": [row for row in baseline if row["id"] != model_id],
+    }
+
+    response = client.put(endpoint, json=request_body, headers=headers, base_url=base_url)
+
+    if mode == "direct":
+        assert response.status_code == 200
+        assert model_id not in {model.id for model in store.config.agents[backend].models}
+        return
+    assert response.status_code == 409
+    refusal = response.get_json()
+    _assert_valid("guard-refusal.schema.json", refusal)
+    assert refusal["error"] == "backend_model_in_route"
+    assert refusal["would_interrupt"] == [
+        {"backend": backend, "model_id": model_id, "agents": ["pm", "写作助手"]}
+    ]
+    assert [hop["menu_model"] for hop in refusal["would_remove_hops"]] == (
+        [model_id] if supplied else []
+    )
+    assert model_id in {model.id for model in store.config.agents[backend].models}
+
+    committed = client.put(
+        endpoint,
+        json={
+            **request_body,
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert committed.status_code == 200
+    assert model_id not in {model.id for model in store.config.agents[backend].models}
+
+
 def test_backend_catalog_removes_model_with_empty_route(tmp_path):
     service, store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")

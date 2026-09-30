@@ -517,6 +517,7 @@ class CodexAgent(BaseAgent):
                         "codex",
                         requested_model or "",
                         process_scope=request.working_path,
+                        context=request.context,
                     )
                     bind_launch(request.context, launch)
                     await self._interrupt_active_turn_before_runtime_change(request, launch)
@@ -536,11 +537,14 @@ class CodexAgent(BaseAgent):
                 self._event_handler._release_stream_turn(request.context)
                 return
             except Exception as e:
+                from modules.agents.model_hub import launch_refusal_copy
+
                 logger.error("Failed to start Codex transport: %s", e, exc_info=True)
                 language = str(
                     getattr(getattr(self.controller, "config", None), "language", "en")
                     or "en"
                 )
+                refusal = launch_refusal_copy(self.controller, e)
                 if isinstance(e, CodexRuntimeChangeBlockedError):
                     # Not a source failure: no Hub cooldown. Hold the unwritten
                     # input for an explicit retry once the blocking turn ends.
@@ -549,6 +553,9 @@ class CodexAgent(BaseAgent):
                 elif isinstance(e, CodexModelHubCatalogUnavailableError):
                     await self._record_model_hub_native_failure(request.context, str(e))
                     display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
+                elif refusal is not None:
+                    await self._record_model_hub_native_failure(request.context, str(e))
+                    display_text = f"❌ {refusal}"
                 else:
                     await self._record_model_hub_native_failure(request.context, str(e))
                     display_text = f"❌ Failed to start Codex CLI: {e}"
