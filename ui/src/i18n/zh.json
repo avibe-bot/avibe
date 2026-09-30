@@ -2047,7 +2047,7 @@
         "applying": "迁移中…",
         "interruptNotice": "迁移会中断所选助手在 Avibe 中正在运行的任务。",
         "errors": {
-          "nativeBusy": "请先退出在 Avibe 之外运行的 CLI（包括终端、IDE 插件和桌面应用），再重试。",
+          "nativeBusy": "这些助手仍在被占用。请稍后重试；如果仍然失败，请退出在 Avibe 之外运行的 CLI（包括终端、IDE 插件和桌面应用）。",
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
           "itemConflict": "无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。",

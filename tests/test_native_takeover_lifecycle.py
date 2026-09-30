@@ -201,6 +201,39 @@ async def test_busy_guard_interrupts_running_work_then_retires_and_yields():
 
 
 @pytest.mark.asyncio
+async def test_cancelled_switch_finishes_interruption_before_reopening_admission():
+    """MH-MIG-009: a client disconnect mid-interruption must not reopen admission
+    between releasing turn owners and tearing down the runtime they ran on."""
+    controller, coordinator, admissions, turns = controller_fixture(busy=True)
+    releasing, released = asyncio.Event(), asyncio.Event()
+
+    async def release(**_kw):
+        releasing.set()
+        await released.wait()
+        return 0
+
+    controller.session_turns.release_for_backend_refresh.side_effect = release
+
+    async def switch():
+        async with coordinator.migration_guard(("codex",)):
+            pytest.fail("mutation admitted after cancellation")
+
+    task = asyncio.create_task(switch())
+    await releasing.wait()
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert admissions == turns == {"codex"}
+    released.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    controller.agent_service.force_cancel_backend_turns.assert_awaited_once_with("codex")
+    coordinator._refresh.assert_awaited_once_with("codex", True)
+    controller.agent_service.agents["codex"].retire_for_native_migration.assert_not_awaited()
+    assert admissions == turns == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure,code", [
     ("survives", "native_runtime_busy"),
     ("teardown", "native_retirement_failed"),

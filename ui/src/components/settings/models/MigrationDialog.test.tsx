@@ -313,7 +313,7 @@ describe('MigrationDialog — the settings default', () => {
   });
 
   it.each([
-    ['migration_native_busy', 'Quit any CLI running outside Avibe, including terminal sessions, IDE extensions and desktop apps, then retry.'],
+    ['migration_native_busy', 'Something is still using these assistants. Retry in a moment; if it keeps failing, quit any CLI running outside Avibe, including terminal sessions, IDE extensions and desktop apps.'],
     ['migration_permission_needed', 'Allow credential access, then retry.'],
     ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
     ['migration_item_conflict', 'Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.'],

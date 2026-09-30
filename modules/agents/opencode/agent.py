@@ -1229,12 +1229,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 cancelled[task] = request_session[0] if request_session else ""
         if not cancelled:
             return
-        await asyncio.wait(cancelled, timeout=2.0)
+        # Like /stop, retire a durable poll only once its task has settled,
+        # however long its cancellation cleanup takes.
+        await asyncio.wait(cancelled)
         server = self._client_manager._server_manager
         if server is None:
             return
-        for task, native_session_id in cancelled.items():
-            if task.done() and native_session_id and self._active_poll_is_persisted(native_session_id):
+        for native_session_id in cancelled.values():
+            if native_session_id and self._active_poll_is_persisted(native_session_id):
                 await self._retire_active_poll(server, native_session_id)
 
     async def handle_message(self, request: AgentRequest) -> None:

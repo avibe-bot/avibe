@@ -1109,6 +1109,38 @@ def test_restore_settles_incomplete_assistant_when_unknown_status_recovers_idle(
     )
 
 
+def test_forced_refresh_retires_a_restored_poll_after_its_slow_cancellation() -> None:
+    """MH-MIG-009: switching to the gateway interrupts a restored poll, so its
+    durable record must go once the task settles; left behind, the next restart
+    restores a run the user chose to interrupt."""
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    active_polls = {"oc-1": poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+    polling = asyncio.Event()
+
+    async def run_restored_poll_loop(poll_info):
+        polling.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Outlasts the two-second bound the teardown once put on settlement.
+            await asyncio.sleep(2.2)
+            raise
+
+    agent._poll_loop.run_restored_poll_loop = run_restored_poll_loop
+
+    async def run() -> None:
+        assert await agent.restore_active_polls() == 1
+        await polling.wait()
+        await agent._cancel_active_requests()
+
+    asyncio.run(run())
+    assert agent._active_requests == {}
+    assert agent._test_inactive_runs == ["oc-1"]
+    assert removed == ["oc-1"]
+    assert active_polls == {}
+
+
 def test_restored_avibe_poll_marks_session_running():
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     agent, status_writes, _, _ = _build_agent({"oc-1": poll})

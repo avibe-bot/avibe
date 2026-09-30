@@ -536,9 +536,11 @@ class BackendRestartCoordinator:
                 for backend in targets:
                     if not await self._has_active_turns(backend):
                         continue
-                    await self._interrupt(backend)
                     try:
-                        await finish_native_operation(self._refresh(backend, True))
+                        # One unit even when the caller is cancelled: reopening
+                        # admission between releasing owners and tearing down
+                        # their runtime would admit turns beside orphaned work.
+                        await finish_native_operation(self._interrupt_and_refresh(backend))
                     except Exception:
                         logger.warning("Forced runtime teardown failed for %s", backend, exc_info=True)
                         raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
@@ -767,6 +769,10 @@ class BackendRestartCoordinator:
         )
         await self.controller.agent_service.force_cancel_backend_turns(backend)
         self.controller.agent_service.force_end_backend_activities(backend)
+
+    async def _interrupt_and_refresh(self, backend: str) -> None:
+        await self._interrupt(backend)
+        await self._refresh(backend, True)
 
     async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service
