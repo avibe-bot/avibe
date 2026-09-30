@@ -489,6 +489,8 @@ jobs:
 
           function Invoke-Uninstall {
             param([string]$Log, [string[]]$Options, [switch]$ScriptBlock)
+            # The installer resets PATH for this session, so restore the peers' directories.
+            $env:Path = "$peerBin;$foreignBin;$env:Path"
             if ($ScriptBlock) {
               # The documented one-line form, with the script read locally instead of downloaded.
               # It must return to the session rather than exit it.
@@ -498,7 +500,7 @@ jobs:
               powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall @Options *> $Log
             }
             $status = $LASTEXITCODE
-            Get-Content -LiteralPath $Log
+            Get-Content -LiteralPath $Log | Write-Host
             return $status
           }
 
@@ -515,7 +517,6 @@ jobs:
             Set-Content -LiteralPath $userData -Value "keep me"
           }
 
-          $env:Path = "$peerBin;$foreignBin;$env:Path"
           Install-WithPeers
           if (-not (Test-Path -LiteralPath $markers[1])) { throw "The installer did not record its launcher marker" }
 

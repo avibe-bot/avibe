@@ -211,8 +211,9 @@ def _powershell_rule(layout: Layout, shell: str) -> set[str]:
         "Get-ManagedLaunchers (Join-Path (Get-RuntimeHome) 'runtime\\install-generations')\n",
         encoding="utf-8-sig",
     )
+    # The layout's PATH replaces this process's, so resolve the shell first.
     result = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        [shutil.which(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
         env={**os.environ, **layout.env(USERPROFILE=str(layout.home), AVIBE_HOME=str(layout.avibe_home))},
         capture_output=True,
         text=True,
@@ -533,18 +534,68 @@ def test_a_purge_never_deletes_a_home_that_holds_the_user_directory(installed):
     _assert_untouched(layout, first, second, foreign, legacy_home)
 
 
+def _fake_uv(layout: Layout, tool_dir: Path) -> None:
+    """uv removes a tool's environment; `uv tool dir` names where they live."""
+    log = shlex.quote(str(layout.tmp / "calls.log"))
+    _foreign(
+        layout.path_dirs[0] / "uv",
+        "#!/bin/sh\n"
+        'case "$1 $2" in\n'
+        f'  "tool dir") echo {shlex.quote(str(tool_dir))} ;;\n'
+        f'  "tool uninstall") echo "uv uninstall $3" >> {log}; rm -rf {shlex.quote(str(tool_dir))}/"$3" ;;\n'
+        "  *) exit 2 ;;\n"
+        "esac\n",
+    )
+
+
 @posix_only
 def test_an_explicit_avibe_home_purges_only_that_home(installed):
     layout, first, second, foreign, legacy_home, env = installed
     instance = layout.tmp / "instance"
     (instance / "state").mkdir(parents=True)
+    # A global uv tool install belongs to no chosen home.
+    tool = layout.tmp / "uv-tools" / "avibe-os"
+    tool.mkdir(parents=True)
+    _fake_uv(layout, tool.parent)
 
     result = _installer_shell(layout, "main --uninstall --purge --yes", **{**env, "AVIBE_HOME": str(instance)})
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not instance.exists()
-    # The default home's launchers and data belong to another installation.
+    # The default home's launchers, data, and uv tool belong to another installation.
     _assert_untouched(layout, first, second, foreign, legacy_home)
+    assert tool.is_dir() and _calls(layout) == []
+    assert "Leaving the uv tool install avibe-os in place" in result.stdout
+
+
+@posix_only
+@pytest.mark.parametrize("shape", ["legacy-link-elsewhere", "explicit-legacy-home"])
+def test_a_purge_deletes_only_the_selected_homes_data(installed, shape):
+    layout, first, second, foreign, legacy_home, env = installed
+    legacy_home.unlink()
+    unrelated = layout.tmp / "unrelated"
+    unrelated.mkdir()
+    (unrelated / "notes.txt").write_text("not Avibe's", encoding="utf-8")
+    if shape == "legacy-link-elsewhere":
+        # Doctor reports this as a wrong link; its target is not Avibe's data.
+        legacy_home.symlink_to(unrelated)
+    else:
+        (legacy_home / "state").mkdir(parents=True)
+        env = {**env, "AVIBE_HOME": str(legacy_home)}
+
+    result = _installer_shell(layout, "main --uninstall --purge --yes", **env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (unrelated / "notes.txt").read_text(encoding="utf-8") == "not Avibe's"
+    if shape == "legacy-link-elsewhere":
+        assert not layout.avibe_home.exists()
+        assert legacy_home.is_symlink()
+        assert f"  {unrelated}" not in result.stdout
+    else:
+        assert not legacy_home.exists()
+        # ~/.avibe is the home Avibe uses without AVIBE_HOME, another installation.
+        assert (layout.avibe_home / "state" / "vibe.sqlite").read_bytes() == b"user data"
+        assert first.is_symlink() and layout.root.is_dir()
 
 
 @pytest.mark.parametrize(

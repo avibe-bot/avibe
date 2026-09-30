@@ -1011,44 +1011,73 @@ function Stop-AvibeService {
     return $false
 }
 
-# The user-data directories of this runtime home. The default home owns both
-# default names, since ~\.vibe_remote is the legacy home or a link to the
-# current one; an explicit AVIBE_HOME names one instance's home only.
+# The physical directory a home path names: a link's target, or the path itself.
+function Resolve-HomeDirectory {
+    param([string]$Path)
+
+    $entry = Get-DirectoryEntry $Path
+    if ($entry -and $entry.LinkType -in @("SymbolicLink", "Junction")) {
+        $target = @($entry.Target)[0]
+        if ($target) {
+            if (-not [System.IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path (Split-Path -Parent $Path) $target
+            }
+            return [System.IO.Path]::GetFullPath($target).TrimEnd("\", "/")
+        }
+    }
+    return [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
+}
+
+# Whether this uninstall is for the default home. Global uv tool installs and
+# a legacy ~\.vibe_remote directory belong to no chosen AVIBE_HOME, so only the
+# default home's uninstall removes them.
+function Test-UninstallingDefaultHome {
+    param([string]$RuntimeHome)
+
+    return -not $env:AVIBE_HOME -or
+        (Resolve-HomeDirectory $RuntimeHome) -eq (Resolve-HomeDirectory (Join-Path $env:USERPROFILE ".avibe"))
+}
+
+# This home's data: the runtime home, then each default name linking to it,
+# and for the default home a real legacy directory left beside it. A link to
+# anywhere else is not this home's, which Doctor reports as a wrong link.
 function Get-AvibeDataDirectories {
     param([string]$RuntimeHome)
 
-    $defaultHome = Join-Path $env:USERPROFILE ".avibe"
-    $legacyHome = Join-Path $env:USERPROFILE ".vibe_remote"
-    $candidates = if (-not $env:AVIBE_HOME -or $RuntimeHome -eq $defaultHome -or $RuntimeHome -eq $legacyHome) {
-        @($defaultHome, $legacyHome)
-    } else {
-        @($RuntimeHome)
+    $runtimeDirectory = Resolve-HomeDirectory $RuntimeHome
+    if (Get-DirectoryEntry $RuntimeHome) {
+        $RuntimeHome
     }
-    foreach ($candidate in $candidates) {
-        if (Get-DirectoryEntry $candidate) {
+    foreach ($candidate in @((Join-Path $env:USERPROFILE ".avibe"), (Join-Path $env:USERPROFILE ".vibe_remote"))) {
+        $entry = Get-DirectoryEntry $candidate
+        if ($candidate -eq $RuntimeHome -or -not $entry) {
+            continue
+        }
+        $directory = Resolve-HomeDirectory $candidate
+        if ($entry.LinkType -in @("SymbolicLink", "Junction")) {
+            if ($directory -eq $runtimeDirectory) {
+                $candidate
+            }
+        } elseif ($entry.PSIsContainer -and $directory -ne $runtimeDirectory -and (Test-UninstallingDefaultHome $RuntimeHome)) {
             $candidate
         }
     }
 }
 
 # What a purge deletes for the data directories: each link, then each distinct
-# directory it or a data directory names, so a link's target goes too.
+# directory it names. Every link here names this home.
 function Get-PurgeTargets {
     param([string]$RuntimeHome)
 
     $seen = @{}
     foreach ($data in Get-AvibeDataDirectories $RuntimeHome) {
-        $entry = Get-DirectoryEntry $data
-        $directory = $data
-        if ($entry.LinkType -in @("SymbolicLink", "Junction")) {
+        if ((Get-DirectoryEntry $data).LinkType -in @("SymbolicLink", "Junction")) {
             $data
-            $target = @($entry.Target)[0]
-            $directory = if (-not $target) { $null } elseif ([System.IO.Path]::IsPathRooted($target)) { $target } else { Join-Path (Split-Path -Parent $data) $target }
         }
-        if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        $directory = Resolve-HomeDirectory $data
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
             continue
         }
-        $directory = [System.IO.Path]::GetFullPath($directory).TrimEnd("\", "/")
         if (-not $seen.ContainsKey($directory.ToLowerInvariant())) {
             $seen[$directory.ToLowerInvariant()] = $true
             $directory
@@ -1159,12 +1188,18 @@ function Uninstall-Avibe {
     $markers = @(Get-StaleLauncherMarkers -Root $root -Launchers $launchers)
     $uv = Get-UvCommand
     $toolDirectory = Get-UvToolDirectory $uv
-    $uvTools = @($PACKAGE_NAME, "vibe-remote" | Where-Object { Test-Path -LiteralPath (Join-Path $toolDirectory $_) -PathType Container })
+    $presentUvTools = @($PACKAGE_NAME, "vibe-remote" | Where-Object { Test-Path -LiteralPath (Join-Path $toolDirectory $_) -PathType Container })
+    $uvTools = @(if (Test-UninstallingDefaultHome $runtimeHome) { $presentUvTools })
     $data = @(Get-AvibeDataDirectories $runtimeHome)
     $doomedData = @()
     $failed = $false
 
     Write-Info "Uninstalling Avibe for $runtimeHome"
+    if ($uvTools.Count -eq 0) {
+        foreach ($package in $presentUvTools) {
+            Write-Info "Leaving the uv tool install $package in place: it belongs to no AVIBE_HOME, so only an uninstall of the default home removes it"
+        }
+    }
     if ($launchers.Count -eq 0 -and $markers.Count -eq 0 -and $uvTools.Count -eq 0 -and -not (Get-DirectoryEntry $root) -and
         (-not $Purge -or $data.Count -eq 0)) {
         Write-Info "No Avibe installation was found, so nothing was removed."

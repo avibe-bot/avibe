@@ -1096,30 +1096,38 @@ stop_avibe_service() {
     return 1
 }
 
-# Print the user-data directories of this runtime home. The default home owns
-# both default names, since ~/.vibe_remote is the legacy home or a link to the
-# current one; an explicit AVIBE_HOME names one instance's home only.
+# Whether this uninstall is for the default home. Global uv tool installs and
+# a legacy ~/.vibe_remote directory belong to no chosen AVIBE_HOME, so only the
+# default home's uninstall removes them.
+uninstalling_default_home() {
+    [ -z "${AVIBE_HOME:-}" ] || [ "$(physical_path "$AVIBE_RUNTIME_HOME")" = "$(physical_path "$HOME/.avibe")" ]
+}
+
+# Print this home's data: the runtime home, then each default name linking to
+# it, and for the default home a real legacy directory left beside it. A link
+# to anywhere else is not this home's, which Doctor reports as a wrong link.
 avibe_data_directories() {
-    local default_home="$HOME/.avibe"
-    local legacy_home="$HOME/.vibe_remote"
     local runtime_home=""
     local path=""
 
     runtime_home="$(physical_path "$AVIBE_RUNTIME_HOME")"
-    if [ -z "${AVIBE_HOME:-}" ] || [ "$runtime_home" = "$(physical_path "$default_home")" ] ||
-        [ "$runtime_home" = "$(physical_path "$legacy_home")" ]; then
-        for path in "$default_home" "$legacy_home"; do
-            if [ -e "$path" ] || [ -L "$path" ]; then
-                printf '%s\n' "$path"
-            fi
-        done
-    elif [ -e "$AVIBE_RUNTIME_HOME" ] || [ -L "$AVIBE_RUNTIME_HOME" ]; then
+    if [ -e "$AVIBE_RUNTIME_HOME" ] || [ -L "$AVIBE_RUNTIME_HOME" ]; then
         printf '%s\n' "$AVIBE_RUNTIME_HOME"
     fi
+    for path in "$HOME/.avibe" "$HOME/.vibe_remote"; do
+        [ "$path" != "$AVIBE_RUNTIME_HOME" ] || continue
+        if [ -L "$path" ]; then
+            if [ "$(physical_path "$path")" = "$runtime_home" ]; then
+                printf '%s\n' "$path"
+            fi
+        elif [ -d "$path" ] && [ "$(physical_path "$path")" != "$runtime_home" ] && uninstalling_default_home; then
+            printf '%s\n' "$path"
+        fi
+    done
 }
 
 # Print what a purge deletes for the data directories: each link, then each
-# distinct directory, by its physical path so a link's target goes too.
+# distinct directory by its physical path. Every link here names this home.
 purge_targets() {
     local data=""
     local directory=""
@@ -1205,16 +1213,24 @@ uninstall_avibe() {
     root="$(install_generations_root)"
     while IFS= read -r item; do launchers+=("$item"); done < <(managed_launchers)
     while IFS= read -r item; do markers+=("$item"); done < <(stale_launcher_markers "${launchers[@]}")
+    local -a other_uv_tools=()
     uv="$(find_uv || true)"
     tool_dir="$(uv_tool_dir "$uv")"
     for package in "$PACKAGE_NAME" vibe-remote; do
-        if [ -d "$tool_dir/$package" ]; then
+        if [ ! -d "$tool_dir/$package" ]; then
+            continue
+        elif uninstalling_default_home; then
             uv_tools+=("$package")
+        else
+            other_uv_tools+=("$package")
         fi
     done
     while IFS= read -r item; do data+=("$item"); done < <(avibe_data_directories)
 
     info "Uninstalling Avibe for $AVIBE_RUNTIME_HOME"
+    for package in "${other_uv_tools[@]}"; do
+        info "Leaving the uv tool install $package in place: it belongs to no AVIBE_HOME, so only an uninstall of the default home removes it"
+    done
     if [ "${#launchers[@]}" -eq 0 ] && [ "${#markers[@]}" -eq 0 ] && [ "${#uv_tools[@]}" -eq 0 ] &&
         [ ! -e "$root" ] && [ ! -L "$root" ] && { [ "$PURGE_USER_DATA" != "1" ] || [ "${#data[@]}" -eq 0 ]; }; then
         info "No Avibe installation was found, so nothing was removed."
